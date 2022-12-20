@@ -1,189 +1,190 @@
-use std::cmp::{Ordering, min};
+//! Module to calculate local regression (LOESS / LOWESS).
 
+use std::cmp::min;
+
+use itertools::izip;
 use nalgebra::{DVector, DMatrix, SVD};
 
-// pub struct Builder {
-//     x: DVector<f64>,
-//     y: DVector<f64>,
-//     w: Option<DVector<f64>>,
-//     frac: f64,
-//     degree: u8,
-// }
+use crate::algo::vec::{reorder, binary_search_left, binary_search_right_at, ElementWise};
 
-
-// def loess(x, y, xout, frac=2/3, deg=1, w=None):
-//     ixs = np.argsort(x)
-//     x = x[ixs]
-//     y = y[ixs]
-//     in_weight = w[ixs] if w is not None else None
-
-//     n = len(x)
-//     n_frac = int(round(n * frac))
-//     size = x[-1] - x[0]
-//     assert size > 0.0
-
-//     res = np.full(len(xout), np.nan)
-//     for i, xval in enumerate(xout):
-//         a = x.searchsorted(xval, 'left')
-//         b = x.searchsorted(xval, 'right')
-//         if b - a >= n_frac:
-//             res[i] = np.mean(y[a:b])
-//             continue
-
-//         if b - a < n_frac:
-//             rem = n_frac - b + a
-//             left = min(a, (rem // 2))
-//             right = min(n - b, rem - left)
-//             a -= left
-//             b += right
-//             assert a >= 0 and b <= n
-
-//         sub_x = x[a:b]
-//         sub_y = y[a:b]
-//         weight = common.tricube_kernel((sub_x - xval) / size)
-//         if in_weight is not None:
-//             weight *= in_weight[a:b]
-//         coef = np.polyfit(sub_x, sub_y, deg=deg, w=weight)
-//         res[i] = np.polyval(coef, xval)
-//     return res
-
-/// Reorders vector by taking elements in the order of `ixs`.
-pub fn reorder(x: &DVector<f64>, ixs: &[usize]) -> DVector<f64> {
-    let n = ixs.len();
-    let mut x2 = DVector::zeros(n);
-    for i in 0..n {
-        x2[i] = x[ixs[i]];
-    }
-    x2
+/// Calculates local regression (LOESS / LOWESS).
+/// Given input arrays `x`, `y` and, optionally weights `w`, finds best `y_out` values for each `xout` value.
+/// If the `xout` array is not set, finds best `y_out` value for each input `x` value.
+///
+/// The structure allows to set custom `frac` option (2/3 by default):
+/// For each `xout` point, looks at `frac * x.len()` input points.
+///
+/// Additionally, the structure allows to set the degree of the local polynomials (1 by default).
+///
+/// Usage:
+/// ```rust
+/// Loess::new().set_degree(2).calculate(&x, &y);
+/// Loess::new().set_frac(0.3).set_xout(xout).calculate_weighted(&x, &y, &w);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Loess {
+    frac: f64,
+    degree: usize,
+    xout: Option<Vec<f64>>,
 }
 
-/// Performs binary search and finds the index `i` such that `v[i-1] < target <= v[i]`.
-pub fn binary_search_left(v: &[f64], target: f64) -> usize {
-    let mut low = 0;
-    let mut high = v.len();
-    while low < high {
-        let mid = (low + high) / 2;
-        match v[mid].total_cmp(&target) {
-            Ordering::Equal if mid == 0 || v[mid - 1] < target => return mid,
-            Ordering::Less => low = mid + 1,
-            _ => high = mid,
+impl Loess {
+    /// Creates a new Loess class with default parameters.
+    pub fn new() -> Loess {
+        Loess {
+            frac: 2.0 / 3.0,
+            degree: 1,
+            xout: None,
         }
     }
-    low
-}
 
-/// Performs binary search and finds the index `i` such that `v[i-1] <= target < v[i]`.
-pub fn binary_search_right(v: &[f64], target: f64) -> usize {
-    let n = v.len();
-    let mut low = 0;
-    let mut high = n;
-    while low < high {
-        let mid = (low + high) / 2;
-        if v[mid] > target {
-            if mid == 0 || v[mid - 1] == target {
-                return mid;
-            }
-            high = mid;
-        } else {
-            low = mid + 1;
+    pub fn frac(&self) -> f64 {
+        self.frac
+    }
+
+    pub fn degree(&self) -> usize {
+        self.degree
+    }
+
+    pub fn xout(&self) -> Option<&[f64]> {
+        match &self.xout {
+            Some(xout) => Some(&xout),
+            None => None,
         }
     }
-    low
-}
 
-/// Calculates tricube kernel: **70/81 (1 - |v|^3)^3**.
-/// Returns 0 for values out of range `[-1, 1]`.
-pub fn tricube_kernel(values: &[f64]) -> DVector<f64> {
-    const MULT: f64 = 70.0 / 81.0;
-    let n = values.len();
-    let mut res = DVector::zeros(n);
-    for (i, &v) in values.iter().enumerate() {
-        res[i] = MULT * (1.0 - v.abs().min(1.0).powi(3)).powi(3);
+    pub fn set_frac(&mut self, frac: f64) -> &mut Loess {
+        assert!(frac > 0.0 && frac <= 1.0, "Fraction must be in (0, 1].");
+        self.frac = frac;
+        self
     }
-    res
+
+    pub fn set_degree(&mut self, degree: usize) -> &mut Loess {
+        self.degree = degree;
+        self
+    }
+
+    pub fn set_xout(&mut self, xout: Vec<f64>) -> &mut Loess {
+        assert!(!xout.is_empty());
+        self.xout = Some(xout);
+        self
+    }
+
+    pub fn calculate(&self, x: &[f64], y: &[f64]) -> Vec<f64> {
+        loess(x, y, None, self.xout().unwrap_or(x), self.frac, self.degree)
+    }
+
+    pub fn calculate_weighted(&self, x: &[f64], y: &[f64], w: &[f64]) -> Vec<f64> {
+        loess(x, y, Some(w), self.xout().unwrap_or(x), self.frac, self.degree)
+    }
 }
 
-pub fn loess(x: &DVector<f64>, y: &DVector<f64>, w: Option<&DVector<f64>>,
-        xout: &DVector<f64>, frac: f64, degree: usize) -> DVector<f64> {
+impl Default for Loess {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Calculates local regression (LOESS / LOWESS).
+/// Given input arrays `x`, `y` and, optionally weights `w`, finds best `y` values for each `xout` value.
+/// For each `xout` point, looks at `frac * x.len()` input points.
+/// Uses local polynomials of degree `deg`.
+fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: usize) -> Vec<f64> {
     let n = x.len();
     assert!(n == y.len(), "Cannot calculate LOESS on vectors of different length ({} and {})", n, y.len());
     let mut ixs: Vec<usize> = (0..n).collect();
     ixs.sort_by(|&i, &j| x[i].total_cmp(&x[j]));
     let x = reorder(x, &ixs);
     let y = reorder(y, &ixs);
-    let w = match w {
-        Some(values) => Some(reorder(values, &ixs)),
-        None => None,
-    };
+    let w = w.map(|values| reorder(values, &ixs));
 
-    let n_frac = (n as f64 * frac).round() as usize;
+    let n_frac = (n as f64 * frac).round().max(1.0) as usize;
     let range = x[n - 1] - x[0];
     assert!(range > 0.0, "Cannot calculate LOESS: x contains a single value {}", x[0]);
 
-    let mut res = DVector::zeros(xout.len());
-    for (i, &xval) in xout.iter().enumerate() {
-        let mut a = binary_search_left((&x).into(), xval);
-        let mut b = binary_search_right((&x).into(), xval);
+    let mut y_out = Vec::with_capacity(xout.len());
+    for &xval in xout.iter() {
+        let mut a = binary_search_left(&x, xval);
+        let mut b = binary_search_right_at(&x, xval, a, n);
         let curr_n = b - a;
         if curr_n >= n_frac {
-            res[i] = x.index((a..b, 0)).sum() / curr_n as f64;
+            y_out.push(y[a..b].iter().sum::<f64>() / curr_n as f64);
             continue
         }
 
-        let rem = n - curr_n;
-        let left = min(a, rem / 2);
-        let right = min(n - b, rem - left);
+        let rem = n_frac - curr_n;
+        let left;
+        let right;
+        if a < n - b {
+            left = min(a, rem / 2);
+            right = min(n - b, rem - left);
+        } else {
+            right = min(n - b, rem / 2);
+            left = min(a, rem - right);
+        }
         a -= left;
         b += right;
 
-        let sub_x = x.index((a..b, 0));
-        let sub_y = y.index((a..b, 0));
-        let mut norm_sub_x = sub_x.add_scalar(-xval);
-        norm_sub_x.unscale_mut(range); // Divides vector by range.
-        let mut weight = tricube_kernel((&norm_sub_x).into());
+        let sub_x = &x[a..b];
+        let sub_y = &y[a..b];
+        let mut norm_sub_x = sub_x.to_vec();
+        // Calculates (sub_x - xval) / range.
+        norm_sub_x.add_mul(-xval, 1.0 / range);
+        let mut weight = tricube_kernel(&norm_sub_x);
+
         if let Some(in_weight) = &w {
-            weight.component_mul_assign(in_weight);
+            weight.mul(in_weight);
         }
+        let coefs = polyfit(sub_x, sub_y, &weight, deg).unwrap();
+        y_out.push(polyval(&coefs, xval));
     }
-    res
-    // for i, xval in enumerate(xout):
-    //     a = x.searchsorted(xval, 'left')
-    //     b = x.searchsorted(xval, 'right')
-    //     if b - a >= n_frac:
-    //         res[i] = np.mean(y[a:b])
-    //         continue
-
-    //     if b - a < n_frac:
-    //         rem = n_frac - b + a
-    //         left = min(a, (rem // 2))
-    //         right = min(n - b, rem - left)
-    //         a -= left
-    //         b += right
-    //         assert a >= 0 and b <= n
-
-    //     sub_x = x[a:b]
-    //     sub_y = y[a:b]
-    //     weight = common.tricube_kernel((sub_x - xval) / size)
-    //     if in_weight is not None:
-    //         weight *= in_weight[a:b]
-    //     coef = np.polyfit(sub_x, sub_y, deg=deg, w=weight)
-    //     res[i] = np.polyval(coef, xval)
-    // return res
+    y_out
 }
 
-pub fn polyfit(x : &DVector<f64>, y: &DVector<f64>, w: &DVector<f64>, degree: usize) ->
-        Result<DVector<f64>, &'static str> {
+/// Fit a polynomial of degree `deg` to points `x`, `y`. Points are weighted with the slice `w`.
+/// Returns a vector of coefficients, starting with x^0 coefficient and ending with x^deg.
+pub fn polyfit(x: &[f64], y: &[f64], w: &[f64], deg: usize) ->
+        Result<Vec<f64>, &'static str> {
     let nrow = x.len();
-    let ncol = degree + 1;
-
+    let ncol = deg + 1;
     let mut a = DMatrix::zeros(nrow, ncol);
-    let mut col = DVector::from_element(nrow, 1.0);
-    a.set_column(0, &col);
-    for i in 1..ncol {
-        col *= x;
-        a.set_column(i, &col);
+    let mut b = DVector::zeros(nrow);
+
+    for (i, (&xi, &yi, &wi)) in izip!(x, y, w).enumerate() {
+        a[(i, 0)] = wi;
+        b[i] = yi * wi;
+
+        let mut xpow = 1.0;
+        for j in 1..ncol {
+            xpow *= xi;
+            a[(i, j)] = xpow * wi;
+        }
     }
 
     let decomp = SVD::new(a, true, true);
-    decomp.solve(&y, 1e-18)
+    decomp.solve(&b, 1e-18).map(|v| v.data.into())
+}
+
+/// Given coefficients a0, a1, a2, ..., an calculates
+/// a0 + a1 * x + a2 * x^2 + ... + an * x^n.
+pub fn polyval(coefs: &[f64], x: f64) -> f64 {
+    let mut curr_x = 1.0;
+    let mut y = 0.0;
+    for coef in coefs.iter() {
+        y += coef * curr_x;
+        curr_x *= x;
+    }
+    y
+}
+
+/// Calculates tricube kernel: **70/81 (1 - |v|^3)^3**.
+/// Returns 0 for values out of range `[-1, 1]`.
+pub fn tricube_kernel(values: &[f64]) -> Vec<f64> {
+    const MULT: f64 = 70.0 / 81.0;
+    let mut y = Vec::with_capacity(values.len());
+    for &v in values {
+        y.push(MULT * (1.0 - v.abs().min(1.0).powi(3)).powi(3))
+    }
+    y
 }
