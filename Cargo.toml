@@ -7,4 +7,5 @@ edition = "2021"
 [dependencies]
 rust-htslib = "0.40"
 num-format = "0.4.4"
+num-traits = "0.2"
 nalgebra = "0.31"
