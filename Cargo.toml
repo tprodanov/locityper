@@ -1,0 +1,10 @@
+[package]
+name = "reconstr"
+authors = ["Timofey Prodanov", "Tobias Marschall"]
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+rust-htslib = "0.40"
+num-format = "0.4.4"
+nalgebra = "0.31"
