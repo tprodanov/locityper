@@ -59,6 +59,41 @@ pub fn binary_search_right_at<T: PartialOrd>(v: &[T], target: T, mut low: usize,
     low
 }
 
+pub trait F64Vec {
+    fn min(&self) -> f64;
+    fn max(&self) -> f64;
+    fn argsort(&self) -> Vec<usize>;
+}
+
+pub trait F64MutVec {
+    fn sort(&mut self);
+    fn sort_rev(&mut self);
+}
+
+impl F64Vec for &[f64] {
+    fn min(&self) -> f64 {
+        self.iter().cloned().fold(f64::INFINITY, f64::min)
+    }
+
+    fn max(&self) -> f64 {
+        self.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    fn sort(&mut self) {
+        self.sort_by(|a, b| a.total_cmp(&b));
+    }
+
+    fn sort_rev(&mut self) {
+        self.sort_by(|a, b| b.total_cmp(&a));
+    }
+
+    fn argsort(&self) -> Vec<usize> {
+        let mut ixs: Vec<usize> = (0..self.len()).collect();
+        ixs.sort_by(|&i, &j| self[i].total_cmp(&self[j]));
+        ixs
+    }
+}
+
 /// Element-wise expansion over vectors.
 /// All operators modify the vector itself and return a mutable reference to itself.
 pub trait ElementWise<T, Rhs = T> {

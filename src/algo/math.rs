@@ -1,21 +1,49 @@
 //! Common math functions.
 //! Everywhere in comments `log` represents natural log.
 
+use crate::algo::F64Vec;
+
 /// Constant log(10).
 pub const LOG10: f64 = 2.302585092994045684_f64;
 /// Constant 1 / log(10).
 pub const INV_LOG10: f64 = 0.4342944819032518277_f64;
 
-/// Convert log10 value to natural log value.
-#[inline]
-pub fn log10_to_ln(v: f64) -> f64 {
-    v * LOG10
-}
+pub struct Ln;
 
-/// Convert natural log value to log10 value.
-#[inline]
-pub fn ln_to_log10(v: f64) -> f64 {
-    v * INV_LOG10
+impl Ln {
+    /// Converts log10 value into natural log value.
+    #[inline]
+    pub fn from_log10(l10: f64) -> f64 {
+        l10 * LOG10
+    }
+
+    /// Converts natural log value into log10 value.
+    #[inline]
+    pub fn to_log10(ln: f64) -> f64 {
+        ln * INV_LOG10
+    }
+
+    /// Calculates *log(exp(a) + exp(b))*.
+    pub fn add(a: f64, b: f64) -> f64 {
+        if a >= b {
+            b + libm::log1p((a - b).exp())
+        } else {
+            a + libm::log1p((b - a).exp())
+        }
+    }
+
+    /// Calculates *log(exp(a) - exp(b))*.
+    pub fn sub(a: f64, b: f64) -> f64 {
+        let c = a - b;
+        debug_assert!(c >= 0.0);
+        b + (c.exp() - 1.0).ln()
+    }
+
+    /// Calculates *log(sum(exp(values)))*.
+    pub fn sum(values: &[f64]) -> f64 {
+        let m = values.min();
+        m
+    }
 }
 
 /// Static Phred class with useful conversion methods.

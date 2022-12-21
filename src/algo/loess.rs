@@ -5,7 +5,7 @@ use std::cmp::min;
 use itertools::izip;
 use nalgebra::{DVector, DMatrix, SVD};
 
-use crate::algo::vec::{reorder, binary_search_left, binary_search_right_at, ElementWise};
+use crate::algo::vec::{reorder, binary_search_left, binary_search_right_at, ElementWise, F64Vec};
 
 /// Calculates local regression (LOESS / LOWESS).
 /// Given input arrays `x`, `y` and, optionally weights `w`, finds best `y_out` values for each `xout` value.
@@ -93,8 +93,7 @@ impl Default for Loess {
 fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: usize) -> Vec<f64> {
     let n = x.len();
     assert!(n == y.len(), "Cannot calculate LOESS on vectors of different length ({} and {})", n, y.len());
-    let mut ixs: Vec<usize> = (0..n).collect();
-    ixs.sort_by(|&i, &j| x[i].total_cmp(&x[j]));
+    let ixs = x.argsort();
     let x = reorder(x, &ixs);
     let y = reorder(y, &ixs);
     let w = w.map(|values| reorder(values, &ixs));
