@@ -5,7 +5,7 @@ use std::cmp::min;
 use itertools::izip;
 use nalgebra::{DVector, DMatrix, SVD};
 
-use crate::algo::vec::{reorder, binary_search_left, binary_search_right_at, ElementWise, F64Vec};
+use crate::algo::vec_ext::*;
 
 /// Calculates local regression (LOESS / LOWESS).
 /// Given input arrays `x`, `y` and, optionally weights `w`, finds best `y_out` values for each `xout` value.
@@ -94,9 +94,9 @@ fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: 
     let n = x.len();
     assert!(n == y.len(), "Cannot calculate LOESS on vectors of different length ({} and {})", n, y.len());
     let ixs = x.argsort();
-    let x = reorder(x, &ixs);
-    let y = reorder(y, &ixs);
-    let w = w.map(|values| reorder(values, &ixs));
+    let x = x.reorder(&ixs);
+    let y = y.reorder(&ixs);
+    let w = w.map(|values| values.reorder(&ixs));
 
     let n_frac = (n as f64 * frac).round().max(1.0) as usize;
     let range = x[n - 1] - x[0];
@@ -104,8 +104,8 @@ fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: 
 
     let mut y_out = Vec::with_capacity(xout.len());
     for &xval in xout.iter() {
-        let mut a = binary_search_left(&x, xval);
-        let mut b = binary_search_right_at(&x, xval, a, n);
+        let mut a = x.binary_search_left(&xval);
+        let mut b = x.binary_search_right_at(&xval, a, n);
         let curr_n = b - a;
         if curr_n >= n_frac {
             y_out.push(y[a..b].iter().sum::<f64>() / curr_n as f64);
@@ -127,13 +127,12 @@ fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: 
 
         let sub_x = &x[a..b];
         let sub_y = &y[a..b];
-        let mut norm_sub_x = sub_x.to_vec();
         // Calculates (sub_x - xval) / range.
-        norm_sub_x.add_mul(-xval, 1.0 / range);
+        let norm_sub_x = sub_x.sc_add_mul(-xval, 1.0 / range);
         let mut weight = tricube_kernel(&norm_sub_x);
 
         if let Some(in_weight) = &w {
-            weight.mul(in_weight);
+            weight.ew_mul_assign(&in_weight[a..b]);
         }
         let coefs = polyfit(sub_x, sub_y, &weight, deg).unwrap();
         y_out.push(polyval(&coefs, xval));

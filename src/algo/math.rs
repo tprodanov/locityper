@@ -1,7 +1,7 @@
 //! Common math functions.
 //! Everywhere in comments `log` represents natural log.
 
-use crate::algo::F64Vec;
+use crate::algo::vec_ext::*;
 
 /// Constant log(10).
 pub const LOG10: f64 = 2.302585092994045684_f64;
@@ -42,7 +42,8 @@ impl Ln {
     /// Calculates *log(sum(exp(values)))*.
     pub fn sum(values: &[f64]) -> f64 {
         let m = values.min();
-        m
+        let s = values.iter().fold(0.0_f64, |acc, v| acc + (v - m).exp());
+        m + s.ln()
     }
 }
 

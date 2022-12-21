@@ -1,0 +1,284 @@
+use std::ops::{Index, Add, AddAssign, Mul, MulAssign, Sub, SubAssign, Div, DivAssign};
+use std::cmp::Ordering;
+
+use itertools::izip;
+
+/// General vector extension.
+pub trait VecExt<T> : Index<usize, Output = T>
+where T: Clone + PartialOrd
+{
+    /// Returns vector length.
+    fn len(&self) -> usize;
+
+    /// Reorders `self` by taking elements with indices `ixs`. Returns a new vector.
+    fn reorder(&self, ixs: &[usize]) -> Vec<T> {
+        let mut res = Vec::with_capacity(ixs.len());
+        for &i in ixs {
+            res.push(self[i].clone());
+        }
+        res
+    }
+
+    /// Performs binary search and finds the index `i` such that `v[i-1] < target <= v[i]`.
+    #[inline]
+    fn binary_search_left(&self, target: &T) -> usize {
+        self.binary_search_left_at(target, 0, self.len())
+    }
+
+    /// Performs binary search between indices `low` and `high`
+    /// and finds the index `i` such that `v[i-1] < target <= v[i]`.
+    fn binary_search_left_at(&self, target: &T, mut low: usize, mut high: usize) -> usize {
+        while low < high {
+            let mid = (low + high) / 2;
+            match self[mid].partial_cmp(target).expect("Incomparable values in binary_search_left") {
+                Ordering::Equal if mid == 0 || &self[mid - 1] < target => return mid,
+                Ordering::Less => low = mid + 1,
+                _ => high = mid,
+            }
+        }
+        low
+    }
+
+    /// Performs binary search and finds the index `i` such that `v[i-1] <= target < v[i]`.
+    #[inline]
+    fn binary_search_right(&self, target: &T) -> usize {
+        self.binary_search_right_at(target, 0, self.len())
+    }
+
+    /// Performs binary search between indices `low` and `high`
+    /// and finds the index `i` such that `v[i-1] <= target < v[i]`.
+    fn binary_search_right_at(&self, target: &T, mut low: usize, mut high: usize) -> usize {
+        while low < high {
+            let mid = (low + high) / 2;
+            if &self[mid] > target {
+                if mid == 0 || &self[mid - 1] == target {
+                    return mid;
+                }
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        low
+    }
+}
+
+impl<T: Clone + PartialOrd> VecExt<T> for Vec<T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<T: Clone + PartialOrd> VecExt<T> for [T] {
+    #[inline]
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+/// `f64` vector extension.
+pub trait F64VecExt : VecExt<f64> {
+    /// Return indices, sorted according to the vector values.
+    fn argsort(&self) -> Vec<usize> {
+        let mut ixs: Vec<usize> = (0..self.len()).collect();
+        ixs.sort_by(|&i, &j| self[i].total_cmp(&self[j]));
+        ixs
+    }
+
+    /// Returns minimal vector value.
+    fn min(&self) -> f64;
+
+    /// Returns maximal vector value.
+    fn max(&self) -> f64;
+
+    /// Element-wise applies function to every element and returns a new vector.
+    fn ew_apply1<F: FnMut(f64) -> f64>(&self, f: F) -> Vec<f64>;
+
+    /// Element-wise applies function to `self` and `oth`, and returns a new vector.
+    fn ew_apply2<F: FnMut(f64, f64) -> f64>(&self, oth: &[f64], f: F) -> Vec<f64>;
+
+    /// Element-wise applies function to `self`, `a` and `b`, and returns a new vector.
+    fn ew_apply3<F: FnMut(f64, f64, f64) -> f64>(&self, a: &[f64], b: &[f64], f: F) -> Vec<f64>;
+
+    /// Element-wise modifies the vector by applying function `f` to every element.
+    fn ew_assign1<F: FnMut(&mut f64)>(&mut self, f: F);
+
+    /// Element-wise modifies the vector by applying function `f` to `self` and `oth`.
+    fn ew_assign2<F: FnMut(&mut f64, f64)>(&mut self, oth: &[f64], f: F);
+
+    /// Element-wise modifies the vector by applying function `f` to `self`, `a` and `b`.
+    fn ew_assign3<F: FnMut(&mut f64, f64, f64)>(&mut self, a: &[f64], b: &[f64], f: F);
+
+    /// Adds two vectors element-wise and returns a new vector.
+    #[inline]
+    fn ew_add(&self, oth: &[f64]) -> Vec<f64> {
+        self.ew_apply2(oth, f64::add)
+    }
+
+    /// Element-wise adds `oth` to `self`, updates `self`.
+    #[inline]
+    fn ew_add_assign(&mut self, oth: &[f64]) {
+        self.ew_assign2(oth, f64::add_assign)
+    }
+
+    /// Multiplies two vectors element-wise and returns a new vector.
+    #[inline]
+    fn ew_mul(&self, oth: &[f64]) -> Vec<f64> {
+        self.ew_apply2(oth, f64::mul)
+    }
+
+    /// Element-wise multiplies `oth` by `self`, updates `self`.
+    #[inline]
+    fn ew_mul_assign(&mut self, oth: &[f64]) {
+        self.ew_assign2(oth, f64::mul_assign)
+    }
+
+    #[inline]
+    fn ew_sub(&self, oth: &[f64]) -> Vec<f64> {
+        self.ew_apply2(oth, f64::sub)
+    }
+
+    #[inline]
+    fn ew_sub_assign(&mut self, oth: &[f64]) {
+        self.ew_assign2(oth, f64::sub_assign)
+    }
+
+    #[inline]
+    fn ew_div(&self, oth: &[f64]) -> Vec<f64> {
+        self.ew_apply2(oth, f64::div)
+    }
+
+    #[inline]
+    fn ew_div_assign(&mut self, oth: &[f64]) {
+        self.ew_assign2(oth, f64::div_assign)
+    }
+
+    #[inline]
+    fn ew_add_mul(&self, a: &[f64], b: &[f64]) -> Vec<f64> {
+        self.ew_apply3(a, b, |x, y, z| (x + y) * z)
+    }
+
+    #[inline]
+    fn ew_add_mul_assign(&mut self, a: &[f64], b: &[f64]) {
+        self.ew_assign3(a, b, |x, y, z| *x = (*x + y) * z)
+    }
+
+    #[inline]
+    fn sc_add(&self, scalar: f64) -> Vec<f64> {
+        self.ew_apply1(|x| x + scalar)
+    }
+
+    #[inline]
+    fn sc_add_assign(&mut self, scalar: f64) {
+        self.ew_assign1(|x| *x += scalar)
+    }
+
+    #[inline]
+    fn sc_sub(&self, scalar: f64) -> Vec<f64> {
+        self.ew_apply1(|x| x - scalar)
+    }
+
+    #[inline]
+    fn sc_sub_assign(&mut self, scalar: f64) {
+        self.ew_assign1(|x| *x -= scalar)
+    }
+
+    #[inline]
+    fn sc_mul(&self, scalar: f64) -> Vec<f64> {
+        self.ew_apply1(|x| x * scalar)
+    }
+
+    #[inline]
+    fn sc_mul_assign(&mut self, scalar: f64) {
+        self.ew_assign1(|x| *x *= scalar)
+    }
+
+    #[inline]
+    fn sc_div(&self, scalar: f64) -> Vec<f64> {
+        self.sc_mul(1.0 / scalar)
+    }
+
+    #[inline]
+    fn sc_div_assign(&mut self, scalar: f64) {
+        self.sc_mul_assign(1.0 / scalar)
+    }
+
+    #[inline]
+    fn sc_add_mul(&self, a: f64, b: f64) -> Vec<f64> {
+        self.ew_apply1(|x| (x + a) * b)
+    }
+
+    #[inline]
+    fn sc_add_mul_assign(&mut self, a: f64, b: f64) {
+        self.ew_assign1(|x| *x = (*x + a) * b)
+    }
+}
+
+macro_rules! f64_vec_ext_impl {
+    (
+        $elem:ty
+    ) => {
+        impl F64VecExt for $elem {
+            fn min(&self) -> f64 {
+                self.iter().cloned().fold(f64::INFINITY, f64::min)
+            }
+
+            fn max(&self) -> f64 {
+                self.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+            }
+
+            #[inline]
+            fn ew_apply1<F: FnMut(f64) -> f64>(&self, f: F) -> Vec<f64> {
+                self.iter().cloned().map(f).collect()
+            }
+
+            fn ew_apply2<F: FnMut(f64, f64) -> f64>(&self, oth: &[f64], mut f: F) -> Vec<f64> {
+                let n = self.len();
+                assert_eq!(n, oth.len(), "Element-wise operation is not permitted: different array lengths!");
+                let mut res = Vec::with_capacity(n);
+                for (&a, &b) in self.iter().zip(oth) {
+                    res.push(f(a, b));
+                }
+                res
+            }
+
+            fn ew_apply3<F: FnMut(f64, f64, f64) -> f64>(&self, a: &[f64], b: &[f64], mut f: F) -> Vec<f64> {
+                let n = self.len();
+                assert_eq!(n, a.len(), "Element-wise operation is not permitted: different array lengths!");
+                assert_eq!(n, b.len(), "Element-wise operation is not permitted: different array lengths!");
+                let mut res = Vec::with_capacity(n);
+                for (&v, &a, &b) in izip!(self.iter(), a, b) {
+                    res.push(f(v, a, b));
+                }
+                res
+            }
+
+            fn ew_assign1<F: FnMut(&mut f64)>(&mut self, mut f: F) {
+                for v in self.iter_mut() {
+                    f(v)
+                }
+            }
+
+            fn ew_assign2<F: FnMut(&mut f64, f64)>(&mut self, oth: &[f64], mut f: F) {
+                assert_eq!(self.len(), oth.len(),
+                    "Element-wise operation is not permitted: different array lengths!");
+                for (a, &b) in self.iter_mut().zip(oth) {
+                    f(a, b);
+                }
+            }
+
+            fn ew_assign3<F: FnMut(&mut f64, f64, f64)>(&mut self, a: &[f64], b: &[f64], mut f: F) {
+                let n = self.len();
+                assert_eq!(n, a.len(), "Element-wise operation is not permitted: different array lengths!");
+                assert_eq!(n, b.len(), "Element-wise operation is not permitted: different array lengths!");
+                for (v, &a, &b) in izip!(self.iter_mut(), a, b) {
+                    f(v, a, b)
+                }
+            }
+        }
+    }
+}
+
+f64_vec_ext_impl!{Vec<f64>}
+f64_vec_ext_impl!{[f64]}
