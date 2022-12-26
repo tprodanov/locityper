@@ -6,8 +6,10 @@ edition = "2021"
 
 [dependencies]
 rust-htslib = "0.40"
-num-format = "0.4.4"
+num-format = "0.4"
 num-traits = "0.2"
 nalgebra = "0.31"
-itertools = "0.10.5"
-libm = "0.2.6"
+itertools = "0.10"
+libm = "0.2"
+lazy_static = "1.4"
+regex = "1.7"

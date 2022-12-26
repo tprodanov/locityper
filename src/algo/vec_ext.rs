@@ -1,5 +1,6 @@
 use std::ops::{Index, Add, AddAssign, Mul, MulAssign, Sub, SubAssign, Div, DivAssign};
 use std::cmp::Ordering;
+use std::fmt::Write;
 
 use itertools::izip;
 
@@ -91,6 +92,15 @@ pub trait F64VecExt : VecExt<f64> {
 
     /// Returns maximal vector value.
     fn max(&self) -> f64;
+
+    /// Converts vector to string with given precision and width.
+    fn to_str(&self, width: usize, precision: usize) -> String;
+
+    /// Converts vector to string with precision = 5 and width = 10.
+    #[inline]
+    fn to_str5(&self) -> String {
+        self.to_str(10, 5)
+    }
 
     /// Element-wise applies function to every element and returns a new vector.
     fn ew_apply1<F: FnMut(f64) -> f64>(&self, f: F) -> Vec<f64>;
@@ -220,12 +230,27 @@ macro_rules! f64_vec_ext_impl {
         $elem:ty
     ) => {
         impl F64VecExt for $elem {
+            #[inline]
             fn min(&self) -> f64 {
                 self.iter().cloned().fold(f64::INFINITY, f64::min)
             }
 
+            #[inline]
             fn max(&self) -> f64 {
                 self.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+            }
+
+            fn to_str(&self, width: usize, precision: usize) -> String {
+                let mut buffer = String::new();
+                buffer.write_char('[').unwrap();
+                for (i, v) in self.iter().enumerate() {
+                    if i > 0 {
+                        buffer.write_str(", ").unwrap();
+                    }
+                    write!(buffer, "{:width$.precision$}", v).unwrap();
+                }
+                buffer.write_char(']').unwrap();
+                buffer
             }
 
             #[inline]
