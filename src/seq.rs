@@ -1,5 +1,5 @@
 pub mod contigs;
 pub mod interval;
-pub mod aln;
+pub mod cigar;
 
 pub use contigs::{ContigId, ContigNames};
