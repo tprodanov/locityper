@@ -407,7 +407,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
 
 /// Create an extended CIGAR from short CIGAR and MD string.
 /// Returns pair (Cigar, S), where S is either `Vec<u8>` and `()`.
-pub fn infer_extended_cigar<S: SeqOrNone>(rec: &record::Record) -> (Cigar, S) {
+pub fn get_ext_cigar<S: SeqOrNone>(rec: &record::Record) -> (Cigar, S) {
     let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
         s
     } else {
