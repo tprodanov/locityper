@@ -2,6 +2,7 @@
 
 use std::fmt::{self, Write};
 use std::cmp::min;
+use std::ops::Index;
 
 use rust_htslib::bam::record;
 
@@ -185,6 +186,35 @@ impl Cigar {
     pub fn iter<'a>(&'a self) -> std::slice::Iter<'a, CigarItem> {
         self.tuples.iter()
     }
+
+    /// Returns CIGAR length.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.tuples.len()
+    }
+
+    /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
+    pub fn infer_ext_cigar(rec: &record::Record) -> Cigar {
+        let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
+            s
+        } else {
+            panic!("Cannot create extended CIGAR: record {} either has no MD tag, or MD tag has incorrect type",
+                String::from_utf8_lossy(rec.qname()))
+        };
+        ExtCigarData::<()>::process(rec.seq(), rec.raw_cigar(), md_str).0
+    }
+
+    /// Create an extended CIGAR from short CIGAR and MD string, as well as the reference sequence.
+    /// Returns pair (Cigar, Vec<u8>).
+    pub fn infer_ext_cigar_seq(rec: &record::Record) -> (Cigar, Vec<u8>) {
+        let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
+            s
+        } else {
+            panic!("Cannot create extended CIGAR: record {} either has no MD tag, or MD tag has incorrect type",
+                String::from_utf8_lossy(rec.qname()))
+        };
+        ExtCigarData::process(rec.seq(), rec.raw_cigar(), md_str)
+    }
 }
 
 impl PartialEq for Cigar {
@@ -201,6 +231,14 @@ impl fmt::Display for Cigar {
             write!(f, "{}", tup)?
         }
         Ok(())
+    }
+}
+
+impl Index<usize> for Cigar {
+    type Output = CigarItem;
+
+    fn index(&self, i: usize) -> &CigarItem {
+        &self.tuples.index(i)
     }
 }
 
@@ -403,16 +441,4 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
         self.new_cigar.push(Operation::Diff, pos_inc);
         *op_len -= pos_inc;
     }
-}
-
-/// Create an extended CIGAR from short CIGAR and MD string.
-/// Returns pair (Cigar, S), where S is either `Vec<u8>` and `()`.
-pub fn get_ext_cigar<S: SeqOrNone>(rec: &record::Record) -> (Cigar, S) {
-    let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
-        s
-    } else {
-        panic!("Cannot create extended CIGAR: record {} either has no MD tag, or MD tag has incorrect type",
-            String::from_utf8_lossy(rec.qname()))
-    };
-    ExtCigarData::process(rec.seq(), rec.raw_cigar(), md_str)
 }
