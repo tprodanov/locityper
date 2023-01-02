@@ -80,6 +80,15 @@ impl<T: Clone + PartialOrd> VecExt<T> for [T] {
 
 /// `f64` vector extension.
 pub trait F64VecExt : VecExt<f64> {
+    /// Sort f64 vector/slice.
+    fn sort(&mut self);
+
+    /// Calculate sample mean.
+    fn mean(&self) -> f64;
+
+    /// Calculate sample variance.
+    fn variance(&self, mean: Option<f64>) -> f64;
+
     /// Return indices, sorted according to the vector values.
     fn argsort(&self) -> Vec<usize> {
         let mut ixs: Vec<usize> = (0..self.len()).collect();
@@ -227,9 +236,30 @@ pub trait F64VecExt : VecExt<f64> {
 
 macro_rules! f64_vec_ext_impl {
     (
-        $elem:ty
+        $coll:ty
     ) => {
-        impl F64VecExt for $elem {
+        impl F64VecExt for $coll {
+            fn sort(&mut self) {
+                self.sort_by(|a, b| a.total_cmp(b));
+            }
+
+            fn mean(&self) -> f64 {
+                self.iter().sum::<f64>() / self.len() as f64
+            }
+
+            fn variance(&self, mean: Option<f64>) -> f64 {
+                let mean = match mean {
+                    Some(val) => val,
+                    None => self.mean(),
+                };
+                let n = self.len();
+                assert!(n > 1, "Cannot calculate variance from less than 2 elements!");
+                self.iter().fold(0.0, |acc, x| {
+                    let diff = x - mean;
+                    acc + diff * diff
+                }) / (n - 1) as f64
+            }
+
             #[inline]
             fn min(&self) -> f64 {
                 self.iter().cloned().fold(f64::INFINITY, f64::min)
