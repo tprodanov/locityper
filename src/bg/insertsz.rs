@@ -7,7 +7,7 @@ use statrs::distribution::{NegativeBinomial, Discrete};
 use crate::algo::vec_ext::*;
 
 /// Trait for insert size distribution.
-pub trait Distr {
+pub trait InsertDistr {
     /// Maximal insert size. Do not allow read mates with distance over `max_size`.
     fn max_size(&self) -> u32;
 
@@ -20,12 +20,12 @@ pub trait Distr {
 
 /// Negative Binomial insert size.
 #[derive(Debug, Clone)]
-pub struct NegBinom {
+pub struct InsertNegBinom {
     max_size: u32,
     distr: NegativeBinomial,
 }
 
-impl NegBinom {
+impl InsertNegBinom {
     /// Creates the Neg. Binom. insert size distribution from an iterator of insert sizes.
     pub fn create<T, I>(insert_sizes: I) -> Self
     where T: Into<f64>,
@@ -51,14 +51,14 @@ impl NegBinom {
         let r = mean * mean / (var - mean);
         let p = 1.0 - mean / var;
 
-        NegBinom {
+        Self {
             max_size: max_size.ceil() as u32,
             distr: NegativeBinomial::new(r, p).unwrap(),
         }
     }
 }
 
-impl Distr for NegBinom {
+impl InsertDistr for InsertNegBinom {
     fn max_size(&self) -> u32 {
         self.max_size
     }
@@ -68,7 +68,7 @@ impl Distr for NegBinom {
     }
 
     fn save<W: Write>(&self, mut f: W) -> Result<()> {
-        f.write(b"Fragment size distribution: Negative Binomial\n")?;
+        f.write_all(b"Fragment size distribution: Negative Binomial\n")?;
         write!(f, "max_size: {}\nr: {:.?}\np: {:?}\n", self.max_size, self.distr.r(), self.distr.p())
     }
 }

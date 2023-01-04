@@ -26,9 +26,9 @@ impl Ln {
     /// Calculates *log(exp(a) + exp(b))*.
     pub fn add(a: f64, b: f64) -> f64 {
         if a >= b {
-            b + libm::log1p((a - b).exp())
+            b + (a - b).exp().ln_1p()
         } else {
-            a + libm::log1p((b - a).exp())
+            a + (b - a).exp().ln_1p()
         }
     }
 
