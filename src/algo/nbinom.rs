@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::fmt::{Debug, Display, Formatter, Result};
 use statrs::{
     statistics::{Min, Max},
     distribution::{Discrete, DiscreteCDF},
@@ -14,6 +14,7 @@ use statrs::{
 /// n: number of successes,
 /// p: probability in one trial,
 /// x: number of failures before n successes are achieved.
+#[derive(Clone)]
 pub struct NBinom {
     n: f64,
     p: f64,
@@ -73,6 +74,18 @@ impl NBinom {
     }
 }
 
+impl Debug for NBinom {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "N.Binom.(n = {:?}, p = {:?})", self.n, self.p)
+    }
+}
+
+impl Display for NBinom {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "N.Binom.(n = {:.5}, p = {:.5})", self.n, self.p)
+    }
+}
+
 macro_rules! nbinom_impl {
     (
         $int:ident
@@ -115,6 +128,7 @@ nbinom_impl!(u32);
 nbinom_impl!(u64);
 
 /// Distribution with cached ln_pmf values.
+#[derive(Clone)]
 pub struct CachedDistr<D: Discrete<u64, f64>> {
     distr: D,
     cache: Vec<f64>,
@@ -135,5 +149,17 @@ impl<D: Discrete<u64, f64>> CachedDistr<D> {
         } else {
             self.distr.ln_pmf(k)
         }
+    }
+}
+
+impl<D: Discrete<u64, f64> + Debug> Debug for CachedDistr<D> {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "Cached[{:?}, 0..{}]", self.distr, self.cache.len())
+    }
+}
+
+impl<D: Discrete<u64, f64> + Display> Display for CachedDistr<D> {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "Cached[{}, 0..{}]", self.distr, self.cache.len())
     }
 }

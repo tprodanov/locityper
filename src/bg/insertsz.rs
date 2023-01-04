@@ -1,6 +1,5 @@
 //! Traits and structures related to insert size (distance between read mates).
 
-use std::cmp::min;
 use std::io::{Write, Result};
 use statrs::distribution::{NegativeBinomial, Discrete};
 
@@ -38,11 +37,9 @@ impl InsertNegBinom {
 
         let mut insert_sizes: Vec<f64> = insert_sizes.map(T::into).collect();
         insert_sizes.sort();
-        let n = insert_sizes.len();
-        let i = min(n - 1, (n as f64 * QUANTILE) as usize);
-        let max_size = QUANT_MULT * insert_sizes[i];
+        let max_size = QUANT_MULT * insert_sizes.quantile_sorted(QUANTILE);
         // Find index after the limiting value.
-        let m = insert_sizes.binary_search_right_at(&max_size, i, n);
+        let m = insert_sizes.binary_search_right(&max_size);
         let lim_insert_sizes = &insert_sizes[..m];
 
         let mean = lim_insert_sizes.mean();

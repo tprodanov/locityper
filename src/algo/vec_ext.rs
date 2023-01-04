@@ -1,8 +1,7 @@
 use std::ops::{Index, Add, AddAssign, Mul, MulAssign, Sub, SubAssign, Div, DivAssign};
 use std::cmp::Ordering;
 use std::fmt::Write;
-
-use itertools::izip;
+use itertools::{izip, Itertools};
 
 /// General vector extension.
 pub trait VecExt<T> : Index<usize, Output = T>
@@ -10,6 +9,13 @@ where T: Clone + PartialOrd
 {
     /// Returns vector length.
     fn len(&self) -> usize;
+
+    /// Return indices, sorted according to the vector values.
+    fn argsort(&self) -> Vec<usize> {
+        let mut ixs: Vec<usize> = (0..self.len()).collect();
+        ixs.sort_by(|&i, &j| self[i].partial_cmp(&self[j]).expect("Error in `argsort`: elements re not comparable"));
+        ixs
+    }
 
     /// Reorders `self` by taking elements with indices `ixs`. Returns a new vector.
     fn reorder(&self, ixs: &[usize]) -> Vec<T> {
@@ -89,18 +95,15 @@ pub trait F64VecExt : VecExt<f64> {
     /// Calculate sample variance.
     fn variance(&self, mean: Option<f64>) -> f64;
 
-    /// Return indices, sorted according to the vector values.
-    fn argsort(&self) -> Vec<usize> {
-        let mut ixs: Vec<usize> = (0..self.len()).collect();
-        ixs.sort_by(|&i, &j| self[i].total_cmp(&self[j]));
-        ixs
-    }
-
     /// Returns minimal vector value.
     fn min(&self) -> f64;
 
     /// Returns maximal vector value.
     fn max(&self) -> f64;
+
+    /// Finds `q`-th quantile in a sorted array.
+    /// Uses linear interpolation, if the quantile is between two elements.
+    fn quantile_sorted(&self, q: f64) -> f64;
 
     /// Converts vector to string with given precision and width.
     fn to_str(&self, width: usize, precision: usize) -> String;
@@ -270,6 +273,23 @@ macro_rules! f64_vec_ext_impl {
                 self.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
             }
 
+            fn quantile_sorted(&self, q: f64) -> f64 {
+                assert!(0.0 <= q && q <= 1.0, "Quantile must be within [0, 1]!");
+                let f = (self.len() - 1) as f64 * q;
+                let i = f as usize;
+                let r = f.fract();
+                debug_assert_eq!(i as f64 + r, f);
+
+                let x = self[i];
+                if r < 1e-6 {
+                    x
+                } else {
+                    let y = self[i + 1];
+                    debug_assert!(y >= x);
+                    x + (y - x) * r
+                }
+            }
+
             fn to_str(&self, width: usize, precision: usize) -> String {
                 let mut buffer = String::new();
                 buffer.write_char('[').unwrap();
@@ -337,3 +357,19 @@ macro_rules! f64_vec_ext_impl {
 
 f64_vec_ext_impl!{Vec<f64>}
 f64_vec_ext_impl!{[f64]}
+
+/// Static methods related to iterators.
+pub struct IterExt;
+
+impl IterExt {
+    /// Sort iterator over f64.
+    pub fn sorted(it: impl Iterator<Item = f64>) -> Vec<f64> {
+        it.sorted_by(f64::total_cmp).collect()
+    }
+
+    /// Consume iterator and find `q`-th quantile in it. Takes *O(n log n)*.
+    pub fn quantile(it: impl Iterator<Item = f64>, q: f64) -> f64 {
+        let v = IterExt::sorted(it);
+        v.quantile_sorted(q)
+    }
+}

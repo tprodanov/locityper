@@ -4,7 +4,7 @@ use std::fmt::{self, Write};
 use std::cmp::min;
 use std::ops::Index;
 
-use rust_htslib::bam::record;
+use htslib::bam::record;
 
 /// Subset of CIGAR operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

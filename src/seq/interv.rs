@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 
 use num_format::{Locale, WriteFormatted};
 
-use crate::seq::{ContigId, ContigNames};
+use crate::seq::contigs::{ContigId, ContigNames};
 
 /// Genomic interval.
 #[derive(Clone)]

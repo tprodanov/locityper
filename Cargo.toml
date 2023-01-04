@@ -5,7 +5,7 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-rust-htslib = "0.40"
+htslib = { package = "rust-htslib", version = "0.40" }
 num-format = "0.4"
 num-traits = "0.2"
 nalgebra = "0.31"

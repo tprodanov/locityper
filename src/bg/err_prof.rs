@@ -1,5 +1,5 @@
 use std::io::{Write, Result};
-use rust_htslib::bam::record::Record;
+use htslib::bam::record::Record;
 
 use crate::seq::cigar::{Cigar, Operation};
 
