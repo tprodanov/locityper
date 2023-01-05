@@ -172,33 +172,80 @@ fn filter_windows(counts: Vec<WindowCounts>, filt_quantile: f64) -> Vec<WindowCo
         .collect()
 }
 
-/// Predicts read depth variance for each GC-count from 0 to window_size.
-/// Uses LOESS, with input points taken for all GC-count values with at least ten observations.
-fn predict_variance(depth: &[u32], gc_counts: &[u32], window_size: u32) -> Vec<f64> {
-    const MIN_WINDOWS: usize = 10;
-    let n = depth.len();
-    let ixs = gc_counts.argsort();
-    let gc_counts = gc_counts.reorder(&ixs);
-    let depth_f64: Vec<f64> = (0..n).map(|i| depth[ixs[i]] as f64).collect();
-
-    let m = window_size as usize + 1;
-    let mut x = Vec::with_capacity(m);
-    let mut y = Vec::with_capacity(m);
-    let mut w = Vec::with_capacity(m);
+/// For each GC-count in 0..=window_size, returns start & end indices,
+/// where gc_counts[start..end] == gc-count.
+/// Note, gc_counts must be sorted in advance.
+fn find_gc_bins(gc_counts: &[u32], window_size: u32) -> Vec<(usize, usize)> {
+    let n = gc_counts.len();
+    let mut res = Vec::with_capacity(window_size as usize + 1);
     let mut i = 0;
     for gc in 0..=window_size {
         let j = gc_counts.binary_search_right_at(&gc, i, n);
-        if j - i >= MIN_WINDOWS {
-            x.push(gc as f64);
-            y.push(x[i..j].variance(None));
-            w.push((j - i) as f64 / n as f64);
-        }
+        res.push((i, j));
         i = j;
     }
     debug_assert_eq!(i, n);
+    res
+}
 
-    let xout: Vec<f64> = (0..=window_size).map(Into::into).collect();
-    Loess::new().set_frac(1.0).set_xout(xout.clone()).calculate_weighted(&x, &y, &w)
+/// Predicts read depth means and variance for each GC-count from 0 to window_size.
+/// GC-counts must be sorted. gc_counts and depth have the same length and have the go in the same order.
+///
+/// Mean values: use LOESS with all observations, without weights, and using `mean_loess_frac`.
+///
+/// Variance: Useuse LOESS, where observations are all GC-count values with at least 10 observations.
+/// Y values are read depth variance in each particular GC-count bin.
+/// Use loess_frac = 1.
+fn predict_mean_var(gc_counts: &[u32], depth: &[u32], gc_bins: &[(usize, usize)], mean_loess_frac: f64)
+        -> (Vec<f64>, Vec<f64>)
+{
+    const VAR_MIN_WINDOWS: usize = 10;
+    let n = depth.len();
+    let m = gc_bins.len();
+    let depth_f: Vec<f64> = depth.iter().cloned().map(Into::into).collect();
+    let gc_counts_f: Vec<f64> = gc_counts.iter().cloned().map(Into::into).collect();
+    let xout: Vec<f64> = (0..m as u32).map(Into::into).collect();
+    let means = Loess::new(mean_loess_frac, 1).set_xout(xout.clone()).calculate(&gc_counts_f, &depth_f);
+
+    let mut x = Vec::with_capacity(m);
+    let mut y = Vec::with_capacity(m);
+    let mut w = Vec::with_capacity(m);
+
+    for (gc, &(i, j)) in gc_bins.iter().enumerate() {
+        if j - i >= VAR_MIN_WINDOWS {
+            x.push(gc as f64);
+            y.push(depth_f[i..j].variance(None));
+            w.push((j - i) as f64 / n as f64);
+        }
+    }
+    let vars = Loess::new(1.0, 1).set_xout(xout).calculate_weighted(&x, &y, &w);
+    (means, vars)
+}
+
+/// At very small and very large GC-content values, there may be not enough observations
+/// to well estimate read depth mean and value.
+///
+/// To counter this, find GC-content values such that to the left of it there are < min_obs observations.
+/// Fill unavailable values with the last available mean, and with the double of the last available variance.
+fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, usize)], min_obs: usize) {
+    const VAR_MULT: f64 = 2.0;
+    if let Some((ix, (_, _))) = gc_bins.iter().enumerate().filter(|(_, (_, end))| *end >= min_obs).next() {
+        // ix -- index of the first GC-count value, where mean and variance are available.
+        for i in 0..ix {
+            means[i] = means[ix];
+            vars[i] = VAR_MULT * vars[ix];
+        }
+    }
+
+    let n = gc_bins[gc_bins.len() - 1].1;
+    if let Some((ix, (_, _))) = gc_bins.iter().enumerate().rev()
+            .filter(|(_, (start, _))| n - start >= min_obs).next() {
+        // ix -- index of the last GC-count value, where mean and variance are available.
+        for i in ix+1..n {
+            means[i] = means[ix];
+            vars[i] = VAR_MULT * vars[ix];
+        }
+    }
 }
 
 /// Read depth parameters.
@@ -207,6 +254,8 @@ pub struct ReadDepthParams {
     pub padding: u32,
     pub max_insert_size: u32,
     pub filter_quantile: f64,
+    pub mean_loess_frac: f64,
+    pub min_tail_obs: usize,
 }
 
 pub struct ReadDepth {
@@ -227,13 +276,26 @@ impl ReadDepth {
             "ReadDepth: interval and reference sequence have different lengths!");
         let window_counts = count_reads(interval, records, params);
         let filt_window_counts = filter_windows(window_counts, params.filter_quantile);
+        assert!(filt_window_counts.len() > 0, "ReadDepth: no applicable windows!");
 
         let shift = interval.start();
         let gc_counts: Vec<u32> = filt_window_counts.iter()
             .map(|window| gc_count(&ref_seq[(window.start - shift) as usize .. (window.end - shift) as usize]))
             .collect();
-        let depth1: Vec<u32> = filt_window_counts.iter().map(|counts| counts.depth1).collect();
+        let ixs = gc_counts.argsort();
+        let gc_counts = gc_counts.reorder(&ixs);
+        let depth1: Vec<u32> = ixs.iter().map(|&i| filt_window_counts[i].depth1).collect();
+        let gc_bins = find_gc_bins(&gc_counts, params.window_size);
 
-        unimplemented!()
+        let (mut means, mut variances) = predict_mean_var(&gc_counts, &depth1, &gc_bins, params.mean_loess_frac);
+        blur_boundary_values(&mut means, &mut variances, &gc_bins, params.min_tail_obs);
+
+        let distributions: Vec<_> = means.iter().zip(variances)
+            .map(|(&m, v)| NBinom::estimate(m, v).cached())
+            .collect();
+        Self {
+            window_size: params.window_size,
+            distributions,
+        }
     }
 }

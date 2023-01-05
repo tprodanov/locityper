@@ -30,10 +30,11 @@ pub struct Loess {
 
 impl Loess {
     /// Creates a new Loess class with default parameters.
-    pub fn new() -> Loess {
+    pub fn new(frac: f64, degree: usize) -> Loess {
+        assert!(frac > 0.0 && frac <= 1.0, "Fraction must be in (0, 1].");
         Loess {
-            frac: 2.0 / 3.0,
-            degree: 1,
+            frac,
+            degree,
             xout: None,
         }
     }
@@ -51,17 +52,6 @@ impl Loess {
             Some(xout) => Some(&xout),
             None => None,
         }
-    }
-
-    pub fn set_frac(&mut self, frac: f64) -> &mut Loess {
-        assert!(frac > 0.0 && frac <= 1.0, "Fraction must be in (0, 1].");
-        self.frac = frac;
-        self
-    }
-
-    pub fn set_degree(&mut self, degree: usize) -> &mut Loess {
-        self.degree = degree;
-        self
     }
 
     pub fn set_xout(&mut self, xout: Vec<f64>) -> &mut Loess {
@@ -82,7 +72,7 @@ impl Loess {
 impl Default for Loess {
     #[inline]
     fn default() -> Self {
-        Self::new()
+        Self::new(2.0 / 3.0, 1)
     }
 }
 
