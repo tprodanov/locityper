@@ -48,7 +48,7 @@ impl InsertNegBinom {
         let var = lim_insert_sizes.variance(Some(mean)).max(1.000001 * mean);
         Self {
             max_size,
-            distr: CachedDistr::new(NBinom::estimate(mean, var), max_size as u64),
+            distr: NBinom::estimate(mean, var).cached(max_size as usize),
         }
     }
 }
@@ -73,7 +73,7 @@ impl JsonSer for InsertNegBinom {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
-        let max_size = obj["max_size"].as_u64().ok_or_else(|| LoadError(format!(
+        let max_size = obj["max_size"].as_usize().ok_or_else(|| LoadError(format!(
             "NBinom: Failed to parse '{}': missing or incorrect 'max_size' field!", obj)))?;
         let n = obj["n"].as_f64().ok_or_else(|| LoadError(format!(
             "NBinom: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
@@ -81,7 +81,7 @@ impl JsonSer for InsertNegBinom {
             "NBinom: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
         Ok(Self {
             max_size: max_size as u32,
-            distr: CachedDistr::new(NBinom::new(n, p), max_size as u64),
+            distr: NBinom::new(n, p).cached(max_size),
         })
     }
 }

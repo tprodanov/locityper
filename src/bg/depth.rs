@@ -291,7 +291,7 @@ impl ReadDepth {
         blur_boundary_values(&mut means, &mut variances, &gc_bins, params.min_tail_obs);
 
         let distributions: Vec<_> = means.iter().zip(variances)
-            .map(|(&m, v)| NBinom::estimate(m, v).cached())
+            .map(|(&m, v)| NBinom::estimate(m, v).cached_q999())
             .collect();
         Self {
             window_size: params.window_size,

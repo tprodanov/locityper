@@ -1,4 +1,5 @@
 use std::fmt::{self, Debug, Display, Formatter};
+use std::cell::Cell;
 use statrs::{
     statistics::{Min, Max},
     distribution::{Discrete, DiscreteCDF},
@@ -48,10 +49,15 @@ impl NBinom {
         NBinom::new(self.n * mul, self.p)
     }
 
-    /// Creates a cached Negative Binomial distribution, with precomputed values from 0 to <0.999 quantile>.
-    pub fn cached(self) -> CachedDistr<Self> {
-        let q999 = self.inverse_cdf(0.999);
-        CachedDistr::new(self, q999)
+    /// Creates a cached Negative Binomial distribution, storing ln_pmf values from 0 up to <0.999 quantile>.
+    pub fn cached_q999(self) -> CachedDistr<Self> {
+        let q999: u64 = self.inverse_cdf(0.999);
+        CachedDistr::new(self, q999 as usize)
+    }
+
+    /// Createts a cached Negative Binomial distribution, storing ln_pmf values in 0..=n.
+    pub fn cached(self, n: usize) -> CachedDistr<Self> {
+        CachedDistr::new(self, n)
     }
 
     pub fn n(&self) -> f64 {
@@ -149,15 +155,17 @@ nbinom_impl!(u64);
 #[derive(Clone)]
 pub struct CachedDistr<D: Discrete<u64, f64>> {
     distr: D,
-    cache: Vec<f64>,
+    cache: Vec<Cell<f64>>,
 }
 
 impl<D: Discrete<u64, f64>> CachedDistr<D> {
     /// Creates the cached distribution.
-    /// Precomputes ln_pmf for all integers in [0, n].
-    pub fn new(distr: D, n: u64) -> Self {
-        let cache = (0..=n).map(|i| distr.ln_pmf(i)).collect();
-        CachedDistr { distr, cache }
+    /// Stores already-computed ln_pmf values in 0..=n.
+    pub fn new(distr: D, n: usize) -> Self {
+        CachedDistr {
+            distr,
+            cache: vec![Cell::new(f64::NAN); n + 1],
+        }
     }
 
     /// Get inner distrbution.
@@ -168,7 +176,14 @@ impl<D: Discrete<u64, f64>> CachedDistr<D> {
     pub fn ln_pmf(&self, k: u64) -> f64 {
         let i = k as usize;
         if i < self.cache.len() {
-            self.cache[i]
+            let val = self.cache[i].get();
+            if val.is_nan() {
+                return val;
+            }
+
+            let val = self.distr.ln_pmf(k);
+            self.cache[i].replace(val);
+            val
         } else {
             self.distr.ln_pmf(k)
         }
@@ -200,7 +215,7 @@ impl<D: Discrete<u64, f64> + JsonSer> JsonSer for CachedDistr<D> {
             return Err(LoadError(format!("CachedDistr: Failed to parse '{}': missing 'distr' field!", obj)));
         }
         let distr = D::load(&obj["distr"])?;
-        let count = obj["p"].as_u64().ok_or_else(|| LoadError(format!(
+        let count = obj["p"].as_usize().ok_or_else(|| LoadError(format!(
             "CachedDistr: Failed to parse '{}': missing or incorrect 'count' field!", obj)))?;
         Ok(Self::new(distr, count))
     }
