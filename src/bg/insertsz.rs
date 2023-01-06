@@ -1,9 +1,12 @@
 //! Traits and structures related to insert size (distance between read mates).
 
-use std::io::{Write, Result};
-use statrs::distribution::{NegativeBinomial, Discrete};
-
-use crate::algo::vec_ext::*;
+use crate::{
+    algo::{
+        vec_ext::*,
+        nbinom::{NBinom, CachedDistr},
+    },
+    bg::ser::{JsonSer, LoadError},
+};
 
 /// Trait for insert size distribution.
 pub trait InsertDistr {
@@ -12,16 +15,13 @@ pub trait InsertDistr {
 
     /// Ln-probability of the insert size.
     fn ln_prob(&self, sz: u32) -> f64;
-
-    /// Save distribution into a file/stream.
-    fn save<W: Write>(&self, f: W) -> Result<()>;
 }
 
 /// Negative Binomial insert size.
 #[derive(Debug, Clone)]
 pub struct InsertNegBinom {
     max_size: u32,
-    distr: NegativeBinomial,
+    distr: CachedDistr<NBinom>,
 }
 
 impl InsertNegBinom {
@@ -41,16 +41,14 @@ impl InsertNegBinom {
         // Find index after the limiting value.
         let m = insert_sizes.binary_search_right(&max_size);
         let lim_insert_sizes = &insert_sizes[..m];
+        let max_size = max_size.ceil() as u32;
 
         let mean = lim_insert_sizes.mean();
         // Increase variance, if less-equal than mean.
         let var = lim_insert_sizes.variance(Some(mean)).max(1.000001 * mean);
-        let r = mean * mean / (var - mean);
-        let p = 1.0 - mean / var;
-
         Self {
-            max_size: max_size.ceil() as u32,
-            distr: NegativeBinomial::new(r, p).unwrap(),
+            max_size,
+            distr: CachedDistr::new(NBinom::estimate(mean, var), max_size as u64),
         }
     }
 }
@@ -63,9 +61,27 @@ impl InsertDistr for InsertNegBinom {
     fn ln_prob(&self, sz: u32) -> f64 {
         self.distr.ln_pmf(sz as u64)
     }
+}
 
-    fn save<W: Write>(&self, mut f: W) -> Result<()> {
-        f.write_all(b"Fragment size distribution: Negative Binomial\n")?;
-        write!(f, "max_size: {}\nr: {:.?}\np: {:?}\n", self.max_size, self.distr.r(), self.distr.p())
+impl JsonSer for InsertNegBinom {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            max_size: self.max_size,
+            n: self.distr.distr().n(),
+            p: self.distr.distr().p(),
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        let max_size = obj["max_size"].as_u64().ok_or_else(|| LoadError(format!(
+            "NBinom: Failed to parse '{}': missing or incorrect 'max_size' field!", obj)))?;
+        let n = obj["n"].as_f64().ok_or_else(|| LoadError(format!(
+            "NBinom: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
+        let p = obj["p"].as_f64().ok_or_else(|| LoadError(format!(
+            "NBinom: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
+        Ok(Self {
+            max_size: max_size as u32,
+            distr: CachedDistr::new(NBinom::new(n, p), max_size as u64),
+        })
     }
 }

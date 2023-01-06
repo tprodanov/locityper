@@ -1,11 +1,10 @@
 [package]
 name = "reconstr"
-authors = ["Timofey Prodanov", "Tobias Marschall"]
+authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
 version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
 htslib = { package = "rust-htslib", version = "0.40" }
 num-format = "0.4"
 num-traits = "0.2"
@@ -13,3 +12,4 @@ nalgebra = "0.31"
 itertools = "0.10"
 statrs = "0.16"
 intmap = "2.0.0"
+json = "0.12"

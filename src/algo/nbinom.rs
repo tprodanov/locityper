@@ -1,4 +1,4 @@
-use std::fmt::{Debug, Display, Formatter, Result};
+use std::fmt::{self, Debug, Display, Formatter};
 use statrs::{
     statistics::{Min, Max},
     distribution::{Discrete, DiscreteCDF},
@@ -7,6 +7,7 @@ use statrs::{
         gamma::ln_gamma,
     },
 };
+use crate::bg::ser::{JsonSer, LoadError};
 
 /// Negative Binomial distribution,
 /// similar to `statrs::distribution::NegativeBinomial`, but storing some precalculated values.
@@ -75,14 +76,31 @@ impl NBinom {
 }
 
 impl Debug for NBinom {
-    fn fmt(&self, f: &mut Formatter) -> Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "N.Binom.(n = {:?}, p = {:?})", self.n, self.p)
     }
 }
 
 impl Display for NBinom {
-    fn fmt(&self, f: &mut Formatter) -> Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "N.Binom.(n = {:.5}, p = {:.5})", self.n, self.p)
+    }
+}
+
+impl JsonSer for NBinom {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            n: self.n,
+            p: self.p,
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        let n = obj["n"].as_f64().ok_or_else(|| LoadError(format!(
+            "NBinom: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
+        let p = obj["p"].as_f64().ok_or_else(|| LoadError(format!(
+            "NBinom: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
+        Ok(Self::new(n, p))
     }
 }
 
@@ -142,6 +160,11 @@ impl<D: Discrete<u64, f64>> CachedDistr<D> {
         CachedDistr { distr, cache }
     }
 
+    /// Get inner distrbution.
+    pub fn distr(&self) -> &D {
+        &self.distr
+    }
+
     pub fn ln_pmf(&self, k: u64) -> f64 {
         let i = k as usize;
         if i < self.cache.len() {
@@ -153,13 +176,32 @@ impl<D: Discrete<u64, f64>> CachedDistr<D> {
 }
 
 impl<D: Discrete<u64, f64> + Debug> Debug for CachedDistr<D> {
-    fn fmt(&self, f: &mut Formatter) -> Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Cached[{:?}, 0..{}]", self.distr, self.cache.len())
     }
 }
 
 impl<D: Discrete<u64, f64> + Display> Display for CachedDistr<D> {
-    fn fmt(&self, f: &mut Formatter) -> Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Cached[{}, 0..{}]", self.distr, self.cache.len())
+    }
+}
+
+impl<D: Discrete<u64, f64> + JsonSer> JsonSer for CachedDistr<D> {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            distr: self.distr.save(),
+            count: self.cache.len(),
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        if !obj.has_key("distr") {
+            return Err(LoadError(format!("CachedDistr: Failed to parse '{}': missing 'distr' field!", obj)));
+        }
+        let distr = D::load(&obj["distr"])?;
+        let count = obj["p"].as_u64().ok_or_else(|| LoadError(format!(
+            "CachedDistr: Failed to parse '{}': missing or incorrect 'count' field!", obj)))?;
+        Ok(Self::new(distr, count))
     }
 }
