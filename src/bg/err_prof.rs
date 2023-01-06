@@ -1,7 +1,8 @@
-use std::io::{Write, Result};
 use htslib::bam::record::Record;
-
-use crate::seq::cigar::{Cigar, Operation};
+use crate::{
+    seq::cigar::{Cigar, Operation},
+    bg::ser::{JsonSer, LoadError, parse_f64_arr},
+};
 
 const MATCH: usize = 0;
 const MISM: usize = 1;
@@ -78,13 +79,8 @@ impl ErrorCounts {
     }
 }
 
-fn write_array<W: Write>(f: &mut W, prefix: &[u8], arr: &[f64]) -> Result<()> {
-    f.write_all(prefix)?;
-    arr.iter().map(|val| write!(f, " {:?}", val)).collect::<Result<()>>()?;
-    f.write_all(b"\n")
-}
-
 /// Single mate error profile. All probabilities are in log-space.
+#[derive(Clone, Debug, Default)]
 struct MateErrorProfile {
     start_probs: [f64; N_OPS],
     trans_probs: [f64; N_OPS_SQ],
@@ -108,11 +104,23 @@ impl MateErrorProfile {
         }
         prob + self.end_probs[prev]
     }
+}
 
-    fn save<W: Write>(&self, f: &mut W) -> Result<()> {
-        write_array(f, b"start:", &self.start_probs)?;
-        write_array(f, b"trans:", &self.trans_probs)?;
-        write_array(f, b"end:", &self.end_probs)
+impl JsonSer for MateErrorProfile {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            start: &self.start_probs as &[f64],
+            trans: &self.trans_probs as &[f64],
+            end: &self.end_probs as &[f64],
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        let mut res = Self::default();
+        parse_f64_arr(obj, "start", &mut res.start_probs)?;
+        parse_f64_arr(obj, "trans", &mut res.trans_probs)?;
+        parse_f64_arr(obj, "end", &mut res.end_probs)?;
+        Ok(res)
     }
 }
 
@@ -151,12 +159,23 @@ impl ErrorProfile {
             self.prof1.ln_prob(&ext_cigar)
         }
     }
+}
 
-    /// Save the error profiles to file/stream.
-    pub fn save<W: Write>(&self, mut f: W) -> Result<()> {
-        f.write_all(b"Error profile #1\n")?;
-        self.prof1.save(&mut f)?;
-        f.write_all(b"Error profile #2\n")?;
-        self.prof2.save(&mut f)
+impl JsonSer for ErrorProfile {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            prof1: self.prof1.save(),
+            prof2: self.prof2.save(),
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        if obj.has_key("prof1") || obj.has_key("prof2") {
+            let prof1 = MateErrorProfile::load(&obj["prof1"])?;
+            let prof2 = MateErrorProfile::load(&obj["prof2"])?;
+            Ok(Self {prof1, prof2 })
+        } else {
+            Err(LoadError(format!("ErrorProfile: Failed to parse '{}': missing 'prof1' or 'prof2' keys!", obj)))
+        }
     }
 }

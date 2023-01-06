@@ -14,6 +14,7 @@ use crate::{
         vec_ext::*,
         loess::Loess,
     },
+    bg::ser::{JsonSer, LoadError, parse_f64_arr},
 };
 
 pub trait DepthDistr {
@@ -290,12 +291,37 @@ impl ReadDepth {
         let (mut means, mut variances) = predict_mean_var(&gc_counts, &depth1, &gc_bins, params.mean_loess_frac);
         blur_boundary_values(&mut means, &mut variances, &gc_bins, params.min_tail_obs);
 
-        let distributions: Vec<_> = means.iter().zip(variances)
-            .map(|(&m, v)| NBinom::estimate(m, v).cached_q999())
+        let distributions: Vec<_> = means.into_iter().zip(variances)
+            .map(|(m, v)| NBinom::estimate(m, v).cached_q999())
             .collect();
         Self {
             window_size: params.window_size,
             distributions,
         }
+    }
+}
+
+impl JsonSer for ReadDepth {
+    fn save(&self) -> json::JsonValue {
+        let n_params: Vec<f64> = self.distributions.iter().map(|distr| distr.distr().n()).collect();
+        let p_params: Vec<f64> = self.distributions.iter().map(|distr| distr.distr().p()).collect();
+        json::object!{
+            window: self.window_size,
+            n: &n_params as &[f64],
+            p: &p_params as &[f64],
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        let window_size = obj["window"].as_usize().ok_or_else(|| LoadError(format!(
+            "ReadDepth: Failed to parse '{}': missing or incorrect 'window' field!", obj)))?;
+        let mut n_params = vec![0.0; window_size + 1];
+        parse_f64_arr(obj, "n", &mut n_params)?;
+        let mut p_params = vec![0.0; window_size + 1];
+        parse_f64_arr(obj, "p", &mut p_params)?;
+        Ok(Self {
+            window_size: window_size as u32,
+            distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p).cached_q999()).collect(),
+        })
     }
 }
