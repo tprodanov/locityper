@@ -72,7 +72,7 @@ impl WindowCounts {
 
     fn add_read(&mut self, record: &Record, max_insert_size: u32) {
         const MAX_CLIPPING: u32 = 4;
-        const MIN_MAPQ: u8 = 10;
+        const MIN_MAPQ: u8 = 30;
 
         debug_assert!(!record.is_unmapped(), "WindowCounts: Cannot add unmapped read!");
         if record.is_last_in_template() {

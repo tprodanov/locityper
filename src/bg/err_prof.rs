@@ -133,10 +133,14 @@ pub struct ErrorProfile {
 
 impl ErrorProfile {
     /// Create error profile from the iterator over records.
-    pub fn create(records: impl Iterator<Item = Record>) -> ErrorProfile {
+    pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>) -> ErrorProfile {
         let mut counts1 = ErrorCounts::new();
         let mut counts2 = ErrorCounts::new();
         for record in records {
+            // Unmapped or secondary.
+            if (record.flags() & 3844) == 0 {
+                continue;
+            }
             let ext_cigar = Cigar::infer_ext_cigar(&record);
             if record.is_last_in_template() {
                 counts2.update(&ext_cigar)
@@ -170,10 +174,11 @@ impl JsonSer for ErrorProfile {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
-        if obj.has_key("prof1") || obj.has_key("prof2") {
-            let prof1 = MateErrorProfile::load(&obj["prof1"])?;
-            let prof2 = MateErrorProfile::load(&obj["prof2"])?;
-            Ok(Self {prof1, prof2 })
+        if obj.has_key("prof1") && obj.has_key("prof2") {
+            Ok(Self {
+                prof1: MateErrorProfile::load(&obj["prof1"])?,
+                prof2: MateErrorProfile::load(&obj["prof2"])?,
+            })
         } else {
             Err(LoadError(format!("ErrorProfile: Failed to parse '{}': missing 'prof1' or 'prof2' keys!", obj)))
         }

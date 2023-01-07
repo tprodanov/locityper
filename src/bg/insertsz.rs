@@ -1,5 +1,7 @@
 //! Traits and structures related to insert size (distance between read mates).
 
+use htslib::bam::record::{Record, Aux};
+
 use crate::{
     algo::{
         vec_ext::*,
@@ -17,6 +19,32 @@ pub trait InsertDistr {
     fn ln_prob(&self, sz: u32) -> f64;
 }
 
+/// Get an absolute value of the insert size.
+/// Returns None if the read is unmapped, unpaired, two mates are on diff chromosomes, or
+/// any of the mates have low mapping quality (< 30).
+pub fn get_insert_size(record: &Record) -> Option<u32> {
+    fn mate_mapq(record: &Record) -> u8 {
+        match record.aux(b"MQ") {
+            Ok(Aux::U8(val)) => val,
+            Ok(Aux::I8(val)) => val as u8,
+            Ok(Aux::I16(val)) => val as u8,
+            Ok(Aux::U16(val)) => val as u8,
+            Ok(Aux::I32(val)) => val as u8,
+            Ok(Aux::U32(val)) => val as u8,
+            Ok(_) => panic!("BAM record tag MQ has non-integer value!"),
+            Err(_) => panic!("BAM record does not have a MQ tag!"),
+        }
+    }
+    const MIN_MAPQ: u8 = 30;
+    // Both mates mapped, primary alignments.
+    if (record.flags() & 3980) == 0 && record.tid() == record.mtid() &&
+            record.mapq() >= MIN_MAPQ && mate_mapq(record) >= MIN_MAPQ {
+        Some(record.insert_size().abs() as u32)
+    } else {
+        None
+    }
+}
+
 /// Negative Binomial insert size.
 #[derive(Debug, Clone)]
 pub struct InsertNegBinom {
@@ -26,7 +54,7 @@ pub struct InsertNegBinom {
 
 impl InsertNegBinom {
     /// Creates the Neg. Binom. insert size distribution from an iterator of insert sizes.
-    pub fn create<T, I>(insert_sizes: I) -> Self
+    pub fn estimate<T, I>(insert_sizes: I) -> Self
     where T: Into<f64>,
           I: Iterator<Item = T>,
     {
