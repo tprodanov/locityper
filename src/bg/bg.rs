@@ -8,14 +8,19 @@ use crate::{
     },
 };
 
-pub struct BgParams {
+/// Various background distributions, including
+/// - read depth distribution,
+/// - insert size distribution,
+/// - error profile.
+pub struct BgDistr {
     depth: ReadDepth,
     insert_sz: InsertNegBinom,
     err_prof: ErrorProfile,
 }
 
-impl BgParams {
-    pub fn create(records: &[Record]) -> Self {
+impl BgDistr {
+    /// Estimates read depth, insert size and error profile given a slice of BAM records.
+    pub fn estimate(records: &[Record]) -> Self {
         let insert_sz = InsertNegBinom::estimate(records.iter().filter_map(get_insert_size));
         let err_prof = ErrorProfile::estimate(records.iter());
         // Self {
@@ -28,7 +33,7 @@ impl BgParams {
     }
 }
 
-impl JsonSer for BgParams {
+impl JsonSer for BgDistr {
     fn save(&self) -> json::JsonValue {
         json::object!{
             bg_depth: self.depth.save(),
@@ -46,7 +51,7 @@ impl JsonSer for BgParams {
             })
         } else {
             Err(LoadError(format!(
-                "BgParams: Failed to parse '{}': missing 'bg_depth', 'insert_size' or 'error_profile' keys!", obj)))
+                "BgDistr: Failed to parse '{}': missing 'bg_depth', 'insert_size' or 'error_profile' keys!", obj)))
         }
     }
 }
