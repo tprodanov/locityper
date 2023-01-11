@@ -138,10 +138,11 @@ impl ErrorProfile {
         let mut counts2 = ErrorCounts::new();
         for record in records {
             // Unmapped or secondary.
-            if (record.flags() & 3844) == 0 {
+            if (record.flags() & 3844) != 0 {
                 continue;
             }
             let ext_cigar = Cigar::infer_ext_cigar(&record);
+
             if record.is_last_in_template() {
                 counts2.update(&ext_cigar)
             } else {

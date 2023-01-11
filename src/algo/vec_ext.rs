@@ -275,6 +275,7 @@ macro_rules! f64_vec_ext_impl {
 
             fn quantile_sorted(&self, q: f64) -> f64 {
                 assert!(0.0 <= q && q <= 1.0, "Quantile must be within [0, 1]!");
+                assert!(self.len() > 0, "Cannot find quantile on an empty array!");
                 let f = (self.len() - 1) as f64 * q;
                 let i = f as usize;
                 let r = f.fract();

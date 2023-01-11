@@ -145,6 +145,14 @@ impl Cigar {
         Cigar::default()
     }
 
+    pub fn from_raw(raw_cigar: &[u32]) -> Cigar {
+        let mut res = Cigar::new();
+        for &val in raw_cigar.iter() {
+            res.push(CigarItem::from_u32(val));
+        }
+        res
+    }
+
     /// Length of the reference sequence.
     pub fn ref_len(&self) -> u32 {
         self.rlen
@@ -155,22 +163,22 @@ impl Cigar {
         self.qlen
     }
 
-    /// Push a new entry, does not merge with the latest entry.
-    pub fn unchecked_push(&mut self, op: Operation, len: u32) {
-        if op.consumes_ref() {
-            self.rlen += len;
+    /// Push a new `CigarItem`, does not merge with the latest entry.
+    pub fn push(&mut self, item: CigarItem) {
+        if item.op.consumes_ref() {
+            self.rlen += item.len;
         }
-        if op.consumes_query() {
-            self.qlen += len;
+        if item.op.consumes_query() {
+            self.qlen += item.len;
         }
-        self.tuples.push(CigarItem::new(op, len))
+        self.tuples.push(item);
     }
 
     /// Push a new entry, merges with the latest entry, if relevant.
-    pub fn push(&mut self, op: Operation, len: u32) {
+    pub fn checked_push(&mut self, op: Operation, len: u32) {
         let n = self.tuples.len();
         if n == 0 || self.tuples[n - 1].op != op {
-            self.unchecked_push(op, len);
+            self.push(CigarItem::new(op, len));
         } else {
             if op.consumes_ref() {
                 self.rlen += len;
@@ -243,7 +251,7 @@ impl Index<usize> for Cigar {
 }
 
 /// Trait that stores either Vec<u8>, or ().
-pub trait SeqOrNone {
+pub trait SeqOrNone : std::fmt::Debug {
     /// Creates a new object.
     fn new() -> Self;
 
@@ -370,6 +378,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
         for &val in raw_cigar {
             data.process_op(CigarItem::from_u32(val));
         }
+        debug_assert_eq!(data.md_ix, data.md_entries.len(), "Failed to parse MD tag \"{}\"", data.md_str);
 
         if let Some(ref_len) = data.ref_seq.len() {
             assert_eq!(ref_len as u32, data.new_cigar.ref_len(), "Failed to parse MD tag \"{}\"", md_str);
@@ -392,7 +401,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
             }
 
         } else if tup.op.consumes_query() {
-            self.new_cigar.unchecked_push(tup.op, tup.len);
+            self.new_cigar.push(CigarItem::new(tup.op, tup.len));
 
         } else {
             if let MdEntry::Deletion(start, end) = self.md_entries[self.md_ix] {
@@ -401,17 +410,16 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
                 for i in start..end {
                     self.ref_seq.push(self.raw_md[i as usize]);
                 }
-                self.new_cigar.unchecked_push(tup.op, tup.len);
+                self.new_cigar.push(CigarItem::new(tup.op, tup.len));
                 self.md_ix += 1;
             }
         }
-        debug_assert_eq!(self.md_ix, self.md_entries.len(), "Failed to parse MD tag \"{}\"", self.md_str);
     }
 
     fn process_match_match(&mut self, op_len: &mut u32, md_len: u32) {
         let rem_md_len = md_len - self.md_shift;
         let pos_inc = min(*op_len, rem_md_len);
-        for qpos in self.new_cigar.rlen..self.new_cigar.rlen + pos_inc {
+        for qpos in self.new_cigar.qlen..self.new_cigar.qlen + pos_inc {
             self.ref_seq.push(self.query_seq[qpos as usize]);
         }
 
@@ -421,7 +429,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
             self.md_ix += 1;
             self.md_shift = 0;
         }
-        self.new_cigar.push(Operation::Equal, pos_inc);
+        self.new_cigar.checked_push(Operation::Equal, pos_inc);
         *op_len -= pos_inc;
     }
 
@@ -438,7 +446,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
             self.md_ix += 1;
             self.md_shift = 0;
         }
-        self.new_cigar.push(Operation::Diff, pos_inc);
+        self.new_cigar.checked_push(Operation::Diff, pos_inc);
         *op_len -= pos_inc;
     }
 }

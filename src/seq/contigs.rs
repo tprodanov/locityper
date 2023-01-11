@@ -59,6 +59,10 @@ impl ContigNames {
         Self { names, lengths, name_to_id }
     }
 
+    pub fn from_index(index: &bio::io::fasta::Index) -> Self {
+        Self::new(index.sequences().into_iter().map(|seq| (seq.name, seq.len as u32)))
+    }
+
     /// Get the number of contigs.
     pub fn len(&self) -> usize {
         self.names.len()
@@ -77,6 +81,11 @@ impl ContigNames {
     /// Get contig id from its name.
     pub fn id(&self, name: &str) -> ContigId {
         self.name_to_id[name]
+    }
+
+    /// Returns contig id, if it is available.
+    pub fn get_id(&self, name: &str) -> Option<ContigId> {
+        self.name_to_id.get(name).copied()
     }
 }
 

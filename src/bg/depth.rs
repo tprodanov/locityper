@@ -84,8 +84,8 @@ impl WindowCounts {
             self.low_mapq_reads += 1;
         }
         if record.is_paired() {
-            if (!record.is_proper_pair() || record.is_mate_unmapped() || record.tid() != record.mtid())
-                    && record.insert_size().abs() as u32 > max_insert_size {
+            if !record.is_proper_pair() || record.is_mate_unmapped() || record.tid() != record.mtid()
+                    || record.insert_size().abs() as u32 > max_insert_size {
                 self.unpaired_reads += 1;
             }
         }
@@ -118,10 +118,11 @@ impl WindowCounts {
     /// Does the read satisfies set constraints?
     fn satisfies(&self, max_depth: f64, max_low_mapq: f64, max_clipped: f64, max_unpaired: f64) -> bool {
         let dp = self.total_depth() as f64;
-        dp > max_depth
-            || self.low_mapq_reads as f64 / dp > max_low_mapq
-            || self.clipped_reads as f64 / dp > max_clipped
-            || self.unpaired_reads as f64 / dp > max_unpaired
+        dp == 0.0 ||
+            (dp <= max_depth
+            && self.low_mapq_reads as f64 / dp <= max_low_mapq
+            && self.clipped_reads as f64 / dp <= max_clipped
+            && self.unpaired_reads as f64 / dp <= max_unpaired)
     }
 }
 
@@ -146,7 +147,7 @@ fn count_reads<'a>(
     for record in records {
         if (record.flags() & 3844) == 0 {
             let middle = (record.reference_start() + record.reference_end()) as u32 >> 1;
-            if middle < shift || middle >= end {
+            if shift <= middle && middle < end {
                 let ix = (middle - shift) / params.window_size;
                 windows[ix as usize].add_read(record, max_insert_size);
             }
@@ -182,7 +183,7 @@ fn get_window_gc_contents(interval: &Interval, ref_seq: &[u8], windows: &[Window
         .collect()
 }
 
-/// In total, GC-content falls in 101 bins (0..=100).
+/// In total, GC-content falls into 101 bins (0..=100).
 const GC_BINS: usize = 101;
 
 /// For each GC-content in 0..=100, returns start & end indices,
@@ -192,9 +193,11 @@ fn find_gc_bins(gc_contents: &[f64]) -> Vec<(usize, usize)> {
     let n = gc_contents.len();
     let mut res = Vec::with_capacity(GC_BINS);
     let mut i = 0;
-    for gc in 0..=100 {
-        let j = gc_contents.binary_search_right_at(&(gc as f64 + 0.5), i, n);
+    for gc in 0..GC_BINS {
+        let gc = gc as f64;
+        let j = gc_contents.binary_search_right_at(&(gc + 0.5), i, n);
         res.push((i, j));
+        debug_assert!(i == j || (gc - 0.5 <= gc_contents[i] && gc_contents[j - 1] < gc + 0.5));
         i = j;
     }
     debug_assert_eq!(i, n);
@@ -241,52 +244,69 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u3
 /// Fill unavailable values with the last available mean, and with the double of the last available variance.
 fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, usize)], params: &ReadDepthParams) {
     let min_obs = params.min_tail_obs;
-    if let Some((ix, (_, _))) = gc_bins.iter().enumerate().filter(|(_, (_, end))| *end >= min_obs).next() {
-        // ix -- index of the first GC-content value, where mean and variance are available.
-        for i in 0..ix {
-            means[i] = means[ix];
-            vars[i] = params.tail_var_mult * vars[ix];
-        }
-    }
+    let n = gc_bins.len();
+    let m = gc_bins[gc_bins.len() - 1].1;
 
-    let n = gc_bins[gc_bins.len() - 1].1;
-    if let Some((ix, (_, _))) = gc_bins.iter().enumerate().rev()
-            .filter(|(_, (start, _))| n - start >= min_obs).next() {
-        // ix -- index of the last GC-content value, where mean and variance are available.
-        for i in ix+1..n {
-            means[i] = means[ix];
-            vars[i] = params.tail_var_mult * vars[ix];
-        }
+    // Index of the first GC-content value, where mean and variance are available.
+    let left_ix = gc_bins
+        .iter().enumerate()
+        .filter(|(_, (_, end))| *end >= min_obs).next()
+        .map(|t| t.0)
+        .unwrap_or(0);
+    // Index of the first GC-content value, where mean and variance are available.
+    let right_ix = gc_bins
+        .iter().enumerate().rev()
+        .filter(|(_, (start, _))| m - start >= min_obs).next()
+        .map(|t| t.0)
+        .unwrap_or(n);
+    assert!(left_ix < right_ix, "Too few windows to calculate read depth!");
+
+    for i in 0..left_ix {
+        means[i] = means[left_ix];
+        vars[i] = (vars[left_ix] * (1.0 + (left_ix - i) as f64 * params.tail_var_mult)).max(vars[i]);
+    }
+    for i in right_ix + 1..n {
+        means[i] = means[right_ix];
+        vars[i] = (vars[right_ix].max(vars[i]) * (1.0 + (i - right_ix) as f64 * params.tail_var_mult)).max(vars[i]);
     }
 }
 
 /// Read depth parameters.
 pub struct ReadDepthParams {
     /// Calculate background per windows of this size.
+    /// Default: 100.
     pub window_size: u32,
 
     /// Calculate GC-content based on the window of size `window_size + 2 * gc_padding`.
+    /// Default: 100.
     pub gc_padding: u32,
 
     /// Ignore left-most and right-most `edge_padding` base-pairs. Must not be smaller than `gc_padding`.
+    /// Default: 1000.
     pub edge_padding: u32,
 
     /// Filter windows with too many low-MAPQ reads, clipped reads or unpaired reads.
-    /// "too many" is defined on the `filter_quantile` across all analyzed windows.
+    /// "too many" is defined on the `filter_quantile` across all analyzed windows. Default: 0.99.
     pub filter_quantile: f64,
 
     /// When calculating read depth averages for various GC-content values, use `mean_loess_frac` fraction
-    /// across all windows. For example, if mean_loess_frac is 0.1, use 10% of all observations with the most
-    /// similar GC-content values.
+    /// across all windows. For example, if mean_loess_frac is 0.1 (default),
+    /// use 10% of all observations with the most similar GC-content values.
     pub mean_loess_frac: f64,
 
     /// Calculate read depth parameters differently for the highest and lowest GC-content values.
-    /// First, select such GC-content values L & R such that there `< min_tail_obs` windows with GC-content `< L`.
-    /// Next, for all GC-content < L use mean as for L, and multiple variance by `tail_var_mult`.
+    /// First, select such GC-content values L & R such that there `< min_tail_obs` windows with GC-content `< L`
+    /// and `< min_tail_obs` windows with GC-content `> R`. Default: 100.
+    ///
+    /// Next, for all GC-content < L use mean as for L, and multiple variance by
+    /// `1 + GC_diff * tail_var_mult` where `GC_diff` is the difference between GC-content of the window and L.
+    /// For example, window with GC-content `L-2` will have `mean[L-2] = mean[L]` and
+    /// `var[L-2] = var[L] * (1 + 2 * tail_var_mult)`.
+    ///
     /// Repeat the same procedure for GC-content values > R.
     pub min_tail_obs: usize,
 
-    /// See `min_tail_obs`.
+    /// See `min_tail_obs`. Default: 0.05.
     pub tail_var_mult: f64,
 }
 
@@ -298,8 +318,8 @@ impl Default for ReadDepthParams {
             edge_padding: 1000,
             filter_quantile: 0.99,
             mean_loess_frac: 0.1,
-            min_tail_obs: 500,
-            tail_var_mult: 2.0,
+            min_tail_obs: 100,
+            tail_var_mult: 0.05,
         }
     }
 }
