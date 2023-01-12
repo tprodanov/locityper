@@ -58,6 +58,7 @@ impl InsertNegBinom {
     where T: Into<f64>,
           I: Iterator<Item = T>,
     {
+        log::info!("    Estimating insert size distribution");
         const QUANTILE: f64 = 0.99;
         const QUANT_MULT: f64 = 2.0;
         // Calculate max_size from input values as 2.0 * <99-th quantile>.
@@ -74,6 +75,8 @@ impl InsertNegBinom {
         let mean = lim_insert_sizes.mean();
         // Increase variance, if less-equal than mean.
         let var = lim_insert_sizes.variance(Some(mean)).max(1.000001 * mean);
+        log::info!("        Insert size mean = {:.1},  st.dev. = {:.1}", mean, var.sqrt());
+        log::info!("        Treat reads with insert size > {} as unpaired", max_size);
         Self {
             max_size,
             distr: NBinom::estimate(mean, var).cached(max_size as usize),

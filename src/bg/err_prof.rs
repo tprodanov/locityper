@@ -134,6 +134,7 @@ pub struct ErrorProfile {
 impl ErrorProfile {
     /// Create error profile from the iterator over records.
     pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>) -> ErrorProfile {
+        log::info!("    Estimating read error profiles");
         let mut counts1 = ErrorCounts::new();
         let mut counts2 = ErrorCounts::new();
         for record in records {
