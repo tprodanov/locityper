@@ -7,6 +7,12 @@ use std::fmt;
 pub struct ContigId(u32);
 
 impl ContigId {
+    /// Creates a new ContigId.
+    #[inline]
+    pub fn new(val: u32) -> ContigId {
+        ContigId(val)
+    }
+
     /// Get `u32` value of the contig id.
     #[inline]
     pub fn get(self) -> u32 {

@@ -1,9 +1,7 @@
 use std::rc::Rc;
 use std::fmt::{self, Write};
 use std::cmp::Ordering;
-
 use num_format::{Locale, WriteFormatted};
-
 use crate::seq::contigs::{ContigId, ContigNames};
 
 /// Genomic interval.
@@ -23,6 +21,17 @@ impl Interval {
             contig_id.ix(), contig_names.len());
         assert!(start < end, "Cannot create interval {}:{}-{}", contig_id, start, end);
         Self { contig_names, contig_id, start, end }
+    }
+
+    /// Creates an empty interval from the contig id and interval start.
+    pub fn new_empty(contig_names: Rc<ContigNames>, contig_id: ContigId, start: u32) -> Self {
+        assert!(contig_id.ix() < contig_names.len(),
+            "Cannot create interval with id {}, when there are {} contigs in total",
+            contig_id.ix(), contig_names.len());
+        Self {
+            contig_names, contig_id, start,
+            end: start,
+        }
     }
 
     /// Parse interval name from string "name:start-end", where start is 1-based, inclusive.
@@ -88,7 +97,7 @@ impl Interval {
 
 impl fmt::Debug for Interval {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}:{}-{}", self.contig_name(), self.start + 1, self.end)
+        fmt::Display::fmt(self, f)
     }
 }
 

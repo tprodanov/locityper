@@ -129,7 +129,7 @@ impl fmt::Display for CigarItem {
 }
 
 /// Wrapper over vector of `CigarItem`.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct Cigar {
     tuples: Vec<CigarItem>,
     /// Reference length.
@@ -201,6 +201,11 @@ impl Cigar {
         self.tuples.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.tuples.is_empty()
+    }
+
     /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
     pub fn infer_ext_cigar(rec: &record::Record) -> Cigar {
         let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
@@ -233,12 +238,35 @@ impl PartialEq for Cigar {
 
 impl Eq for Cigar {}
 
+impl fmt::Debug for Cigar {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.is_empty() {
+            write!(f, "*")
+        } else {
+            let mut first = true;
+            for tup in self.iter() {
+                if first {
+                    first = false;
+                } else {
+                    f.write_char(' ')?;
+                }
+                write!(f, "{}", tup)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 impl fmt::Display for Cigar {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for tup in self.iter() {
-            write!(f, "{}", tup)?
+        if self.is_empty() {
+            write!(f, "*")
+        } else {
+            for tup in self.iter() {
+                write!(f, "{}", tup)?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 
