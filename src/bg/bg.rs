@@ -5,7 +5,7 @@ use crate::{
     bg::{
         depth::{ReadDepth, ReadDepthParams},
         insertsz::{InsertNegBinom, InsertDistr, get_insert_size},
-        err_prof::ErrorProfile,
+        err_prof::TransErrorProfile,
         ser::{JsonSer, LoadError},
     },
     seq::interv::Interval,
@@ -18,7 +18,7 @@ use crate::{
 pub struct BgDistr {
     depth: ReadDepth,
     insert_sz: InsertNegBinom,
-    err_prof: ErrorProfile,
+    err_prof: TransErrorProfile,
 }
 
 impl BgDistr {
@@ -38,7 +38,7 @@ impl BgDistr {
         fasta.read(&mut ref_seq)?;
 
         let insert_sz = InsertNegBinom::estimate(records.iter().filter_map(get_insert_size));
-        let err_prof = ErrorProfile::estimate(records.iter());
+        let err_prof = TransErrorProfile::estimate(records.iter());
         let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), params, insert_sz.max_size());
         Ok(Self { depth, insert_sz, err_prof })
     }
@@ -58,7 +58,7 @@ impl JsonSer for BgDistr {
             Ok(Self {
                 depth: ReadDepth::load(&obj["bg_depth"])?,
                 insert_sz: InsertNegBinom::load(&obj["insert_size"])?,
-                err_prof: ErrorProfile::load(&obj["error_profile"])?,
+                err_prof: TransErrorProfile::load(&obj["error_profile"])?,
             })
         } else {
             Err(LoadError(format!(

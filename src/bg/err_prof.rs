@@ -1,8 +1,16 @@
+use std::fmt;
 use htslib::bam::record::Record;
 use crate::{
     seq::cigar::{Cigar, Operation},
+    seq::aln::{READ_ENDS, ReadEnd},
     bg::ser::{JsonSer, LoadError, parse_f64_arr},
 };
+
+/// Trait to calculate probabilities of an alignment.
+pub trait ErrorProfile : Clone + fmt::Debug + JsonSer {
+    /// Get log-probability of the record alignment.
+    fn ln_prob(&self, ext_cigar: &Cigar, read_end: ReadEnd) -> f64;
+}
 
 const MATCH: usize = 0;
 const MISM: usize = 1;
@@ -126,14 +134,14 @@ impl JsonSer for MateErrorProfile {
 
 /// Error profile.
 /// Takes into account transition probabilities between CIGAR operations (match->match), etc.
-pub struct ErrorProfile {
-    prof1: MateErrorProfile,
-    prof2: MateErrorProfile,
+#[derive(Debug, Clone)]
+pub struct TransErrorProfile {
+    profiles: [MateErrorProfile; READ_ENDS],
 }
 
-impl ErrorProfile {
+impl TransErrorProfile {
     /// Create error profile from the iterator over records.
-    pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>) -> ErrorProfile {
+    pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>) -> TransErrorProfile {
         log::info!("    Estimating read error profiles");
         let mut counts1 = ErrorCounts::new();
         let mut counts2 = ErrorCounts::new();
@@ -150,39 +158,33 @@ impl ErrorProfile {
                 counts1.update(&ext_cigar)
             }
         }
-        ErrorProfile {
-            prof1: counts1.to_profile(),
-            prof2: counts2.to_profile(),
-        }
-    }
-
-    /// Get log-probability of the record alignment.
-    pub fn ln_prob(&self, record: &Record) -> f64 {
-        let ext_cigar = Cigar::infer_ext_cigar(record);
-        if record.is_last_in_template() {
-            self.prof2.ln_prob(&ext_cigar)
-        } else {
-            self.prof1.ln_prob(&ext_cigar)
+        TransErrorProfile {
+            profiles: [counts1.to_profile(), counts2.to_profile()],
         }
     }
 }
 
-impl JsonSer for ErrorProfile {
+impl JsonSer for TransErrorProfile {
     fn save(&self) -> json::JsonValue {
         json::object!{
-            prof1: self.prof1.save(),
-            prof2: self.prof2.save(),
+            prof1: self.profiles[0].save(),
+            prof2: self.profiles[1].save(),
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
         if obj.has_key("prof1") && obj.has_key("prof2") {
             Ok(Self {
-                prof1: MateErrorProfile::load(&obj["prof1"])?,
-                prof2: MateErrorProfile::load(&obj["prof2"])?,
+                profiles: [MateErrorProfile::load(&obj["prof1"])?, MateErrorProfile::load(&obj["prof2"])?],
             })
         } else {
-            Err(LoadError(format!("ErrorProfile: Failed to parse '{}': missing 'prof1' or 'prof2' keys!", obj)))
+            Err(LoadError(format!("TransErrorProfile: Failed to parse '{}': missing 'prof1' or 'prof2' keys!", obj)))
         }
+    }
+}
+
+impl ErrorProfile for TransErrorProfile {
+    fn ln_prob(&self, ext_cigar: &Cigar, read_end: ReadEnd) -> f64 {
+        self.profiles[read_end.ix()].ln_prob(ext_cigar)
     }
 }

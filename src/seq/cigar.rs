@@ -206,6 +206,11 @@ impl Cigar {
         self.tuples.is_empty()
     }
 
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        self.tuples.shrink_to_fit()
+    }
+
     /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
     pub fn infer_ext_cigar(rec: &record::Record) -> Cigar {
         let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
@@ -413,6 +418,8 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
         }
         assert_eq!(data.new_cigar.query_len(), query_seq.len() as u32, "Failed to parse MD tag \"{}\"", md_str);
 
+        data.new_cigar.shrink_to_fit();
+        data.ref_seq.complete();
         (data.new_cigar, data.ref_seq)
     }
 

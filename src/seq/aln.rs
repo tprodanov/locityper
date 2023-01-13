@@ -73,6 +73,9 @@ impl fmt::Display for ReadEnd {
     }
 }
 
+/// In total, there can be only two read ends.
+pub const READ_ENDS: usize = 2;
+
 /// Read alignment.
 /// Stores reference interval, strand, extended CIGAR and read-end information.
 /// Does not store read name.
