@@ -4,7 +4,7 @@ use bio::io::fasta::IndexedReader;
 use crate::{
     bg::{
         depth::{ReadDepth, ReadDepthParams},
-        insertsz::{InsertNegBinom, InsertDistr, get_insert_size},
+        insertsz::{InsertNegBinom, InsertDistr},
         err_prof::TransErrorProfile,
         ser::{JsonSer, LoadError},
     },
@@ -37,7 +37,7 @@ impl BgDistr {
         let mut ref_seq = Vec::new();
         fasta.read(&mut ref_seq)?;
 
-        let insert_sz = InsertNegBinom::estimate(records.iter().filter_map(get_insert_size));
+        let insert_sz = InsertNegBinom::estimate(records.iter());
         let err_prof = TransErrorProfile::estimate(records.iter());
         let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), params, insert_sz.max_size());
         Ok(Self { depth, insert_sz, err_prof })

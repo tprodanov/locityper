@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::fmt;
 use htslib::bam::Record;
 use intmap::{IntMap, Entry};
 use crate::{
@@ -21,11 +22,18 @@ struct ExtAln {
 }
 
 impl ExtAln {
+    /// Creates a new alignment extension from a htslib `Record`.
     fn from_record<E: ErrorProfile>(contigs: Rc<ContigNames>, record: &Record, err_prof: &E) -> Self {
         let aln = Alignment::from_record(contigs, record);
         let read_end = ReadEnd::from_record(record);
         let aln_prob = err_prof.ln_prob(aln.cigar(), read_end);
         Self { aln, aln_prob, read_end }
+    }
+}
+
+impl fmt::Display for ExtAln {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ExtAln[{}, {}, prob={:.2}]", self.read_end, self.aln, self.aln_prob)
     }
 }
 
@@ -46,6 +54,7 @@ impl PrelimReadLocations {
     }
 }
 
+/// Preliminary read locations for multiple reads.
 struct AllLocations<E: ErrorProfile> {
     contigs: Rc<ContigNames>,
     err_prof: E,
@@ -53,6 +62,7 @@ struct AllLocations<E: ErrorProfile> {
 }
 
 impl<E: ErrorProfile> AllLocations<E> {
+    /// Creates a new, empty, `AllLocations`.
     fn new(contigs: Rc<ContigNames>, err_prof: E) -> Self {
         Self {
             contigs, err_prof,
@@ -70,6 +80,7 @@ impl<E: ErrorProfile> AllLocations<E> {
         }
     }
 
+    /// Push multiple records in the `AllLocations`.
     fn extend<'a>(&mut self, records: impl Iterator<Item = &'a Record>) {
         for record in records {
             self.push(record);
