@@ -99,7 +99,7 @@ impl Alignment {
         } else {
             Interval::new(contigs, contig_id, start, start + cigar.ref_len())
         };
-        debug_assert_eq!(cigar.ref_len() as i64, record.reference_end());
+        debug_assert_eq!(cigar.ref_len() as i64, record.reference_end() - record.pos());
         Self {
             ref_interval, cigar,
             strand: Strand(!record.is_reverse()),

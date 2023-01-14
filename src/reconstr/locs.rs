@@ -5,8 +5,8 @@ use intmap::{IntMap, Entry};
 use crate::{
     seq::{
         contigs::ContigNames,
-        interv::Interval,
-        cigar::Cigar,
+        // interv::Interval,
+        // cigar::Cigar,
         aln::{READ_ENDS, ReadEnd, Alignment},
     },
     bg::err_prof::ErrorProfile,
@@ -29,6 +29,11 @@ impl ExtAln {
         let aln_prob = err_prof.ln_prob(aln.cigar(), read_end);
         Self { aln, aln_prob, read_end }
     }
+
+    /// Get the index: contig_id * 2 + read_end.
+    fn ix(&self) -> usize {
+        self.aln.ref_interval().contig_id().ix() * READ_ENDS + self.read_end.ix()
+    }
 }
 
 impl fmt::Display for ExtAln {
@@ -38,32 +43,47 @@ impl fmt::Display for ExtAln {
 }
 
 /// Preliminary read locations for a single read pair.
-/// `self.0[contig_id * 2 + read_end]` - Vector of potential alignment at a certain contig and read end.
-struct PrelimReadLocations(Vec<Vec<ExtAln>>);
+/// Store all potential alignments in a single vector.
+#[derive(Clone, Debug)]
+struct PrelimReadLocations(Vec<ExtAln>);
 
 impl PrelimReadLocations {
     /// Creates an empty vector of preliminary locations.
-    fn new(n_contigs: usize) -> Self {
-        Self(vec![Vec::new(); READ_ENDS * n_contigs])
+    fn new() -> Self {
+        Self(Vec::new())
     }
 
     /// Push a new `ExtAln`.
+    #[inline]
     fn push(&mut self, ext_aln: ExtAln) {
-        let ix = ext_aln.aln.ref_interval().contig_id().ix() * READ_ENDS + ext_aln.read_end.ix();
-        self.0[ix].push(ext_aln);
+        self.0.push(ext_aln);
+    }
+
+    /// Sort alignments first by contig, and then by the read end.
+    #[inline]
+    fn sort(&mut self) {
+        self.0.sort_by_key(|ext_aln| ext_aln.ix())
+        // self.0.sort_by(|a, b| b.aln_prob.total_cmp(&a.aln_prob))
+    }
+
+    fn debug(&mut self) {
+        self.sort();
+        for aln in self.0.iter() {
+            log::debug!("        {}", aln);
+        }
     }
 }
 
 /// Preliminary read locations for multiple reads.
-struct AllLocations<E: ErrorProfile> {
+pub struct AllLocations<'a, E: ErrorProfile> {
     contigs: Rc<ContigNames>,
-    err_prof: E,
+    err_prof: &'a E,
     reads: IntMap<PrelimReadLocations>,
 }
 
-impl<E: ErrorProfile> AllLocations<E> {
+impl<'a, E: ErrorProfile> AllLocations<'a, E> {
     /// Creates a new, empty, `AllLocations`.
-    fn new(contigs: Rc<ContigNames>, err_prof: E) -> Self {
+    pub fn new(contigs: Rc<ContigNames>, err_prof: &'a E) -> Self {
         Self {
             contigs, err_prof,
             reads: IntMap::new(),
@@ -71,19 +91,28 @@ impl<E: ErrorProfile> AllLocations<E> {
     }
 
     /// Create a new `ExtAln` from the record, and push it into IntMap.
-    fn push(&mut self, record: &Record) {
+    pub fn push(&mut self, record: &Record) {
         let hash = fnv1a(record.qname());
-        let ext_aln = ExtAln::from_record(Rc::clone(&self.contigs), record, &self.err_prof);
+        let ext_aln = ExtAln::from_record(Rc::clone(&self.contigs), record, self.err_prof);
+        log::debug!("    {}     {}", ext_aln, hash);
         match self.reads.entry(hash) {
             Entry::Occupied(mut entry) => entry.get_mut().push(ext_aln),
-            Entry::Vacant(entry) => entry.insert(PrelimReadLocations::new(self.contigs.len())).push(ext_aln),
+            Entry::Vacant(entry) => entry.insert(PrelimReadLocations::new()).push(ext_aln),
         }
     }
 
     /// Push multiple records in the `AllLocations`.
-    fn extend<'a>(&mut self, records: impl Iterator<Item = &'a Record>) {
+    pub fn extend<'b>(&mut self, records: impl Iterator<Item = &'b Record>) {
         for record in records {
             self.push(record);
+        }
+    }
+
+    pub fn debug(&mut self) {
+        log::debug!("Debug read locations!");
+        for (key, val) in self.reads.iter_mut() {
+            log::debug!("    Read {}", key);
+            val.debug();
         }
     }
 }
