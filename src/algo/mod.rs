@@ -3,3 +3,4 @@ pub mod math;
 pub mod vec_ext;
 pub mod hash;
 pub mod nbinom;
+pub mod bisect;

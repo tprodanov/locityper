@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Newtype over strand: false = negative, true = positive.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Strand(pub bool);
 
 impl fmt::Debug for Strand {
@@ -33,7 +33,7 @@ impl fmt::Display for Strand {
 }
 
 /// Read-end: first or second.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
 pub enum ReadEnd {
     First,
     Second,
@@ -107,16 +107,19 @@ impl Alignment {
     }
 
     /// Returns reference interval.
+    #[inline]
     pub fn ref_interval(&self) -> &Interval {
         &self.ref_interval
     }
 
     /// Returns extended alignment CIGAR.
+    #[inline]
     pub fn cigar(&self) -> &Cigar {
         &self.cigar
     }
 
     /// Returns alignment strand.
+    #[inline]
     pub fn strand(&self) -> Strand {
         self.strand
     }

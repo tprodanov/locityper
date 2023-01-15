@@ -1,22 +1,37 @@
 //! Traits and structures related to insert size (distance between read mates).
 
+use std::cmp::{min, max};
 use htslib::bam::record::{Record, Aux};
-
 use crate::{
     algo::{
         vec_ext::*,
         nbinom::{NBinom, CachedDistr},
+        bisect,
     },
     bg::ser::{JsonSer, LoadError},
+    seq::aln::Alignment,
 };
+
+/// Calculate insert size of the two alignments (panics if different contigs!).
+pub fn insert_size(aln1: &Alignment, aln2: &Alignment) -> u32 {
+    let ri1 = aln1.ref_interval();
+    let ri2 = aln2.ref_interval();
+    assert_eq!(ri1.contig_id(), ri2.contig_id(), "Cannot calculate insert size: alignments lie on different contigs!");
+    max(ri1.end(), ri2.end()) - min(ri1.start(), ri2.start())
+}
 
 /// Trait for insert size distribution.
 pub trait InsertDistr {
-    /// Maximal insert size. Do not allow read mates with distance over `max_size`.
-    fn max_size(&self) -> u32;
+    /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
+    fn ln_prob(&self, sz: u32, same_orient: bool) -> f64;
 
-    /// Ln-probability of the insert size.
-    fn ln_prob(&self, sz: u32) -> f64;
+    #[inline]
+    fn pair_aln_prob(&self, aln1: &Alignment, aln2: &Alignment) -> f64 {
+        self.ln_prob(insert_size(aln1, aln2), aln1.strand() == aln2.strand())
+    }
+
+    /// Maximum insert size. Over this size, all pairs are deemed unpaired.
+    fn max_size(&self) -> u32;
 }
 
 /// Get MAPQ of the mate record.
@@ -54,8 +69,8 @@ impl InsertNegBinom {
     pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>) -> Self {
         const MIN_MAPQ: u8 = 30;
         const QUANTILE: f64 = 0.99;
-        const QUANT_MULT: f64 = 2.0;
-        // Calculate max_size from input values as 2.0 * <99-th quantile>.
+        const QUANT_MULT: f64 = 3.0;
+        // Calculate max_size from input values as 3.0 * <99-th quantile>.
         // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
 
         log::info!("    Estimating insert size distribution");
@@ -82,7 +97,7 @@ impl InsertNegBinom {
         insert_sizes.sort();
         let max_size = QUANT_MULT * insert_sizes.quantile_sorted(QUANTILE);
         // Find index after the limiting value.
-        let m = insert_sizes.binary_search_right(&max_size);
+        let m = bisect::right(&insert_sizes, &max_size);
         let lim_insert_sizes = &insert_sizes[..m];
         let max_size = max_size.ceil() as u32;
 
@@ -93,18 +108,22 @@ impl InsertNegBinom {
         log::info!("        Treat reads with insert size > {} as unpaired", max_size);
         Self {
             max_size, orient_probs,
-            distr: NBinom::estimate(mean, var).cached(max_size as usize),
+            distr: NBinom::estimate(mean, var).cached(max_size as usize + 1),
         }
     }
 }
 
 impl InsertDistr for InsertNegBinom {
-    fn max_size(&self) -> u32 {
-        self.max_size
+    fn ln_prob(&self, sz: u32, same_orient: bool) -> f64 {
+        if sz > self.max_size {
+            f64::NEG_INFINITY
+        } else {
+            self.distr.ln_pmf(sz as u64) + self.orient_probs[same_orient as usize]
+        }
     }
 
-    fn ln_prob(&self, sz: u32) -> f64 {
-        self.distr.ln_pmf(sz as u64)
+    fn max_size(&self) -> u32 {
+        self.max_size
     }
 }
 

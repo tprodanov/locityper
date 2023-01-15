@@ -1,11 +1,12 @@
 //! Module to calculate local regression (LOESS / LOWESS).
 
 use std::cmp::min;
-
 use itertools::izip;
 use nalgebra::{DVector, DMatrix, SVD};
-
-use crate::algo::vec_ext::*;
+use crate::algo::{
+    vec_ext::*,
+    bisect,
+};
 
 /// Calculates local regression (LOESS / LOWESS).
 /// Given input arrays `x`, `y` and, optionally weights `w`, finds best `y_out` values for each `xout` value.
@@ -94,8 +95,8 @@ fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: 
 
     let mut y_out = Vec::with_capacity(xout.len());
     for &xval in xout.iter() {
-        let mut a = x.binary_search_left(&xval);
-        let mut b = x.binary_search_right_at(&xval, a, n);
+        let mut a = bisect::left(&x, &xval);
+        let mut b = bisect::right_at(&x, &xval, a, n);
         let curr_n = b - a;
         if curr_n >= n_frac {
             y_out.push(y[a..b].iter().sum::<f64>() / curr_n as f64);

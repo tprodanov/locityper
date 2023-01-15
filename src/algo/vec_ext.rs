@@ -1,5 +1,5 @@
 use std::ops::{Index, Add, AddAssign, Mul, MulAssign, Sub, SubAssign, Div, DivAssign};
-use std::cmp::Ordering;
+use std::cmp::{min, Ordering};
 use std::fmt::Write;
 use itertools::{izip, Itertools};
 
@@ -24,49 +24,6 @@ where T: Clone + PartialOrd
             res.push(self[i].clone());
         }
         res
-    }
-
-    /// Performs binary search and finds the index `i` such that `v[i-1] < target <= v[i]`.
-    #[inline]
-    fn binary_search_left(&self, target: &T) -> usize {
-        self.binary_search_left_at(target, 0, self.len())
-    }
-
-    /// Performs binary search between indices `low` and `high`
-    /// and finds the index `i` such that `v[i-1] < target <= v[i]`.
-    fn binary_search_left_at(&self, target: &T, mut low: usize, mut high: usize) -> usize {
-        while low < high {
-            let mid = (low + high) / 2;
-            match self[mid].partial_cmp(target).expect("Incomparable values in binary_search_left") {
-                Ordering::Equal if mid == 0 || &self[mid - 1] < target => return mid,
-                Ordering::Less => low = mid + 1,
-                _ => high = mid,
-            }
-        }
-        low
-    }
-
-    /// Performs binary search and finds the index `i` such that `v[i-1] <= target < v[i]`.
-    #[inline]
-    fn binary_search_right(&self, target: &T) -> usize {
-        self.binary_search_right_at(target, 0, self.len())
-    }
-
-    /// Performs binary search between indices `low` and `high`
-    /// and finds the index `i` such that `v[i-1] <= target < v[i]`.
-    fn binary_search_right_at(&self, target: &T, mut low: usize, mut high: usize) -> usize {
-        while low < high {
-            let mid = (low + high) / 2;
-            if &self[mid] > target {
-                if mid == 0 || &self[mid - 1] == target {
-                    return mid;
-                }
-                high = mid;
-            } else {
-                low = mid + 1;
-            }
-        }
-        low
     }
 }
 

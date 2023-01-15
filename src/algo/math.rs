@@ -39,10 +39,18 @@ impl Ln {
         b + (c.exp() - 1.0).ln()
     }
 
-    /// Calculates *log(sum(exp(values)))*.
+    /// Calculates logsumexp: *log(sum(exp(values)))*.
     pub fn sum(values: &[f64]) -> f64 {
         let m = values.min();
         let s = values.iter().fold(0.0_f64, |acc, v| acc + (v - m).exp());
+        m + s.ln()
+    }
+
+    /// Calculates logsumexp, but applies function `f` to each element of `arr` before calculating sum.
+    /// WARNING: Function `f` is applied to each element twice!
+    pub fn map_sum<T, F: FnMut(&T) -> f64>(arr: &[T], mut f: F) -> f64 {
+        let m = arr.iter().map(|v| f(v)).fold(f64::INFINITY, f64::min);
+        let s = arr.iter().fold(0.0_f64, |acc, el| acc + (f(&el) - m).exp());
         m + s.ln()
     }
 }

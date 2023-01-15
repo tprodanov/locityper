@@ -13,6 +13,7 @@ use crate::{
         nbinom::{NBinom, CachedDistr},
         vec_ext::*,
         loess::Loess,
+        bisect,
     },
     bg::ser::{JsonSer, LoadError, parse_f64_arr},
 };
@@ -237,7 +238,7 @@ fn find_gc_bins(gc_contents: &[f64]) -> Vec<(usize, usize)> {
     let mut i = 0;
     for gc in 0..GC_BINS {
         let gc = gc as f64;
-        let j = gc_contents.binary_search_right_at(&(gc + 0.5), i, n);
+        let j = bisect::right_at(gc_contents, &(gc + 0.5), i, n);
         res.push((i, j));
         debug_assert!(i == j || (gc - 0.5 <= gc_contents[i] && gc_contents[j - 1] < gc + 0.5));
         i = j;
