@@ -8,6 +8,18 @@ pub const LOG10: f64 = 2.302585092994045684_f64;
 /// Constant 1 / log(10).
 pub const INV_LOG10: f64 = 0.4342944819032518277_f64;
 
+/// Returns the smaller value between `a` and `b`.
+/// However, if only one of them equals -INF, returns the other one.
+fn non_inf_min(a: f64, b: f64) -> f64 {
+    if a == f64::NEG_INFINITY {
+        b
+    } else if b == f64::NEG_INFINITY {
+        a
+    } else {
+        a.min(b)
+    }
+}
+
 pub struct Ln;
 
 impl Ln {
@@ -26,32 +38,60 @@ impl Ln {
     /// Calculates *log(exp(a) + exp(b))*.
     pub fn add(a: f64, b: f64) -> f64 {
         if a >= b {
-            b + (a - b).exp().ln_1p()
+            if b == f64::NEG_INFINITY { a } else { b + (a - b).exp().ln_1p() }
         } else {
-            a + (b - a).exp().ln_1p()
+            if a == f64::NEG_INFINITY { b } else { a + (b - a).exp().ln_1p() }
         }
     }
 
     /// Calculates *log(exp(a) - exp(b))*.
     pub fn sub(a: f64, b: f64) -> f64 {
-        let c = a - b;
-        debug_assert!(c >= 0.0);
-        b + (c.exp() - 1.0).ln()
+        if b == f64::NEG_INFINITY {
+            a
+        } else {
+            let c = a - b;
+            assert!(c >= 0.0, "Ln::sub({}, {}) impossible!", a, b);
+            b + (c.exp() - 1.0).ln()
+        }
     }
 
     /// Calculates logsumexp: *log(sum(exp(values)))*.
     pub fn sum(values: &[f64]) -> f64 {
-        let m = values.min();
-        let s = values.iter().fold(0.0_f64, |acc, v| acc + (v - m).exp());
-        m + s.ln()
+        Ln::map_sum(values, f64::clone)
     }
 
-    /// Calculates logsumexp, but applies function `f` to each element of `arr` before calculating sum.
+    /// Similar to `Ln::sum`, but starts summation with an `init` value (ln-space).
+    /// Calculates *log( exp(init) + sum(exp(values)) )*.
+    pub fn sum_init(values: &[f64], init: f64) -> f64 {
+        Ln::map_sum_init(values, f64::clone, init)
+    }
+
+    /// Calculates logsumexp, but applies function `f` to each element of `a` before calculating sum.
     /// WARNING: Function `f` is applied to each element twice!
-    pub fn map_sum<T, F: FnMut(&T) -> f64>(arr: &[T], mut f: F) -> f64 {
-        let m = arr.iter().map(|v| f(v)).fold(f64::INFINITY, f64::min);
-        let s = arr.iter().fold(0.0_f64, |acc, el| acc + (f(&el) - m).exp());
-        m + s.ln()
+    pub fn map_sum<T, F: FnMut(&T) -> f64>(a: &[T], mut f: F) -> f64 {
+        match a.len() {
+            0 => f64::NEG_INFINITY,
+            1 => f(&a[0]),
+            _ => {
+                let m = a.iter().map(|v| f(v)).fold(f64::INFINITY, non_inf_min);
+                let s = a.iter().fold(0.0_f64, |acc, el| acc + (f(&el) - m).exp());
+                m + s.ln()
+            },
+        }
+    }
+
+    /// Similar to `Ln::map_sum`, but start summation with an `init` value (ln-space).
+    /// Calculates *log( exp(init) + sum(exp(f(a))) )*
+    pub fn map_sum_init<T, F: FnMut(&T) -> f64>(a: &[T], mut f: F, init: f64) -> f64 {
+        match a.len() {
+            0 => init,
+            1 => Ln::add(init, f(&a[0])),
+            _ => {
+                let m = a.iter().map(|v| f(v)).fold(init, non_inf_min);
+                let s = a.iter().fold((init - m).exp(), |acc, el| acc + (f(&el) - m).exp());
+                m + s.ln()
+            },
+        }
     }
 }
 

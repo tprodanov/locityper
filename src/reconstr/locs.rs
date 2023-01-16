@@ -109,11 +109,11 @@ impl<'a, E: ErrorProfile> PrelimLocations<'a, E> {
     {
         log::info!("Identify paired alignment location and probabilities ({} read pairs)", self.alns.len());
         let mut res = AllPairAlignments {
-            alns: IntMap::with_capacity(self.alns.len()),
+            palns: IntMap::with_capacity(self.alns.len()),
         };
         for (&key, values) in self.alns.iter_mut() {
             log::debug!("Read {}", key);
-            res.alns.insert(key, identify_pair_alignments(values, unmapped_penalty, insert_distr));
+            res.palns.insert(key, identify_pair_alignments(values, unmapped_penalty, insert_distr));
         }
         res
     }
@@ -180,7 +180,7 @@ fn identify_pair_alignments<D: InsertDistr>(alns: &mut [ExtAln], unmapped_penalt
         i = k;
     }
     // Normalization factor for all pair-end alignment probabilities.
-    let norm_fct = Ln::add(2.0 * unmapped_penalty, Ln::map_sum(&pair_alns, PairAlignment::ln_prob));
+    let norm_fct = Ln::map_sum_init(&pair_alns, PairAlignment::ln_prob, 2.0 * unmapped_penalty);
     log::debug!("    {} pair-end alignments, unmapped prob. = {:.2}",
         pair_alns.len(), 2.0 * unmapped_penalty - norm_fct);
     for aln in pair_alns.iter_mut() {
@@ -288,8 +288,18 @@ impl ReadPairAlignments {
 /// All read-pair alignments for all read-pairs.
 pub struct AllPairAlignments {
     /// Key: read name hash.
-    alns: IntMap<ReadPairAlignments>,
+    palns: IntMap<ReadPairAlignments>,
 }
 
 impl AllPairAlignments {
+    /// Calculates sum probability of a contig
+    /// (product over all read-pair probabilities for that contig).
+    pub fn sum_contig_prob(&self, contig_id: ContigId) -> f64 {
+        let mut total_prob = 0.0;
+        for palns in self.palns.values() {
+            let (contig_palns, unmapped_prob) = palns.contig_alns(contig_id);
+            total_prob += Ln::map_sum_init(contig_palns, PairAlignment::ln_prob, unmapped_prob);
+        }
+        total_prob
+    }
 }

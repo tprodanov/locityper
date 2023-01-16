@@ -101,6 +101,10 @@ impl ContigNames {
     pub fn get_id(&self, name: &str) -> Option<ContigId> {
         self.name_to_id.get(name).copied()
     }
+
+    pub fn ids(&self) -> impl Iterator<Item = ContigId> {
+        (0..self.len() as u32).map(ContigId::new)
+    }
 }
 
 impl fmt::Debug for ContigNames {
