@@ -1,7 +1,6 @@
 use std::{
     rc::Rc,
     fmt,
-    cmp::min,
 };
 use htslib::bam::Record;
 use intmap::{IntMap, Entry};
@@ -44,9 +43,9 @@ impl ExtAln {
         self.aln.ref_interval().contig_id()
     }
 
-    /// Returns log-probability of the alignment.
-    fn ln_prob(&self) -> f64 {
-        self.ln_prob
+    /// Returns sorted key: first sort by contig id, then by read end.
+    fn sort_key(&self) -> u32 {
+        (self.contig_id().get() << 1) | (self.read_end.as_u32())
     }
 }
 
@@ -125,41 +124,33 @@ impl<'a, E: ErrorProfile> PrelimLocations<'a, E> {
 const BISECT_RIGHT_STEP: usize = 4;
 
 /// For a single read-pair, find all paired-read alignments to the same contig.
-fn extend_pair_alignments<D>(
-        new_alns: &mut Vec<PairAlignment>,
-        alns1: &[ExtAln], alns2: &[ExtAln],
-        norm1: f64, norm2: f64, unmapped_penalty: f64, thresh_prob: f64,
-        insert_distr: &D,
+fn extend_pair_alignments<D>(new_alns: &mut Vec<PairAlignment>,
+        alns1: &[ExtAln], alns2: &[ExtAln], unmapped_penalty: f64, insert_distr: &D,
     )
 where D: InsertDistr,
 {
+    let thresh_prob = unmapped_penalty * 2.0;
     if alns1.len() > 0 && alns2.len() > 0 {
         for aln1 in alns1.iter() {
             for aln2 in alns2.iter() {
-                let new_prob = aln1.ln_prob - norm1 + aln2.ln_prob - norm2
-                    + insert_distr.pair_aln_prob(&aln1.aln, &aln2.aln);
-                log::debug!("        prob1 {:.1}   prob2 {:.1}   insert {:.1}  -> {:.1}",
-                    aln1.ln_prob, aln2.ln_prob, insert_distr.pair_aln_prob(&aln1.aln, &aln2.aln), new_prob);
+                let new_prob = aln1.ln_prob + aln2.ln_prob + insert_distr.pair_aln_prob(&aln1.aln, &aln2.aln);
                 if new_prob > thresh_prob {
                     new_alns.push(PairAlignment::new(Some(aln1.aln.clone()), Some(aln2.aln.clone()), new_prob));
-                    log::debug!("        Push {}", new_alns.last().unwrap());
                 }
             }
         }
     } else if alns1.len() > 0 {
         for aln1 in alns1.iter() {
-            let new_prob = aln1.ln_prob - norm1 + unmapped_penalty - norm2;
+            let new_prob = aln1.ln_prob + unmapped_penalty;
             if new_prob > thresh_prob {
                 new_alns.push(PairAlignment::new(Some(aln1.aln.clone()), None, new_prob));
-                log::debug!("        Push {}", new_alns.last().unwrap());
             }
         }
     } else if alns2.len() > 0 {
         for aln2 in alns2.iter() {
-            let new_prob = unmapped_penalty - norm1 + aln2.ln_prob - norm2;
+            let new_prob = aln2.ln_prob + unmapped_penalty;
             if new_prob > thresh_prob {
                 new_alns.push(PairAlignment::new(None, Some(aln2.aln.clone()), new_prob));
-                log::debug!("        Push {}", new_alns.last().unwrap());
             }
         }
     } else {
@@ -169,58 +160,37 @@ where D: InsertDistr,
 
 fn identify_pair_alignments<D: InsertDistr>(alns: &mut [ExtAln], unmapped_penalty: f64, insert_distr: &D)
         -> ReadPairAlignments {
-    // Sort alignments first by read-end, then by contig id.
-    alns.sort_by_key(|ext_aln| (ext_aln.read_end, ext_aln.contig_id()));
-    // Find the first alignment corresponding to the second read mate.
-    let m = bisect::left_by(alns, |aln| aln.read_end.cmp(&ReadEnd::Second));
+    // Sort alignments first by contig id, then by read-end.
+    alns.sort_by_key(ExtAln::sort_key);
     let n = alns.len();
-    // All first mate alignments are in 0..m, second mate alignments are in m..n.
-    debug_assert!(m == 0 || alns[m - 1].read_end == ReadEnd::First);
-    debug_assert!(m == n || alns[m].read_end == ReadEnd::Second);
-    log::debug!("    {} first alns:", m);
-    for i in 0..m {
-        log::debug!("        {:3} {:?}", i, alns[i]);
-    }
-    log::debug!("    {} second alns:", n - m);
-    for i in m..n {
-        log::debug!("        {:3} {:?}", i, alns[i]);
-    }
-
-    // Normalizing factors for first-mate and second-mate alignment probabilities.
-    let norm1 = if m > 0 {
-        Ln::add(Ln::map_sum(&alns[..m], ExtAln::ln_prob), unmapped_penalty)
-    } else { unmapped_penalty };
-    let norm2 = if m < n {
-        Ln::add(Ln::map_sum(&alns[m..], ExtAln::ln_prob), unmapped_penalty)
-    } else { unmapped_penalty };
-    // TODO: Should we penalize read pairs where one mate does not map anywhere at all?
-    
-    let unmapped_prob = 2.0 * unmapped_penalty - norm1 - norm2;
-    log::debug!("    Norm factors {:.2}   {:.2}.   Unmapped prob: {:.1}", norm1, norm2, unmapped_prob);
+    // For the current contig id, first mates will be in i..j, and second mates in j..k.
+    let mut i = 0;
     let mut pair_alns = Vec::new();
-    // For the current contigs, alns[i1..j1]: first mate alignments, alns[i2..j2]: sceond mate alignments.
-    let mut i1 = 0;
-    let mut i2 = m;
-    loop {
-        let contig_id = match (i1 < m, i2 < n) {
-            (false, false) => break,
-            (true,  false) => alns[i1].contig_id(),
-            (false, true ) => alns[i2].contig_id(),
-            (true,  true ) => min(alns[i1].contig_id(), alns[i2].contig_id()),
-        };
-        log::debug!("    Searching for contig {},  i1 = {}, i2 = {}", contig_id, i1, i2);
-        let j1 = bisect::right_by_approx(alns, |aln| aln.contig_id().cmp(&contig_id), i1, m, BISECT_RIGHT_STEP);
-        debug_assert!(i1 <= j1 && j1 <= m);
-        let j2 = bisect::right_by_approx(alns, |aln| aln.contig_id().cmp(&contig_id), i2, n, BISECT_RIGHT_STEP);
-        debug_assert!(i2 <= j2 && j2 <= n);
-        log::debug!("    Contig #{}:   {}..{}   {}..{}", contig_id, i1, j1, i2, j2);
-
-        extend_pair_alignments(&mut pair_alns, &alns[i1..j1], &alns[i2..j2],
-            norm1, norm2, unmapped_penalty, unmapped_prob, insert_distr);
-        i1 = j1;
-        i2 = j2;
+    while i < n {
+        let contig_id = alns[i].contig_id();
+        // Sort key = contig_id * 2 + (first_mate ? 0 : 1).
+        // sort_key1: current sort key for first mates, sort_key2: current sort key for second mates.
+        let sort_key1 = contig_id.get() << 1;
+        let sort_key2 = sort_key1 | 1;
+        let j = if alns[i].read_end == ReadEnd::First {
+            bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key1), i, n, BISECT_RIGHT_STEP)
+        } else { i };
+        let k = bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key2), j, n, BISECT_RIGHT_STEP);
+        extend_pair_alignments(&mut pair_alns, &alns[i..j], &alns[j..k], unmapped_penalty, insert_distr);
+        i = k;
     }
-    ReadPairAlignments { unmapped_prob, pair_alns }
+    // Normalization factor for all pair-end alignment probabilities.
+    let norm_fct = Ln::add(2.0 * unmapped_penalty, Ln::map_sum(&pair_alns, PairAlignment::ln_prob));
+    log::debug!("    {} pair-end alignments, unmapped prob. = {:.2}",
+        pair_alns.len(), 2.0 * unmapped_penalty - norm_fct);
+    for aln in pair_alns.iter_mut() {
+        aln.ln_prob -= norm_fct;
+        log::debug!("        {:?}", aln);
+    }
+    ReadPairAlignments {
+        unmapped_prob: 2.0 * unmapped_penalty - norm_fct,
+        pair_alns,
+    }
 }
 
 /// Alignment of the read pair. At most one of two alignments may be missing!

@@ -50,6 +50,14 @@ impl ReadEnd {
     }
 
     /// Converts read-end into integer (First => 0, Second => 1).
+    pub const fn as_u32(self) -> u32 {
+        match self {
+            ReadEnd::First => 0,
+            ReadEnd::Second => 1,
+        }
+    }
+
+    /// Converts read-end into integer (First => 0, Second => 1).
     pub const fn ix(self) -> usize {
         match self {
             ReadEnd::First => 0,
