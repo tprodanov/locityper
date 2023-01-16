@@ -1,8 +1,6 @@
 //! Common math functions.
 //! Everywhere in comments `log` represents natural log.
 
-use crate::algo::vec_ext::*;
-
 /// Constant log(10).
 pub const LOG10: f64 = 2.302585092994045684_f64;
 /// Constant 1 / log(10).

@@ -37,7 +37,7 @@ impl fmt::Display for ContigId {
 /// Additionally, contig id can be extracting knowing contig name using `id()` method.
 #[derive(Clone)]
 pub struct ContigNames {
-    set_name: String,
+    tag: String,
     names: Vec<String>,
     lengths: Vec<u32>,
     name_to_id: HashMap<String, ContigId>,
@@ -46,8 +46,8 @@ pub struct ContigNames {
 impl ContigNames {
     /// Create contig names from an iterator over pairs (name, length).
     /// Names must not repeat.
-    /// First argument: overall name of the contig name set.
-    pub fn new(set_name: String, it: impl Iterator<Item = (String, u32)>) -> Self {
+    /// First argument: overall name of the contig set.
+    pub fn new(tag: String, it: impl Iterator<Item = (String, u32)>) -> Self {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
         let mut name_to_id = HashMap::new();
@@ -64,13 +64,13 @@ impl ContigNames {
         names.shrink_to_fit();
         lengths.shrink_to_fit();
         name_to_id.shrink_to_fit();
-        Self { set_name, names, lengths, name_to_id }
+        Self { tag, names, lengths, name_to_id }
     }
 
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
-    pub fn from_index(set_name: String, index: &bio::io::fasta::Index) -> Self {
-        Self::new(set_name, index.sequences().into_iter().map(|seq| (seq.name, seq.len as u32)))
+    pub fn from_index(tag: String, index: &bio::io::fasta::Index) -> Self {
+        Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, seq.len as u32)))
     }
 
     /// Get the number of contigs.
@@ -78,8 +78,8 @@ impl ContigNames {
         self.names.len()
     }
 
-    pub fn set_name(&self) -> &str {
-        &self.set_name
+    pub fn tag(&self) -> &str {
+        &self.tag
     }
 
     /// Get contig name from an id.
@@ -109,7 +109,7 @@ impl ContigNames {
 
 impl fmt::Debug for ContigNames {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ContigNames({}, {} entries)", self.set_name, self.names.len())
+        write!(f, "ContigNames({}, {} entries)", self.tag, self.names.len())
     }
 }
 

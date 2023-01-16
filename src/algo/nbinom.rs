@@ -41,6 +41,7 @@ impl NBinom {
     /// Create Negative Binomial distribution from mean `m` and variance `v`.
     /// Conditions: 0 < m < v.
     pub fn estimate(m: f64, v: f64) -> NBinom {
+        assert!(v > m, "Negative Binomial: cannot estimate parameters for mean {:.3} and variance {:.3}", m, v);
         NBinom::new(m * m / (v - m), m / v)
     }
 

@@ -120,6 +120,11 @@ impl Alignment {
         &self.ref_interval
     }
 
+    /// Returns contig id of the alignment.
+    pub fn contig_id(&self) -> ContigId {
+        self.ref_interval.contig_id()
+    }
+
     /// Returns extended alignment CIGAR.
     #[inline]
     pub fn cigar(&self) -> &Cigar {

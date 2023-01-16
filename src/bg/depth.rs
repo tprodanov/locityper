@@ -410,7 +410,7 @@ impl ReadDepth {
         /// Cache up to 256 values for each GC-content.
         const CACHE_SIZE: usize = 256;
         let distributions: Vec<_> = means.into_iter().zip(variances)
-            .map(|(m, v)| NBinom::estimate(m, v).cached(CACHE_SIZE))
+            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)).cached(CACHE_SIZE))
             .collect();
         Self {
             window_size: params.window_size,
