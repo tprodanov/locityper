@@ -1,5 +1,4 @@
 use std::ops::{Index, Add, AddAssign, Mul, MulAssign, Sub, SubAssign, Div, DivAssign};
-use std::cmp::{min, Ordering};
 use std::fmt::Write;
 use itertools::{izip, Itertools};
 

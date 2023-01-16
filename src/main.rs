@@ -9,7 +9,7 @@ mod test;
 
 fn init_logger() {
     TermLogger::init(
-        log::LevelFilter::Debug,
+        log::LevelFilter::Trace,
         ConfigBuilder::new()
             .set_level_padding(LevelPadding::Right)
             .set_thread_level(LevelFilter::Off)

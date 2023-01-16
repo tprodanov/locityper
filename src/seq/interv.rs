@@ -97,7 +97,7 @@ impl Interval {
 
 impl fmt::Debug for Interval {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        write!(f, "{}={}:{}-{}", self.contig_id, self.contig_name(), self.start + 1, self.end)
     }
 }
 

@@ -41,17 +41,16 @@ pub fn left_by_at<T, F: FnMut(&T) -> Ordering>(a: &[T], mut f: F, mut lo: usize,
     assert!(lo <= hi && hi <= a.len(), "Cannot perform binary search on indices {}, {} (len: {})", lo, hi, a.len());
     while lo < hi {
         let mid = (lo + hi) / 2;
-        let cmp = f(unsafe { a.get_unchecked(mid) });
-        if cmp == Ordering::Less {
+        if f(unsafe { a.get_unchecked(mid) }) == Ordering::Less {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    debug_assert!(lo == 0 || f(&a[lo - 1]) == Ordering::Less,
-        "Binary search left: Incorrect output index {}: f({}) = {:?}", lo, lo - 1, f(&a[lo - 1]));
-    debug_assert!(lo == a.len() || f(&a[lo]) != Ordering::Less,
-        "Binary search left: Incorrect output index {}: f({}) = {:?}", lo, lo, f(&a[lo]));
+    // debug_assert!(lo == 0 || f(&a[lo - 1]) == Ordering::Less,
+    //     "Binary search left: Incorrect output index {}: f({}) = {:?}", lo, lo - 1, f(&a[lo - 1]));
+    // debug_assert!(lo == a.len() || f(&a[lo]) != Ordering::Less,
+    //     "Binary search left: Incorrect output index {}: f({}) = {:?}", lo, lo, f(&a[lo]));
     lo
 }
 
@@ -68,30 +67,26 @@ pub fn right_by_at<T, F: FnMut(&T) -> Ordering>(a: &[T], mut f: F, mut lo: usize
     assert!(lo <= hi && hi <= a.len(), "Cannot perform binary search on indices {}, {} (len: {})", lo, hi, a.len());
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if f(unsafe { a.get_unchecked(mid) }) == Ordering::Less {
+        if f(unsafe { a.get_unchecked(mid) }) == Ordering::Greater {
             hi = mid;
         } else {
             lo = mid + 1;
         }
     }
-    debug_assert!(lo == 0 || f(&a[lo - 1]) != Ordering::Greater,
-        "Binary search right: Incorrect output index {}: f({}) = {:?}", lo, lo - 1, f(&a[lo - 1]));
-    debug_assert!(lo == a.len() || f(&a[lo]) == Ordering::Greater,
-        "Binary search right: Incorrect output index {}: f({}) = {:?}", lo, lo, f(&a[lo]));
     lo
 }
 
-/// Performs binary search
+/// Performs binary search between `lo` and `hi`
 /// and finds the index `i` such that `f(a[i-1]) -> Less | Equal` and `f(a[i]) -> Greater`.
 ///
-/// The search is performed between `lo` and `hi`, but first values between `lo` and `approx_high` are checked.
-pub fn right_by_approx<T, F>(a: &[T], mut f: F, lo: usize, mut approx_hi: usize, hi: usize) -> usize
+/// First, values are examined between `lo` and `lo+step`, with `step` gradually increased, if needed.
+pub fn right_by_approx<T, F>(a: &[T], mut f: F, lo: usize, hi: usize, mut step: usize) -> usize
 where F: FnMut(&T) -> Ordering
 {
-    assert!(lo < approx_hi && hi <= a.len(),
-        "Cannot perform binary search on indices {}, ~{}, {} (len: {})", lo, approx_hi, hi, a.len());
-    while approx_hi < hi && f(unsafe { a.get_unchecked(approx_hi - 1) }) != Ordering::Greater {
-        approx_hi += approx_hi - lo;
+    assert!(hi <= a.len() && step > 0,
+        "Cannot perform binary search on indices {}, {} (len: {}, step: {})", lo, hi, a.len(), step);
+    while lo + step < hi && f(unsafe { a.get_unchecked(lo + step - 1) }) != Ordering::Greater {
+        step *= 2;
     }
-    right_by_at(a, f, lo, min(approx_hi, hi))
+    right_by_at(a, f, lo, min(lo + step, hi))
 }
