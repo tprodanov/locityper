@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use std::fmt::{self, Write};
-use std::cmp::Ordering;
+use std::cmp::{min, max, Ordering};
 use num_format::{Locale, WriteFormatted};
 use crate::seq::contigs::{ContigId, ContigNames};
 
@@ -77,6 +77,29 @@ impl Interval {
     #[inline]
     pub fn len(&self) -> u32 {
         self.end - self.start
+    }
+
+    /// Distance between closest points on two intervals (0 if overlap).
+    /// Returns None if on different contigs.
+    pub fn distance(&self, other: &Interval) -> Option<u32> {
+        if self.contig_id == other.contig_id {
+            Some(max(
+                (self.start + 1).saturating_sub(other.end),
+                (other.start + 1).saturating_sub(self.end),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Distance between furthest points on two intervals.
+    /// Returns None if on different contigs.
+    pub fn furthest_distance(&self, other: &Interval) -> Option<u32> {
+        if self.contig_id == other.contig_id {
+            Some(max(self.end, other.end) - min(self.start, other.start))
+        } else {
+            None
+        }
     }
 
     /// Convert interval into string with comma separator.

@@ -97,7 +97,7 @@ pub struct Alignment {
 
 impl Alignment {
     /// Creates a new Alignment from the record.
-    pub fn from_record(contigs: Rc<ContigNames>, record: &Record) -> Self {
+    pub fn from_record(record: &Record, contigs: Rc<ContigNames>) -> Self {
         let cigar = Cigar::infer_ext_cigar(record);
         let contig_id = ContigId::new(record.tid() as u32);
         let start = record.pos() as u32;
@@ -115,9 +115,13 @@ impl Alignment {
     }
 
     /// Returns reference interval.
-    #[inline]
     pub fn ref_interval(&self) -> &Interval {
         &self.ref_interval
+    }
+
+    /// Consumes alignments and returns reference interval.
+    pub fn take_interval(self) -> Interval {
+        self.ref_interval
     }
 
     /// Returns contig id of the alignment.
@@ -126,13 +130,11 @@ impl Alignment {
     }
 
     /// Returns extended alignment CIGAR.
-    #[inline]
     pub fn cigar(&self) -> &Cigar {
         &self.cigar
     }
 
     /// Returns alignment strand.
-    #[inline]
     pub fn strand(&self) -> Strand {
         self.strand
     }

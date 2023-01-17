@@ -1,6 +1,5 @@
 //! Traits and structures related to insert size (distance between read mates).
 
-use std::cmp::{min, max};
 use htslib::bam::record::{Record, Aux};
 use crate::{
     algo::{
@@ -9,26 +8,12 @@ use crate::{
         bisect,
     },
     bg::ser::{JsonSer, LoadError},
-    seq::aln::Alignment,
 };
-
-/// Calculate insert size of the two alignments (panics if different contigs!).
-pub fn insert_size(aln1: &Alignment, aln2: &Alignment) -> u32 {
-    let ri1 = aln1.ref_interval();
-    let ri2 = aln2.ref_interval();
-    assert_eq!(ri1.contig_id(), ri2.contig_id(), "Cannot calculate insert size: alignments lie on different contigs!");
-    max(ri1.end(), ri2.end()) - min(ri1.start(), ri2.start())
-}
 
 /// Trait for insert size distribution.
 pub trait InsertDistr {
     /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
     fn ln_prob(&self, sz: u32, same_orient: bool) -> f64;
-
-    #[inline]
-    fn pair_aln_prob(&self, aln1: &Alignment, aln2: &Alignment) -> f64 {
-        self.ln_prob(insert_size(aln1, aln2), aln1.strand() == aln2.strand())
-    }
 
     /// Maximum insert size. Over this size, all pairs are deemed unpaired.
     fn max_size(&self) -> u32;
