@@ -1,7 +1,7 @@
 use std::rc::Rc;
-use std::fmt::{self, Write};
+use std::fmt;
 use std::cmp::{min, max, Ordering};
-use num_format::{Locale, WriteFormatted};
+// use num_format::{Locale, WriteFormatted};
 use crate::seq::contigs::{ContigId, ContigNames};
 
 /// Genomic interval.
@@ -102,15 +102,15 @@ impl Interval {
         }
     }
 
-    /// Convert interval into string with comma separator.
-    pub fn comma_string(&self) -> String {
-        let mut s = String::new();
-        write!(s, "{}:", self.contig_name()).unwrap();
-        s.write_formatted(&(self.start + 1), &Locale::en).unwrap();
-        s.write_str("-").unwrap();
-        s.write_formatted(&(self.end), &Locale::en).unwrap();
-        s
-    }
+    // /// Convert interval into string with comma separator.
+    // pub fn comma_string(&self) -> String {
+    //     let mut s = String::new();
+    //     write!(s, "{}:", self.contig_name()).unwrap();
+    //     s.write_formatted(&(self.start + 1), &Locale::en).unwrap();
+    //     s.write_str("-").unwrap();
+    //     s.write_formatted(&(self.end), &Locale::en).unwrap();
+    //     s
+    // }
 
     /// Convert interval into bed string (tab separator, 0-indexing).
     pub fn bed_string(&self) -> String {

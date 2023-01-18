@@ -5,16 +5,14 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-htslib = { package = "rust-htslib", version = "0.40" }
-num-format = "0.4"
-num-traits = "0.2"
-nalgebra = "0.31"
-itertools = "0.10"
-statrs = "0.16"
-intmap = "2.0.0"
-json = "0.12"
-once_cell = "1.17"
-bio = "1.1.0"
+htslib = { package = "rust-htslib", version = "0.40", default-features = false }
+nalgebra = { version = "0.31", default-features = false, features = ["std"] }
+itertools = { version = "0.10", default-features = false }
+statrs = { version = "0.16", default-features = false } # Possibly remove later.
+intmap = { version = "2.0.0", default-features = false }
+json = { version = "0.12", default-features = false }
+once_cell = { version = "1.17", default-features = false }
+bio = { version = "1.1.0", default-features = false }
+log = { version = "0.4", default-features = false }
+simplelog = { version = "0.12", default-features = false, features = ["termcolor"] }
 # rand = "0.8.5"
-log = "0.4"
-simplelog = "0.12"
