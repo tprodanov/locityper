@@ -1,21 +1,21 @@
 use std::collections::HashMap;
 use std::fmt;
 
-/// Contig identificator - newtype over u32.
+/// Contig identificator - newtype over u16.
 /// Can be converted to `usize` using `id.ix()` method.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct ContigId(u32);
+pub struct ContigId(u16);
 
 impl ContigId {
     /// Creates a new ContigId.
     #[inline]
-    pub fn new(val: u32) -> ContigId {
+    pub fn new(val: u16) -> ContigId {
         ContigId(val)
     }
 
     /// Get `u32` value of the contig id.
     #[inline]
-    pub fn get(self) -> u32 {
+    pub fn get(self) -> u16 {
         self.0
     }
 
@@ -53,13 +53,16 @@ impl ContigNames {
         let mut name_to_id = HashMap::new();
 
         for (name, length) in it {
-            let contig_id = ContigId(names.len() as u32);
+            let contig_id = ContigId(names.len() as u16);
             if let Some(prev_id) = name_to_id.insert(name.clone(), contig_id) {
                 panic!("Contig {} appears twice in the contig list ({} and {})!", name, prev_id, contig_id);
             }
             names.push(name);
             lengths.push(length);
         }
+
+        assert!(names.len() < (std::u16::MAX as usize - 1) / 2,
+            "Cannot supports {} contigs, maximum number is {}", names.len(), (std::u16::MAX as usize - 1) / 2);
 
         names.shrink_to_fit();
         lengths.shrink_to_fit();
@@ -103,7 +106,7 @@ impl ContigNames {
     }
 
     pub fn ids(&self) -> impl Iterator<Item = ContigId> {
-        (0..self.len() as u32).map(ContigId::new)
+        (0..self.len() as u16).map(ContigId::new)
     }
 }
 

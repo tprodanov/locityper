@@ -49,8 +49,8 @@ impl MateAln {
     }
 
     /// Returns sorted key: first sort by contig id, then by read end.
-    fn sort_key(&self) -> u32 {
-        (self.interval.contig_id().get() << 1) | (self.read_end.as_u32())
+    fn sort_key(&self) -> u16 {
+        (self.interval.contig_id().get() << 1) | (self.read_end.as_u16())
     }
 }
 

@@ -50,7 +50,7 @@ impl ReadEnd {
     }
 
     /// Converts read-end into integer (First => 0, Second => 1).
-    pub const fn as_u32(self) -> u32 {
+    pub const fn as_u16(self) -> u16 {
         match self {
             ReadEnd::First => 0,
             ReadEnd::Second => 1,
@@ -99,7 +99,7 @@ impl Alignment {
     /// Creates a new Alignment from the record.
     pub fn from_record(record: &Record, contigs: Rc<ContigNames>) -> Self {
         let cigar = Cigar::infer_ext_cigar(record);
-        let contig_id = ContigId::new(record.tid() as u32);
+        let contig_id = ContigId::new(record.tid() as u16);
         let start = record.pos() as u32;
         let ref_interval = if cigar.is_empty() {
             assert!(record.is_unmapped(), "Read is mapped, but has empty CIGAR!");
