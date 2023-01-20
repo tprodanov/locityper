@@ -13,7 +13,10 @@ use crate::{
         err_prof::TransErrorProfile,
         ser::{JsonSer, LoadError},
     },
-    seq::interv::Interval,
+    seq::{
+        seq,
+        interv::Interval,
+    },
 };
 
 /// Various background distributions, including
@@ -38,9 +41,10 @@ impl BgDistr {
         log::info!("Estimating background parameters");
         log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
         // TODO: Consider using lighter dependency (such as faimm).
-        fasta.fetch(interval.contig_name(), interval.start() as u64, interval.end() as u64)?;
+        fasta.fetch(interval.contig_name(), u64::from(interval.start()), u64::from(interval.end()))?;
         let mut ref_seq = Vec::new();
         fasta.read(&mut ref_seq)?;
+        seq::standardize(&mut ref_seq);
 
         let insert_sz = InsertNegBinom::estimate(records.iter());
         let err_prof = TransErrorProfile::estimate(records.iter());

@@ -7,7 +7,7 @@ pub fn fnv1(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET;
     for &b in bytes.iter() {
         hash = hash.wrapping_mul(FNV_PRIME);
-        hash ^= b as u64;
+        hash ^= u64::from(b);
     }
     hash
 }
@@ -16,7 +16,7 @@ pub fn fnv1(bytes: &[u8]) -> u64 {
 pub fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET;
     for &b in bytes.iter() {
-        hash ^= b as u64;
+        hash ^= u64::from(b);
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash

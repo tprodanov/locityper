@@ -357,9 +357,9 @@ fn parse_md(md: &[u8]) -> Vec<MdEntry> {
                 md_entries.push(
                     if status == MISM { MdEntry::Mismatch(value, i) } else { MdEntry::Deletion(value, i) });
                 status = MATCH;
-                value = (byte - b'0') as u32;
+                value = u32::from(byte - b'0');
             } else {
-                value = 10 * value + (byte - b'0') as u32;
+                value = 10 * value + u32::from(byte - b'0');
             }
         }
 

@@ -100,7 +100,7 @@ impl Alignment {
     pub fn from_record(record: &Record, contigs: Rc<ContigNames>) -> Self {
         let cigar = Cigar::infer_ext_cigar(record);
         let contig_id = ContigId::new(record.tid() as u16);
-        let start = record.pos() as u32;
+        let start = u32::try_from(record.pos()).unwrap();
         let ref_interval = if cigar.is_empty() {
             assert!(record.is_unmapped(), "Read is mapped, but has empty CIGAR!");
             Interval::new_empty(contigs, contig_id, start)

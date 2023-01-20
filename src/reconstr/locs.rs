@@ -344,7 +344,7 @@ impl SeveralContigs {
             if !dedup_contigs.contains(contig) {
                 dedup_contigs.push(*contig);
                 let multiplicity = contigs.iter().fold(0, |acc, contig2| acc + (contig == contig2) as u8);
-                coeffs.push((multiplicity as f64).ln());
+                coeffs.push(f64::from(multiplicity).ln());
             }
         }
         Self {

@@ -73,7 +73,7 @@ impl ContigNames {
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
     pub fn from_index(tag: String, index: &bio::io::fasta::Index) -> Self {
-        Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, seq.len as u32)))
+        Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
     }
 
     /// Get the number of contigs.

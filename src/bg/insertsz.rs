@@ -60,7 +60,7 @@ impl InsertNegBinom {
 
         log::info!("    Estimating insert size distribution");
         let mut insert_sizes = Vec::<f64>::new();
-        let mut orient_counts = [0; 2];
+        let mut orient_counts = [0_u64; 2];
         for record in records {
             // 3980 - ignore reads with any mate unmapped, ignore sec./supp. alignments, ignore second mates.
             if (record.flags() & 3980) == 0 && record.tid() == record.mtid() &&
@@ -103,7 +103,7 @@ impl InsertDistr for InsertNegBinom {
         if sz > self.max_size {
             f64::NEG_INFINITY
         } else {
-            self.distr.ln_pmf(sz as u64) + self.orient_probs[same_orient as usize]
+            self.distr.ln_pmf(u64::from(sz)) + self.orient_probs[same_orient as usize]
         }
     }
 
@@ -137,7 +137,7 @@ impl JsonSer for InsertNegBinom {
                 "InsertNegBinom: Failed to parse '{}': missing or incorrect 'ff_prob' field!", obj)))?,
         ];
         Ok(Self {
-            max_size: max_size as u32,
+            max_size: u32::try_from(max_size).unwrap(),
             orient_probs,
             distr: NBinom::new(n, p).cached(max_size),
         })

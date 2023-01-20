@@ -74,13 +74,13 @@ impl ErrorCounts {
         let first = iter.next().expect("Cannot calculate error counts from an empty CIGAR!");
         let mut prev = cigar_op_to_int(first.operation());
         self.start_counts[prev] += 1;
-        self.trans_counts[prev * N_OPS + prev] += (first.len() - 1) as u64;
+        self.trans_counts[prev * N_OPS + prev] += u64::from(first.len() - 1);
 
         let mut curr;
-        for tup in iter {
-            curr = cigar_op_to_int(tup.operation());
+        for item in iter {
+            curr = cigar_op_to_int(item.operation());
             self.trans_counts[prev * N_OPS + curr] += 1;
-            self.trans_counts[curr * N_OPS + curr] += (tup.len() - 1) as u64;
+            self.trans_counts[curr * N_OPS + curr] += u64::from(item.len() - 1);
             prev = curr;
         }
         self.end_counts[prev] += 1;
@@ -101,13 +101,13 @@ impl MateErrorProfile {
         let first = iter.next().expect("Cannot calculate error counts from an empty CIGAR!");
         let mut prev = cigar_op_to_int(first.operation());
         let mut prob = self.start_probs[prev]
-            + (first.len() - 1) as f64 * self.trans_probs[prev * N_OPS + prev];
+            + f64::from(first.len() - 1) * self.trans_probs[prev * N_OPS + prev];
 
         let mut curr;
-        for tup in iter {
-            curr = cigar_op_to_int(tup.operation());
+        for item in iter {
+            curr = cigar_op_to_int(item.operation());
             prob += self.trans_probs[prev * N_OPS + curr]
-                + (tup.len() - 1) as f64 * self.trans_probs[curr * N_OPS + curr];
+                + f64::from(item.len() - 1) * self.trans_probs[curr * N_OPS + curr];
             prev = curr;
         }
         prob + self.end_probs[prev]
