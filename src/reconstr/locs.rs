@@ -152,8 +152,9 @@ impl PrelimAlignments {
             log::debug!("Read {}", name_hash);
             // Sort alignments first by contig id, then by read-end.
             alns.sort_by_key(MateAln::sort_key);
-            let pair_alns = identify_pair_alignments(alns, insert_distr, unmapped_penalty, prob_diff, ln_ncontigs);
-            res.insert(name_hash, pair_alns);
+            let pair_alns = identify_pair_alignments(name_hash, alns, insert_distr,
+                unmapped_penalty, prob_diff, ln_ncontigs);
+            res.push(pair_alns);
         }
         res
     }
@@ -212,6 +213,7 @@ where D: InsertDistr,
 
 /// For a single read pair, combine all single-mate alignments across all contigs.
 fn identify_pair_alignments<D>(
+        name_hash: u64,
         alns: &[MateAln],
         insert_distr: &D,
         unmapped_penalty: f64,
@@ -253,7 +255,7 @@ where D: InsertDistr
         aln.ln_prob -= norm_fct;
         log::debug!("        {}", aln);
     }
-    ReadPairAlignments { unmapped_prob, pair_alns } 
+    ReadPairAlignments { name_hash, unmapped_prob, pair_alns } 
 }
 
 #[derive(Clone)]
@@ -359,6 +361,9 @@ impl SeveralContigs {
 
 /// Read-pair alignments for a single read-pair.
 pub struct ReadPairAlignments {
+    /// Hash of the read name.
+    name_hash: u64,
+
     /// Probability of being unmapped for one contig.
     unmapped_prob: f64,
 
@@ -367,6 +372,11 @@ pub struct ReadPairAlignments {
 }
 
 impl ReadPairAlignments {
+    /// Returns the FNV1a hash of the read name.
+    pub fn name_hash(&self) -> u64 {
+        self.name_hash
+    }
+
     /// Probability that both reads are unmapped for one specific contig (but same for all contigs).
     pub fn unmapped_prob(&self) -> f64 {
         self.unmapped_prob
@@ -420,25 +430,24 @@ impl ReadPairAlignments {
 
 /// All read-pair alignments for all read-pairs.
 /// Key: read name hash.
-pub struct AllPairAlignments(IntMap<ReadPairAlignments>);
+pub struct AllPairAlignments(Vec<ReadPairAlignments>);
 
 impl AllPairAlignments {
     /// Creates a new instance with given capacity.
     fn with_capacity(capacity: usize) -> Self {
-        Self(IntMap::with_capacity(capacity))
+        Self(Vec::with_capacity(capacity))
     }
 
-    /// Inserts new read-pair alignments. Name hash must be new (not in the map).
-    fn insert(&mut self, name_hash: u64, read_pair_alns: ReadPairAlignments) {
-        // Assert must not be removed, or converted into debug_assert!
-        assert!(self.0.insert(name_hash, read_pair_alns).is_none(), "Duplicate read name hash {}", name_hash);
+    /// Inserts new read-pair alignments. Name hash is not checked for being in the vector before.
+    fn push(&mut self, read_pair_alns: ReadPairAlignments) {
+        self.0.push(read_pair_alns);
     }
 
     /// Calculates sum probability of a contig
     /// (product over all read-pair probabilities for that contig).
     pub fn sum_contig_prob(&self, contig_id: ContigId) -> f64 {
         let mut total_prob = 0.0;
-        for paired_alns in self.0.values() {
+        for paired_alns in self.0.iter() {
             let curr_paired_alns = paired_alns.contig_alns(contig_id);
             let unmapped_prob = paired_alns.unmapped_prob();
             total_prob += Ln::map_sum_init(curr_paired_alns, PairAlignment::ln_prob, unmapped_prob);
@@ -455,7 +464,7 @@ impl AllPairAlignments {
         // Buffer with current alignments.
         let mut curr_alns = Vec::new();
 
-        for paired_alns in self.0.values() {
+        for paired_alns in self.0.iter() {
             let unmapped_prob = paired_alns.multi_contig_alns(&mut curr_alns, &contigs, prob_diff);
             total_prob += Ln::map_sum_init(&curr_alns, PairAlignment::ln_prob, unmapped_prob);
             curr_alns.clear();
