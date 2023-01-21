@@ -10,7 +10,7 @@ use crate::{
         seq,
     },
     algo::{
-        nbinom::{NBinom, CachedDistr},
+        nbinom::NBinom,
         vec_ext::*,
         loess::Loess,
         bisect,
@@ -238,7 +238,7 @@ fn get_window_gc_contents(windows: &[WindowCounts], interval: &Interval, ref_seq
 }
 
 /// In total, GC-content falls into 101 bins (0..=100).
-const GC_BINS: usize = 101;
+pub const GC_BINS: usize = 101;
 
 /// For each GC-content in 0..=100, returns start & end indices,
 /// where gc_contents[start..end] lie in [GC - 0.5, GC + 0.5).
@@ -380,14 +380,11 @@ impl Default for ReadDepthParams {
     }
 }
 
-/// Cache up to 256 values for each GC-content.
-const CACHE_SIZE: usize = 256;
-
 pub struct ReadDepth {
     window_size: u32,
     limits: LimitingValues,
     // Read depth distribution for each GC-content in 0..=100.
-    distributions: Vec<CachedDistr<NBinom>>,
+    distributions: Vec<NBinom>,
 }
 
 impl ReadDepth {
@@ -423,7 +420,7 @@ impl ReadDepth {
         blur_boundary_values(&mut means, &mut variances, &gc_bins, params);
 
         let distributions = means.into_iter().zip(variances)
-            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)).cached(CACHE_SIZE))
+            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)))
             .collect();
         Self {
             window_size: params.window_size,
@@ -435,8 +432,8 @@ impl ReadDepth {
 
 impl JsonSer for ReadDepth {
     fn save(&self) -> json::JsonValue {
-        let n_params: Vec<f64> = self.distributions.iter().map(|distr| distr.distr().n()).collect();
-        let p_params: Vec<f64> = self.distributions.iter().map(|distr| distr.distr().p()).collect();
+        let n_params: Vec<f64> = self.distributions.iter().map(|distr| distr.n()).collect();
+        let p_params: Vec<f64> = self.distributions.iter().map(|distr| distr.p()).collect();
         json::object!{
             window: self.window_size,
             limits: self.limits.save(),
@@ -459,7 +456,7 @@ impl JsonSer for ReadDepth {
         Ok(Self {
             window_size: u32::try_from(window_size).unwrap(),
             limits,
-            distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p).cached_q999()).collect(),
+            distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p)).collect(),
         })
     }
 }

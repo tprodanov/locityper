@@ -1,5 +1,6 @@
 //! Traits and structures related to insert size (distance between read mates).
 
+use statrs::distribution::Discrete;
 use htslib::bam::record::{Record, Aux};
 use crate::{
     algo::{
@@ -103,7 +104,7 @@ impl InsertDistr for InsertNegBinom {
         if sz > self.max_size {
             f64::NEG_INFINITY
         } else {
-            self.distr.ln_pmf(u64::from(sz)) + self.orient_probs[same_orient as usize]
+            self.distr.ln_pmf(sz) + self.orient_probs[same_orient as usize]
         }
     }
 

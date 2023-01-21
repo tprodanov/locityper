@@ -1,7 +1,6 @@
 use std::fmt::{self, Debug, Display, Formatter};
 use once_cell::unsync::OnceCell;
 use statrs::{
-    statistics::{Min, Max},
     distribution::Discrete,
     function::{
         beta::beta_reg,
@@ -45,9 +44,9 @@ impl NBinom {
         NBinom::new(m * m / (v - m), m / v)
     }
 
-    /// Create a new distribution where n is multiplied by `mul` and p stays the same.
-    pub fn mul_n(&self, mul: f64) -> NBinom {
-        NBinom::new(self.n * mul, self.p)
+    /// Create a new distribution where n is multiplied by `coef` and p stays the same.
+    pub fn mul(&self, coef: f64) -> NBinom {
+        NBinom::new(self.n * coef, self.p)
     }
 
     /// Creates a cached Negative Binomial distribution, storing ln_pmf values from 0 up to <0.999 quantile>.
@@ -81,14 +80,17 @@ impl NBinom {
         self.lnpmf_const + ln_gamma(self.n + x) - ln_gamma(x + 1.0) + x * self.lnq
     }
 
+    /// Cumulative distribution function: P(X <= x).
     pub fn cdf(&self, x: f64) -> f64 {
         beta_reg(self.n, x + 1.0, self.p)
     }
 
+    /// Survival function: P(X > x).
     pub fn sf(&self, x: f64) -> f64 {
         beta_reg(x + 1.0, self.n, 1.0 - self.p)
     }
 
+    /// Inverse CDF function: returns approximate such `x` that `cdf(x) = q`.
     pub fn quantile(&self, q: f64) -> f64 {
         if q <= 0.0 {
             return 0.0;
@@ -155,36 +157,72 @@ impl JsonSer for NBinom {
     }
 }
 
-impl Min<u64> for NBinom {
-    fn min(&self) -> u64 {
-        0
+impl Discrete<u32, f64> for NBinom {
+    fn pmf(&self, x: u32) -> f64 {
+        self.ln_pmf_f64(f64::from(x)).exp()
+    }
+
+    fn ln_pmf(&self, x: u32) -> f64 {
+        self.ln_pmf_f64(f64::from(x))
     }
 }
 
-impl Max<u64> for NBinom {
-    fn max(&self) -> u64 {
-        std::u64::MAX
+/// Chimeric distribution: discrete Uniform on the left, and Negative Binomial distribution on the right.
+#[derive(Clone)]
+pub struct UniformNBinom {
+    partition: u32,
+    uniform_ln_prob: f64,
+    tail: NBinom,
+    tail_ln_weight: f64,
+}
+
+impl UniformNBinom {
+    /// Creates `UniformNBinom` from discrete uniform distribution in `[0, partition]` with `1 - tail_weight`,
+    /// with Negative Binomial tail in `[partition+1, INF)` with weight `tail_weight`.
+    ///
+    /// If `tail_weight` is not given, select a weight that would give a smooth transition.
+    pub fn new(partition: u32, tail: NBinom, tail_weight: Option<f64>) -> Self {
+        let x = f64::from(partition);
+        let tail_sf = tail.sf(x);
+        // let tail_weight = tail_weight.unwrap_or(tail_sf);
+
+        let tail_weight = if let Some(weight) = tail_weight {
+            assert!(0.0 <= weight && weight <= 1.0, "UniformNBinom: weight ({}) must be in [0, 1]", weight);
+            weight
+        } else {
+            let pmf = tail.pmf(partition);
+            // Select weight, for which nbinom.pmf(x) ~= self.pmf(x)
+            1.0 / ((x + 1.0) * pmf / tail_sf + 1.0)
+        };
+
+        let uniform_ln_prob = (-tail_weight).ln_1p() - x.ln_1p();
+        let tail_ln_weight = tail_weight.ln() - tail_sf.ln();
+        Self { partition, uniform_ln_prob, tail, tail_ln_weight }
     }
 }
 
-impl Discrete<u64, f64> for NBinom {
-    fn pmf(&self, x: u64) -> f64 {
-        self.ln_pmf_f64(x as f64).exp()
+impl Discrete<u32, f64> for UniformNBinom {
+    fn pmf(&self, x: u32) -> f64 {
+        self.ln_pmf(x).exp()
     }
 
-    fn ln_pmf(&self, x: u64) -> f64 {
-        self.ln_pmf_f64(x as f64)
+    fn ln_pmf(&self, x: u32) -> f64 {
+        if x <= self.partition {
+            self.uniform_ln_prob
+        } else {
+            self.tail_ln_weight + self.tail.ln_pmf(x)
+        }
     }
 }
 
 /// Distribution with cached ln_pmf values.
 #[derive(Clone)]
-pub struct CachedDistr<D: Discrete<u64, f64>> {
+pub struct CachedDistr<D> {
     distr: D,
     cache: Vec<OnceCell<f64>>,
 }
 
-impl<D: Discrete<u64, f64>> CachedDistr<D> {
+impl<D> CachedDistr<D> {
     /// Creates the cached distribution.
     /// Caches ln_pmf values in `0..cache_size`.
     pub fn new(distr: D, cache_size: usize) -> Self {
@@ -199,8 +237,15 @@ impl<D: Discrete<u64, f64>> CachedDistr<D> {
         &self.distr
     }
 
+    /// Returns the maximal cache size. Values 0..cache_size are stored once calculated the first time.
+    pub fn cache_size(&self) -> usize {
+        self.cache.len()
+    }
+}
+
+impl<D: Discrete<u32, f64>> Discrete<u32, f64> for CachedDistr<D> {
     /// Returns ln(pmf(k)). Caches values in a certain range.
-    pub fn ln_pmf(&self, k: u64) -> f64 {
+    fn ln_pmf(&self, k: u32) -> f64 {
         let i = k as usize;
         if i < self.cache.len() {
             *self.cache[i].get_or_init(|| self.distr.ln_pmf(k))
@@ -208,21 +253,25 @@ impl<D: Discrete<u64, f64>> CachedDistr<D> {
             self.distr.ln_pmf(k)
         }
     }
+
+    fn pmf(&self, k: u32) -> f64 {
+        self.ln_pmf(k).exp()
+    }
 }
 
-impl<D: Discrete<u64, f64> + Debug> Debug for CachedDistr<D> {
+impl<D: Debug> Debug for CachedDistr<D> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Cached[{:?}, size={}]", self.distr, self.cache.len())
     }
 }
 
-impl<D: Discrete<u64, f64> + Display> Display for CachedDistr<D> {
+impl<D: Display> Display for CachedDistr<D> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Cached[{}, size={}]", self.distr, self.cache.len())
     }
 }
 
-impl<D: Discrete<u64, f64> + JsonSer> JsonSer for CachedDistr<D> {
+impl<D: JsonSer> JsonSer for CachedDistr<D> {
     fn save(&self) -> json::JsonValue {
         json::object!{
             distr: self.distr.save(),
