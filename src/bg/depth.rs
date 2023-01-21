@@ -380,14 +380,21 @@ impl Default for ReadDepthParams {
     }
 }
 
+/// Background read depth distrbutions for each GC-content value.
 pub struct ReadDepth {
+    /// Read depth is calculated per windows with this size.
     window_size: u32,
+    /// For each window, add `gc_padding` to the left and right before calculating GC-content.
+    gc_padding: u32,
+    /// Limit read depth calculation to certain windows.
     limits: LimitingValues,
     // Read depth distribution for each GC-content in 0..=100.
     distributions: Vec<NBinom>,
 }
 
 impl ReadDepth {
+    /// Estimates read depth from primary alignments, mapped to the `interval` with sequence `ref_seq`.
+    /// Treat reads with insert size over `max_insert_size` as unpaired.
     pub fn estimate<'a>(
             interval: &Interval,
             ref_seq: &[u8],
@@ -424,9 +431,29 @@ impl ReadDepth {
             .collect();
         Self {
             window_size: params.window_size,
+            gc_padding: params.gc_padding,
             limits,
             distributions,
         }
+    }
+
+    /// Returns window size.
+    pub fn window_size(&self) -> u32 {
+        self.window_size
+    }
+
+    pub fn gc_padding(&self) -> u32 {
+        self.gc_padding
+    }
+
+    /// Returns read depth distribution at GC-content `gc_content` (between 0 and 100).
+    pub fn depth_distribution(&self, gc_content: usize) -> &NBinom {
+        &self.distributions[gc_content]
+    }
+
+    /// Returns iterator over read-depth distributions at GC-contents between 0 and 100.
+    pub fn distributions(&self) -> std::slice::Iter<'_, NBinom> {
+        self.distributions.iter()
     }
 }
 
@@ -436,6 +463,7 @@ impl JsonSer for ReadDepth {
         let p_params: Vec<f64> = self.distributions.iter().map(|distr| distr.p()).collect();
         json::object!{
             window: self.window_size,
+            gc_padd: self.gc_padding,
             limits: self.limits.save(),
             n: &n_params as &[f64],
             p: &p_params as &[f64],
@@ -445,6 +473,8 @@ impl JsonSer for ReadDepth {
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
         let window_size = obj["window"].as_usize().ok_or_else(|| LoadError(format!(
             "ReadDepth: Failed to parse '{}': missing or incorrect 'window' field!", obj)))?;
+        let gc_padding = obj["gc_padd"].as_usize().ok_or_else(|| LoadError(format!(
+            "ReadDepth: Failed to parse '{}': missing or incorrect 'gc_padd' field!", obj)))?;
         if !obj.has_key("limits") {
             return Err(LoadError(format!("BgDistr: Failed to parse '{}': missing 'limits' key!", obj)))
         }
@@ -455,6 +485,7 @@ impl JsonSer for ReadDepth {
         parse_f64_arr(obj, "p", &mut p_params)?;
         Ok(Self {
             window_size: u32::try_from(window_size).unwrap(),
+            gc_padding: u32::try_from(gc_padding).unwrap(),
             limits,
             distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p)).collect(),
         })
