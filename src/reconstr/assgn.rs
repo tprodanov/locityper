@@ -238,14 +238,11 @@ impl<'a> ReadAssignment<'a> {
         let contig_windows = ContigWindows::new(cached_distrs.bg_depth.window_size(), contig_names,
             contigs.contigs().to_vec());
         let depth_distrs = contig_windows.identify_depth_distributions(all_ref_seqs, cached_distrs, boundary_size);
-        let n_windows = contig_windows.total_windows() as usize;
-        let mut depth = vec![0; n_windows];
 
         let mut ix = 0;
         let mut read_locs = Vec::new();
         let mut read_ixs = vec![ix];
         let mut non_trivial_reads = Vec::new();
-
         for (rp, paired_alns) in all_alns.iter().enumerate() {
             let new_alns = paired_alns.multi_contig_alns(&mut read_locs, &contigs, prob_diff);
             debug_assert!(new_alns > 0, "Read pair {} has zero possible alignment location", rp);
@@ -256,6 +253,8 @@ impl<'a> ReadAssignment<'a> {
             }
         }
 
+        let n_windows = contig_windows.total_windows() as usize;
+        let n_reads = read_ixs.len() - 1;
         Self {
             contig_windows,
             depth: vec![0; n_windows],
@@ -263,14 +262,44 @@ impl<'a> ReadAssignment<'a> {
             read_locs,
             read_ixs,
             non_trivial_reads,
-            read_assgn: Vec::new(),
+            read_assgn: vec![0; n_reads],
             likelihood: f64::NAN,
         }
+    }
+
+    /// Initialize read assignments.
+    /// Must provide function, that provides initial assignment for all read pairs with at least two possible locations.
+    /// Signature: `select_init(single_read_locations) -> initial_index as u16`
+    pub fn init_assignments<F>(&mut self, mut select_init: F)
+    where F: FnMut(&[PairAlignment]) -> u16,
+    {
+        for (rp, assgn_mut) in self.read_assgn.iter_mut().enumerate() {
+            let start_ix = self.read_ixs[rp];
+            let end_ix = self.read_ixs[rp + 1];
+            let assgn;
+            if start_ix + 1 == end_ix {
+                assgn = 0;
+            } else {
+                assgn = select_init(&self.read_locs[start_ix..end_ix]);
+                assert!(start_ix + (assgn as usize) < end_ix,
+                    "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
+            }
+            let (w1, w2) = self.contig_windows.get_pair_window_ixs(&self.read_locs[start_ix + assgn as usize]);
+            self.depth[w1 as usize] += 1;
+            self.depth[w2 as usize] += 1;
+            *assgn_mut = assgn;
+        }
+        self.recalc_likelihood();
     }
 
     /// Returns the total likelihood of the read assignment.
     pub fn likelihood(&self) -> f64 {
         self.likelihood
+    }
+
+    /// Returns slice with indices of all read pairs with at least two alignment locations.
+    pub fn non_trivial_reads(&self) -> &[usize] {
+        &self.non_trivial_reads
     }
 
     /// Returns the current read-pair alignment given the read pair with index `rp`.
@@ -358,18 +387,18 @@ impl<'a> ReadAssignment<'a> {
         }
     }
 
-    /// Re-calculates the total likehood (ln-probability) of the read depth across all windows.
-    fn recalc_depth_likelihood(&self) -> f64 {
-        self.depth_distrs.iter()
+    /// Recalculates total model likelihood, and returns separately
+    /// - ln-probability of read depth across all windows,
+    /// - ln-probability of of all read alignments.
+    pub fn recalc_likelihood(&mut self) -> (f64, f64) {
+        let depth_lik = self.depth_distrs.iter()
             .zip(&self.depth)
             .map(|(distr, &depth)| distr.ln_pmf(depth))
-            .sum()
-    }
-
-    /// Re-calculates the total likehood (ln-probability) of all read alignments.
-    fn recalc_alns_likelihood(&self) -> f64 {
-        self.read_ixs.iter().zip(&self.read_assgn)
+            .sum();
+        let aln_lik = self.read_ixs.iter().zip(&self.read_assgn)
             .map(|(&start_ix, &assgn)| self.read_locs[start_ix + assgn as usize].ln_prob())
-            .sum()
+            .sum();
+        self.likelihood = depth_lik + aln_lik;
+        (depth_lik, aln_lik)
     }
 }

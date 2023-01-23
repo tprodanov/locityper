@@ -2,8 +2,9 @@ use simplelog::{TermLogger, ConfigBuilder, LevelPadding, LevelFilter, TerminalMo
 
 pub mod seq;
 pub mod algo;
-pub mod reconstr;
 pub mod bg;
+pub mod reconstr;
+pub mod solvers;
 
 mod test;
 
