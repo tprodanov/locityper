@@ -3,14 +3,14 @@
 pub fn standardize(seq: &mut [u8]) {
     for nt in seq.iter_mut() {
         *nt = match &nt {
-            b'a' => b'A',
-            b'c' => b'C',
-            b'g' => b'G',
-            b't' => b'T',
+            b'A' | b'a' => b'A',
+            b'C' | b'c' => b'C',
+            b'G' | b'g' => b'G',
+            b'T' | b't' => b'T',
             b'n' | b'R' | b'Y' | b'K' | b'M' | b'S' | b'W' | b'B' | b'D' | b'H' | b'V'
                  | b'r' | b'y' | b'k' | b'm' | b's' | b'w' | b'b' | b'd' | b'h' | b'v'
                  => b'N',
-            _ => panic!("Unknown nucleotide {}", nt),
+            _ => panic!("Unknown nucleotide {}", *nt as char),
         };
     }
 }

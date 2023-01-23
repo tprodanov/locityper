@@ -7,6 +7,10 @@ use crate::{
 };
 
 pub mod greedy;
+pub mod dbg;
+
+pub use crate::solvers::greedy::GreedySolver;
+pub use crate::solvers::dbg::*;
 
 /// Trait that distributes the reads between their possible alignments
 pub trait Solver<'a> {
@@ -36,28 +40,36 @@ fn init_best(possible_alns: &[PairAlignment]) -> usize {
 }
 
 /// Distribute read assignment in at most `max_iter` iterations.
-pub fn solve<'a, 'b, S>(mut solver: S, max_iter: usize) -> ReadAssignment<'a>
+pub fn solve<'a, 'b, S, W>(mut solver: S, max_iter: u32, dbg_writer: &mut W) -> std::io::Result<ReadAssignment<'a>>
 // 'a - lifetime of ReadAssignments, 'b - lifetime of Solver, 'a outlives 'b.
 where 'a: 'b,
     S: Solver<'a> + 'b,
+    W: DbgWrite,
 {
     let mut best_lik = solver.initialize();
     let mut last_lik = best_lik;
     let mut best_assgns: Vec<u16> = solver.current_assignments().read_assignments().to_vec();
-    for _ in 0..max_iter {
+    dbg_writer.write(solver.current_assignments(), 0, true)?;
+
+    let mut total_iterations = max_iter;
+    for it in 1..=max_iter {
         solver.step();
         last_lik = solver.current_assignments().likelihood();
         if last_lik > best_lik {
             best_lik = last_lik;
             best_assgns.clone_from_slice(solver.current_assignments().read_assignments());
         }
+
         if solver.is_finished() {
+            total_iterations = it;
             break;
         }
+        dbg_writer.write(solver.current_assignments(), it, false)?;
     }
     let mut model = solver.finish();
     if last_lik < best_lik {
         model.set_assignments(&best_assgns);
     }
-    model
+    dbg_writer.write(&model, total_iterations, true)?;
+    Ok(model)
 }

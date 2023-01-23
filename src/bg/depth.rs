@@ -224,7 +224,7 @@ impl JsonSer for LimitingValues {
 /// Removes windows with unknown nucleotides (N) in them.
 fn filter_ns(windows: &mut Vec<WindowCounts>, interval: &Interval, ref_seq: &[u8]) {
     let shift = interval.start();
-    windows.retain(|window| seq::has_n(&ref_seq[(window.start - shift) as usize..(window.end - shift) as usize]));
+    windows.retain(|window| !seq::has_n(&ref_seq[(window.start - shift) as usize..(window.end - shift) as usize]));
 }
 
 /// Return `f64` GC-content for each window in `WindowCounts`.

@@ -149,7 +149,7 @@ impl PrelimAlignments {
         log::info!("Identify paired alignment location and probabilities ({} read pairs)", n_reads);
         let mut res = AllPairAlignments::with_capacity(n_reads);
         for (&name_hash, alns) in self.alns.iter_mut() {
-            log::debug!("Read {}", name_hash);
+            // log::debug!("Read {}", name_hash);
             // Sort alignments first by contig id, then by read-end.
             alns.sort_by_key(MateAln::sort_key);
             let pair_alns = identify_pair_alignments(name_hash, alns, insert_distr,
@@ -250,12 +250,12 @@ where D: InsertDistr
     // possibility for every contig, but we do not store them explicitely.
     let norm_fct = Ln::map_sum_init(&pair_alns, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
     unmapped_prob -= norm_fct;
-    log::debug!("    {} pair-end alignments. Unmapped prob: {:.2}", pair_alns.len(), unmapped_prob);
+    // log::debug!("    {} pair-end alignments. Unmapped prob: {:.2}", pair_alns.len(), unmapped_prob);
     for aln in pair_alns.iter_mut() {
         aln.ln_prob -= norm_fct;
-        log::debug!("        {}", aln);
+        // log::debug!("        {}", aln);
     }
-    ReadPairAlignments { name_hash, unmapped_prob, pair_alns } 
+    ReadPairAlignments { name_hash, unmapped_prob, pair_alns }
 }
 
 #[derive(Clone)]

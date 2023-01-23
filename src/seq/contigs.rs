@@ -1,5 +1,8 @@
-use std::collections::HashMap;
-use std::fmt;
+use std::{
+    collections::HashMap,
+    fmt, io,
+};
+use bio::io::fasta::{FastaRead, Index, Record};
 
 /// Contig identificator - newtype over u16.
 /// Can be converted to `usize` using `id.ix()` method.
@@ -72,8 +75,27 @@ impl ContigNames {
 
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
-    pub fn from_index(tag: String, index: &bio::io::fasta::Index) -> Self {
+    pub fn from_index(tag: String, index: &Index) -> Self {
         Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
+    }
+
+    /// Reads all entries from fasta and saves them into memory.
+    /// Returns pair (ContigNames, Vec<nt sequence>).
+    pub fn from_fasta<R: FastaRead>(tag: String, reader: &mut R) -> io::Result<(Self, Vec<Vec<u8>>)> {
+        let mut names_lengths = Vec::new();
+        let mut seqs = Vec::new();
+        let mut record = Record::new();
+        loop {
+            reader.read(&mut record)?;
+            if record.is_empty() {
+                return Ok((Self::new(tag, names_lengths.into_iter()), seqs));
+            }
+
+            let mut ref_seq = record.seq().to_vec();
+            crate::seq::seq::standardize(&mut ref_seq);
+            names_lengths.push((record.id().to_string(), u32::try_from(ref_seq.len()).unwrap()));
+            seqs.push(ref_seq.to_vec());
+        }
     }
 
     /// Get the number of contigs.
@@ -105,7 +127,7 @@ impl ContigNames {
         self.name_to_id.get(name).copied()
     }
 
-    pub fn ids(&self) -> impl Iterator<Item = ContigId> {
+    pub fn ids(&self) -> impl Iterator<Item = ContigId> + std::iter::ExactSizeIterator {
         (0..self.len() as u16).map(ContigId::new)
     }
 }

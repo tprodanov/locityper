@@ -226,7 +226,7 @@ impl<'a> ReadAssignment<'a> {
     /// instead of regular ones.
     ///
     /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
-    pub fn new<F>(
+    pub fn new(
         contigs: &SeveralContigs,
         contig_names: Rc<ContigNames>,
         all_ref_seqs: &[Vec<u8>],
@@ -334,6 +334,11 @@ impl<'a> ReadAssignment<'a> {
         &self.read_assgn
     }
 
+    /// Returns iterator over pair (read depth, read depth ln-prob) for all windows.
+    pub fn depth_lik_iter(&self) -> impl Iterator<Item = (u32, f64)> + std::iter::ExactSizeIterator + '_ {
+        self.depth.iter().zip(&self.depth_distrs).map(|(&d, distr)| (d, distr.ln_pmf(d)))
+    }
+
     /// Returns the current read-pair alignment given the read pair with index `rp`.
     pub fn current_pair_alignment(&self, rp: usize) -> &PairAlignment {
         &self.read_locs[self.read_ixs[rp] + self.read_assgn[rp] as usize]
@@ -394,6 +399,11 @@ impl<'a> ReadAssignment<'a> {
             + self.depth_lik_diff2(old_windows, -1) + self.depth_lik_diff2(new_windows, 1);
         self.likelihood += diff;
         self.read_assgn[rp] = new_assignment;
+        // First add, then remove, so that we do not overflow.
+        self.depth[new_windows.0 as usize] += 1;
+        self.depth[new_windows.1 as usize] += 1;
+        self.depth[old_windows.0 as usize] -= 1;
+        self.depth[old_windows.1 as usize] -= 1;
         diff
     }
 
