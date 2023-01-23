@@ -82,7 +82,7 @@ impl PrelimAlignments {
         contigs: Rc<ContigNames>,
         err_prof: &E,
         min_ln_prob: f64,
-        ) -> Self
+    ) -> Self
     where I: Iterator<Item = Record>,
           E: ErrorProfile,
     {
@@ -213,13 +213,13 @@ where D: InsertDistr,
 
 /// For a single read pair, combine all single-mate alignments across all contigs.
 fn identify_pair_alignments<D>(
-        name_hash: u64,
-        alns: &[MateAln],
-        insert_distr: &D,
-        unmapped_penalty: f64,
-        prob_diff: f64,
-        ln_ncontigs: f64,
-    ) -> ReadPairAlignments
+    name_hash: u64,
+    alns: &[MateAln],
+    insert_distr: &D,
+    unmapped_penalty: f64,
+    prob_diff: f64,
+    ln_ncontigs: f64,
+) -> ReadPairAlignments
 where D: InsertDistr
 {
     let mut pair_alns = Vec::new();
@@ -331,7 +331,7 @@ impl fmt::Display for PairAlignment {
 /// Structure, required for `ReadPairAlignments::multi_contig_alns`.
 /// Stores multiple contigs (do not repeat), and their ln-coefficients.
 /// Use-case: coeff = ln(contig multiplicity).
-struct SeveralContigs {
+pub struct SeveralContigs {
     contigs: Vec<ContigId>,
     coeffs: Vec<f64>,
     /// Sum of coefficients.
@@ -341,7 +341,7 @@ struct SeveralContigs {
 impl SeveralContigs {
     /// Creates `SeveralContigs` from a slice of contig ids (may repeat).
     /// Assumes that the total number of contigs is small, and, therefore, is not the most sofisticated.
-    fn new(contigs: &[ContigId]) -> Self {
+    pub fn new(contigs: &[ContigId]) -> Self {
         let mut dedup_contigs = Vec::new();
         let mut coeffs = Vec::new();
         for contig in contigs {
@@ -358,8 +358,14 @@ impl SeveralContigs {
         }
     }
 
-    fn iter<'a>(&'a self) -> std::iter::Zip<std::slice::Iter<'a, ContigId>, std::slice::Iter<'a, f64>> {
+    /// Returns iterator over pairs `(ContigId, ln_coef)`.
+    pub fn iter<'a>(&'a self) -> std::iter::Zip<std::slice::Iter<'a, ContigId>, std::slice::Iter<'a, f64>> {
         self.contigs.iter().zip(self.coeffs.iter())
+    }
+
+    /// Returns contig ids.
+    pub fn contigs(&self) -> &[ContigId] {
+        &self.contigs
     }
 }
 
@@ -404,7 +410,11 @@ impl ReadPairAlignments {
     /// Remaining alignments have random order, and non-normalized probabilities.
     ///
     /// Any alignments that were in the vector before, stay as they are and in the same order.
-    fn multi_contig_alns(&self, out_alns: &mut Vec<PairAlignment>, contigs: &SeveralContigs, prob_diff: f64) -> usize {
+    pub fn multi_contig_alns(&self,
+        out_alns: &mut Vec<PairAlignment>,
+        contigs: &SeveralContigs,
+        prob_diff: f64,
+    ) -> usize {
         let start_len = out_alns.len();
         // Probability of being unmapped to any of the contigs.
         let unmapped_prob = self.unmapped_prob + contigs.sum_coeff;
@@ -480,5 +490,10 @@ impl AllPairAlignments {
             total_prob += Ln::map_sum(&curr_alns, PairAlignment::ln_prob);
         }
         total_prob
+    }
+
+    /// Returns iterator over `ReadPairAlignments` for all read pairs.
+    pub fn iter(&self) -> std::slice::Iter<'_, ReadPairAlignments> {
+        self.0.iter()
     }
 }

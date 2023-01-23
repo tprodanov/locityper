@@ -1,8 +1,10 @@
 use std::rc::Rc;
+use std::cmp::min;
 use once_cell::unsync::OnceCell;
 use statrs::distribution::Discrete;
 use crate::{
     seq::{
+        seq,
         contigs::{ContigNames, ContigId},
         interv::Interval,
     },
@@ -12,8 +14,16 @@ use crate::{
     bg::{self,
         depth::GC_BINS,
     },
-    reconstr::locs::{TwoIntervals, PairAlignment},
+    reconstr::locs::{TwoIntervals, PairAlignment, SeveralContigs, AllPairAlignments},
 };
+
+/// Fake proxy distribution, that has 1.0 probability for all values.
+struct AlwaysOneDistr;
+
+impl Discrete<u32, f64> for AlwaysOneDistr {
+    fn pmf(&self, _: u32) -> f64 { 1.0 }
+    fn ln_pmf(&self, _: u32) -> f64 { 0.0 }
+}
 
 /// Store read depth probabilities for values between 0 and 127 for each GC content.
 const CACHE_SIZE: usize = 256;
@@ -28,6 +38,8 @@ pub struct CachedDepthDistrs<'a> {
     regular: Vec<OnceCell<CachedDistr<NBinom>>>,
     /// Read depth distributions at the boundary windows.
     boundary: Vec<OnceCell<CachedDistr<UniformNBinom>>>,
+    /// Distribution for proxy window with unmapped reads.
+    unmapped: AlwaysOneDistr,
 }
 
 impl<'a> CachedDepthDistrs<'a> {
@@ -41,6 +53,7 @@ impl<'a> CachedDepthDistrs<'a> {
             bg_depth, mul_coef,
             regular: vec![OnceCell::new(); GC_BINS],
             boundary: vec![OnceCell::new(); GC_BINS],
+            unmapped: AlwaysOneDistr,
         }
     }
 
@@ -75,15 +88,18 @@ pub struct ContigWindows {
     wshifts: Vec<u32>,
 }
 
-pub const UNMAPPED_WINDOW: u32 = u32::MAX;
+/// First window in `ContigWindows` represents an unmapped window.
+const UNMAPPED_WINDOW: u32 = 0;
+/// First contig will have windows starting from index 1.
+const INIT_WSHIFT: u32 = 1;
 
 impl ContigWindows {
     /// Creates new `ContigWindows`.
     /// Functionally, this constructor only counts the number of windows per each contig.
     pub fn new(window_size: u32, contigs: Rc<ContigNames>, ids: Vec<ContigId>) -> Self {
         let mut wshifts = Vec::with_capacity(ids.len() + 1);
-        wshifts.push(0);
-        let mut curr_windows = 0;
+        let mut curr_windows = INIT_WSHIFT;
+        wshifts.push(curr_windows);
         for &id in ids.iter() {
             // Ceiling division.
             curr_windows += (contigs.length(id) + window_size - 1) / window_size;
@@ -105,34 +121,70 @@ impl ContigWindows {
     /// Returns the window-shift for `contig` (windows for contig are stored starting with this shift).
     /// Works linearly from the number of contigs.
     pub fn window_shift(&self, contig: ContigId) -> u32 {
-        for (&id, &shift) in self.ids.iter().zip(&self.wshifts) {
-            if id == contig {
-                return shift;
-            }
+        if let Some(i) = self.ids.iter().position(|&id| id == contig) {
+            self.wshifts[i]
+        } else {
+            panic!("Contig {} is not in the contig set", self.contigs.name(contig))
         }
-        panic!("Contig {} is not in the contig set", self.contigs.name(contig));
     }
 
     /// Returns the window corresponding to the middle of the interval.
-    pub fn get_window(&self, interval: &Interval) -> u32 {
+    pub fn get_window_ix(&self, interval: &Interval) -> u32 {
         self.window_shift(interval.contig_id()) + interval.middle() / self.window_size
     }
 
     /// Returns a pair of window indices of the pair alignment.
     /// If one (or both) of the mates are unmapped, returns `UNMAPPED_WINDOW`.
-    pub fn get_windows(&self, paln: &PairAlignment) -> (u32, u32) {
+    pub fn get_pair_window_ixs(&self, paln: &PairAlignment) -> (u32, u32) {
         match paln.intervals() {
             TwoIntervals::Both(aln1, aln2) => {
                 debug_assert_eq!(aln1.contig_id(), aln2.contig_id(), "Read mates are mapped to diff. contigs!");
                 let shift = self.window_shift(aln1.contig_id());
                 (shift + aln1.middle() / self.window_size, shift + aln2.middle() / self.window_size)
             },
-            TwoIntervals::First(aln1) => (self.get_window(aln1), UNMAPPED_WINDOW),
-            TwoIntervals::Second(aln2) => (UNMAPPED_WINDOW, self.get_window(aln2)),
+            TwoIntervals::First(aln1) => (self.get_window_ix(aln1), UNMAPPED_WINDOW),
+            TwoIntervals::Second(aln2) => (UNMAPPED_WINDOW, self.get_window_ix(aln2)),
             TwoIntervals::None => (UNMAPPED_WINDOW, UNMAPPED_WINDOW),
         }
     }
+
+    /// Returns read depth distributions for all windows in a set of contigs.
+    fn identify_depth_distributions<'a>(
+        &self,
+        ref_seqs: &[Vec<u8>],
+        cached_distrs: &'a CachedDepthDistrs<'a>,
+        boundary_size: u32,
+    ) -> DistrsVec<'a> {
+        let mut distrs: DistrsVec<'a> = Vec::with_capacity(self.total_windows() as usize);
+        debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
+        distrs.push(Box::new(&cached_distrs.unmapped));
+
+        let window_size = cached_distrs.bg_depth.window_size();
+        let gc_padding = cached_distrs.bg_depth.gc_padding();
+        for (i, &contig_id) in self.ids.iter().enumerate() {
+            let n_windows = self.wshifts[i + 1] - self.wshifts[i];
+            let contig_len = self.contigs.length(contig_id);
+            let ref_seq = &ref_seqs[contig_id.ix()];
+            assert_eq!(contig_len as usize, ref_seq.len(), "Contig length and reference length do not match!");
+
+            for i in 0..n_windows {
+                let start = window_size * i;
+                let end = start + window_size;
+                let gc_content = seq::gc_content(
+                    &ref_seq[start.saturating_sub(gc_padding) as usize..min(end + gc_padding, contig_len) as usize])
+                    .round() as usize;
+                if end <= boundary_size || start + boundary_size >= contig_len {
+                    distrs.push(Box::new(cached_distrs.boundary_distr(gc_content)));
+                } else {
+                    distrs.push(Box::new(cached_distrs.regular_distr(gc_content)));
+                }
+            }
+        }
+        distrs
+    }
 }
+
+type DistrsVec<'a> = Vec<Box<&'a dyn Discrete<u32, f64>>>;
 
 /// Read assignment to a vector of contigs and the corresponding likelihoods.
 pub struct ReadAssignment<'a> {
@@ -145,7 +197,7 @@ pub struct ReadAssignment<'a> {
     depth: Vec<u32>,
 
     /// Read depth distribution at each window (length: `contig_windows.total_windows()`).
-    depth_distrs: Vec<Box<&'a dyn Discrete<u32, f64>>>,
+    depth_distrs: DistrsVec<'a>,
 
     /// A vector of possible read alignments to the vector of contigs (length: n_reads).
     read_locs: Vec<PairAlignment>,
@@ -156,6 +208,9 @@ pub struct ReadAssignment<'a> {
     /// For read-pair `i`, possible read locations are `possible_read_locs[read_ixs[i]..read_ixs[i + 1]]`.
     read_ixs: Vec<usize>,
 
+    /// Read pair indices that have > 1 possible read location (length <= n_reads).
+    non_trivial_reads: Vec<usize>,
+
     /// Store current read assignment (length: n_reads).
     read_assgn: Vec<u16>,
 
@@ -164,6 +219,55 @@ pub struct ReadAssignment<'a> {
 }
 
 impl<'a> ReadAssignment<'a> {
+    /// Creates an instance that stores read assignments to given contigs.
+    /// Read assignment itself is not stored, call `init_assignments()` to start.
+    ///
+    /// Boundary size: in the left-most and right-most `boundary_size` bp, use boundary read depth distributions,
+    /// instead of regular ones.
+    ///
+    /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
+    pub fn new<F>(
+        contigs: &SeveralContigs,
+        contig_names: Rc<ContigNames>,
+        all_ref_seqs: &[Vec<u8>],
+        cached_distrs: &'a CachedDepthDistrs<'a>,
+        all_alns: &AllPairAlignments,
+        boundary_size: u32,
+        prob_diff: f64,
+    ) -> Self {
+        let contig_windows = ContigWindows::new(cached_distrs.bg_depth.window_size(), contig_names,
+            contigs.contigs().to_vec());
+        let depth_distrs = contig_windows.identify_depth_distributions(all_ref_seqs, cached_distrs, boundary_size);
+        let n_windows = contig_windows.total_windows() as usize;
+        let mut depth = vec![0; n_windows];
+
+        let mut ix = 0;
+        let mut read_locs = Vec::new();
+        let mut read_ixs = vec![ix];
+        let mut non_trivial_reads = Vec::new();
+
+        for (rp, paired_alns) in all_alns.iter().enumerate() {
+            let new_alns = paired_alns.multi_contig_alns(&mut read_locs, &contigs, prob_diff);
+            debug_assert!(new_alns > 0, "Read pair {} has zero possible alignment location", rp);
+            ix += new_alns;
+            read_ixs.push(ix);
+            if new_alns > 1 {
+                non_trivial_reads.push(rp);
+            }
+        }
+
+        Self {
+            contig_windows,
+            depth: vec![0; n_windows],
+            depth_distrs,
+            read_locs,
+            read_ixs,
+            non_trivial_reads,
+            read_assgn: Vec::new(),
+            likelihood: f64::NAN,
+        }
+    }
+
     /// Returns the total likelihood of the read assignment.
     pub fn likelihood(&self) -> f64 {
         self.likelihood
@@ -193,7 +297,7 @@ impl<'a> ReadAssignment<'a> {
         let curr_ix = start_ix + self.read_assgn[rp] as usize;
         debug_assert!(curr_ix < end_ix, "Read pair #{}: impossible current location!", rp);
         let curr_paln = &self.read_locs[curr_ix];
-        let curr_windows = self.contig_windows.get_windows(curr_paln);
+        let curr_windows = self.contig_windows.get_pair_window_ixs(curr_paln);
         // Total likelihood difference will be:
         // P(new alignment) - P(old alignment) + P(increase depth in new windows) + P(decrease depth in old windows).
         let base_diff = -curr_paln.ln_prob() + self.depth_lik_diff2(curr_windows, -1);
@@ -204,7 +308,7 @@ impl<'a> ReadAssignment<'a> {
                 continue;
             }
             let new_paln = &self.read_locs[i];
-            let new_windows = self.contig_windows.get_windows(new_paln);
+            let new_windows = self.contig_windows.get_pair_window_ixs(new_paln);
             let diff = base_diff + new_paln.ln_prob() + self.depth_lik_diff2(new_windows, 1);
             buffer.push(diff);
         }
@@ -223,8 +327,8 @@ impl<'a> ReadAssignment<'a> {
 
         let old_paln = &self.read_locs[old_ix];
         let new_paln = &self.read_locs[new_ix];
-        let old_windows = self.contig_windows.get_windows(old_paln);
-        let new_windows = self.contig_windows.get_windows(new_paln);
+        let old_windows = self.contig_windows.get_pair_window_ixs(old_paln);
+        let new_windows = self.contig_windows.get_pair_window_ixs(new_paln);
         let diff = new_paln.ln_prob() - old_paln.ln_prob()
             + self.depth_lik_diff2(old_windows, -1) + self.depth_lik_diff2(new_windows, 1);
         self.likelihood = diff;
@@ -246,15 +350,11 @@ impl<'a> ReadAssignment<'a> {
     }
 
     /// Wraps `depth_lik_diff` function, and runs on a pair windows.
-    fn depth_lik_diff2(&self, windows: (u32, u32), depth_change: i32) -> f64 {
-        match windows {
-            (UNMAPPED_WINDOW, UNMAPPED_WINDOW) => 0.0,
-            (w, UNMAPPED_WINDOW) | (UNMAPPED_WINDOW, w) => self.depth_lik_diff(w, depth_change),
-            (w1, w2) => if w1 == w2 {
-                self.depth_lik_diff(w1, 2 * depth_change)
-            } else {
-                self.depth_lik_diff(w1, depth_change) + self.depth_lik_diff(w2, depth_change)
-            },
+    fn depth_lik_diff2(&self, (w1, w2): (u32, u32), depth_change: i32) -> f64 {
+        if w1 == w2 {
+            self.depth_lik_diff(w1, 2 * depth_change)
+        } else {
+            self.depth_lik_diff(w1, depth_change) + self.depth_lik_diff(w2, depth_change)
         }
     }
 

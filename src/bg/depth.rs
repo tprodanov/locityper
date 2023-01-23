@@ -139,8 +139,7 @@ fn count_reads<'a>(
         records: impl Iterator<Item = &'a Record>,
         params: &ReadDepthParams,
         max_insert_size: i64,
-    ) -> Vec<WindowCounts>
-{
+) -> Vec<WindowCounts> {
     assert!(interval.len() >= params.window_size + 2 * params.edge_padding, "Input interval is too short!");
     let n_windows = (f64::from(interval.len() - 2 * params.edge_padding) / f64::from(params.window_size))
         .floor() as u32;
@@ -301,18 +300,10 @@ fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, 
     let n = gc_bins.len();
     let m = gc_bins[gc_bins.len() - 1].1;
 
-    // Index of the first GC-content value, where mean and variance are available.
-    let left_ix = gc_bins
-        .iter().enumerate()
-        .filter(|(_, (_, end))| *end >= min_obs).next()
-        .map(|t| t.0)
-        .unwrap_or(0);
-    // Index of the first GC-content value, where mean and variance are available.
-    let right_ix = gc_bins
-        .iter().enumerate().rev()
-        .filter(|(_, (start, _))| m - start >= min_obs).next()
-        .map(|t| t.0)
-        .unwrap_or(n);
+    // Index of the first GC-content value, such that there are at least `min_obs` windows to the left.
+    let left_ix = gc_bins.iter().position(|(_, end)| *end >= min_obs).unwrap_or(n);
+    // Index of the last GC-content value, such that there are at least `min_obs` windows to the right.
+    let right_ix = n - gc_bins.iter().rev().position(|(start, _)| m - *start >= min_obs).unwrap_or(n);
     assert!(left_ix < right_ix, "Too few windows to calculate read depth!");
     log::debug!("        Few windows (< {}) with GC-content < {} OR > {}, bluring distribution",
         min_obs, left_ix, right_ix);
@@ -396,13 +387,12 @@ impl ReadDepth {
     /// Estimates read depth from primary alignments, mapped to the `interval` with sequence `ref_seq`.
     /// Treat reads with insert size over `max_insert_size` as unpaired.
     pub fn estimate<'a>(
-            interval: &Interval,
-            ref_seq: &[u8],
-            records: impl Iterator<Item = &'a Record>,
-            params: &ReadDepthParams,
-            max_insert_size: u32,
-        ) -> Self
-    {
+        interval: &Interval,
+        ref_seq: &[u8],
+        records: impl Iterator<Item = &'a Record>,
+        params: &ReadDepthParams,
+        max_insert_size: u32,
+    ) -> Self {
         log::info!("    Estimating read depth");
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
