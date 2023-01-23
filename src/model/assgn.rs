@@ -14,7 +14,7 @@ use crate::{
     bg::{self,
         depth::GC_BINS,
     },
-    reconstr::locs::{TwoIntervals, PairAlignment, SeveralContigs, AllPairAlignments},
+    model::locs::{TwoIntervals, PairAlignment, SeveralContigs, AllPairAlignments},
 };
 
 /// Fake proxy distribution, that has 1.0 probability for all values.
@@ -246,6 +246,7 @@ impl<'a> ReadAssignment<'a> {
         for (rp, paired_alns) in all_alns.iter().enumerate() {
             let new_alns = paired_alns.multi_contig_alns(&mut read_locs, &contigs, prob_diff);
             debug_assert!(new_alns > 0, "Read pair {} has zero possible alignment location", rp);
+            assert!(new_alns <= u16::MAX as usize, "Read pair {} has too many alignment locations ({})", rp, new_alns);
             ix += new_alns;
             read_ixs.push(ix);
             if new_alns > 1 {
@@ -267,12 +268,13 @@ impl<'a> ReadAssignment<'a> {
         }
     }
 
-    /// Initialize read assignments.
+    /// Initialize read assignments and return total likelihood.
     /// Must provide function, that provides initial assignment for all read pairs with at least two possible locations.
-    /// Signature: `select_init(single_read_locations) -> initial_index as u16`
-    pub fn init_assignments<F>(&mut self, mut select_init: F)
-    where F: FnMut(&[PairAlignment]) -> u16,
+    /// Signature: `select_init(single_read_locations) -> initial_index`.
+    pub fn init_assignments<F>(&mut self, mut select_init: F) -> f64
+    where F: FnMut(&[PairAlignment]) -> usize,
     {
+        self.depth.fill(0);
         for (rp, assgn_mut) in self.read_assgn.iter_mut().enumerate() {
             let start_ix = self.read_ixs[rp];
             let end_ix = self.read_ixs[rp + 1];
@@ -281,15 +283,35 @@ impl<'a> ReadAssignment<'a> {
                 assgn = 0;
             } else {
                 assgn = select_init(&self.read_locs[start_ix..end_ix]);
-                assert!(start_ix + (assgn as usize) < end_ix,
+                assert!(start_ix + assgn < end_ix,
                     "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
             }
-            let (w1, w2) = self.contig_windows.get_pair_window_ixs(&self.read_locs[start_ix + assgn as usize]);
+            let (w1, w2) = self.contig_windows.get_pair_window_ixs(&self.read_locs[start_ix + assgn]);
             self.depth[w1 as usize] += 1;
             self.depth[w2 as usize] += 1;
-            *assgn_mut = assgn;
+            *assgn_mut = assgn.try_into().unwrap();
         }
         self.recalc_likelihood();
+        self.likelihood
+    }
+
+    /// Sets current read assignments with the new ones.
+    /// This triggers complete recalculation of the model likelihood, which is then returned.
+    pub fn set_assignments(&mut self, new_assgn: &[u16]) -> f64 {
+        self.read_assgn.clone_from_slice(new_assgn);
+        self.depth.fill(0);
+        for (rp, assgn) in self.read_assgn.iter().enumerate() {
+            let assgn = *assgn as usize;
+            let start_ix = self.read_ixs[rp];
+            let end_ix = self.read_ixs[rp + 1];
+            assert!(start_ix + assgn < end_ix,
+                "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
+            let (w1, w2) = self.contig_windows.get_pair_window_ixs(&self.read_locs[start_ix + assgn]);
+            self.depth[w1 as usize] += 1;
+            self.depth[w2 as usize] += 1;
+        }
+        self.recalc_likelihood();
+        self.likelihood
     }
 
     /// Returns the total likelihood of the read assignment.
@@ -300,6 +322,16 @@ impl<'a> ReadAssignment<'a> {
     /// Returns slice with indices of all read pairs with at least two alignment locations.
     pub fn non_trivial_reads(&self) -> &[usize] {
         &self.non_trivial_reads
+    }
+
+    /// Returns the total number of reads.
+    pub fn total_reads(&self) -> usize {
+        self.read_assgn.len()
+    }
+
+    /// Returns the slice of read assignments.
+    pub fn read_assignments(&self) -> &[u16] {
+        &self.read_assgn
     }
 
     /// Returns the current read-pair alignment given the read pair with index `rp`.
@@ -360,7 +392,7 @@ impl<'a> ReadAssignment<'a> {
         let new_windows = self.contig_windows.get_pair_window_ixs(new_paln);
         let diff = new_paln.ln_prob() - old_paln.ln_prob()
             + self.depth_lik_diff2(old_windows, -1) + self.depth_lik_diff2(new_windows, 1);
-        self.likelihood = diff;
+        self.likelihood += diff;
         self.read_assgn[rp] = new_assignment;
         diff
     }

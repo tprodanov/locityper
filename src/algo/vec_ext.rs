@@ -57,6 +57,12 @@ pub trait F64VecExt : VecExt<f64> {
     /// Returns maximal vector value.
     fn max(&self) -> f64;
 
+    /// Returns the index of the minimal value and the value itself.
+    fn argmin(&self) -> (usize, f64);
+
+    /// Returns the index of the maximal value and the value itself.
+    fn argmax(&self) -> (usize, f64);
+
     /// Finds `q`-th quantile in a sorted array.
     /// Uses linear interpolation, if the quantile is between two elements.
     fn quantile_sorted(&self, q: f64) -> f64;
@@ -219,14 +225,20 @@ macro_rules! f64_vec_ext_impl {
                 }) / (n - 1) as f64
             }
 
-            #[inline]
             fn min(&self) -> f64 {
                 self.iter().cloned().fold(f64::INFINITY, f64::min)
             }
 
-            #[inline]
             fn max(&self) -> f64 {
                 self.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+            }
+
+            fn argmin(&self) -> (usize, f64) {
+                IterExt::argmin(self.iter().cloned())
+            }
+
+            fn argmax(&self) -> (usize, f64) {
+                IterExt::argmax(self.iter().cloned())
             }
 
             fn quantile_sorted(&self, q: f64) -> f64 {
@@ -328,5 +340,35 @@ impl IterExt {
     pub fn quantile(it: impl Iterator<Item = f64>, q: f64) -> f64 {
         let v = IterExt::sorted(it);
         v.quantile_sorted(q)
+    }
+
+    /// Finds the index of the minimal value in the iterator and the value itself.
+    /// Panics on an empty iterator (or full of NANs).
+    pub fn argmin(it: impl Iterator<Item = f64>) -> (usize, f64) {
+        let mut k = usize::MAX;
+        let mut m = f64::INFINITY;
+        for (i, v) in it.enumerate() {
+            if v < m {
+                k = i;
+                m = v;
+            }
+        }
+        assert_ne!(k, usize::MAX, "argmin: empty iterator or all values are NAN!");
+        (k, m)
+    }
+
+    /// Finds the index of the maximal value in the iterator and the value itself.
+    /// Panics on an empty iterator (or full of NANs).
+    pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
+        let mut k = usize::MAX;
+        let mut m = f64::NEG_INFINITY;
+        for (i, v) in it.enumerate() {
+            if v > m {
+                k = i;
+                m = v;
+            }
+        }
+        assert_ne!(k, usize::MAX, "argmax: empty iterator or all values are NAN!");
+        (k, m)
     }
 }
