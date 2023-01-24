@@ -2,6 +2,8 @@ use std::rc::Rc;
 use std::cmp::min;
 use once_cell::unsync::OnceCell;
 use statrs::distribution::Discrete;
+#[cfg(feature = "stochastic")]
+use rand::Rng;
 use crate::{
     seq::{
         seq,
@@ -357,16 +359,13 @@ impl<'a> ReadAssignment<'a> {
     pub fn possible_reassignments(&self, rp: usize, buffer: &mut Vec<f64>) {
         let start_ix = self.read_ixs[rp];
         let end_ix = self.read_ixs[rp + 1];
-        assert!(start_ix + 1 < end_ix,
+        assert!(end_ix - start_ix >= 2,
             "Read pair #{} has {} possible locations! Impossible or or useless.", rp, end_ix - start_ix);
 
         let curr_ix = start_ix + self.read_assgn[rp] as usize;
         debug_assert!(curr_ix < end_ix, "Read pair #{}: impossible current location!", rp);
         let curr_paln = &self.read_locs[curr_ix];
-        let curr_windows = self.contig_windows.get_pair_window_ixs(curr_paln);
-        // Total likelihood difference will be:
-        // P(new alignment) - P(old alignment) + P(increase depth in new windows) + P(decrease depth in old windows).
-        let base_diff = -curr_paln.ln_prob() + self.depth_lik_diff2(curr_windows, -1);
+        let (w1, w2) = self.contig_windows.get_pair_window_ixs(curr_paln);
 
         for i in start_ix..end_ix {
             if i == curr_ix {
@@ -374,10 +373,38 @@ impl<'a> ReadAssignment<'a> {
                 continue;
             }
             let new_paln = &self.read_locs[i];
-            let new_windows = self.contig_windows.get_pair_window_ixs(new_paln);
-            let diff = base_diff + new_paln.ln_prob() + self.depth_lik_diff2(new_windows, 1);
+            let (w3, w4) = self.contig_windows.get_pair_window_ixs(new_paln);
+            let diff = new_paln.ln_prob() - curr_paln.ln_prob() + self.depth_lik_diff(w1, w2, w3, w4);
             buffer.push(diff);
         }
+    }
+
+    /// Calculates the probability of a random reassignment from a random read pair `rp` to a random location.
+    /// Returns the read pair index, new assignment and the improvement in likelihood.
+    /// Does not actually update any assignments.
+    #[cfg(feature = "stochastic")]
+    pub fn random_reassignment<R: Rng>(&self, rng: &mut R) -> (usize, u16, f64) {
+        let rp = self.non_trivial_reads[rng.gen_range(0..self.non_trivial_reads.len())];
+        let start_ix = self.read_ixs[rp];
+        let end_ix = self.read_ixs[rp + 1];
+        let total_assgns = end_ix - start_ix;
+        let curr_assgn = self.read_assgn[rp] as usize;
+        let new_assgn = if total_assgns < 2 {
+            panic!("Read pair #{} less than 2 possible assignments.", rp)
+        } else if total_assgns == 2 {
+            1 - curr_assgn
+        } else {
+            let i = rng.gen_range(1..total_assgns);
+            if i <= curr_assgn { i - 1 } else { i }
+        };
+        debug_assert_ne!(new_assgn, curr_assgn);
+
+        let old_paln = &self.read_locs[start_ix + curr_assgn];
+        let new_paln = &self.read_locs[start_ix + new_assgn];
+        let (w1, w2) = self.contig_windows.get_pair_window_ixs(old_paln);
+        let (w3, w4) = self.contig_windows.get_pair_window_ixs(new_paln);
+        let diff = new_paln.ln_prob() - old_paln.ln_prob() + self.depth_lik_diff(w1, w2, w3, w4);
+        (rp, new_assgn as u16, diff)
     }
 
     /// Reassigns read pair `rp` to a new location and returns the difference in likelihood.
@@ -393,17 +420,15 @@ impl<'a> ReadAssignment<'a> {
 
         let old_paln = &self.read_locs[old_ix];
         let new_paln = &self.read_locs[new_ix];
-        let old_windows = self.contig_windows.get_pair_window_ixs(old_paln);
-        let new_windows = self.contig_windows.get_pair_window_ixs(new_paln);
-        let diff = new_paln.ln_prob() - old_paln.ln_prob()
-            + self.depth_lik_diff2(old_windows, -1) + self.depth_lik_diff2(new_windows, 1);
+        let (w1, w2) = self.contig_windows.get_pair_window_ixs(old_paln);
+        let (w3, w4) = self.contig_windows.get_pair_window_ixs(new_paln);
+        let diff = new_paln.ln_prob() - old_paln.ln_prob() + self.depth_lik_diff(w1, w2, w3, w4);
         self.likelihood += diff;
         self.read_assgn[rp] = new_assignment;
-        // First add, then remove, so that we do not overflow.
-        self.depth[new_windows.0 as usize] += 1;
-        self.depth[new_windows.1 as usize] += 1;
-        self.depth[old_windows.0 as usize] -= 1;
-        self.depth[old_windows.1 as usize] -= 1;
+        self.depth[w1 as usize] -= 1;
+        self.depth[w2 as usize] -= 1;
+        self.depth[w3 as usize] += 1;
+        self.depth[w4 as usize] += 1;
         diff
     }
 
@@ -411,22 +436,44 @@ impl<'a> ReadAssignment<'a> {
     /// calculates the difference between the new and the old ln-probabilities.
     /// Positive value means that the likelihood will improve.
     /// Does not actually update the read depth.
-    ///
-    /// Windows must not be `UNMAPPED_WINDOW`.
-    fn depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
-        let i = window as usize;
-        let old_depth = self.depth[i];
-        let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative!");
-        self.depth_distrs[i].ln_pmf(new_depth) - self.depth_distrs[i].ln_pmf(old_depth)
+    fn atomic_depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
+        if depth_change == 0 {
+            0.0
+        } else {
+            let i = window as usize;
+            let old_depth = self.depth[i];
+            let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative!");
+            self.depth_distrs[i].ln_pmf(new_depth) - self.depth_distrs[i].ln_pmf(old_depth)
+        }
     }
 
-    /// Wraps `depth_lik_diff` function, and runs on a pair windows.
-    fn depth_lik_diff2(&self, (w1, w2): (u32, u32), depth_change: i32) -> f64 {
-        if w1 == w2 {
-            self.depth_lik_diff(w1, 2 * depth_change)
-        } else {
-            self.depth_lik_diff(w1, depth_change) + self.depth_lik_diff(w2, depth_change)
-        }
+    /// Calculate likelihood difference on four windows (some of them can be equal to others).
+    /// Depth at w1 and w2 is decreased by one, depth at w3 and w4 is increased by one.
+    fn depth_lik_diff(&self, w1: u32, w2: u32, w3: u32, w4: u32) -> f64 {
+        // Variables c1..c4 store change in read depth. If cX == 0, it means that wX is the same as some other window.
+        let mut c1 = -1;
+
+        let mut c2 = if w2 == w1 {
+            c1 -= 1; 0
+        } else { -1 };
+
+        let mut c3 = if w3 == w1 {
+            c1 += 1; 0
+        } else if w3 == w2 {
+            c2 += 1; 0
+        } else { 1 };
+
+        let c4 = if w4 == w1 {
+            c1 += 1; 0
+        } else if w4 == w2 {
+            c2 += 1; 0
+        } else if w4 == w3 {
+            c3 += 1; 0
+        } else { 1 };
+
+        debug_assert_eq!(c1 + c2 + c3 + c4, 0);
+        self.atomic_depth_lik_diff(w1, c1) + self.atomic_depth_lik_diff(w2, c2)
+            + self.atomic_depth_lik_diff(w3, c3) + self.atomic_depth_lik_diff(w4, c4)
     }
 
     /// Recalculates total model likelihood, and returns separately

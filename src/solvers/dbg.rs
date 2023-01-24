@@ -83,7 +83,7 @@ impl<W: Write> DbgWrite for DbgWriter<W> {
             _ => {},
         };
 
-        log::debug!("Iteration {:10}:   likelihood {:12.4}", iteration.to_string(), read_assignments.likelihood());
+        log::debug!("{:10}:   likelihood {:12.4}", iteration.to_string(), read_assignments.likelihood());
         for (w, (depth, lik)) in read_assignments.depth_lik_iter().enumerate() {
             writeln!(self.writer, "{}{}\t{}\t{}\t{:.2}", self.prefix, iteration, w, depth, lik)?;
         }

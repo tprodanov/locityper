@@ -1,5 +1,6 @@
 use std::cmp::min;
 use rand::{
+    Rng,
     SeedableRng,
     rngs::SmallRng,
     seq::SliceRandom,
@@ -99,7 +100,9 @@ impl<'a> Solver<'a> for GreedySolver<'a> {
 
     /// Initialize read alignments. Returns current likelihood.
     fn initialize(&mut self) -> f64 {
-        self.assignments.init_assignments(solvers::init_best)
+        // self.assignments.init_assignments(solvers::init_best)
+        // self.assignments.init_assignments(|_| 0)
+        self.assignments.init_assignments(|alns| self.rng.gen_range(0..alns.len()))
     }
 
     /// Perform one iteration, and return the likelihood improvement.
@@ -122,8 +125,7 @@ impl<'a> Solver<'a> for GreedySolver<'a> {
         }
         if best_improv > 0.0 {
             self.curr_plato = 0;
-            let improv2 = self.assignments.reassign(best_rp, best_assgn);
-            debug_assert_eq!(improv2, best_improv, "Unexpected likelihood improvement.");
+            self.assignments.reassign(best_rp, best_assgn);
         } else {
             self.curr_plato += 1;
             self.is_finished = self.curr_plato > self.plato_iters;

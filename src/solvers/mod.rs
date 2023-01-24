@@ -7,14 +7,19 @@ use crate::{
     },
 };
 
+pub mod dbg;
 #[cfg(feature = "stochastic")]
 pub mod greedy;
-pub mod dbg;
-
 #[cfg(feature = "stochastic")]
-pub use crate::solvers::greedy::GreedySolver;
+pub mod anneal;
+
 pub use crate::solvers::dbg::{DbgWrite, NoDbg, DbgWriter};
 use crate::solvers::dbg::Iteration;
+#[cfg(feature = "stochastic")]
+pub use crate::solvers::{
+    greedy::GreedySolver,
+    anneal::SimulatedAnnealing,
+};
 
 pub trait SolverBuilder {
     type S<'a>: Solver<'a>;
@@ -103,6 +108,13 @@ where B: SolverBuilder,
             }
         }
         assgns = solver.finish();
+        assgns.recalc_likelihood();
+        let divergence = (last_lik - assgns.likelihood()).abs();
+        assert!(divergence < 1e-2, "Likelihood estimates diverged too much {} and {}", last_lik, assgns.likelihood());
+        if divergence > 1e-6 {
+            log::error!("Likelihood estimates diverged by {} ({} and {})", divergence, last_lik, assgns.likelihood());
+        }
+
         if B::S::<'a>::is_determenistic() {
             break;
         }
