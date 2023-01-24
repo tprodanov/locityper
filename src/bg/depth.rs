@@ -11,7 +11,7 @@ use crate::{
     },
     algo::{
         nbinom::NBinom,
-        vec_ext::*,
+        vec_ext::{VecExt, F64Ext, IterExt},
         loess::Loess,
         bisect,
     },
@@ -282,7 +282,7 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u3
     for (gc, &(i, j)) in gc_bins.iter().enumerate() {
         if j - i >= VAR_MIN_WINDOWS {
             x.push(gc as f64);
-            y.push(depth_f[i..j].variance(None));
+            y.push(F64Ext::variance(&depth_f[i..j], None));
             w.push((j - i) as f64 / n as f64);
         }
     }
@@ -406,8 +406,8 @@ impl ReadDepth {
         assert!(windows.len() > 0, "ReadDepth: no applicable windows!");
 
         let gc_contents = get_window_gc_contents(&windows, interval, ref_seq, params.gc_padding);
-        let ixs = gc_contents.argsort();
-        let gc_contents = gc_contents.reorder(&ixs);
+        let ixs = VecExt::argsort(&gc_contents);
+        let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
         let depth1: Vec<u32> = ixs.iter().map(|&i| windows[i].depth1).collect();
 

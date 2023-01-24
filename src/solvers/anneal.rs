@@ -1,12 +1,10 @@
-use std::cmp::{min, max};
+use std::cmp::max;
 use rand::{
     Rng,
     SeedableRng,
     rngs::SmallRng,
-    seq::SliceRandom,
 };
 use crate::{
-    algo::vec_ext::*,
     model::assgn::ReadAssignment,
     solvers::{self, SolverBuilder, Solver},
 };

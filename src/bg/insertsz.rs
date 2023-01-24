@@ -4,7 +4,7 @@ use statrs::distribution::Discrete;
 use htslib::bam::record::{Record, Aux};
 use crate::{
     algo::{
-        vec_ext::*,
+        vec_ext::{VecExt, F64Ext},
         nbinom::{NBinom, CachedDistr},
         bisect,
     },
@@ -80,16 +80,16 @@ impl InsertNegBinom {
             (orient_counts[0] as f64).ln_1p() - total.ln_1p(),
             (orient_counts[1] as f64).ln_1p() - total.ln_1p()];
 
-        insert_sizes.sort();
-        let max_size = QUANT_MULT * insert_sizes.quantile_sorted(QUANTILE);
+        VecExt::sort(&mut insert_sizes);
+        let max_size = QUANT_MULT * F64Ext::quantile_sorted(&insert_sizes, QUANTILE);
         // Find index after the limiting value.
         let m = bisect::right(&insert_sizes, &max_size);
         let lim_insert_sizes = &insert_sizes[..m];
         let max_size = max_size.ceil() as u32;
 
-        let mean = lim_insert_sizes.mean();
+        let mean = F64Ext::mean(lim_insert_sizes);
         // Increase variance, if less-equal than mean.
-        let var = lim_insert_sizes.variance(Some(mean)).max(1.000001 * mean);
+        let var = F64Ext::variance(lim_insert_sizes, Some(mean)).max(1.000001 * mean);
         log::info!("        Insert size mean = {:.1},  st.dev. = {:.1}", mean, var.sqrt());
         log::info!("        Treat reads with insert size > {} as unpaired", max_size);
         Self {

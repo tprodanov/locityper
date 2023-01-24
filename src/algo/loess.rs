@@ -1,10 +1,9 @@
 //! Module to calculate local regression (LOESS / LOWESS).
 
 use std::cmp::min;
-use itertools::izip;
 use nalgebra::{DVector, DMatrix, SVD};
 use crate::algo::{
-    vec_ext::*,
+    vec_ext::VecExt,
     bisect,
 };
 
@@ -84,10 +83,10 @@ impl Default for Loess {
 fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: usize) -> Vec<f64> {
     let n = x.len();
     assert!(n == y.len(), "Cannot calculate LOESS on vectors of different length ({} and {})", n, y.len());
-    let ixs = x.argsort();
-    let x = x.reorder(&ixs);
-    let y = y.reorder(&ixs);
-    let w = w.map(|values| values.reorder(&ixs));
+    let ixs = VecExt::argsort(x);
+    let x = VecExt::reorder(x, &ixs);
+    let y = VecExt::reorder(y, &ixs);
+    let w = w.map(|values| VecExt::reorder(values, &ixs));
 
     let n_frac = (n as f64 * frac).round().max(1.0) as usize;
     let range = x[n - 1] - x[0];
@@ -118,12 +117,11 @@ fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: 
 
         let sub_x = &x[a..b];
         let sub_y = &y[a..b];
-        // Calculates (sub_x - xval) / range.
-        let norm_sub_x = sub_x.sc_add_mul(-xval, 1.0 / range);
+        let norm_sub_x: Vec<f64> = sub_x.iter().map(|v| (v - xval) / range).collect();
         let mut weight = tricube_kernel(&norm_sub_x);
 
         if let Some(in_weight) = &w {
-            weight.ew_mul_assign(&in_weight[a..b]);
+            weight.iter_mut().zip(&in_weight[a..b]).for_each(|(w1, &w2)| *w1 *= w2);
         }
         let coefs = polyfit(sub_x, sub_y, &weight, deg).unwrap();
         y_out.push(polyval(&coefs, xval));
@@ -139,7 +137,7 @@ pub fn polyfit(x: &[f64], y: &[f64], w: &[f64], deg: usize) -> Result<Vec<f64>, 
     let mut a = DMatrix::zeros(nrow, ncol);
     let mut b = DVector::zeros(nrow);
 
-    for (i, (&xi, &yi, &wi)) in izip!(x, y, w).enumerate() {
+    for (i, ((&xi, &yi), &wi)) in x.iter().zip(y).zip(w).enumerate() {
         a[(i, 0)] = wi;
         b[i] = yi * wi;
 

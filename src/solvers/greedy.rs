@@ -6,9 +6,9 @@ use rand::{
     seq::SliceRandom,
 };
 use crate::{
-    algo::vec_ext::*,
+    algo::vec_ext::F64Ext,
     model::assgn::ReadAssignment,
-    solvers::{self, SolverBuilder, Solver},
+    solvers::{SolverBuilder, Solver},
 };
 
 /// Builder, that constructs `GreedySolver`.
@@ -116,7 +116,7 @@ impl<'a> Solver<'a> for GreedySolver<'a> {
         for &rp in self.assignments.non_trivial_reads().choose_multiple(&mut self.rng, self.sample_size) {
             self.buffer.clear();
             self.assignments.possible_reassignments(rp, &mut self.buffer);
-            let (assgn, improv) = self.buffer.argmax();
+            let (assgn, improv) = F64Ext::argmax(&self.buffer);
             if improv > best_improv {
                 best_rp = rp;
                 best_assgn = assgn as u16;
