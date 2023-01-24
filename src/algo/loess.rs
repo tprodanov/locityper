@@ -133,8 +133,7 @@ fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: 
 
 /// Fit a polynomial of degree `deg` to points `x`, `y`. Points are weighted with the slice `w`.
 /// Returns a vector of coefficients, starting with x^0 coefficient and ending with x^deg.
-pub fn polyfit(x: &[f64], y: &[f64], w: &[f64], deg: usize) ->
-        Result<Vec<f64>, &'static str> {
+pub fn polyfit(x: &[f64], y: &[f64], w: &[f64], deg: usize) -> Result<Vec<f64>, &'static str> {
     let nrow = x.len();
     let ncol = deg + 1;
     let mut a = DMatrix::zeros(nrow, ncol);

@@ -1,5 +1,8 @@
-use std::io::{self, Write};
-use std::fs::File;
+use std::{
+    io::{self, Write},
+    fmt,
+    fs::File,
+};
 use crate::{
     // algo::vec_ext::IterExt,
     model::{
@@ -8,11 +11,35 @@ use crate::{
     },
 };
 
+/// Enum that denotes two-order iteration number.
+#[derive(Clone)]
+pub enum Iteration {
+    /// Initialization was performed. Argument: outer iteration.
+    Init(u32),
+    /// Single step was performed. Arguments: outer iteration and inner iteration.
+    Step(u32, u32),
+    /// Last step was performed. Arguments: outer iteration and last inner iteration.
+    Last(u32, u32),
+    /// Best solution across all iterations.
+    Best,
+}
+
+impl fmt::Display for Iteration {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Iteration::Init(outer) => write!(f, "{}-init", outer),
+            Iteration::Step(outer, inner) => write!(f, "{}-{}", outer, inner),
+            Iteration::Last(outer, inner) => write!(f, "{}-{}!", outer, inner),
+            Iteration::Best => write!(f, "best"),
+        }
+    }
+}
+
 /// Write debug information about solvers.
 pub trait DbgWrite {
     /// Write current read assignments after the corresponding iteration.
     /// If force is true, write in any case.
-    fn write<'a>(&mut self, read_assignments: &'a ReadAssignment<'a>, iteration: u32, force: bool) -> io::Result<()>;
+    fn write<'a>(&mut self, read_assignments: &'a ReadAssignment<'a>, iteration: Iteration) -> io::Result<()>;
 
     fn flush(&mut self) -> io::Result<()>;
 }
@@ -21,7 +48,7 @@ pub trait DbgWrite {
 pub struct NoDbg;
 
 impl DbgWrite for NoDbg {
-    fn write<'a>(&mut self, _: &'a ReadAssignment<'a>, _: u32, _: bool) -> io::Result<()> { Ok(()) }
+    fn write<'a>(&mut self, _: &'a ReadAssignment<'a>, _: Iteration) -> io::Result<()> { Ok(()) }
 
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
@@ -49,13 +76,16 @@ impl DbgWriter<io::BufWriter<File>> {
 }
 
 impl<W: Write> DbgWrite for DbgWriter<W> {
-    fn write<'a>(&mut self, read_assignments: &'a ReadAssignment<'a>, iteration: u32, force: bool) -> io::Result<()> {
-        if force || iteration % self.frequency == 0 {
-            log::debug!("Iteration {:5}:   likelihood {:12.4}", iteration, read_assignments.likelihood());
-            writeln!(self.writer, "{}{}\t-1\tNA\t{:.2}", self.prefix, iteration, read_assignments.likelihood())?;
-            for (w, (depth, lik)) in read_assignments.depth_lik_iter().enumerate() {
-                writeln!(self.writer, "{}{}\t{}\t{}\t{:.2}", self.prefix, iteration, w, depth, lik)?;
-            }
+    fn write<'a>(&mut self, read_assignments: &'a ReadAssignment<'a>, iteration: Iteration) -> io::Result<()> {
+        writeln!(self.writer, "{}{}\t-1\tNA\t{:.2}", self.prefix, iteration, read_assignments.likelihood())?;
+        match &iteration {
+            Iteration::Step(_, inner) if inner % self.frequency != 0 => return Ok(()),
+            _ => {},
+        };
+
+        log::debug!("Iteration {:10}:   likelihood {:12.4}", iteration.to_string(), read_assignments.likelihood());
+        for (w, (depth, lik)) in read_assignments.depth_lik_iter().enumerate() {
+            writeln!(self.writer, "{}{}\t{}\t{}\t{:.2}", self.prefix, iteration, w, depth, lik)?;
         }
         Ok(())
     }
