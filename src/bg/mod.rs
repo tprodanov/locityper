@@ -1,4 +1,5 @@
 pub mod err_prof;
+pub mod err_prof2;
 pub mod insertsz;
 pub mod depth;
 pub mod ser;
