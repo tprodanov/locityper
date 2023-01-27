@@ -107,6 +107,11 @@ impl Interval {
         }
     }
 
+    /// Returns true if two intervals overlap by at least one base-pair.
+    pub fn overlaps(&self, other: &Interval) -> bool {
+        self.contig_id == other.contig_id && self.start < other.end && other.start < self.end
+    }
+
     // /// Convert interval into string with comma separator.
     // pub fn comma_string(&self) -> String {
     //     let mut s = String::new();

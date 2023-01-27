@@ -150,7 +150,7 @@ impl TransErrorProfile {
             if (record.flags() & 3844) != 0 {
                 continue;
             }
-            let ext_cigar = Cigar::infer_ext_cigar(&record);
+            let ext_cigar = Cigar::infer_ext_cigar(&record, ());
 
             if record.is_last_in_template() {
                 counts2.update(&ext_cigar)

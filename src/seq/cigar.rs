@@ -212,26 +212,50 @@ impl Cigar {
     }
 
     /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
-    pub fn infer_ext_cigar(rec: &record::Record) -> Cigar {
+    /// Second argument: either `()`, or `&mut Vec<u8>`.
+    pub fn infer_ext_cigar<S: SeqOrNone>(rec: &record::Record, mut ref_seq: S) -> Cigar {
         let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
             s
         } else {
             panic!("Cannot create extended CIGAR: record {} either has no MD tag, or MD tag has incorrect type",
                 String::from_utf8_lossy(rec.qname()))
         };
-        ExtCigarData::<()>::process(rec.seq(), rec.raw_cigar(), md_str).0
+        let raw_md = md_str.as_bytes();
+        let mut data = ExtCigarData {
+            new_cigar: Cigar::new(),
+            query_seq: rec.seq(),
+            ref_seq: &mut ref_seq,
+            md_str, raw_md,
+            md_entries: parse_md(raw_md),
+            md_ix: 0,
+            md_shift: 0,
+        };
+
+        for &val in rec.raw_cigar() {
+            data.process_op(CigarItem::from_u32(val));
+        }
+        debug_assert_eq!(data.md_ix, data.md_entries.len(), "Failed to parse MD tag \"{}\"", data.md_str);
+        if let Some(ref_len) = data.ref_seq.try_len() {
+            assert_eq!(ref_len as u32, data.new_cigar.ref_len(), "Failed to parse MD tag \"{}\"", md_str);
+        }
+        let in_query_len = data.query_seq.len() as u32;
+        // If the query sequence is missing, in_query_len will be 0.
+        if in_query_len > 0 {
+            assert_eq!(data.new_cigar.query_len(), in_query_len, "Failed to parse MD tag \"{}\"", md_str);
+        }
+        data.new_cigar.shrink_to_fit();
+        data.new_cigar
     }
 
-    /// Create an extended CIGAR from short CIGAR and MD string, as well as the reference sequence.
-    /// Returns pair (Cigar, Vec<u8>).
-    pub fn infer_ext_cigar_seq(rec: &record::Record) -> (Cigar, Vec<u8>) {
-        let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
-            s
-        } else {
-            panic!("Cannot create extended CIGAR: record {} either has no MD tag, or MD tag has incorrect type",
-                String::from_utf8_lossy(rec.qname()))
-        };
-        ExtCigarData::process(rec.seq(), rec.raw_cigar(), md_str)
+    /// Returns soft clipping on the left and right.
+    pub fn soft_clipping(&self) -> (u32, u32) {
+        assert!(!self.is_empty(), "Cannot calculate soft clipping on an empty CIGAR!");
+        let first = &self.tuples[0];
+        let last = &self.tuples[self.len() - 1];
+        (
+            if first.op == Operation::Soft { first.len() } else { 0 },
+            if last.op == Operation::Soft { last.len() } else { 0 },
+        )
     }
 }
 
@@ -283,48 +307,32 @@ impl Index<usize> for Cigar {
     }
 }
 
-/// Trait that stores either Vec<u8>, or ().
-pub trait SeqOrNone : std::fmt::Debug {
-    /// Creates a new object.
-    fn new() -> Self;
-
+/// Trait that stores either `Vec<u8>`, or `()`.
+pub trait SeqOrNone : fmt::Debug {
     /// Returns true if it is possible to push nucletides in the object (false for ()).
     fn push_possible() -> bool;
 
     /// Pushes a new nucleotide.
     fn push(&mut self, nt: u8);
 
-    /// Complete the object creation (for example, shrinks the vector).
-    fn complete(&mut self);
-
     /// Returns length, if available.
-    fn len(&self) -> Option<usize>;
+    fn try_len(&self) -> Option<usize>;
 }
 
 impl SeqOrNone for () {
-    fn new() -> Self {}
     fn push_possible() -> bool { false }
     fn push(&mut self, _nt: u8) {}
-    fn complete(&mut self) {}
-    fn len(&self) -> Option<usize> { None }
+    fn try_len(&self) -> Option<usize> { None }
 }
 
-impl SeqOrNone for Vec<u8> {
-    fn new() -> Self {
-        Vec::new()
-    }
-
+impl SeqOrNone for &mut Vec<u8> {
     fn push_possible() -> bool { true }
 
     fn push(&mut self, nt: u8) {
-        self.push(nt);
+        Vec::push(*self, nt);
     }
 
-    fn complete(&mut self) {
-        self.shrink_to_fit();
-    }
-
-    fn len(&self) -> Option<usize> {
+    fn try_len(&self) -> Option<usize> {
         Some(self.len())
     }
 }
@@ -391,8 +399,7 @@ fn parse_md(md: &[u8]) -> Vec<MdEntry> {
 struct ExtCigarData<'a, S: SeqOrNone> {
     query_seq: record::Seq<'a>,
     new_cigar: Cigar,
-    ref_seq: S,
-
+    ref_seq: &'a mut S,
     md_str: &'a str,
     raw_md: &'a [u8],
     md_entries: Vec<MdEntry>,
@@ -401,38 +408,6 @@ struct ExtCigarData<'a, S: SeqOrNone> {
 }
 
 impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
-    fn process(query_seq: record::Seq<'a>, raw_cigar: &[u32], md_str: &'a str) -> (Cigar, S) {
-        let raw_md = md_str.as_bytes();
-        let mut data = Self {
-            query_seq,
-            new_cigar: Cigar::new(),
-            ref_seq: S::new(),
-            md_str,
-            raw_md,
-            md_entries: parse_md(raw_md),
-            md_ix: 0,
-            md_shift: 0,
-        };
-
-        for &val in raw_cigar {
-            data.process_op(CigarItem::from_u32(val));
-        }
-        debug_assert_eq!(data.md_ix, data.md_entries.len(), "Failed to parse MD tag \"{}\"", data.md_str);
-
-        if let Some(ref_len) = data.ref_seq.len() {
-            assert_eq!(ref_len as u32, data.new_cigar.ref_len(), "Failed to parse MD tag \"{}\"", md_str);
-        }
-        let in_query_len = query_seq.len() as u32;
-        // If the query sequence is missing, in_query_len will be 0.
-        if in_query_len > 0 {
-            assert_eq!(data.new_cigar.query_len(), in_query_len, "Failed to parse MD tag \"{}\"", md_str);
-        }
-
-        data.new_cigar.shrink_to_fit();
-        data.ref_seq.complete();
-        (data.new_cigar, data.ref_seq)
-    }
-
     fn process_op(&mut self, tup: CigarItem) {
         if tup.op.consumes_both() {
             let mut op_len = tup.len;
