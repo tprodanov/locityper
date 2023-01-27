@@ -79,7 +79,15 @@ pub fn sevenmer_complexities(seq: &[u8]) -> Vec<u8> {
     // Last calculated index.
     let r = n - PADD - 1;
     for i in PADD..=r {
-        res[i] = min(kmer_abundance_123(&seq[i-PADD..=i+PADD]) as u8 / DIVISOR, MAX_COMPLEXITY);
+        let ab = kmer_abundance_123(&seq[i-PADD..=i+PADD]);
+        res[i] = if ab <= 15 {
+            0
+        } else if ab <= 60 {
+            1
+        } else {
+            2
+        };
+        // res[i] = min(kmer_abundance_123(&seq[i-PADD..=i+PADD]) as u8 / DIVISOR, MAX_COMPLEXITY);
     }
     for i in 0..PADD {
         res[i] = res[PADD];
@@ -98,6 +106,22 @@ struct ErrorCounts {
     mismatches: u32,
     deletions: u32,
     sum_insertion: u32,
+}
+
+impl ErrorCounts {
+    fn observations(&self) -> u32 {
+        // Insertions always come after another operation, therefore it is not counted here.
+        self.matches + self.mismatches + self.deletions
+    }
+}
+
+impl fmt::Debug for ErrorCounts {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let obs = self.observations();
+        write!(f, "{:5} obs.  M: {:5}, X: {:5}, D: {:5}, I: {:5} ({:.10})",
+            obs, self.matches, self.mismatches, self.deletions,
+            self.sum_insertion, self.sum_insertion as f32 / obs as f32)
+    }
 }
 
 /// Place read position into one of the bins as
@@ -124,17 +148,30 @@ impl Default for SubProfileBuilder {
     }
 }
 
+impl fmt::Debug for SubProfileBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut clipping: Vec<(f64, u32)> = self.clip_counts.iter()
+            .map(|(&key, &count)| (f64::from_bits(key), count)).collect();
+        clipping.sort_by(|a, b| a.0.total_cmp(&b.0));
+        writeln!(f, "    Clipping: {:?}", clipping)?;
+        for i in 0..=POSITION_BINS as usize {
+            writeln!(f, "        {:3} {:?}", i, self.err_counts[i])?;
+        }
+        Ok(())
+    }
+}
+
 use crate::seq::aln::READ_ENDS;
 
 /// Construct error profiles.
 struct ProfileBuilder {
-    /// Stratify errors by read mate and sequence complexity.
-    profiles: [[SubProfileBuilder; N_COMPLEXITIES]; READ_ENDS],
     /// Reference sequence interval.
     interval: Interval,
     /// Sequence complexity around each nucleotide of the input interval.
     /// Stores values in 0..N_COMPLEXITIES.
     complexities: Vec<u8>,
+    /// Stratify errors by read mate and sequence complexity.
+    profiles: [[SubProfileBuilder; N_COMPLEXITIES]; READ_ENDS],
 }
 
 impl ProfileBuilder {
@@ -225,20 +262,29 @@ impl ProfileBuilder {
     }
 }
 
+impl fmt::Debug for ProfileBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "Profile builder for {}", self.interval)?;
+        for read_end in 0..READ_ENDS as usize {
+            for complexity in 0..N_COMPLEXITIES as usize {
+                writeln!(f, "Mate {}, complexity {}", read_end + 1, complexity)?;
+                self.profiles[read_end][complexity].fmt(f)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct ErrorProfile;
 
 impl ErrorProfile {
     /// Create error profile from the iterator over records.
-    pub fn estimate<'a, I>(
-        records: I,
-        contigs: &Rc<ContigNames>,
-        interval: &Interval,
-        interval_seq: &[u8],
-    ) -> ErrorProfile
+    pub fn estimate<'a, I>(records: I, interval: &Interval, interval_seq: &[u8]) -> ErrorProfile
     where I: Iterator<Item = &'a Record>,
     {
         log::info!("    Estimating read error profiles");
         let mut prof_builder = ProfileBuilder::new(interval, interval_seq);
+        let contigs = interval.contigs();
         for record in records {
             // Unmapped or secondary.
             if (record.flags() & 3844) != 0 {
@@ -247,6 +293,7 @@ impl ErrorProfile {
             let aln = Alignment::from_record(&record, Rc::clone(contigs));
             prof_builder.update(&aln, ReadEnd::from_record(&record));
         }
+        println!("{:?}", prof_builder);
         ErrorProfile
     }
 }

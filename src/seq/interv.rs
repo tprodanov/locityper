@@ -61,6 +61,10 @@ impl Interval {
         self.contig_names.name(self.contig_id)
     }
 
+    pub fn contigs(&self) -> &Rc<ContigNames> {
+        &self.contig_names
+    }
+
     /// Interval start.
     #[inline]
     pub fn start(&self) -> u32 {
