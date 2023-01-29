@@ -79,10 +79,21 @@ fn abundances(seq_2b: &[u8], out: &mut [u16], w: usize, k: usize) {
     }
 }
 
-pub fn linguistic_complexity(seq: &[u8], w: usize, min_k: usize, max_k: usize) -> Vec<f32> {
+/// Calculates the linguistic complexity of a sequence.
+/// Complexity is calculated across moving windows of size `w` (must be odd).
+///
+/// For each window of size `w`, the function calculates the product of *U_k* of all `k in k1..=k2`,
+/// where *U_k* is the number of unique k-mers in the window divided by the maximal possible number of k-mers
+/// `min(4^k, w-k+1)`.
+///
+/// Output complexity is written in the middle of each window (`i -> i + w/2`).
+/// Returns NaN for windows that contain Ns.
+/// Fills values close to boundary with the last available values.
+pub fn linguistic_complexity(seq: &[u8], w: usize, k1: usize, k2: usize
+) -> impl Iterator<Item = f32> + std::iter::ExactSizeIterator {
     let n = seq.len();
     assert!(w % 2 == 1, "Window size ({}) must be odd", w);
-    assert!(min_k <= max_k && max_k <= MAX_K_VAL, "Impossible k values {} and {}", min_k, max_k);
+    assert!(k1 <= k2 && k2 <= MAX_K_VAL, "Impossible k values {} and {}", k1, k2);
     assert!(w <= n, "Window size ({}) must not be greater than the sequence length ({})", w, n);
     let seq_2b = seq_to_2bit(seq);
 
@@ -104,21 +115,21 @@ pub fn linguistic_complexity(seq: &[u8], w: usize, min_k: usize, max_k: usize) -
     }
 
     let mut divisor = 1.0;
-    for k in min_k..=max_k {
+    for k in k1..=k2 {
         abundances(&seq_2b, &mut abund, w, k);
         divisor *= min(4_u32.pow(k as u32), (w + 1 - k) as u32) as f32;
     }
-    let coef = 1.0 / divisor;
-    let mut compl: Vec<_> = abund.iter().map(|&a| if a == 0 { f32::NAN } else { coef * a as f32 }).collect();
     for i in 0..halfw {
         debug_assert!(abund[i] <= 1 && abund[n - i - 1] <= 1);
-        compl[i] = compl[halfw];
-        compl[n - i - 1] = compl[n - halfw - 1];
+        abund[i] = abund[w];
+        abund[n - i - 1] = abund[n - halfw - 1];
     }
-    compl
+    let coef = 1.0 / divisor;
+    abund.into_iter().map(move |a| if a == 0 { f32::NAN } else { coef * a as f32 })
 }
 
+/// Linguistic complexity of a sequence, with k-mer size between 1 and 3 (see `linguistic_complexity`).
 #[inline]
-pub fn linguistic_complexity_k3(seq: &[u8], w: usize) -> Vec<f32> {
+pub fn linguistic_complexity_k3(seq: &[u8], w: usize) -> impl Iterator<Item = f32> + std::iter::ExactSizeIterator {
     linguistic_complexity(seq, w, 1, 3)
 }

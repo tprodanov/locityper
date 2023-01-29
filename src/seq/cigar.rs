@@ -257,6 +257,29 @@ impl Cigar {
             if last.op == Operation::Soft { last.len() } else { 0 },
         )
     }
+
+    /// Calculates "true" clipping: total query length before the first match (=), and after the last match.
+    pub fn true_clipping(&self) -> (u32, u32) {
+        let mut left = 0;
+        for item in self.tuples.iter() {
+            if item.op == Operation::Equal {
+                break;
+            } else if item.op.consumes_query() {
+                left += item.len;
+            }
+        }
+        assert!(left < self.qlen, "Error in true_clipping({}): there are no matches in the CIGAR.", self);
+
+        let mut right = 0;
+        for item in self.tuples.iter().rev() {
+            if item.op == Operation::Equal {
+                break;
+            } else if item.op.consumes_query() {
+                right += item.len;
+            }
+        }
+        (left, right)
+    }
 }
 
 impl PartialEq for Cigar {
