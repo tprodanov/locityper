@@ -149,6 +149,38 @@ impl fmt::Debug for ReadProfile {
     }
 }
 
+#[derive(Clone, Default)]
+struct SubProfileBuilder {
+    matches: u64,
+    mismatches: u64,
+    deletions: u64,
+    sum_insertions: u64,
+    n_insertions: u32,
+}
+
+impl SubProfileBuilder {
+    fn update(&mut self, read_subprofile: &ReadSubProfile) {
+        self.matches += u64::from(read_subprofile.matches);
+        self.mismatches += u64::from(read_subprofile.mismatches);
+        self.deletions += u64::from(read_subprofile.deletions);
+        for &ins in read_subprofile.insertions.iter() {
+            self.n_insertions += 1;
+            self.sum_insertions += u64::from(ins);
+        }
+    }
+}
+
+impl fmt::Debug for SubProfileBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let obs = self.matches + self.mismatches + self.deletions;
+        let obsf = obs as f64;
+        write!(f, "{:8} obs,  M: {:8} ({:.6}),  X: {:8} ({:.6}),  D: {:8} ({:.6}),  I: {:6}/{:6} ({:.6})",
+            obs, self.matches, self.matches as f64 / obsf, self.mismatches, self.mismatches as f64 / obsf,
+            self.deletions, self.deletions as f64 / obsf,
+            self.sum_insertions, self.n_insertions, self.sum_insertions as f64 / self.n_insertions as f64)
+    }
+}
+
 use crate::seq::aln::READ_ENDS;
 
 /// Construct error profiles.
@@ -158,7 +190,8 @@ struct ProfileBuilder {
     /// Sequence complexity around each nucleotide of the input interval.
     /// Stores values in range 0..N_COMPLEXITIES.
     complexities: Vec<u8>,
-    buffer_read_prof: ReadProfile,
+    read_prof: ReadProfile,
+    subprofiles: [[SubProfileBuilder; N_COMPLEXITIES]; READ_ENDS],
 }
 
 impl ProfileBuilder {
@@ -171,14 +204,30 @@ impl ProfileBuilder {
         Self {
             interval: interval.clone(),
             complexities,
-            buffer_read_prof: ReadProfile::default(),
+            read_prof: ReadProfile::default(),
+            subprofiles: Default::default(),
         }
     }
 
     fn update(&mut self, aln: &Alignment, read_end: ReadEnd) {
-        self.buffer_read_prof.clear();
-        ReadProfile::fill(&mut self.buffer_read_prof, aln, &self.interval, &self.complexities);
-        println!("{:?}", self.buffer_read_prof);
+        self.read_prof.clear();
+        ReadProfile::fill(&mut self.read_prof, aln, &self.interval, &self.complexities);
+        let subprofiles = &mut self.subprofiles[read_end.ix()];
+        for i in 0..N_COMPLEXITIES {
+            subprofiles[i].update(&self.read_prof.0[i]);
+        }
+    }
+}
+
+impl fmt::Debug for ProfileBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for read_end in 0..READ_ENDS {
+            for compl in 0..N_COMPLEXITIES {
+                writeln!(f, "Mate {},  compl {}", read_end + 1, compl)?;
+                writeln!(f, "    {:?}", self.subprofiles[read_end][compl])?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -204,9 +253,9 @@ impl ErrorProfile {
                 continue;
             }
             let aln = Alignment::from_record(&record, Rc::clone(contigs));
-            println!("Read {}   aln {}", String::from_utf8_lossy(record.qname()), aln);
             prof_builder.update(&aln, ReadEnd::from_record(&record));
         }
+        println!("{:?}", prof_builder);
         ErrorProfile
     }
 }
