@@ -16,10 +16,10 @@ use crate::{
         insertsz::InsertDistr,
     },
     algo::{
-        math::Ln,
         hash::fnv1a,
         bisect,
     },
+    math::Ln,
 };
 
 /// Single mate alignment: store alignment location, strand, read-end, and alignment ln-probability.

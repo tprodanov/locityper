@@ -2,6 +2,7 @@ use simplelog::{TermLogger, ConfigBuilder, LevelPadding, LevelFilter, TerminalMo
 
 pub mod seq;
 pub mod algo;
+pub mod math;
 pub mod bg;
 pub mod model;
 pub mod solvers;

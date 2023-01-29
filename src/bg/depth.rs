@@ -10,12 +10,12 @@ use crate::{
         seq,
     },
     algo::{
-        nbinom::NBinom,
         vec_ext::{VecExt, F64Ext, IterExt},
         loess::Loess,
         bisect,
     },
     bg::ser::{JsonSer, LoadError, parse_f64_arr},
+    math::nbinom::NBinom,
 };
 
 pub trait DepthDistr {

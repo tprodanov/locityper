@@ -10,7 +10,7 @@ use crate::{
         contigs::{ContigNames, ContigId},
         interv::Interval,
     },
-    algo::{
+    math::{
         nbinom::{NBinom, UniformNBinom, CachedDistr},
     },
     bg::{self,

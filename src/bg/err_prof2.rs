@@ -22,31 +22,22 @@ struct ReadSubProfile {
     matches: u16,
     mismatches: u16,
     deletions: u16,
-    insertions: Vec<u16>,
+    insertions: u16,
     left_clip: Option<u16>,
     right_clip: Option<u16>,
 }
 
 impl ReadSubProfile {
-    fn clear(&mut self) {
-        self.matches = 0;
-        self.mismatches = 0;
-        self.deletions = 0;
-        self.insertions.clear();
-        self.left_clip = None;
-        self.right_clip = None;
-    }
-
     /// Sum number of reference positions, covered by this profile (matches + mismatches + deletions).
-    fn ref_positions(&self) -> u16 {
+    fn ref_len(&self) -> u16 {
         self.matches + self.mismatches + self.deletions
     }
 }
 
 impl fmt::Debug for ReadSubProfile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let obs = self.ref_positions();
-        write!(f, "{:3} obs.  M: {:3}, X: {:3}, D: {:3}, I: {:?},  S {:>2} {:>2}",
+        let obs = self.ref_len();
+        write!(f, "{:3} obs.  M: {:3}, X: {:3}, D: {:3}, I: {:3},  S {:>2} {:>2}",
             obs, self.matches, self.mismatches, self.deletions, self.insertions,
             self.left_clip.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
             self.right_clip.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()))
@@ -57,11 +48,8 @@ impl fmt::Debug for ReadSubProfile {
 struct ReadProfile([ReadSubProfile; N_COMPLEXITIES]);
 
 impl ReadProfile {
-    fn clear(&mut self) {
-        self.0.iter_mut().for_each(ReadSubProfile::clear);
-    }
-
-    fn fill(&mut self, aln: &Alignment, compl_interval: &Interval, complexities: &[u8]) {
+    fn calculate(aln: &Alignment, compl_interval: &Interval, complexities: &[u8]) -> Self {
+        let mut profiles: [ReadSubProfile; N_COMPLEXITIES] = Default::default();
         let ref_interval = aln.ref_interval();
         assert!(ref_interval.overlaps(compl_interval),
             "Cannot calculate read profile: read alignment ({}) does not overlap with the reference interval ({}).",
@@ -74,11 +62,11 @@ impl ReadProfile {
         let compl_start = compl_interval.start();
         let compl_end = compl_interval.end();
         if ref_start >= compl_start {
-            self.0[complexities[(ref_start - compl_start) as usize] as usize].left_clip =
+            profiles[complexities[(ref_start - compl_start) as usize] as usize].left_clip =
                 Some(u16::try_from(left_clip).unwrap());
         }
         if ref_end <= compl_end {
-            self.0[complexities[(ref_end - compl_start - 1) as usize] as usize].right_clip =
+            profiles[complexities[(ref_end - compl_start - 1) as usize] as usize].right_clip =
                 Some(u16::try_from(right_clip).unwrap());
         }
 
@@ -98,7 +86,7 @@ impl ReadProfile {
                     let upper = min(curr_len,
                         min(compl_end.saturating_sub(ref_pos), read_end.saturating_sub(read_pos)));
                     for i in lower..upper {
-                        self.0[complexities[(ref_pos + i - compl_start) as usize] as usize].matches += 1;
+                        profiles[complexities[(ref_pos + i - compl_start) as usize] as usize].matches += 1;
                     }
                     read_pos += curr_len;
                     ref_pos += curr_len;
@@ -109,15 +97,15 @@ impl ReadProfile {
                     let upper = min(curr_len,
                         min(compl_end.saturating_sub(ref_pos), read_end.saturating_sub(read_pos)));
                     for i in lower..upper {
-                        self.0[complexities[(ref_pos + i - compl_start) as usize] as usize].mismatches += 1;
+                        profiles[complexities[(ref_pos + i - compl_start) as usize] as usize].mismatches += 1;
                     }
                     read_pos += curr_len;
                     ref_pos += curr_len;
                 },
                 Operation::Ins => {
                     if compl_start <= ref_pos && ref_pos < compl_end {
-                        self.0[complexities[(ref_pos - compl_start) as usize] as usize]
-                            .insertions.push(u16::try_from(curr_len).unwrap());
+                        profiles[complexities[(ref_pos - compl_start) as usize] as usize]
+                            .insertions += u16::try_from(curr_len).unwrap();
                     }
                     read_pos += curr_len;
                 },
@@ -129,14 +117,14 @@ impl ReadProfile {
                         let lower = ref_pos.saturating_sub(compl_start);
                         let upper = min(ref_pos + curr_len, compl_end) - compl_start;
                         for i in lower..upper {
-                            self.0[complexities[i as usize] as usize].deletions += 1;
+                            profiles[complexities[i as usize] as usize].deletions += 1;
                         }
                     }
                     ref_pos += curr_len;
                 },
             }
         }
-
+        Self(profiles)
     }
 }
 
@@ -154,8 +142,7 @@ struct SubProfileBuilder {
     matches: u64,
     mismatches: u64,
     deletions: u64,
-    sum_insertions: u64,
-    n_insertions: u32,
+    insertions: u64,
 }
 
 impl SubProfileBuilder {
@@ -163,10 +150,7 @@ impl SubProfileBuilder {
         self.matches += u64::from(read_subprofile.matches);
         self.mismatches += u64::from(read_subprofile.mismatches);
         self.deletions += u64::from(read_subprofile.deletions);
-        for &ins in read_subprofile.insertions.iter() {
-            self.n_insertions += 1;
-            self.sum_insertions += u64::from(ins);
-        }
+        self.insertions += u64::from(read_subprofile.insertions);
     }
 }
 
@@ -174,10 +158,10 @@ impl fmt::Debug for SubProfileBuilder {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let obs = self.matches + self.mismatches + self.deletions;
         let obsf = obs as f64;
-        write!(f, "{:8} obs,  M: {:8} ({:.6}),  X: {:8} ({:.6}),  D: {:8} ({:.6}),  I: {:6}/{:6} ({:.6})",
+        write!(f, "{:8} obs,  M: {:8} ({:.6}),  X: {:8} ({:.6}),  D: {:8} ({:.6}),  I: {:8}/{:8} ({:.6})",
             obs, self.matches, self.matches as f64 / obsf, self.mismatches, self.mismatches as f64 / obsf,
             self.deletions, self.deletions as f64 / obsf,
-            self.sum_insertions, self.n_insertions, self.sum_insertions as f64 / self.n_insertions as f64)
+            self.insertions, obs, self.insertions as f64 / obsf)
     }
 }
 
@@ -190,7 +174,6 @@ struct ProfileBuilder {
     /// Sequence complexity around each nucleotide of the input interval.
     /// Stores values in range 0..N_COMPLEXITIES.
     complexities: Vec<u8>,
-    read_prof: ReadProfile,
     subprofiles: [[SubProfileBuilder; N_COMPLEXITIES]; READ_ENDS],
 }
 
@@ -204,17 +187,15 @@ impl ProfileBuilder {
         Self {
             interval: interval.clone(),
             complexities,
-            read_prof: ReadProfile::default(),
             subprofiles: Default::default(),
         }
     }
 
     fn update(&mut self, aln: &Alignment, read_end: ReadEnd) {
-        self.read_prof.clear();
-        ReadProfile::fill(&mut self.read_prof, aln, &self.interval, &self.complexities);
+        let read_prof = ReadProfile::calculate(aln, &self.interval, &self.complexities);
         let subprofiles = &mut self.subprofiles[read_end.ix()];
         for i in 0..N_COMPLEXITIES {
-            subprofiles[i].update(&self.read_prof.0[i]);
+            subprofiles[i].update(&read_prof.0[i]);
         }
     }
 }

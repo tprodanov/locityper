@@ -5,10 +5,11 @@ use htslib::bam::record::{Record, Aux};
 use crate::{
     algo::{
         vec_ext::{VecExt, F64Ext},
-        nbinom::{NBinom, CachedDistr},
+
         bisect,
     },
     bg::ser::{JsonSer, LoadError},
+    math::nbinom::{NBinom, CachedDistr},
 };
 
 /// Trait for insert size distribution.
