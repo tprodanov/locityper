@@ -12,7 +12,7 @@ use crate::{
         aln::{Strand, ReadEnd, Alignment},
     },
     bg::{
-        err_prof2::{ErrorProfile, ForwRevComplexity},
+        err_prof::{ErrorProfile, ForwRevComplexity},
         insertsz::InsertDistr,
     },
     algo::{

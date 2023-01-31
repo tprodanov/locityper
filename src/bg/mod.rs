@@ -1,5 +1,4 @@
 pub mod err_prof;
-pub mod err_prof2;
 pub mod insertsz;
 pub mod depth;
 pub mod ser;
@@ -11,7 +10,7 @@ use crate::{
     bg::{
         depth::{ReadDepth, ReadDepthParams},
         insertsz::{InsertNegBinom, InsertDistr},
-        err_prof2::{ComplexityCalculator, ErrorProfile},
+        err_prof::{ComplexityCalculator, ErrorProfile},
         ser::{JsonSer, LoadError},
     },
     seq::{
