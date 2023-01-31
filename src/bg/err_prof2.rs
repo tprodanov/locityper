@@ -2,7 +2,6 @@ use std::{
     cmp::{min, max},
     rc::Rc,
     fmt,
-    mem::{self, MaybeUninit},
 };
 use htslib::bam::Record;
 use statrs::distribution::Discrete;
@@ -10,14 +9,15 @@ use crate::{
     seq::{
         contigs::ContigNames,
         interv::Interval,
-        cigar::Operation,
-        aln::{ReadEnd, Alignment},
+        cigar::{Operation, Cigar},
+        aln::{ReadEnd, Strand, Alignment},
         compl::linguistic_complexity_k3,
     },
     math::{
         nbinom::{NBinom, CachedDistr},
         mnom::Multinomial,
-    }
+    },
+    bg::ser::{JsonSer, LoadError},
 };
 
 const N_COMPLEXITIES: usize = 2;
@@ -31,11 +31,16 @@ struct ReadSubProfile {
     deletions: u16,
 }
 
+impl ReadSubProfile {
+    fn read_len(&self) -> u16 {
+        self.matches + self.mismatches + self.insertions + self.clipping
+    }
+}
+
 impl fmt::Debug for ReadSubProfile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let qlen = self.matches + self.mismatches + self.insertions + self.clipping;
         write!(f, "qlen: {:3}, M: {:3}, X: {:3}, I: {:3}, S: {:3}, D: {:3}",
-        qlen, self.matches, self.mismatches, self.insertions, self.clipping, self.deletions)
+            self.read_len(), self.matches, self.mismatches, self.insertions, self.clipping, self.deletions)
     }
 }
 
@@ -43,15 +48,14 @@ impl fmt::Debug for ReadSubProfile {
 struct ReadProfile([ReadSubProfile; N_COMPLEXITIES]);
 
 impl ReadProfile {
-    fn calculate(aln: &Alignment, read_compl: &[u8]) -> Self {
+    fn calculate(cigar: &Cigar, read_complx: &[u8]) -> Self {
         let mut profiles: [ReadSubProfile; N_COMPLEXITIES] = Default::default();
-        let cigar = aln.cigar();
         let (left_clip, right_clip) = cigar.true_clipping();
         let read_len = cigar.query_len();
-        assert_eq!(read_len, read_compl.len() as u32, "Unexpected read length!");
+        assert_eq!(read_len, read_complx.len() as u32, "Unexpected read length!");
 
-        profiles[read_compl[0] as usize].clipping += u16::try_from(left_clip).unwrap();
-        profiles[read_compl[read_compl.len() - 1] as usize].clipping += u16::try_from(right_clip).unwrap();
+        profiles[read_complx[0] as usize].clipping += u16::try_from(left_clip).unwrap();
+        profiles[read_complx[read_complx.len() - 1] as usize].clipping += u16::try_from(right_clip).unwrap();
 
         // read_start and read_end: read boundaries after we remove clipping.
         // Need to do this, because we do not simply remove Soft clipping,
@@ -65,14 +69,14 @@ impl ReadProfile {
                 Operation::Match => panic!("Expected an extended CIGAR, but found M operation."),
                 Operation::Equal => {
                     for i in max(read_start, read_pos)..min(read_end, read_pos + curr_len) {
-                        profiles[read_compl[i as usize] as usize].matches += 1;
+                        profiles[read_complx[i as usize] as usize].matches += 1;
                     }
                     read_pos += curr_len;
                 },
                 Operation::Diff => {
                     // Same as in Operation::Equal.
                     for i in max(read_start, read_pos)..min(read_end, read_pos + curr_len) {
-                        profiles[read_compl[i as usize] as usize].mismatches += 1;
+                        profiles[read_complx[i as usize] as usize].mismatches += 1;
                     }
                     read_pos += curr_len;
                 },
@@ -81,7 +85,7 @@ impl ReadProfile {
                     // [read_start, read_end), or will be completely out.
                     if read_start <= read_pos && read_pos < read_end {
                         for i in read_pos..read_pos + curr_len {
-                            profiles[read_compl[i as usize] as usize].insertions += 1;
+                            profiles[read_complx[i as usize] as usize].insertions += 1;
                         }
                     }
                     read_pos += curr_len;
@@ -94,7 +98,7 @@ impl ReadProfile {
                     // No need to check read_pos + curr_len <= read_end, as the deletion
                     // will either be completely inside [read_start, read_end), or will be completely out.
                     if read_start <= read_pos && read_pos < read_end {
-                        profiles[read_compl[read_pos as usize] as usize].deletions += u16::try_from(curr_len).unwrap();
+                        profiles[read_complx[read_pos as usize] as usize].deletions += u16::try_from(curr_len).unwrap();
                     }
                 },
             }
@@ -178,17 +182,13 @@ impl ProfileBuilder {
     }
 
     fn get_profiles(&self) -> SubErrorProfiles {
-        // Start with uninitialized array and fill it one by one.
-        // Perhaps, later there will be a simpler solution in Rust.
-        let mut uninit_subprofiles: [[MaybeUninit<SubErrorProfile>; N_COMPLEXITIES]; READ_ENDS] = unsafe {
-            MaybeUninit::uninit().assume_init()
-        };
+        let mut subprofiles: SubErrorProfiles = Default::default();
         for read_end in 0..READ_ENDS {
             for compl in 0..N_COMPLEXITIES {
-                uninit_subprofiles[read_end][compl] = MaybeUninit::new(self.0[read_end][compl].get_profile());
+                subprofiles[read_end][compl] = self.0[read_end][compl].get_profile();
             }
         }
-        unsafe { mem::transmute::<_, SubErrorProfiles>(uninit_subprofiles) }
+        subprofiles
     }
 }
 
@@ -204,17 +204,48 @@ impl fmt::Debug for ProfileBuilder {
     }
 }
 
-struct SubErrorProfile {
-    /// Distribution of matches, mismatches, insertions and clippings.
-    read_operation_distr: Multinomial,
-    /// Probability of success (no deletion) per base-pair in the read sequence.
-    /// Used in Neg.Binomial distribution.
-    no_del_prob: f64,
+#[derive(Default, Clone)]
+pub struct ForwRevComplexity {
+    forward: Vec<u8>,
+    reverse: Vec<u8>,
 }
 
-impl fmt::Debug for SubErrorProfile {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SubErrorProfile{{ MXIS: {}, D: NB({:.6}) }}", self.read_operation_distr, self.no_del_prob)
+impl ForwRevComplexity {
+    fn clear(&mut self) {
+        self.forward.clear();
+        self.reverse.clear();
+    }
+
+    fn clear_and_get(&mut self, strand: Strand) -> &mut Vec<u8> {
+        self.forward.clear();
+        self.reverse.clear();
+        if strand.is_forward() {
+            &mut self.forward
+        } else {
+            &mut self.reverse
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.forward.is_empty() && self.reverse.is_empty()
+    }
+
+    fn get(&mut self, strand: Strand) -> &[u8] {
+        if strand.is_forward() {
+            if self.forward.is_empty() {
+                assert!(!self.reverse.is_empty(),
+                    "ForwRevComplexity: both forward and reverse complexities are uninitialized!");
+                self.forward.extend(self.reverse.iter().rev().cloned());
+            }
+            &self.forward
+        } else {
+            if self.reverse.is_empty() {
+                assert!(!self.forward.is_empty(),
+                    "ForwRevComplexity: both forward and reverse complexities are uninitialized!");
+                self.reverse.extend(self.forward.iter().rev().cloned());
+            }
+            &self.reverse
+        }
     }
 }
 
@@ -233,9 +264,85 @@ impl ComplexityCalculator {
         Self { window, thresh }
     }
 
-    /// Calculates sequence complexity. Output size = read length, output values are in `0..N_COMPLEXITIES`.
-    pub fn calculate(&self, seq: &[u8]) -> Vec<u8> {
-        linguistic_complexity_k3(seq, self.window).map(|v| u8::from(!v.is_nan() && v > self.thresh)).collect()
+    /// Calculates sequence complexity, clears buffer, and write `seq.len()` elements to it.
+    /// Possible output values are in `0..N_COMPLEXITIES`.
+    pub fn calculate_direct(&self, seq: &[u8], buffer: &mut Vec<u8>) {
+        buffer.extend(linguistic_complexity_k3(seq, self.window).map(|v| u8::from(!v.is_nan() && v > self.thresh)));
+    }
+
+    /// Lazily calculates forward/reverse sequence complexity for the record.
+    /// Clears and updates `forw_rev_complx` buffer.
+    pub fn calculate_forw_rev(&self, record: &Record, forw_rev_complx: &mut ForwRevComplexity) {
+        let read_seq = record.seq().as_bytes();
+        assert!(!read_seq.is_empty(), "Cannot calculate sequence complexity: read {} has no sequence",
+            String::from_utf8_lossy(record.qname()));
+        let strand = Strand::from_record(record);
+        self.calculate_direct(&read_seq, forw_rev_complx.clear_and_get(strand));
+    }
+}
+
+impl JsonSer for ComplexityCalculator {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            window: self.window,
+            thresh: self.thresh,
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        let window = obj["window"].as_usize().ok_or_else(|| LoadError(format!(
+            "ComplexityCalculator: Failed to parse '{}': missing or incorrect 'window' field!", obj)))?;
+        let thresh = obj["thresh"].as_f32().ok_or_else(|| LoadError(format!(
+            "ComplexityCalculator: Failed to parse '{}': missing or incorrect 'thresh' field!", obj)))?;
+        Ok(Self { window, thresh })
+    }
+}
+
+#[derive(Default)]
+struct SubErrorProfile {
+    /// Distribution of matches, mismatches, insertions and clippings.
+    read_operation_distr: Multinomial,
+    /// Probability of success (no deletion) per base-pair in the read sequence.
+    /// Used in Neg.Binomial distribution.
+    no_del_prob: f64,
+}
+
+impl SubErrorProfile {
+    fn ln_prob(&self, subprofile: &ReadSubProfile) -> f64 {
+        let read_len = subprofile.read_len();
+        if read_len == 0 {
+            0.0
+        } else {
+            NBinom::new(f64::from(read_len), self.no_del_prob).ln_pmf_f64(f64::from(subprofile.deletions))
+                + self.read_operation_distr.ln_pmf(
+                    &[subprofile.matches, subprofile.mismatches, subprofile.insertions, subprofile.clipping])
+        }
+    }
+}
+
+impl fmt::Debug for SubErrorProfile {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SubErrorProfile{{ MXIS: {}, D: NB({:.6}) }}", self.read_operation_distr, self.no_del_prob)
+    }
+}
+
+impl JsonSer for SubErrorProfile {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            op_distr: self.read_operation_distr.save(),
+            no_del_prob: self.no_del_prob,
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        if !obj.has_key("op_distr") {
+            return Err(LoadError(format!(
+                "SubErrorProfile: Failed to parse '{}': missing 'op_distr' field!", obj)))?;
+        }
+        let read_operation_distr = Multinomial::load(&obj["op_distr"])?;
+        let no_del_prob = obj["no_del_prob"].as_f64().ok_or_else(|| LoadError(format!(
+            "SubErrorProfile: Failed to parse '{}': missing or incorrect 'no_del_prob' field!", obj)))?;
+        Ok(Self { read_operation_distr, no_del_prob })
     }
 }
 
@@ -246,20 +353,22 @@ pub struct ErrorProfile {
 
 impl ErrorProfile {
     /// Create error profile from the iterator over records.
-    pub fn estimate<'a, I>(compl_calc: ComplexityCalculator, contigs: &Rc<ContigNames>, records: I) -> ErrorProfile
+    pub fn estimate<'a, I>(compl_calc: ComplexityCalculator, records: I) -> ErrorProfile
     where I: Iterator<Item = &'a Record>,
     {
         log::info!("    Estimating read error profiles");
         let mut prof_builder = ProfileBuilder::default();
+        let mut read_complx = Vec::new();
         for record in records {
             // Unmapped or secondary.
             if (record.flags() & 3844) != 0 {
                 continue;
             }
             assert_ne!(record.seq_len(), 0, "Read {} does not have a sequence", String::from_utf8_lossy(record.qname()));
-            let aln = Alignment::from_record(record, Rc::clone(contigs));
-            let read_compl = compl_calc.calculate(&record.seq().as_bytes());
-            let read_prof = ReadProfile::calculate(&aln, &read_compl);
+            let cigar = Cigar::infer_ext_cigar(record, ());
+            read_complx.clear();
+            compl_calc.calculate_direct(&record.seq().as_bytes(), &mut read_complx);
+            let read_prof = ReadProfile::calculate(&cigar, &read_complx);
             prof_builder.update(&read_prof, ReadEnd::from_record(record));
         }
 
@@ -267,6 +376,20 @@ impl ErrorProfile {
             compl_calc,
             subprofiles: prof_builder.get_profiles(),
         }
+    }
+
+    /// Returns complexity calculator.
+    pub fn complexity_calculator(&self) -> &ComplexityCalculator {
+        &self.compl_calc
+    }
+
+    /// Returns alignment ln-probability.
+    pub fn ln_prob(&self, aln: &Alignment, read_end: ReadEnd, read_complx: &mut ForwRevComplexity) -> f64 {
+        let read_prof = ReadProfile::calculate(aln.cigar(), read_complx.get(aln.strand()));
+        self.subprofiles[read_end.ix()].iter()
+            .zip(&read_prof.0)
+            .map(|(err_subprofile, read_subprofile)| err_subprofile.ln_prob(read_subprofile))
+            .sum()
     }
 }
 
@@ -278,5 +401,43 @@ impl fmt::Debug for ErrorProfile {
             }
         }
         Ok(())
+    }
+}
+
+impl JsonSer for ErrorProfile {
+    fn save(&self) -> json::JsonValue {
+        let mut subprofiles = Vec::with_capacity(READ_ENDS * N_COMPLEXITIES);
+        for read_end in 0..READ_ENDS {
+            for compl in 0..N_COMPLEXITIES {
+                subprofiles.push(self.subprofiles[read_end][compl].save());
+            }
+        }
+        json::object!{
+            compl_calc: self.compl_calc.save(),
+            subprofiles: subprofiles,
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        if !obj.has_key("compl_calc") || !obj.has_key("subprofiles") {
+            return Err(LoadError(format!(
+                "ErrorProfile: Failed to parse '{}': missing 'compl_calc' or 'subprofiles' field!", obj)))?;
+        }
+        let compl_calc = ComplexityCalculator::load(&obj["compl_calc"])?;
+
+        let mut subprofiles: SubErrorProfiles = Default::default();
+        let key = "subprofiles";
+        if let json::JsonValue::Array(arr) = &obj[key] {
+            if arr.len() != READ_ENDS * N_COMPLEXITIES {
+                return Err(LoadError(format!("Failed to parse '{}': incorrect number of elements in array '{}'",
+                    obj, key)));
+            }
+            for (i, obj) in arr.iter().enumerate() {
+                subprofiles[i / READ_ENDS][i % READ_ENDS] = SubErrorProfile::load(obj)?;
+            }
+        } else {
+            return Err(LoadError(format!("Failed to parse '{}': missing or incorrect array '{}'", obj, key)));
+        }
+        Ok(Self { compl_calc, subprofiles })
     }
 }

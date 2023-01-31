@@ -11,7 +11,7 @@ use crate::{
     bg::{
         depth::{ReadDepth, ReadDepthParams},
         insertsz::{InsertNegBinom, InsertDistr},
-        err_prof::TransErrorProfile,
+        err_prof2::{ComplexityCalculator, ErrorProfile},
         ser::{JsonSer, LoadError},
     },
     seq::{
@@ -27,7 +27,7 @@ use crate::{
 pub struct BgDistr {
     depth: ReadDepth,
     insert_sz: InsertNegBinom,
-    err_prof: TransErrorProfile,
+    err_prof: ErrorProfile,
 }
 
 impl BgDistr {
@@ -47,15 +47,12 @@ impl BgDistr {
         fasta.read(&mut ref_seq)?;
         seq::standardize(&mut ref_seq);
 
-        // let insert_sz = InsertNegBinom::estimate(records.iter());
-        // let err_prof = TransErrorProfile::estimate(records.iter());
-        let compl_calc = err_prof2::ComplexityCalculator::new(15, 0.2);
-        let contigs = interval.contigs();
-        let err_prof = err_prof2::ErrorProfile::estimate(compl_calc, contigs, records.iter());
+        let compl_calc = ComplexityCalculator::new(15, 0.2);
+        let insert_sz = InsertNegBinom::estimate(records.iter());
+        let err_prof = ErrorProfile::estimate(ComplexityCalculator::new(15, 0.2), records.iter());
         println!("{:?}", err_prof);
-        // let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), params, insert_sz.max_size());
-        // Ok(Self { depth, insert_sz, err_prof })
-        panic!()
+        let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), params, insert_sz.max_size());
+        Ok(Self { depth, insert_sz, err_prof })
     }
 
     pub fn depth(&self) -> &ReadDepth {
@@ -66,7 +63,7 @@ impl BgDistr {
         &self.insert_sz
     }
 
-    pub fn error_profile(&self) -> &TransErrorProfile {
+    pub fn error_profile(&self) -> &ErrorProfile {
         &self.err_prof
     }
 }
@@ -85,7 +82,7 @@ impl JsonSer for BgDistr {
             Ok(Self {
                 depth: ReadDepth::load(&obj["bg_depth"])?,
                 insert_sz: InsertNegBinom::load(&obj["insert_size"])?,
-                err_prof: TransErrorProfile::load(&obj["error_profile"])?,
+                err_prof: ErrorProfile::load(&obj["error_profile"])?,
             })
         } else {
             Err(LoadError(format!(

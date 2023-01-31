@@ -14,7 +14,24 @@ use crate::{
 
 /// Newtype over strand: false = negative, true = positive.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Strand(pub bool);
+pub struct Strand(bool);
+
+impl Strand {
+    #[inline]
+    pub fn new(forward: bool) -> Self {
+        Self(forward)
+    }
+
+    #[inline]
+    pub fn from_record(record: &Record) -> Self {
+        Self(!record.is_reverse())
+    }
+
+    #[inline]
+    pub fn is_forward(self) -> bool {
+        self.0
+    }
+}
 
 impl fmt::Debug for Strand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -111,7 +128,7 @@ impl Alignment {
         debug_assert_eq!(cigar.ref_len() as i64, record.reference_end() - record.pos());
         Self {
             ref_interval, cigar,
-            strand: Strand(!record.is_reverse()),
+            strand: Strand::from_record(record),
         }
     }
 

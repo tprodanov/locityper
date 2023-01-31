@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Calculates ln-factorial. Stores up to 1024 values in a cache.
-fn ln_factorial(n: u32) -> f64 {
+fn ln_factorial(n: u16) -> f64 {
     const CACHE_SIZE: usize = 1024;
     const EMPTY_CELL: OnceCell<f64> = OnceCell::new();
     static FACTORIAL_CACHE: [OnceCell<f64>; CACHE_SIZE] = [EMPTY_CELL; CACHE_SIZE];
@@ -21,7 +21,7 @@ fn ln_factorial(n: u32) -> f64 {
 }
 
 /// Multinomial distribution. `n` is not fixed and is selected based on the input counts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Multinomial {
     lnp: Vec<f64>,
 }
@@ -37,7 +37,7 @@ impl Multinomial {
     }
 
     /// Calculates ln-probability of the counts `ks` assuming that `sum(ks)` is fixed.
-    pub fn ln_pmf(&self, ks: &[u32]) -> f64 {
+    pub fn ln_pmf(&self, ks: &[u16]) -> f64 {
         assert_eq!(self.lnp.len(), ks.len(),
             "Multinomial distribution: number of probabilities does not match the number of classes");
         let mut res = 0.0;
