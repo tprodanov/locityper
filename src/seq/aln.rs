@@ -41,6 +41,7 @@ pub enum ReadEnd {
 
 impl ReadEnd {
     /// Gets record read-end information.
+    #[inline]
     pub fn from_record(record: &Record) -> ReadEnd {
         if record.is_last_in_template() {
             ReadEnd::Second

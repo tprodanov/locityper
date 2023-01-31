@@ -49,7 +49,10 @@ impl BgDistr {
 
         // let insert_sz = InsertNegBinom::estimate(records.iter());
         // let err_prof = TransErrorProfile::estimate(records.iter());
-        let err_prof = err_prof2::ErrorProfile::estimate(records.iter(), interval, &ref_seq, 25, 0.2);
+        let compl_calc = err_prof2::ComplexityCalculator::new(15, 0.2);
+        let contigs = interval.contigs();
+        let err_prof = err_prof2::ErrorProfile::estimate(compl_calc, contigs, records.iter());
+        println!("{:?}", err_prof);
         // let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), params, insert_sz.max_size());
         // Ok(Self { depth, insert_sz, err_prof })
         panic!()

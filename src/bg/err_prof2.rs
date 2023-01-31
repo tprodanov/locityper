@@ -2,9 +2,9 @@ use std::{
     cmp::{min, max},
     rc::Rc,
     fmt,
+    mem::{self, MaybeUninit},
 };
 use htslib::bam::Record;
-use intmap::{IntMap, Entry};
 use statrs::distribution::Discrete;
 use crate::{
     seq::{
@@ -26,25 +26,16 @@ const N_COMPLEXITIES: usize = 2;
 struct ReadSubProfile {
     matches: u16,
     mismatches: u16,
-    deletions: u16,
     insertions: u16,
-    clipping: [Option<u16>; 2],
-}
-
-impl ReadSubProfile {
-    /// Sum number of reference positions, covered by this profile (matches + mismatches + deletions).
-    fn ref_len(&self) -> u16 {
-        self.matches + self.mismatches + self.deletions
-    }
+    clipping: u16,
+    deletions: u16,
 }
 
 impl fmt::Debug for ReadSubProfile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let obs = self.ref_len();
-        write!(f, "{:3} obs.  M: {:3}, X: {:3}, D: {:3}, I: {:3},  S {:>2} {:>2}",
-            obs, self.matches, self.mismatches, self.deletions, self.insertions,
-            self.clipping[0].map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
-            self.clipping[1].map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()))
+        let qlen = self.matches + self.mismatches + self.insertions + self.clipping;
+        write!(f, "qlen: {:3}, M: {:3}, X: {:3}, I: {:3}, S: {:3}, D: {:3}",
+        qlen, self.matches, self.mismatches, self.insertions, self.clipping, self.deletions)
     }
 }
 
@@ -52,79 +43,59 @@ impl fmt::Debug for ReadSubProfile {
 struct ReadProfile([ReadSubProfile; N_COMPLEXITIES]);
 
 impl ReadProfile {
-    fn calculate(aln: &Alignment, compl_interval: &Interval, complexities: &[u8]) -> Self {
+    fn calculate(aln: &Alignment, read_compl: &[u8]) -> Self {
         let mut profiles: [ReadSubProfile; N_COMPLEXITIES] = Default::default();
-        let ref_interval = aln.ref_interval();
-        assert!(ref_interval.overlaps(compl_interval),
-            "Cannot calculate read profile: read alignment ({}) does not overlap with the reference interval ({}).",
-            ref_interval, compl_interval);
         let cigar = aln.cigar();
         let (left_clip, right_clip) = cigar.true_clipping();
+        let read_len = cigar.query_len();
+        assert_eq!(read_len, read_compl.len() as u32, "Unexpected read length!");
 
-        let ref_start = ref_interval.start();
-        let ref_end = ref_interval.end();
-        let compl_start = compl_interval.start();
-        let compl_end = compl_interval.end();
-        if ref_start >= compl_start {
-            profiles[complexities[(ref_start - compl_start) as usize] as usize].clipping[0] =
-                Some(u16::try_from(left_clip).unwrap());
-        }
-        if ref_end <= compl_end {
-            profiles[complexities[(ref_end - compl_start - 1) as usize] as usize].clipping[1] =
-                Some(u16::try_from(right_clip).unwrap());
-        }
+        profiles[read_compl[0] as usize].clipping += u16::try_from(left_clip).unwrap();
+        profiles[read_compl[read_compl.len() - 1] as usize].clipping += u16::try_from(right_clip).unwrap();
 
+        // read_start and read_end: read boundaries after we remove clipping.
+        // Need to do this, because we do not simply remove Soft clipping,
+        // but also remove all operations before the first (last) match.
         let read_start = left_clip;
-        let read_end = cigar.query_len() - right_clip;
+        let read_end = read_len - right_clip;
         let mut read_pos = 0;
-        let mut ref_pos = ref_start;
         for item in cigar.iter() {
             let curr_len = item.len();
             match item.operation() {
                 Operation::Match => panic!("Expected an extended CIGAR, but found M operation."),
                 Operation::Equal => {
-                    // `i in 0..curr_len` that satisfies two conditions:
-                    //   (a)  compl_start <=  ref_pos + i < compl_end,
-                    //   (b)  read_start  <= read_pos + i < read_end.
-                    let lower = max(compl_start.saturating_sub(ref_pos), read_start.saturating_sub(read_pos));
-                    let upper = min(curr_len,
-                        min(compl_end.saturating_sub(ref_pos), read_end.saturating_sub(read_pos)));
-                    for i in lower..upper {
-                        profiles[complexities[(ref_pos + i - compl_start) as usize] as usize].matches += 1;
+                    for i in max(read_start, read_pos)..min(read_end, read_pos + curr_len) {
+                        profiles[read_compl[i as usize] as usize].matches += 1;
                     }
                     read_pos += curr_len;
-                    ref_pos += curr_len;
                 },
                 Operation::Diff => {
                     // Same as in Operation::Equal.
-                    let lower = max(compl_start.saturating_sub(ref_pos), read_start.saturating_sub(read_pos));
-                    let upper = min(curr_len,
-                        min(compl_end.saturating_sub(ref_pos), read_end.saturating_sub(read_pos)));
-                    for i in lower..upper {
-                        profiles[complexities[(ref_pos + i - compl_start) as usize] as usize].mismatches += 1;
+                    for i in max(read_start, read_pos)..min(read_end, read_pos + curr_len) {
+                        profiles[read_compl[i as usize] as usize].mismatches += 1;
                     }
                     read_pos += curr_len;
-                    ref_pos += curr_len;
                 },
                 Operation::Ins => {
-                    if compl_start <= ref_pos && ref_pos < compl_end {
-                        profiles[complexities[(ref_pos - compl_start) as usize] as usize]
-                            .insertions += u16::try_from(curr_len).unwrap();
+                    // No need to check read_pos + curr_len <= read_end, as insert will either be completely inside
+                    // [read_start, read_end), or will be completely out.
+                    if read_start <= read_pos && read_pos < read_end {
+                        for i in read_pos..read_pos + curr_len {
+                            profiles[read_compl[i as usize] as usize].insertions += 1;
+                        }
                     }
                     read_pos += curr_len;
                 },
                 Operation::Soft => {
+                    // Soft clipping is already accounted for.
                     read_pos += curr_len;
                 },
                 Operation::Del => {
+                    // No need to check read_pos + curr_len <= read_end, as the deletion
+                    // will either be completely inside [read_start, read_end), or will be completely out.
                     if read_start <= read_pos && read_pos < read_end {
-                        let lower = ref_pos.saturating_sub(compl_start);
-                        let upper = min(ref_pos + curr_len, compl_end) - compl_start;
-                        for i in lower..upper {
-                            profiles[complexities[i as usize] as usize].deletions += 1;
-                        }
+                        profiles[read_compl[read_pos as usize] as usize].deletions += u16::try_from(curr_len).unwrap();
                     }
-                    ref_pos += curr_len;
                 },
             }
         }
@@ -141,117 +112,83 @@ impl fmt::Debug for ReadProfile {
     }
 }
 
-/// Transmutes clipping from u64 back to f64, and calculates clipping mean and variance.
-fn clipping_mean_var(counts: &IntMap<u32>) -> (f64, f64) {
-    let mut counts: Vec<_> = counts.iter().map(|(&val_u64, &count)| (f64::from_bits(val_u64), count)).collect();
-    counts.sort_by(|a, b| a.0.total_cmp(&b.0)); // TODO: REMOVE
-    println!("    Clipping: {:?}", counts);
-    let mut n = 0;
-    let mut mean = 0.0;
-    for (val, count) in counts.iter() {
-        n += u64::from(*count);
-        mean += val;
-    }
-    assert!(n > 1, "Cannot calculate variance from less than 2 elements!");
-    mean /= n as f64;
-
-    let mut var = 0.0;
-    for (val, count) in counts.iter() {
-        let diff = val - mean;
-        var += diff * diff;
-    }
-    var /= (n - 1) as f64;
-    println!("    mean: {:.10},  variance: {:.10}", mean, var);
-    (mean, var)
-}
-
 #[derive(Clone, Default)]
 struct SubProfileBuilder {
     matches: u64,
     mismatches: u64,
-    deletions: u64,
     insertions: u64,
-    /// Number of various read clipping values.
-    /// Key = <clipping / read_len> transmuted into u64, value = number of such clipping values (both left and right).
-    clipping: IntMap<u32>,
+    clipping: u64,
+    deletions: u64,
 }
 
 impl SubProfileBuilder {
-    fn update(&mut self, read_subprofile: &ReadSubProfile, read_len: u32) {
+    fn update(&mut self, read_subprofile: &ReadSubProfile) {
         self.matches += u64::from(read_subprofile.matches);
         self.mismatches += u64::from(read_subprofile.mismatches);
-        self.deletions += u64::from(read_subprofile.deletions);
         self.insertions += u64::from(read_subprofile.insertions);
-        for clipping in read_subprofile.clipping.iter() {
-            if let Some(val) = clipping {
-                let key = (f64::from(*val) / f64::from(read_len)).to_bits();
-                match self.clipping.entry(key) {
-                    Entry::Occupied(mut entry) => *entry.get_mut() += 1,
-                    Entry::Vacant(entry) => { entry.insert(1); },
-                };
-            }
-        }
+        self.clipping += u64::from(read_subprofile.clipping);
+        self.deletions += u64::from(read_subprofile.deletions);
     }
 
-    fn to_profile(&self) -> SubErrorProfile {
-        let (clip_mean, clip_var) = clipping_mean_var(&self.clipping);
-        let sum_ref_len = (self.matches + self.mismatches + self.deletions) as f64;
-        let sum_read_len = (self.matches + self.mismatches + self.insertions) as f64;
+    fn sum_read_len(&self) -> u64 {
+        self.matches + self.mismatches + self.insertions + self.clipping
+    }
+
+    fn get_profile(&self) -> SubErrorProfile {
+        let sum_read_lenf = self.sum_read_len() as f64;
         SubErrorProfile {
-            op_distr: Multinomial::new(&[
-                self.matches as f64 / sum_ref_len,
-                self.mismatches as f64 / sum_ref_len,
-                self.deletions as f64 / sum_ref_len]),
-            no_insert_prob: 1.0 - self.insertions as f64 / sum_read_len,
-            // clipping_distr: NBinom::estimate(clip_mean, clip_var.max(clip_mean * 1.00001)).cached(),
+            read_operation_distr: Multinomial::new(&[
+                self.matches as f64 / sum_read_lenf,
+                self.mismatches as f64 / sum_read_lenf,
+                self.insertions as f64 / sum_read_lenf,
+                self.clipping as f64 / sum_read_lenf,
+                ]),
+            no_del_prob: sum_read_lenf / (sum_read_lenf + self.deletions as f64),
         }
     }
 }
 
 impl fmt::Debug for SubProfileBuilder {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let obs = self.matches + self.mismatches + self.deletions;
-        let obsf = obs as f64;
-        write!(f, "{:8} obs,  M: {:8} ({:.6}),  X: {:8} ({:.6}),  D: {:8} ({:.6}),  I: {:8}/{:8} ({:.6})",
-            obs, self.matches, self.matches as f64 / obsf, self.mismatches, self.mismatches as f64 / obsf,
-            self.deletions, self.deletions as f64 / obsf,
-            self.insertions, obs, self.insertions as f64 / obsf)
+        let sum_read_len = self.sum_read_len();
+        let sum_read_lenf = sum_read_len as f64;
+        write!(f, concat!("sum read length: {:8},  M: {:8} ({:.6}),  X: {:8} ({:.6}),  I: {:8} ({:.6}),  ",
+                            "S: {:8} ({:.6}),  D: {:8} ({:.6})"),
+            sum_read_len, self.matches, self.matches as f64 / sum_read_lenf,
+            self.mismatches, self.mismatches as f64 / sum_read_lenf,
+            self.insertions, self.insertions as f64 / sum_read_lenf,
+            self.clipping, self.clipping as f64 / sum_read_lenf,
+            self.deletions, self.deletions as f64 / (sum_read_lenf + self.deletions as f64))
     }
 }
 
 use crate::seq::aln::READ_ENDS;
+type SubErrorProfiles = [[SubErrorProfile; N_COMPLEXITIES]; READ_ENDS];
 
-/// Construct error profiles.
-struct ProfileBuilder {
-    /// Reference sequence interval.
-    interval: Interval,
-    /// Sequence complexity around each nucleotide of the input interval.
-    /// Stores values in range 0..N_COMPLEXITIES.
-    complexities: Vec<u8>,
-    subprofiles: [[SubProfileBuilder; N_COMPLEXITIES]; READ_ENDS],
-}
+/// Error profile builder.
+#[derive(Default)]
+struct ProfileBuilder([[SubProfileBuilder; N_COMPLEXITIES]; READ_ENDS]);
 
 impl ProfileBuilder {
-    fn new(interval: &Interval, interval_seq: &[u8], window: usize, compl_thresh: f32) -> Self {
-        assert_eq!(interval.len(), interval_seq.len() as u32);
-        let complexities = linguistic_complexity_k3(interval_seq, window)
-            .map(|c| u8::from(!c.is_nan() && c > compl_thresh))
-            .collect();
-        println!("Profile builder on interval {}", interval);
-        Self {
-            interval: interval.clone(),
-            complexities,
-            subprofiles: Default::default(),
+    fn update(&mut self, read_prof: &ReadProfile, read_end: ReadEnd) {
+        let subprofiles = &mut self.0[read_end.ix()];
+        for i in 0..N_COMPLEXITIES {
+            subprofiles[i].update(&read_prof.0[i]);
         }
     }
 
-    fn update(&mut self, aln: &Alignment, read_end: ReadEnd) {
-        let read_prof = ReadProfile::calculate(aln, &self.interval, &self.complexities);
-        let subprofiles = &mut self.subprofiles[read_end.ix()];
-        let read_len = aln.cigar().query_len();
-        for i in 0..N_COMPLEXITIES {
-            subprofiles[i].update(&read_prof.0[i], read_len);
+    fn get_profiles(&self) -> SubErrorProfiles {
+        // Start with uninitialized array and fill it one by one.
+        // Perhaps, later there will be a simpler solution in Rust.
+        let mut uninit_subprofiles: [[MaybeUninit<SubErrorProfile>; N_COMPLEXITIES]; READ_ENDS] = unsafe {
+            MaybeUninit::uninit().assume_init()
+        };
+        for read_end in 0..READ_ENDS {
+            for compl in 0..N_COMPLEXITIES {
+                uninit_subprofiles[read_end][compl] = MaybeUninit::new(self.0[read_end][compl].get_profile());
+            }
         }
+        unsafe { mem::transmute::<_, SubErrorProfiles>(uninit_subprofiles) }
     }
 }
 
@@ -260,49 +197,86 @@ impl fmt::Debug for ProfileBuilder {
         for read_end in 0..READ_ENDS {
             for compl in 0..N_COMPLEXITIES {
                 writeln!(f, "Mate {},  compl {}", read_end + 1, compl)?;
-                writeln!(f, "    {:?}", self.subprofiles[read_end][compl])?;
-                self.subprofiles[read_end][compl].to_profile();
+                writeln!(f, "    {:?}", self.0[read_end][compl])?;
             }
         }
         Ok(())
     }
 }
 
-pub struct SubErrorProfile {
-    /// Distribution of matches, mismatches and deletions.
-    op_distr: Multinomial,
-    /// Probability of success (no insertion) per reference base-pair in a read.
-    /// Later used in Neg.Binomial distribution.
-    no_insert_prob: f64,
-    // /// Distribution of left/right clipping (as a fraction of read length).
-    // clipping_distr: NBinom,
+struct SubErrorProfile {
+    /// Distribution of matches, mismatches, insertions and clippings.
+    read_operation_distr: Multinomial,
+    /// Probability of success (no deletion) per base-pair in the read sequence.
+    /// Used in Neg.Binomial distribution.
+    no_del_prob: f64,
 }
 
-pub struct ErrorProfile;
+impl fmt::Debug for SubErrorProfile {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SubErrorProfile{{ MXIS: {}, D: NB({:.6}) }}", self.read_operation_distr, self.no_del_prob)
+    }
+}
+
+/// Simple structure that calculates sequence complexity in moving windows.
+#[derive(Debug, Clone)]
+pub struct ComplexityCalculator {
+    /// Read sequence complexity is calculated on windows of corresponding size.
+    window: usize,
+    /// Sequence is considered *low-complexity* if complexity is not greater `thresh` (or contains Ns).
+    thresh: f32,
+}
+
+impl ComplexityCalculator {
+    /// Creates a new complexity calculator.
+    pub fn new(window: usize, thresh: f32) -> Self {
+        Self { window, thresh }
+    }
+
+    /// Calculates sequence complexity. Output size = read length, output values are in `0..N_COMPLEXITIES`.
+    pub fn calculate(&self, seq: &[u8]) -> Vec<u8> {
+        linguistic_complexity_k3(seq, self.window).map(|v| u8::from(!v.is_nan() && v > self.thresh)).collect()
+    }
+}
+
+pub struct ErrorProfile {
+    compl_calc: ComplexityCalculator,
+    subprofiles: SubErrorProfiles,
+}
 
 impl ErrorProfile {
     /// Create error profile from the iterator over records.
-    pub fn estimate<'a, I>(
-        records: I,
-        interval: &Interval,
-        interval_seq: &[u8],
-        compl_window: usize,
-        compl_thresh: f32,
-    ) -> ErrorProfile
+    pub fn estimate<'a, I>(compl_calc: ComplexityCalculator, contigs: &Rc<ContigNames>, records: I) -> ErrorProfile
     where I: Iterator<Item = &'a Record>,
     {
         log::info!("    Estimating read error profiles");
-        let mut prof_builder = ProfileBuilder::new(interval, interval_seq, compl_window, compl_thresh);
-        let contigs = interval.contigs();
+        let mut prof_builder = ProfileBuilder::default();
         for record in records {
             // Unmapped or secondary.
             if (record.flags() & 3844) != 0 {
                 continue;
             }
-            let aln = Alignment::from_record(&record, Rc::clone(contigs));
-            prof_builder.update(&aln, ReadEnd::from_record(&record));
+            assert_ne!(record.seq_len(), 0, "Read {} does not have a sequence", String::from_utf8_lossy(record.qname()));
+            let aln = Alignment::from_record(record, Rc::clone(contigs));
+            let read_compl = compl_calc.calculate(&record.seq().as_bytes());
+            let read_prof = ReadProfile::calculate(&aln, &read_compl);
+            prof_builder.update(&read_prof, ReadEnd::from_record(record));
         }
-        println!("{:?}", prof_builder);
-        ErrorProfile
+
+        Self {
+            compl_calc,
+            subprofiles: prof_builder.get_profiles(),
+        }
+    }
+}
+
+impl fmt::Debug for ErrorProfile {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for read_end in 0..READ_ENDS {
+            for compl in 0..N_COMPLEXITIES {
+                writeln!(f, "Mate{}, compl{}:  {:?}", read_end + 1, compl, self.subprofiles[read_end][compl])?;
+            }
+        }
+        Ok(())
     }
 }
