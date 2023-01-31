@@ -5,6 +5,7 @@ use std::{
 };
 use htslib::bam::Record;
 use intmap::{IntMap, Entry};
+use statrs::distribution::Discrete;
 use crate::{
     seq::{
         contigs::ContigNames,
@@ -13,6 +14,10 @@ use crate::{
         aln::{ReadEnd, Alignment},
         compl::linguistic_complexity_k3,
     },
+    math::{
+        nbinom::{NBinom, CachedDistr},
+        mnom::Multinomial,
+    }
 };
 
 const N_COMPLEXITIES: usize = 2;
@@ -23,8 +28,7 @@ struct ReadSubProfile {
     mismatches: u16,
     deletions: u16,
     insertions: u16,
-    left_clip: Option<u16>,
-    right_clip: Option<u16>,
+    clipping: [Option<u16>; 2],
 }
 
 impl ReadSubProfile {
@@ -39,8 +43,8 @@ impl fmt::Debug for ReadSubProfile {
         let obs = self.ref_len();
         write!(f, "{:3} obs.  M: {:3}, X: {:3}, D: {:3}, I: {:3},  S {:>2} {:>2}",
             obs, self.matches, self.mismatches, self.deletions, self.insertions,
-            self.left_clip.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
-            self.right_clip.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()))
+            self.clipping[0].map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
+            self.clipping[1].map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()))
     }
 }
 
@@ -62,11 +66,11 @@ impl ReadProfile {
         let compl_start = compl_interval.start();
         let compl_end = compl_interval.end();
         if ref_start >= compl_start {
-            profiles[complexities[(ref_start - compl_start) as usize] as usize].left_clip =
+            profiles[complexities[(ref_start - compl_start) as usize] as usize].clipping[0] =
                 Some(u16::try_from(left_clip).unwrap());
         }
         if ref_end <= compl_end {
-            profiles[complexities[(ref_end - compl_start - 1) as usize] as usize].right_clip =
+            profiles[complexities[(ref_end - compl_start - 1) as usize] as usize].clipping[1] =
                 Some(u16::try_from(right_clip).unwrap());
         }
 
@@ -137,20 +141,70 @@ impl fmt::Debug for ReadProfile {
     }
 }
 
+/// Transmutes clipping from u64 back to f64, and calculates clipping mean and variance.
+fn clipping_mean_var(counts: &IntMap<u32>) -> (f64, f64) {
+    let mut counts: Vec<_> = counts.iter().map(|(&val_u64, &count)| (f64::from_bits(val_u64), count)).collect();
+    counts.sort_by(|a, b| a.0.total_cmp(&b.0)); // TODO: REMOVE
+    println!("    Clipping: {:?}", counts);
+    let mut n = 0;
+    let mut mean = 0.0;
+    for (val, count) in counts.iter() {
+        n += u64::from(*count);
+        mean += val;
+    }
+    assert!(n > 1, "Cannot calculate variance from less than 2 elements!");
+    mean /= n as f64;
+
+    let mut var = 0.0;
+    for (val, count) in counts.iter() {
+        let diff = val - mean;
+        var += diff * diff;
+    }
+    var /= (n - 1) as f64;
+    println!("    mean: {:.10},  variance: {:.10}", mean, var);
+    (mean, var)
+}
+
 #[derive(Clone, Default)]
 struct SubProfileBuilder {
     matches: u64,
     mismatches: u64,
     deletions: u64,
     insertions: u64,
+    /// Number of various read clipping values.
+    /// Key = <clipping / read_len> transmuted into u64, value = number of such clipping values (both left and right).
+    clipping: IntMap<u32>,
 }
 
 impl SubProfileBuilder {
-    fn update(&mut self, read_subprofile: &ReadSubProfile) {
+    fn update(&mut self, read_subprofile: &ReadSubProfile, read_len: u32) {
         self.matches += u64::from(read_subprofile.matches);
         self.mismatches += u64::from(read_subprofile.mismatches);
         self.deletions += u64::from(read_subprofile.deletions);
         self.insertions += u64::from(read_subprofile.insertions);
+        for clipping in read_subprofile.clipping.iter() {
+            if let Some(val) = clipping {
+                let key = (f64::from(*val) / f64::from(read_len)).to_bits();
+                match self.clipping.entry(key) {
+                    Entry::Occupied(mut entry) => *entry.get_mut() += 1,
+                    Entry::Vacant(entry) => { entry.insert(1); },
+                };
+            }
+        }
+    }
+
+    fn to_profile(&self) -> SubErrorProfile {
+        let (clip_mean, clip_var) = clipping_mean_var(&self.clipping);
+        let sum_ref_len = (self.matches + self.mismatches + self.deletions) as f64;
+        let sum_read_len = (self.matches + self.mismatches + self.insertions) as f64;
+        SubErrorProfile {
+            op_distr: Multinomial::new(&[
+                self.matches as f64 / sum_ref_len,
+                self.mismatches as f64 / sum_ref_len,
+                self.deletions as f64 / sum_ref_len]),
+            no_insert_prob: 1.0 - self.insertions as f64 / sum_read_len,
+            // clipping_distr: NBinom::estimate(clip_mean, clip_var.max(clip_mean * 1.00001)).cached(),
+        }
     }
 }
 
@@ -194,8 +248,9 @@ impl ProfileBuilder {
     fn update(&mut self, aln: &Alignment, read_end: ReadEnd) {
         let read_prof = ReadProfile::calculate(aln, &self.interval, &self.complexities);
         let subprofiles = &mut self.subprofiles[read_end.ix()];
+        let read_len = aln.cigar().query_len();
         for i in 0..N_COMPLEXITIES {
-            subprofiles[i].update(&read_prof.0[i]);
+            subprofiles[i].update(&read_prof.0[i], read_len);
         }
     }
 }
@@ -206,10 +261,21 @@ impl fmt::Debug for ProfileBuilder {
             for compl in 0..N_COMPLEXITIES {
                 writeln!(f, "Mate {},  compl {}", read_end + 1, compl)?;
                 writeln!(f, "    {:?}", self.subprofiles[read_end][compl])?;
+                self.subprofiles[read_end][compl].to_profile();
             }
         }
         Ok(())
     }
+}
+
+pub struct SubErrorProfile {
+    /// Distribution of matches, mismatches and deletions.
+    op_distr: Multinomial,
+    /// Probability of success (no insertion) per reference base-pair in a read.
+    /// Later used in Neg.Binomial distribution.
+    no_insert_prob: f64,
+    // /// Distribution of left/right clipping (as a fraction of read length).
+    // clipping_distr: NBinom,
 }
 
 pub struct ErrorProfile;

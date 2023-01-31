@@ -10,7 +10,7 @@ nalgebra = { version = "0.31", default-features = false, features = ["std"] } # 
 statrs = { version = "0.16", default-features = false } # Possibly remove later.
 intmap = { version = "2.0.0", default-features = false }
 json = { version = "0.12", default-features = false }
-once_cell = { version = "1.17", default-features = false }
+once_cell = { version = "1.17", default-features = false, features = ["std"] }
 bio = { version = "1.1.0", default-features = false } # Remove later.
 log = { version = "0.4", default-features = false }
 simplelog = { version = "0.12", default-features = false, features = ["termcolor"] }

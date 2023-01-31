@@ -46,7 +46,7 @@ pub struct CachedDepthDistrs<'a> {
 
 impl<'a> CachedDepthDistrs<'a> {
     /// Create a set of cached depth distributions.
-    /// Assume that there are `mul_coef` as much reads, as in the background distrbution.
+    /// Assume that there are `mul_coef` as much reads, as in the background distribution.
     ///
     /// As background distribution counts only first read mates,
     /// we assume that `mul_coef` should be either `1.0` for unpaired reads, or `2.0` for paired reads.

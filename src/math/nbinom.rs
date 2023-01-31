@@ -232,7 +232,7 @@ impl<D> CachedDistr<D> {
         }
     }
 
-    /// Get inner distrbution.
+    /// Get inner distribution.
     pub fn distr(&self) -> &D {
         &self.distr
     }

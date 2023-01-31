@@ -1,4 +1,5 @@
 pub mod nbinom;
+pub mod mnom;
 
 /// Constant log(10).
 pub const LOG10: f64 = 2.302585092994045684_f64;
