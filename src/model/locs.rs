@@ -12,7 +12,7 @@ use crate::{
         aln::{Strand, ReadEnd, Alignment},
     },
     bg::{
-        err_prof::{ErrorProfile, ForwRevComplexity},
+        err_prof::ErrorProfile,
         insertsz::InsertDistr,
     },
     algo::{
@@ -34,19 +34,16 @@ struct MateAln {
 
 impl MateAln {
     /// Creates a new alignment extension from a htslib `Record`.
-    fn from_record(
-        record: &Record,
-        contigs: Rc<ContigNames>,
-        err_prof: &ErrorProfile,
-        read_complx: &mut ForwRevComplexity,
-    ) -> Self {
+    fn from_record(record: &Record, contigs: Rc<ContigNames>, err_prof: &ErrorProfile) -> Self {
         let aln = Alignment::from_record(record, contigs);
-        let read_end = ReadEnd::from_record(record);
-        let ln_prob = err_prof.ln_prob(&aln, read_end, read_complx);
-        log::debug!("        {}  {}  {:.3}", aln, read_end, ln_prob);
-        let strand = aln.strand();
-        let interval = aln.take_interval();
-        Self { interval, strand, read_end, ln_prob }
+        let ln_prob = err_prof.ln_prob(aln.cigar());
+        // log::debug!("        {}  {}  {:.3}", aln, read_end, ln_prob);
+        Self {
+            strand: aln.strand(),
+            interval: aln.take_interval(),
+            read_end: ReadEnd::from_record(record),
+            ln_prob,
+        }
     }
 
     /// Get contig id of the alignment.
@@ -95,14 +92,10 @@ impl PrelimAlignments {
             contigs.tag(), min_ln_prob);
         assert!(min_ln_prob.is_finite(), "PrelimAlignments: min_ln_prob must be finite!");
         let mut alns = IntMap::new();
-        // NOTE: One possible issue may be that the first read will have hash = 0,
-        // but probability of that will be extremely small.
         let mut curr_hash = 0;
         let mut curr_alns = Vec::new();
         let mut best_prob = f64::NEG_INFINITY;
-        let mut read_complx = ForwRevComplexity::default();
 
-        let compl_calc = err_prof.complexity_calculator();
         for record in records {
             if record.is_unmapped() {
                 continue;
@@ -111,35 +104,34 @@ impl PrelimAlignments {
             let hash = fnv1a(record.qname());
             if hash != curr_hash {
                 if best_prob >= min_ln_prob {
-                    log::debug!("    Saving {} alignments for hash {}  (prob {:.1})",
-                        curr_alns.len(), curr_hash, best_prob);
+                    // log::debug!("    Saving {} alignments for hash {}  (prob {:.1})",
+                    //     curr_alns.len(), curr_hash, best_prob);
                     // Assert must not be removed, or converted into debug_assert!
                     assert!(alns.insert(curr_hash, mem::replace(&mut curr_alns, Vec::new())).is_none(),
                         "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
                 } else {
-                    log::debug!("    Ignoring {} alignments for hash {}  (prob {:.1})",
-                        curr_alns.len(), curr_hash, best_prob);
+                    // log::debug!("    Ignoring {} alignments for hash {}  (prob {:.1})",
+                    //     curr_alns.len(), curr_hash, best_prob);
                     curr_alns.clear();
                 }
-                log::debug!("    Read {},  hash {}:", String::from_utf8_lossy(record.qname()), hash);
+                // log::debug!("    Read {},  hash {}:", String::from_utf8_lossy(record.qname()), hash);
                 curr_hash = hash;
                 best_prob = f64::NEG_INFINITY;
-                compl_calc.calculate_forw_rev(&record, &mut read_complx);
             }
-            let mate_aln = MateAln::from_record(&record, Rc::clone(&contigs), err_prof, &mut read_complx);
+            let mate_aln = MateAln::from_record(&record, Rc::clone(&contigs), err_prof);
             best_prob = best_prob.max(mate_aln.ln_prob);
             curr_alns.push(mate_aln);
         }
 
         if best_prob >= min_ln_prob {
-            log::debug!("    Saving {} alignments for hash {}  (prob {:.1})",
-                curr_alns.len(), curr_hash, best_prob);
+            // log::debug!("    Saving {} alignments for hash {}  (prob {:.1})",
+            //     curr_alns.len(), curr_hash, best_prob);
             // Assert must not be removed, or converted into debug_assert!
             assert!(alns.insert(curr_hash, curr_alns).is_none(),
                 "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
         } else {
-            log::debug!("    Ignoring {} alignments for hash {}  (prob {:.1})",
-                curr_alns.len(), curr_hash, best_prob);
+            // log::debug!("    Ignoring {} alignments for hash {}  (prob {:.1})",
+            //     curr_alns.len(), curr_hash, best_prob);
         }
 
         Self { contigs, alns }

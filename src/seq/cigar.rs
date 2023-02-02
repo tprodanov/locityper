@@ -17,6 +17,10 @@ pub enum Operation {
     Del,
 }
 
+/// In total, there are 9 possible operations in the SAM file specification.
+/// Some of them (3, 5 & 6) are impossible in our case.
+pub const RAW_OPERATIONS: usize = 9;
+
 impl Operation {
     /// Does the Cigar operation consume reference sequence?
     pub const fn consumes_ref(self) -> bool {
@@ -67,6 +71,21 @@ impl Operation {
             7 => Operation::Equal,
             8 => Operation::Diff,
             _ => panic!("Unexpected cigar operation"),
+        }
+    }
+
+    /// Convert operation into an index (values in 0..RAW_OPERATIONS).
+    pub const fn ix(self) -> usize {
+        match self {
+            Operation::Match => 0,
+            Operation::Ins => 1,
+            Operation::Del => 2,
+            // RefSkip,
+            Operation::Soft => 4,
+            // Hard,
+            // Padding,
+            Operation::Equal => 7,
+            Operation::Diff => 8,
         }
     }
 }

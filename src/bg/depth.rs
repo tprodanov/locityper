@@ -319,6 +319,7 @@ fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, 
 }
 
 /// Read depth parameters.
+#[derive(Clone, Debug)]
 pub struct ReadDepthParams {
     /// Calculate background per windows of this size.
     /// Default: 100.

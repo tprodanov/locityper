@@ -10,7 +10,7 @@ use crate::{
     bg::{
         depth::{ReadDepth, ReadDepthParams},
         insertsz::{InsertNegBinom, InsertDistr},
-        err_prof::{ComplexityCalculator, ErrorProfile},
+        err_prof::ErrorProfile,
         ser::{JsonSer, LoadError},
     },
     seq::{
@@ -18,6 +18,23 @@ use crate::{
         interv::Interval,
     },
 };
+
+#[derive(Debug, Clone)]
+pub struct Params {
+    pub depth: ReadDepthParams,
+    pub err_prob_mult: f64,
+    pub max_clipping: f64,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            depth: ReadDepthParams::default(),
+            err_prob_mult: 1.2,
+            max_clipping: 0.02,
+        }
+    }
+}
 
 /// Various background distributions, including
 /// - read depth distribution,
@@ -35,7 +52,7 @@ impl BgDistr {
             records: &[Record],
             interval: &Interval,
             fasta: &mut IndexedReader<R>,
-            params: &ReadDepthParams)
+            params: &Params)
             -> io::Result<Self>
     {
         log::info!("Estimating background parameters");
@@ -46,11 +63,9 @@ impl BgDistr {
         fasta.read(&mut ref_seq)?;
         seq::standardize(&mut ref_seq);
 
-        let compl_calc = ComplexityCalculator::new(15, 0.2);
         let insert_sz = InsertNegBinom::estimate(records.iter());
-        let err_prof = ErrorProfile::estimate(ComplexityCalculator::new(15, 0.2), records.iter());
-        println!("{:?}", err_prof);
-        let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), params, insert_sz.max_size());
+        let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);
+        let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), &params.depth, insert_sz.max_size());
         Ok(Self { depth, insert_sz, err_prof })
     }
 
