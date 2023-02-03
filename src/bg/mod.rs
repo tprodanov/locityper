@@ -19,10 +19,15 @@ use crate::{
     },
 };
 
+/// Parameters for background distributions estimation.
 #[derive(Debug, Clone)]
 pub struct Params {
+    /// Background read depth parameters.
     pub depth: ReadDepthParams,
+    /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
+    /// by this value. This will soften overly harsh read alignment penalties.
     pub err_prob_mult: f64,
+    /// When calculating read error profiles, ignore reads with `clipping > max_clipping * read_len`.
     pub max_clipping: f64,
 }
 

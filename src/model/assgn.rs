@@ -9,9 +9,11 @@ use crate::{
         seq,
         contigs::{ContigNames, ContigId},
         interv::Interval,
+        compl::linguistic_complexity_k3,
     },
     math::{
         nbinom::{NBinom, UniformNBinom, CachedDistr},
+        Ln,
     },
     bg::{self,
         depth::GC_BINS,
@@ -155,12 +157,14 @@ impl ContigWindows {
         &self,
         ref_seqs: &[Vec<u8>],
         cached_distrs: &'a CachedDepthDistrs<'a>,
-        boundary_size: u32,
+        params: &Params,
     ) -> DistrsVec<'a> {
         let mut distrs: DistrsVec<'a> = Vec::with_capacity(self.total_windows() as usize);
         debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
         distrs.push(Box::new(&cached_distrs.unmapped));
 
+        // Normal windows, boundary windows, low-complexity windows.
+        let mut window_counts = [0_32, 0, 0];
         let window_size = cached_distrs.bg_depth.window_size();
         let gc_padding = cached_distrs.bg_depth.gc_padding();
         for (i, &contig_id) in self.ids.iter().enumerate() {
@@ -171,17 +175,34 @@ impl ContigWindows {
 
             for i in 0..n_windows {
                 let start = window_size * i;
-                let end = start + window_size;
+                let end = min(start + window_size, contig_len);
+                let hicomplex_kmers = if end - start >= params.complexity_k as u32 {
+                    let window_seq = &ref_seq[start as usize..end as usize];
+                    linguistic_complexity_k3(window_seq, params.complexity_k)
+                        .filter(|&c| !c.is_nan() && c >= params.complexity_thresh)
+                        .count()
+                } else { 0 };
+                if hicomplex_kmers < params.hicomplex_kmers {
+                    distrs.push(Box::new(&AlwaysOneDistr));
+                    window_counts[2] += 1;
+                    continue;
+                }
+
                 let gc_content = seq::gc_content(
                     &ref_seq[start.saturating_sub(gc_padding) as usize..min(end + gc_padding, contig_len) as usize])
                     .round() as usize;
-                if end <= boundary_size || start + boundary_size >= contig_len {
+                if end <= params.boundary_size || start + params.boundary_size >= contig_len {
                     distrs.push(Box::new(cached_distrs.boundary_distr(gc_content)));
+                    window_counts[1] += 1;
                 } else {
                     distrs.push(Box::new(cached_distrs.regular_distr(gc_content)));
+                    window_counts[0] += 1;
                 }
             }
         }
+        log::debug!("    There are {} windows: {} regular, {} boundary, {} low-complexity",
+            self.total_windows() - 1, window_counts[0], window_counts[1], window_counts[2]);
+        assert_eq!(self.total_windows() as usize, distrs.len());
         distrs
     }
 }
@@ -220,34 +241,62 @@ pub struct ReadAssignment<'a> {
     likelihood: f64,
 }
 
+/// Read depth model parameters.
+#[derive(Clone, Debug)]
+pub struct Params {
+    /// Boundary size: in the left-most and right-most `boundary_size` bp, use boundary read depth distributions,
+    /// instead of regular ones.
+    pub boundary_size: u32,
+    /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
+    pub prob_diff: f64,
+    /// Only analyze windows, for which there are at least `hicomplex_kmers` k-mers of size `complexity_k`
+    /// that have linguistic complexity >= `complexity_thresh`.
+    pub complexity_k: usize,
+    pub complexity_thresh: f32,
+    pub hicomplex_kmers: usize,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            boundary_size: 1000,
+            prob_diff: Ln::from_log10(8.0),
+            complexity_k: 21,
+            complexity_thresh: 0.6,
+            hicomplex_kmers: 1,
+        }
+    }
+}
+
+impl Params {
+    fn check(&self) {
+        assert!(self.prob_diff >= 0.0, "Probability difference ({:.4}) cannot be negative!", self.prob_diff);
+    }
+}
+
 impl<'a> ReadAssignment<'a> {
     /// Creates an instance that stores read assignments to given contigs.
     /// Read assignment itself is not stored, call `init_assignments()` to start.
-    ///
-    /// Boundary size: in the left-most and right-most `boundary_size` bp, use boundary read depth distributions,
-    /// instead of regular ones.
-    ///
-    /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
     pub fn new(
         contigs: &SeveralContigs,
         contig_names: Rc<ContigNames>,
         all_ref_seqs: &[Vec<u8>],
         cached_distrs: &'a CachedDepthDistrs<'a>,
         all_alns: &AllPairAlignments,
-        boundary_size: u32,
-        prob_diff: f64,
+        params: &Params,
     ) -> Self {
+        params.check();
         let contig_windows = ContigWindows::new(cached_distrs.bg_depth.window_size(), contig_names,
             contigs.contigs().to_vec());
-        let depth_distrs = contig_windows.identify_depth_distributions(all_ref_seqs, cached_distrs, boundary_size);
+        let depth_distrs = contig_windows.identify_depth_distributions(all_ref_seqs, cached_distrs, params);
 
         let mut ix = 0;
         let mut read_locs = Vec::new();
         let mut read_ixs = vec![ix];
         let mut non_trivial_reads = Vec::new();
         for (rp, paired_alns) in all_alns.iter().enumerate() {
-            let new_alns = paired_alns.multi_contig_alns(&mut read_locs, &contigs, prob_diff);
-            debug_assert!(new_alns > 0, "Read pair {} has zero possible alignment location", rp);
+            let new_alns = paired_alns.multi_contig_alns(&mut read_locs, &contigs, params.prob_diff);
+            debug_assert!(new_alns > 0, "Read pair {} has zero possible alignment locations", rp);
             assert!(new_alns <= u16::MAX as usize, "Read pair {} has too many alignment locations ({})", rp, new_alns);
             ix += new_alns;
             read_ixs.push(ix);

@@ -87,8 +87,7 @@ fn abundances(seq_2b: &[u8], out: &mut [u16], w: usize, k: usize) {
 /// `min(4^k, w-k+1)`.
 ///
 /// Output complexity is written in the middle of each window (`i -> i + w/2`).
-/// Returns NaN for windows that contain Ns.
-/// Fills values close to boundary with the last available values.
+/// Returns NaN for windows close to the edge and windows that contain Ns.
 pub fn linguistic_complexity(seq: &[u8], w: usize, k1: usize, k2: usize
 ) -> impl Iterator<Item = f32> + std::iter::ExactSizeIterator {
     let n = seq.len();
@@ -119,11 +118,8 @@ pub fn linguistic_complexity(seq: &[u8], w: usize, k1: usize, k2: usize
         abundances(&seq_2b, &mut abund, w, k);
         divisor *= min(4_u32.pow(k as u32), (w + 1 - k) as u32) as f32;
     }
-    for i in 0..halfw {
-        debug_assert!(abund[i] <= 1 && abund[n - i - 1] <= 1);
-        abund[i] = abund[w];
-        abund[n - i - 1] = abund[n - halfw - 1];
-    }
+    abund[..halfw].fill(0);
+    abund[n - halfw..].fill(0);
     let coef = 1.0 / divisor;
     abund.into_iter().map(move |a| if a == 0 { f32::NAN } else { coef * a as f32 })
 }
