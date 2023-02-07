@@ -5,27 +5,27 @@ use std::cmp::{min, Ordering};
 /// Performs binary search and finds index `i` such that `a[i-1] < target <= a[i].
 #[inline]
 pub fn left<T: PartialOrd>(a: &[T], target: &T) -> usize {
-    left_by(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable!"))
+    left_by(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"))
 }
 
 /// Performs binary search between indices `lo` and `hi`
 /// and finds index `i` such that `a[i-1] < target <= a[i].
 #[inline]
 pub fn left_at<T: PartialOrd>(a: &[T], target: &T, lo: usize, hi: usize) -> usize {
-    left_by_at(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable!"), lo, hi)
+    left_by_at(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"), lo, hi)
 }
 
 /// Performs binary search and finds index `i` such that `a[i-1] <= target < a[i].
 #[inline]
 pub fn right<T: PartialOrd>(a: &[T], target: &T) -> usize {
-    right_by(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable!"))
+    right_by(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"))
 }
 
 /// Performs binary search between indices `lo` and `hi`
 /// and finds index `i` such that `a[i-1] <= target < a[i].
 #[inline]
 pub fn right_at<T: PartialOrd>(a: &[T], target: &T, lo: usize, hi: usize) -> usize {
-    right_by_at(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable!"), lo, hi)
+    right_by_at(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"), lo, hi)
 }
 
 /// Performs binary search

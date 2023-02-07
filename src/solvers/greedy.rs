@@ -55,7 +55,7 @@ impl SolverBuilder for GreedyBuilder {
     fn build<'a>(&self, assignments: ReadAssignment<'a>) -> Self::S<'a> {
         GreedySolver {
             sample_size: min(self.sample_size, assignments.non_trivial_reads().len()),
-            rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set!")),
+            rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set")),
             assignments,
             is_finished: false,
             buffer: Vec::with_capacity(16),

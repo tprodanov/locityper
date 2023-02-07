@@ -98,7 +98,7 @@ where T: Add<Output = T> + Copy + fmt::Display,
 
 impl<T, U> AddAssign<&OpCounts<U>> for OpCounts<T>
 where U: TryInto<T> + Copy,
-      <U as TryInto<T>>::Error: fmt::Debug,
+      U::Error: fmt::Debug,
       T: AddAssign,
 {
     /// Sums operation counts with other operation counts.

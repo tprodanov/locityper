@@ -202,7 +202,7 @@ where D: InsertDistr,
         let mut best_prob1 = f64::NEG_INFINITY;
         for (j, aln2) in alns2.iter().enumerate() {
             let insert_size = aln1.interval.furthest_distance(&aln2.interval)
-                .expect("Alignments must be on the same contig!");
+                .expect("Alignments must be on the same contig");
             let prob = aln1.ln_prob + aln2.ln_prob + insert_distr.ln_prob(insert_size, aln1.strand == aln2.strand);
             if prob >= thresh_prob {
                 best_prob1 = best_prob1.max(prob);

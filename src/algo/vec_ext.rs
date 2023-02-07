@@ -22,7 +22,7 @@ impl VecExt {
 
     /// Sort vector/slice using `partial_ord`.
     pub fn sort<T: PartialOrd>(a: &mut [T]) {
-        a.sort_by(|x, y| x.partial_cmp(y).expect("Error in sort: elements are not comparable!"));
+        a.sort_by(|x, y| x.partial_cmp(y).expect("Error in sort: elements are not comparable"));
     }
 }
 

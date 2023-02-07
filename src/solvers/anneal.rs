@@ -59,7 +59,7 @@ impl SolverBuilder for AnnealingBuilder {
     fn build<'a>(&self, assignments: ReadAssignment<'a>) -> Self::S<'a> {
         SimulatedAnnealing {
             assignments,
-            rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set!")),
+            rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set")),
             curr_step: 0,
             steps: self.steps,
             max_tries: self.max_tries,

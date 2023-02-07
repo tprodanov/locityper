@@ -11,9 +11,11 @@ pub struct ContigId(u16);
 
 impl ContigId {
     /// Creates a new ContigId.
-    #[inline]
-    pub fn new(val: u16) -> ContigId {
-        ContigId(val)
+    pub fn new<T>(val: T) -> ContigId
+    where T: TryInto<u16>,
+          T::Error: fmt::Debug,
+    {
+        ContigId(val.try_into().expect("Contig ID too large"))
     }
 
     /// Get `u32` value of the contig id.
@@ -56,7 +58,7 @@ impl ContigNames {
         let mut name_to_id = HashMap::new();
 
         for (name, length) in it {
-            let contig_id = ContigId(names.len() as u16);
+            let contig_id = ContigId::new(u16::try_from(names.len()).unwrap());
             if let Some(prev_id) = name_to_id.insert(name.clone(), contig_id) {
                 panic!("Contig {} appears twice in the contig list ({} and {})!", name, prev_id, contig_id);
             }
@@ -98,6 +100,10 @@ impl ContigNames {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
     /// Get the number of contigs.
     pub fn len(&self) -> usize {
         self.names.len()
@@ -130,6 +136,10 @@ impl ContigNames {
     pub fn ids(&self) -> impl Iterator<Item = ContigId> + std::iter::ExactSizeIterator {
         (0..self.len() as u16).map(ContigId::new)
     }
+
+    // pub fn ids_lengths(&self) -> impl Iterator<Item = (ContigId, u32)> + std::iter::ExactSizeIterator {
+    //     self.lengths.iter().enumerate().map(|(i, length)| (ContigId::new(i as u16), *length))
+    // }
 }
 
 impl fmt::Debug for ContigNames {
