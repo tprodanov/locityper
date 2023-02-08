@@ -58,7 +58,7 @@ impl ContigNames {
         let mut name_to_id = HashMap::new();
 
         for (name, length) in it {
-            let contig_id = ContigId::new(u16::try_from(names.len()).unwrap());
+            let contig_id = ContigId::new(names.len());
             if let Some(prev_id) = name_to_id.insert(name.clone(), contig_id) {
                 panic!("Contig {} appears twice in the contig list ({} and {})!", name, prev_id, contig_id);
             }
@@ -114,32 +114,39 @@ impl ContigNames {
     }
 
     /// Get contig name from an id.
-    pub fn name(&self, id: ContigId) -> &str {
+    pub fn get_name(&self, id: ContigId) -> &str {
         &self.names[id.ix()]
     }
 
     /// Get contig length from an id.
-    pub fn length(&self, id: ContigId) -> u32 {
+    pub fn get_len(&self, id: ContigId) -> u32 {
         self.lengths[id.ix()]
     }
 
     /// Get contig id from its name.
-    pub fn id(&self, name: &str) -> ContigId {
+    pub fn get_id(&self, name: &str) -> ContigId {
         self.name_to_id[name]
     }
 
     /// Returns contig id, if it is available.
-    pub fn get_id(&self, name: &str) -> Option<ContigId> {
+    pub fn try_get_id(&self, name: &str) -> Option<ContigId> {
         self.name_to_id.get(name).copied()
     }
 
+    /// Returns iterator over all contig IDs.
     pub fn ids(&self) -> impl Iterator<Item = ContigId> + std::iter::ExactSizeIterator {
-        (0..self.len() as u16).map(ContigId::new)
+        (0..u16::try_from(self.len()).unwrap()).map(ContigId::new)
     }
 
-    // pub fn ids_lengths(&self) -> impl Iterator<Item = (ContigId, u32)> + std::iter::ExactSizeIterator {
-    //     self.lengths.iter().enumerate().map(|(i, length)| (ContigId::new(i as u16), *length))
-    // }
+    /// Returns iterator over all contig names.
+    pub fn names(&self) -> std::slice::Iter<'_, String> {
+        self.names.iter()
+    }
+
+    /// Returns iterator over all contig lengths.
+    pub fn lengths(&self) -> std::iter::Cloned<std::slice::Iter<'_, u32>> {
+        self.lengths.iter().cloned()
+    }
 }
 
 impl fmt::Debug for ContigNames {

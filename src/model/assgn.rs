@@ -1,5 +1,8 @@
-use std::rc::Rc;
-use std::cmp::min;
+use std::{
+    rc::Rc,
+    cmp::min,
+    io::{self, Error, ErrorKind},
+};
 use once_cell::unsync::OnceCell;
 use statrs::distribution::Discrete;
 #[cfg(feature = "stochastic")]
@@ -9,7 +12,6 @@ use crate::{
         seq,
         contigs::{ContigNames, ContigId},
         interv::Interval,
-        compl::linguistic_complexity_k3,
     },
     math::{
         nbinom::{NBinom, UniformNBinom, CachedDistr},
@@ -20,6 +22,47 @@ use crate::{
     },
     model::locs::{TwoIntervals, PairAlignment, SeveralContigs, AllPairAlignments},
 };
+
+/// Stores k-mer counts for each input k-mer.
+pub struct KmerCounts {
+    k: u32,
+    counts: Vec<Vec<u16>>,
+}
+
+impl KmerCounts {
+    /// Load k-mer counts from a string.
+    /// First line is "k=<number>". All consecutive lines contain just a single number.
+    /// Must contain exact number of k-mer as `contigs`.
+    pub fn load(s: &str, contigs: &ContigNames) -> io::Result<Self> {
+        assert!(!contigs.is_empty(), "Cannot load k-mer counts for empty contigs set!");
+        let mut split = s.split('\n');
+        let first = split.next().ok_or_else(|| Error::new(ErrorKind::InvalidData,
+            "Empty file with k-mer counts!"))?;
+        let k = match first.split_once('=') {
+            Some(("k", v)) => v.parse().map_err(|e: std::num::ParseIntError|
+                Error::new(ErrorKind::InvalidData, e))?,
+            _ => return Err(Error::new(ErrorKind::InvalidData,
+                format!("Incorrect k-mer counts format, first line ({}) must be in format \"k=integer\"", first))),
+        };
+
+        let mut counts = Vec::with_capacity(contigs.len());
+        for contig_len in contigs.lengths() {
+            assert!(contig_len >= k, "Contig too short!");
+            let n_kmers = contig_len - k + 1;
+            let mut curr_counts = Vec::with_capacity(n_kmers as usize);
+            for _ in 0..n_kmers {
+                curr_counts.push(split.next()
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Not enough k-mer counts!"))?
+                    .parse().map_err(|e: std::num::ParseIntError| Error::new(ErrorKind::InvalidData, e))?);
+            }
+            counts.push(curr_counts);
+        }
+        match split.next() {
+            Some("") | None => Ok(Self { k, counts }),
+            _ => Err(Error::new(ErrorKind::InvalidData, "Too many k-mer counts!")),
+        }
+    }
+}
 
 /// Fake proxy distribution, that has 1.0 probability for all values.
 struct AlwaysOneDistr;
@@ -106,7 +149,7 @@ impl ContigWindows {
         wshifts.push(curr_windows);
         for &id in ids.iter() {
             // Ceiling division.
-            curr_windows += (contigs.length(id) + window_size - 1) / window_size;
+            curr_windows += (contigs.get_len(id) + window_size - 1) / window_size;
             wshifts.push(curr_windows);
         }
         Self { window_size, contigs, ids, wshifts }
@@ -128,7 +171,7 @@ impl ContigWindows {
         if let Some(i) = self.ids.iter().position(|&id| id == contig) {
             self.wshifts[i]
         } else {
-            panic!("Contig {} is not in the contig set", self.contigs.name(contig))
+            panic!("Contig {} is not in the contig set", self.contigs.get_name(contig))
         }
     }
 
@@ -157,32 +200,38 @@ impl ContigWindows {
         &self,
         ref_seqs: &[Vec<u8>],
         cached_distrs: &'a CachedDepthDistrs<'a>,
+        kmer_counts: &KmerCounts,
         params: &Params,
     ) -> DistrsVec<'a> {
+        assert!(kmer_counts.k % 2 == 1, "k-mer ({}) size must be odd!", kmer_counts.k);
+        let halfk = kmer_counts.k / 2;
         let mut distrs: DistrsVec<'a> = Vec::with_capacity(self.total_windows() as usize);
         debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
         distrs.push(Box::new(&cached_distrs.unmapped));
 
-        // Normal windows, boundary windows, low-complexity windows.
+        // Normal windows, boundary windows, windows without rare k-mers.
         let mut window_counts = [0_32, 0, 0];
         let window_size = cached_distrs.bg_depth.window_size();
         let gc_padding = cached_distrs.bg_depth.gc_padding();
         for (i, &contig_id) in self.ids.iter().enumerate() {
+            let curr_kmer_counts = &kmer_counts.counts[contig_id.ix()];
             let n_windows = self.wshifts[i + 1] - self.wshifts[i];
-            let contig_len = self.contigs.length(contig_id);
+            let contig_len = self.contigs.get_len(contig_id);
             let ref_seq = &ref_seqs[contig_id.ix()];
             assert_eq!(contig_len as usize, ref_seq.len(), "Contig length and reference length do not match!");
 
-            for i in 0..n_windows {
-                let start = window_size * i;
-                let end = min(start + window_size, contig_len);
-                let hicomplex_kmers = if end - start >= params.complexity_k as u32 {
-                    let window_seq = &ref_seq[start as usize..end as usize];
-                    linguistic_complexity_k3(window_seq, params.complexity_k)
-                        .filter(|&c| !c.is_nan() && c >= params.complexity_thresh)
-                        .count()
+            for j in 0..n_windows {
+                let start = window_size * j;
+                let end = start + window_size;
+                let rare_kmers = if end - start >= kmer_counts.k {
+                    curr_kmer_counts[start.saturating_sub(halfk) as usize..
+                            min(end - halfk, contig_len - kmer_counts.k + 1) as usize]
+                        .into_iter().filter(|&&count| count < params.rare_thresh).count()
                 } else { 0 };
-                if hicomplex_kmers < params.hicomplex_kmers {
+                log::debug!("{}:{}  ({}-{})   {} rare k-mers", contig_id, j, start, end, rare_kmers);
+                log::debug!("    {:?}", &curr_kmer_counts[start.saturating_sub(halfk) as usize..
+                    min(end - halfk, contig_len - kmer_counts.k + 1) as usize]);
+                if rare_kmers < params.rare_kmers {
                     distrs.push(Box::new(&AlwaysOneDistr));
                     window_counts[2] += 1;
                     continue;
@@ -200,7 +249,7 @@ impl ContigWindows {
                 }
             }
         }
-        log::debug!("    There are {} windows: {} regular, {} boundary, {} low-complexity",
+        log::debug!("    There are {} windows: {} regular, {} boundary, {} with few rare k-mers",
             self.total_windows() - 1, window_counts[0], window_counts[1], window_counts[2]);
         assert_eq!(self.total_windows() as usize, distrs.len());
         distrs
@@ -249,11 +298,10 @@ pub struct Params {
     pub boundary_size: u32,
     /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
     pub prob_diff: f64,
-    /// Only analyze windows, for which there are at least `hicomplex_kmers` k-mers of size `complexity_k`
-    /// that have linguistic complexity >= `complexity_thresh`.
-    pub complexity_k: usize,
-    pub complexity_thresh: f32,
-    pub hicomplex_kmers: usize,
+    /// Only analyze windows, for which there are at least `rare_kmers` k-mers
+    /// that have at most `rare_thresh` occurances in the genomes.
+    pub rare_thresh: u16,
+    pub rare_kmers: usize,
 }
 
 impl Default for Params {
@@ -261,9 +309,8 @@ impl Default for Params {
         Self {
             boundary_size: 1000,
             prob_diff: Ln::from_log10(8.0),
-            complexity_k: 21,
-            complexity_thresh: 0.6,
-            hicomplex_kmers: 1,
+            rare_thresh: 5,
+            rare_kmers: 20,
         }
     }
 }
@@ -281,6 +328,7 @@ impl<'a> ReadAssignment<'a> {
         contigs: &SeveralContigs,
         contig_names: Rc<ContigNames>,
         all_ref_seqs: &[Vec<u8>],
+        kmer_counts: &KmerCounts,
         cached_distrs: &'a CachedDepthDistrs<'a>,
         all_alns: &AllPairAlignments,
         params: &Params,
@@ -288,7 +336,7 @@ impl<'a> ReadAssignment<'a> {
         params.check();
         let contig_windows = ContigWindows::new(cached_distrs.bg_depth.window_size(), contig_names,
             contigs.contigs().to_vec());
-        let depth_distrs = contig_windows.identify_depth_distributions(all_ref_seqs, cached_distrs, params);
+        let depth_distrs = contig_windows.identify_depth_distributions(all_ref_seqs, cached_distrs, kmer_counts, params);
 
         let mut ix = 0;
         let mut read_locs = Vec::new();
@@ -491,7 +539,7 @@ impl<'a> ReadAssignment<'a> {
         } else {
             let i = window as usize;
             let old_depth = self.depth[i];
-            let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative!");
+            let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative");
             self.depth_distrs[i].ln_pmf(new_depth) - self.depth_distrs[i].ln_pmf(old_depth)
         }
     }

@@ -38,7 +38,7 @@ impl Interval {
     pub fn parse(contig_names: Rc<ContigNames>, s: &str) -> Result<Self, String> {
         if let Some((name, coord)) = s.split_once(':') {
             if let Some((start, end)) = coord.split_once('-') {
-                if let Some(contig_id) = contig_names.get_id(name) {
+                if let Some(contig_id) = contig_names.try_get_id(name) {
                     let start: u32 = start.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
                     let end: u32 = end.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
                     return Ok(Self::new(contig_names, contig_id, start - 1, end));
@@ -58,7 +58,7 @@ impl Interval {
     /// Contig name.
     #[inline]
     pub fn contig_name(&self) -> &str {
-        self.contig_names.name(self.contig_id)
+        self.contig_names.get_name(self.contig_id)
     }
 
     pub fn contigs(&self) -> &Rc<ContigNames> {
