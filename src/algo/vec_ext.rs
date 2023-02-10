@@ -31,8 +31,10 @@ pub struct F64Ext;
 
 impl F64Ext {
     /// Calculate sample mean.
-    pub fn mean(a: &[f64]) -> f64 {
-        a.iter().sum::<f64>() / a.len() as f64
+    pub fn mean<T>(a: &[T]) -> f64
+    where T: Into<f64> + Copy,
+    {
+        a.iter().fold(0.0_f64, |acc, &v| acc + v.into()) / a.len() as f64
     }
 
     /// Calculate sample variance.

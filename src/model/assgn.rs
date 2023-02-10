@@ -1,5 +1,5 @@
 use std::{
-    cmp::min,
+    cmp::{min, max},
     io::{self, Error, ErrorKind},
     rc::Rc,
     cell::RefCell,
@@ -9,6 +9,7 @@ use statrs::distribution::Discrete;
 #[cfg(feature = "stochastic")]
 use rand::Rng;
 use crate::{
+    algo::vec_ext::F64Ext,
     seq::{
         seq,
         contigs::{ContigNames, ContigId},
@@ -52,9 +53,11 @@ impl KmerCounts {
             let n_kmers = contig_len - k + 1;
             let mut curr_counts = Vec::with_capacity(n_kmers as usize);
             for _ in 0..n_kmers {
-                curr_counts.push(split.next()
+                let val: u16 = split.next()
                     .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Not enough k-mer counts!"))?
-                    .parse().map_err(|e: std::num::ParseIntError| Error::new(ErrorKind::InvalidData, e))?);
+                    .parse().map_err(|e: std::num::ParseIntError| Error::new(ErrorKind::InvalidData, e))?;
+                // We assume that each k-mer appears at least once.
+                curr_counts.push(max(val, 1));
             }
             counts.push(curr_counts);
         }
@@ -87,9 +90,6 @@ pub struct CachedDepthDistrs<'a> {
 
     /// Distribution for proxy window with unmapped reads.
     unmapped: DistrPtr,
-    /// Bad window distribution.
-    bad_window: DistrPtr,
-
     /// Read depth distributions in regular windows. Key `= GC_BINS * cn + gc_content`.
     regular: RefCell<IntMap<DistrPtr>>,
     /// Read depth distributions in windows close to the region boundary. Key `= GC_BINS * cn + gc_content`.
@@ -106,7 +106,6 @@ impl<'a> CachedDepthDistrs<'a> {
         Self {
             bg_depth, mul_coef,
             unmapped: Rc::new(AlwaysOneDistr),
-            bad_window: Rc::new(AlwaysOneDistr),
             regular: RefCell::new(IntMap::new()),
             boundary: RefCell::new(IntMap::new()),
         }
@@ -115,11 +114,6 @@ impl<'a> CachedDepthDistrs<'a> {
     /// Returns a pointer to unmapped distribution (`AlwaysOneDistr`).
     pub fn unmapped_distr(&self) -> DistrPtr {
         Rc::clone(&self.unmapped)
-    }
-
-    /// Returns a pointer to distribution within bad windows (`AlwaysOneDistr`).
-    pub fn bad_window_distr(&self) -> DistrPtr {
-        Rc::clone(&self.bad_window)
     }
 
     /// Returns read depth distribution in regular windows at GC-content and contig CN.
@@ -150,6 +144,55 @@ impl<'a> CachedDepthDistrs<'a> {
             },
         }
     }
+}
+
+/// Weighted distribution: calculates P(x)^weight.
+/// Note, resulting values will not sum to one anymore.
+struct WeightedDistr {
+    distr: DistrPtr,
+    weight: f64,
+}
+
+impl WeightedDistr {
+    fn new(distr: DistrPtr, weight: f64) -> Self {
+        Self { distr, weight }
+    }
+}
+
+impl Discrete<u32, f64> for WeightedDistr {
+    fn ln_pmf(&self, x: u32) -> f64 {
+        self.weight * self.distr.ln_pmf(x)
+    }
+
+    fn pmf(&self, x: u32) -> f64 {
+        self.ln_pmf(x).exp()
+    }
+}
+
+/// Calculates weight of a positive value x.
+/// If x <= c1, returns 1.
+/// If x = c2, returns 0.5 (returns ln 0.5).
+/// For values between c1 and infinity, the weight is distributed according to a sech function.
+/// ```
+/// f(x) = { 1                              if x in [0, c1].
+///                x - c1
+///        { sech ------- * ln(2 + sqrt3)   if x > c1.
+///               c2 - c1
+/// ```
+fn sech_weight(x: f64, c1: f64, c2: f64) -> f64 {
+    if x <= c1 {
+        return 1.0;
+    }
+    // ln(2 + sqrt(3)).
+    const LN2_SQRT3: f64 = 1.31695789692481;
+    let t = (x - c1) / (c2 - c1) * LN2_SQRT3;
+    let expt = t.exp();
+    2.0 * expt / (expt * expt + 1.0)
+
+    // Calculating ln(sech(t))
+    // // ln(2).
+    // const LN2: f64 = 0.69314718055995;
+    // LN2 + t - (2.0 * t).exp().ln_1p()
 }
 
 /// Stores the contigs and windows corresponding to the windows.
@@ -232,15 +275,17 @@ impl ContigWindows {
         cached_distrs: &CachedDepthDistrs<'_>,
         kmer_counts: &KmerCounts,
         params: &Params,
-    ) -> Vec<DistrPtr> {
+    ) -> Vec<WeightedDistr> {
         assert!(kmer_counts.k % 2 == 1, "k-mer ({}) size must be odd!", kmer_counts.k);
         let halfk = kmer_counts.k / 2;
-        let mut distrs: Vec<DistrPtr> = Vec::with_capacity(self.total_windows() as usize);
+        let mut distrs: Vec<WeightedDistr> = Vec::with_capacity(self.total_windows() as usize);
         debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
-        distrs.push(cached_distrs.unmapped_distr());
+        distrs.push(WeightedDistr::new(cached_distrs.unmapped_distr(), 1.0));
 
-        // Normal windows, boundary windows, windows without rare k-mers.
-        let mut window_counts = [0_32, 0, 0];
+        // Normal windows, boundary windows.
+        let mut window_counts1 = [0_u16, 0];
+        // Stratifying uniqueness: good, adequate, bad.
+        let mut window_counts2 = [0_u16, 0, 0];
         let window_size = cached_distrs.bg_depth.window_size();
         let gc_padding = cached_distrs.bg_depth.gc_padding();
         for (i, (&contig_id, &contig_cn)) in
@@ -254,34 +299,37 @@ impl ContigWindows {
             for j in 0..n_windows {
                 let start = window_size * j;
                 let end = start + window_size;
-                let rare_kmers = if end - start >= kmer_counts.k {
-                    curr_kmer_counts[start.saturating_sub(halfk) as usize..
-                            min(end - halfk, contig_len - kmer_counts.k + 1) as usize]
-                        .into_iter().filter(|&&count| count < params.rare_thresh).count()
-                } else { 0 };
-                log::debug!("{}:{}  ({}-{})   {} rare k-mers", contig_id, j, start, end, rare_kmers);
-                log::debug!("    {:?}", &curr_kmer_counts[start.saturating_sub(halfk) as usize..
-                    min(end - halfk, contig_len - kmer_counts.k + 1) as usize]);
-                if rare_kmers < params.rare_kmers {
-                    distrs.push(cached_distrs.bad_window_distr());
-                    window_counts[2] += 1;
-                    continue;
+                let mean_kmer_freq = if end - start >= kmer_counts.k {
+                    let start_ix = start.saturating_sub(halfk) as usize;
+                    let end_ix = min(end - halfk, contig_len - kmer_counts.k + 1) as usize;
+                    F64Ext::mean(&curr_kmer_counts[start_ix..end_ix])
+                } else { 0.0 };
+                let weight = sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer);
+                log::debug!("{}:{}  ({}-{})   {:.4}  -> {:.4}", contig_id, j, start, end, mean_kmer_freq, weight);
+                if mean_kmer_freq <= params.rare_kmer {
+                    window_counts2[0] += 1;
+                } else if mean_kmer_freq <= params.semicommon_kmer {
+                    window_counts2[1] += 1;
+                } else {
+                    window_counts2[2] += 1;
                 }
 
                 let gc_content = seq::gc_content(
                     &ref_seq[start.saturating_sub(gc_padding) as usize..min(end + gc_padding, contig_len) as usize])
                     .round() as usize;
-                if end <= params.boundary_size || start + params.boundary_size >= contig_len {
-                    distrs.push(cached_distrs.boundary_distr(gc_content, usize::from(contig_cn)));
-                    window_counts[1] += 1;
+                let distr = if end <= params.boundary_size || start + params.boundary_size >= contig_len {
+                    window_counts1[1] += 1;
+                    cached_distrs.boundary_distr(gc_content, usize::from(contig_cn))
                 } else {
-                    distrs.push(cached_distrs.regular_distr(gc_content, usize::from(contig_cn)));
-                    window_counts[0] += 1;
-                }
+                    window_counts1[0] += 1;
+                    cached_distrs.regular_distr(gc_content, usize::from(contig_cn))
+                };
+                distrs.push(WeightedDistr::new(distr, weight));
             }
         }
-        log::debug!("    There are {} windows: {} regular, {} boundary, {} with few rare k-mers",
-            self.total_windows() - 1, window_counts[0], window_counts[1], window_counts[2]);
+        log::debug!("    There are {} windows: {} regular, {} boundary;   uniqueness: {} good, {} adequate, {} bad",
+            self.total_windows() - 1, window_counts1[0], window_counts1[1],
+                window_counts2[0], window_counts2[1], window_counts2[2]);
         assert_eq!(self.total_windows() as usize, distrs.len());
         distrs
     }
@@ -298,7 +346,7 @@ pub struct ReadAssignment {
     depth: Vec<u32>,
 
     /// Read depth distribution at each window (length: `contig_windows.total_windows()`).
-    depth_distrs: Vec<DistrPtr>,
+    depth_distrs: Vec<WeightedDistr>,
 
     /// A vector of possible read alignments to the vector of contigs (length: n_reads).
     read_locs: Vec<PairAlignment>,
@@ -327,10 +375,12 @@ pub struct Params {
     pub boundary_size: u32,
     /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
     pub prob_diff: f64,
-    /// Only analyze windows, for which there are at least `rare_kmers` k-mers
-    /// that have at most `rare_thresh` occurances in the genomes.
-    pub rare_thresh: u16,
-    pub rare_kmers: usize,
+
+    /// Average k-mer frequency is calculated for a window in question.
+    /// If the value is less-or-equal than `rare_kmer`, the window received a weight = 1.
+    /// If the value equals to `semicommon_kmer`, weight would be 0.5.
+    pub rare_kmer: f64,
+    pub semicommon_kmer: f64,
 }
 
 impl Default for Params {
@@ -338,8 +388,8 @@ impl Default for Params {
         Self {
             boundary_size: 1000,
             prob_diff: Ln::from_log10(8.0),
-            rare_thresh: 5,
-            rare_kmers: 5,
+            rare_kmer: 3.0,
+            semicommon_kmer: 5.0,
         }
     }
 }
@@ -347,6 +397,8 @@ impl Default for Params {
 impl Params {
     fn check(&self) {
         assert!(self.prob_diff >= 0.0, "Probability difference ({:.4}) cannot be negative!", self.prob_diff);
+        assert!(self.rare_kmer < self.semicommon_kmer, "k-mer frequency thresholds ({:.4}, {:.4}) are non-increasing",
+            self.rare_kmer, self.semicommon_kmer);
     }
 }
 
