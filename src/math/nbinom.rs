@@ -44,9 +44,9 @@ impl NBinom {
         NBinom::new(m * m / (v - m), m / v)
     }
 
-    /// Create a new distribution where n is multiplied by `coef` and p stays the same.
-    pub fn mul(&self, coef: f64) -> NBinom {
-        NBinom::new(self.n * coef, self.p)
+    /// Create a new distribution where n is multiplied by `coeff` and p stays the same.
+    pub fn mul(&self, coeff: f64) -> NBinom {
+        NBinom::new(self.n * coeff, self.p)
     }
 
     /// Creates a cached Negative Binomial distribution, storing ln_pmf values from 0 up to <0.999 quantile>.

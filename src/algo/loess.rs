@@ -157,8 +157,8 @@ pub fn polyfit(x: &[f64], y: &[f64], w: &[f64], deg: usize) -> Result<Vec<f64>, 
 pub fn polyval(coefs: &[f64], x: f64) -> f64 {
     let mut curr_x = 1.0;
     let mut y = 0.0;
-    for coef in coefs.iter() {
-        y += coef * curr_x;
+    for coeff in coefs.iter() {
+        y += coeff * curr_x;
         curr_x *= x;
     }
     y

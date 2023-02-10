@@ -38,9 +38,9 @@ impl fmt::Display for Iteration {
 /// Write debug information about solvers.
 pub trait DbgWrite {
     /// Write current read assignments after the corresponding iteration.
-    /// If force is true, write in any case.
-    fn write<'a>(&mut self, read_assignments: &'a ReadAssignment<'a>, iteration: Iteration) -> io::Result<()>;
+    fn write(&mut self, read_assignments: &ReadAssignment, iteration: Iteration) -> io::Result<()>;
 
+    /// Flush cached data to the writer.
     fn flush(&mut self) -> io::Result<()>;
 }
 
@@ -48,7 +48,7 @@ pub trait DbgWrite {
 pub struct NoDbg;
 
 impl DbgWrite for NoDbg {
-    fn write<'a>(&mut self, _: &'a ReadAssignment<'a>, _: Iteration) -> io::Result<()> { Ok(()) }
+    fn write(&mut self, _: &ReadAssignment, _: Iteration) -> io::Result<()> { Ok(()) }
 
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
@@ -76,7 +76,7 @@ impl DbgWriter<io::BufWriter<File>> {
 }
 
 impl<W: Write> DbgWrite for DbgWriter<W> {
-    fn write<'a>(&mut self, read_assignments: &'a ReadAssignment<'a>, iteration: Iteration) -> io::Result<()> {
+    fn write(&mut self, read_assignments: &ReadAssignment, iteration: Iteration) -> io::Result<()> {
         writeln!(self.writer, "{}{}\t-1\tNA\t{:.2}", self.prefix, iteration, read_assignments.likelihood())?;
         match &iteration {
             Iteration::Step(_, inner) if inner % self.frequency != 0 => return Ok(()),

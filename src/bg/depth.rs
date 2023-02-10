@@ -266,7 +266,7 @@ fn find_gc_bins(gc_contents: &[f64]) -> Vec<(usize, usize)> {
 /// Y values are read depth variance in each particular GC-content bin.
 /// Use loess_frac = 1.
 fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u32], mean_loess_frac: f64)
-        -> (Vec<f64>, Vec<f64>)
+    -> (Vec<f64>, Vec<f64>)
 {
     const VAR_MIN_WINDOWS: usize = 10;
     let n = depth.len();
@@ -321,6 +321,9 @@ fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, 
 /// Read depth parameters.
 #[derive(Clone, Debug)]
 pub struct ReadDepthParams {
+    /// Specie ploidy (2 in most cases).
+    ploidy: u8,
+
     /// Calculate background per windows of this size.
     /// Default: 100.
     pub window_size: u32,
@@ -361,6 +364,7 @@ pub struct ReadDepthParams {
 impl Default for ReadDepthParams {
     fn default() -> Self {
         Self {
+            ploidy: 2,
             window_size: 100,
             gc_padding: 100,
             edge_padding: 1000,
@@ -372,10 +376,19 @@ impl Default for ReadDepthParams {
     }
 }
 
+impl ReadDepthParams {
+    pub fn check(&self) {
+        assert!(self.ploidy > 0, "Ploidy cannot be zero!");
+        assert!(self.edge_padding >= self.gc_padding, "Edge padding must not be smaller than GC padding!");
+    }
+}
+
 /// Background read depth distributions for each GC-content value.
 pub struct ReadDepth {
     /// Read depth is calculated per windows with this size.
     window_size: u32,
+    /// Specie ploidy (2 in most cases).
+    ploidy: u8,
     /// For each window, add `gc_padding` to the left and right before calculating GC-content.
     gc_padding: u32,
     /// Limit read depth calculation to certain windows.
@@ -397,7 +410,6 @@ impl ReadDepth {
         log::info!("    Estimating read depth");
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
-        assert!(params.edge_padding >= params.gc_padding, "Edge padding must not be smaller than GC padding!");
         let mut windows = count_reads(interval, records, params, i64::from(max_insert_size));
         log::debug!("        Count reads in  {:7} windows", windows.len());
         filter_ns(&mut windows, interval, ref_seq);
@@ -413,14 +425,16 @@ impl ReadDepth {
         let depth1: Vec<u32> = ixs.iter().map(|&i| windows[i].depth1).collect();
 
         let (mut means, mut variances) = predict_mean_var(&gc_contents, &gc_bins, &depth1, params.mean_loess_frac);
-        log::info!("        Read depth:  mean = {:.2},  st.dev. = {:.2}   (GC-content 40, {} bp windows)",
-            means[40], variances[40].sqrt(), params.window_size);
+        log::info!("        Read depth:  mean = {:.2},  st.dev. = {:.2}   (GC-content 40, {} bp windows, ploidy {})",
+            means[40], variances[40].sqrt(), params.window_size, params.ploidy);
         blur_boundary_values(&mut means, &mut variances, &gc_bins, params);
 
+        let inv_ploidy = 1.0 / f64::from(params.ploidy);
         let distributions = means.into_iter().zip(variances)
-            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)))
+            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)).mul(inv_ploidy))
             .collect();
         Self {
+            ploidy: params.ploidy,
             window_size: params.window_size,
             gc_padding: params.gc_padding,
             limits,
@@ -453,6 +467,7 @@ impl JsonSer for ReadDepth {
         let n_params: Vec<f64> = self.distributions.iter().map(|distr| distr.n()).collect();
         let p_params: Vec<f64> = self.distributions.iter().map(|distr| distr.p()).collect();
         json::object!{
+            ploidy: self.ploidy,
             window: self.window_size,
             gc_padd: self.gc_padding,
             limits: self.limits.save(),
@@ -462,6 +477,8 @@ impl JsonSer for ReadDepth {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+        let ploidy = obj["ploidy"].as_usize().ok_or_else(|| LoadError(format!(
+            "ReadDepth: Failed to parse '{}': missing or incorrect 'ploidy' field!", obj)))?;
         let window_size = obj["window"].as_usize().ok_or_else(|| LoadError(format!(
             "ReadDepth: Failed to parse '{}': missing or incorrect 'window' field!", obj)))?;
         let gc_padding = obj["gc_padd"].as_usize().ok_or_else(|| LoadError(format!(
@@ -475,6 +492,7 @@ impl JsonSer for ReadDepth {
         let mut p_params = vec![0.0; window_size + 1];
         parse_f64_arr(obj, "p", &mut p_params)?;
         Ok(Self {
+            ploidy: u8::try_from(ploidy).unwrap(),
             window_size: u32::try_from(window_size).unwrap(),
             gc_padding: u32::try_from(gc_padding).unwrap(),
             limits,

@@ -47,7 +47,7 @@ impl AnnealingBuilder {
 }
 
 impl SolverBuilder for AnnealingBuilder {
-    type S<'a> = SimulatedAnnealing<'a>;
+    type S = SimulatedAnnealing;
 
     /// Sets seed.
     fn set_seed(&mut self, seed: u64) -> &mut Self {
@@ -56,7 +56,7 @@ impl SolverBuilder for AnnealingBuilder {
     }
 
     /// Builds the solver.
-    fn build<'a>(&self, assignments: ReadAssignment<'a>) -> Self::S<'a> {
+    fn build(&self, assignments: ReadAssignment) -> Self::S {
         SimulatedAnnealing {
             assignments,
             rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set")),
@@ -64,7 +64,7 @@ impl SolverBuilder for AnnealingBuilder {
             steps: self.steps,
             max_tries: self.max_tries,
             init_prob: self.init_prob,
-            coef: f64::NAN,
+            coeff: f64::NAN,
         }
     }
 }
@@ -73,8 +73,8 @@ impl SolverBuilder for AnnealingBuilder {
 ///
 /// In one step, the solver examines `sample_size` read pairs, and selects the best read pair to switch location.
 /// If no improvement was made for `plato_iters` iterations, the solver stops.
-pub struct SimulatedAnnealing<'a> {
-    assignments: ReadAssignment<'a>,
+pub struct SimulatedAnnealing {
+    assignments: ReadAssignment,
     rng: SmallRng,
     curr_step: u32,
     /// Total number of iterations.
@@ -82,12 +82,12 @@ pub struct SimulatedAnnealing<'a> {
     /// Maximal number of neighbours, visited per step.
     max_tries: u32,
     init_prob: f64,
-    coef: f64,
+    coeff: f64,
 }
 
-impl<'a> SimulatedAnnealing<'a> {
+impl SimulatedAnnealing {
     /// Creates GreedySolver with default parameters (seed `AnnealingBuilder::default`).
-    pub fn new(assignments: ReadAssignment<'a>, seed: u64) -> Self {
+    pub fn new(assignments: ReadAssignment, seed: u64) -> Self {
         Self::builder().set_seed(seed).build(assignments)
     }
 
@@ -97,7 +97,7 @@ impl<'a> SimulatedAnnealing<'a> {
     }
 }
 
-impl<'a> Solver<'a> for SimulatedAnnealing<'a> {
+impl Solver for SimulatedAnnealing {
     /// Returns false, the method is not determenistic.
     fn is_determenistic() -> bool { false }
 
@@ -113,7 +113,7 @@ impl<'a> Solver<'a> for SimulatedAnnealing<'a> {
                 neg_count += 1;
             }
         }
-        self.coef = if neg_count == 0 {
+        self.coeff = if neg_count == 0 {
             1.0
         } else {
             self.init_prob.ln() * neg_count as f64 / neg_sum
@@ -130,7 +130,7 @@ impl<'a> Solver<'a> for SimulatedAnnealing<'a> {
         self.curr_step += 1;
         for _ in 0..self.max_tries {
             let (rp, new_assign, improv) = self.assignments.random_reassignment(&mut self.rng);
-            if improv > 0.0 || (temp > 0.0 && self.rng.gen_range(0.0..=1.0) <= (self.coef * improv / temp).exp()) {
+            if improv > 0.0 || (temp > 0.0 && self.rng.gen_range(0.0..=1.0) <= (self.coeff * improv / temp).exp()) {
                 return self.assignments.reassign(rp, new_assign);
             }
         }
@@ -143,12 +143,12 @@ impl<'a> Solver<'a> for SimulatedAnnealing<'a> {
     }
 
     /// Return the current read assignments.
-    fn current_assignments<'b>(&'b self) -> &'b ReadAssignment<'a> where 'a: 'b {
+    fn current_assignments(&self) -> &ReadAssignment {
         &self.assignments
     }
 
     /// Finish solving, consume the solver and return the read assignments.
-    fn finish(self) -> ReadAssignment<'a> {
+    fn finish(self) -> ReadAssignment {
         self.assignments
     }
 }

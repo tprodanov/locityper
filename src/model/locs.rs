@@ -1,7 +1,7 @@
 use std::{
     rc::Rc,
-    fmt,
-    mem,
+    io::{self, Write},
+    fmt, mem,
 };
 use htslib::bam::Record;
 use intmap::IntMap;
@@ -22,12 +22,46 @@ use crate::{
     math::Ln,
 };
 
-// TODO: REMOVE LATER.
-const DEBUG_ALNS: bool = false;
+/// Write debug information about read locations.
+pub(crate) trait DbgWrite {
+    /// Write single-mate alignment.
+    fn write_mate_aln(&mut self, qname: &[u8], hash: u64, aln: &MateAln) -> io::Result<()>;
+
+    /// Save/ignore `count` mate alignments for read `hash`.
+    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize, best_prob: f64) -> io::Result<()>;
+
+    /// Flush cached data to the writer.
+    fn flush(&mut self) -> io::Result<()>;
+}
+
+impl DbgWrite for () {
+    fn write_mate_aln(&mut self, _qname: &[u8], _hash: u64, _aln: &MateAln) -> io::Result<()> { Ok(()) }
+    fn finalize_mate_alns(&mut self, _hash: u64, _save: bool, _count: usize, _prob: f64) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+}
+
+impl<W: io::Write> DbgWrite for &mut W {
+    fn write_mate_aln(&mut self, qname: &[u8], hash: u64, aln: &MateAln) -> io::Result<()> {
+        write!(self, "{:X}", hash)?;
+        if !qname.is_empty() {
+            write!(self, "=")?;
+            self.write_all(qname)?;
+        }
+        writeln!(self, "\t{}\t{}\t{:.3}", aln.read_end, aln.interval, aln.ln_prob)
+    }
+
+    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize, best_prob: f64) -> io::Result<()> {
+        writeln!(self, "{:X}\t{}\t{} alns\t{:.3}", hash, if save { "save" } else { "ignore" }, count, best_prob)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(self)
+    }
+}
 
 /// Single mate alignment: store alignment location, strand, read-end, and alignment ln-probability.
 #[derive(Clone)]
-struct MateAln {
+pub(crate) struct MateAln {
     interval: Interval,
     strand: Strand,
     read_end: ReadEnd,
@@ -39,15 +73,11 @@ impl MateAln {
     /// Creates a new alignment extension from a htslib `Record`.
     fn from_record(record: &Record, contigs: Rc<ContigNames>, err_prof: &ErrorProfile) -> Self {
         let aln = Alignment::from_record(record, contigs);
-        let ln_prob = err_prof.ln_prob(aln.cigar());
-        let read_end = ReadEnd::from_record(record);
-        if DEBUG_ALNS {
-            log::debug!("        {}  {}  {:.3}", aln, read_end, ln_prob);
-        }
         Self {
             strand: aln.strand(),
+            ln_prob: err_prof.ln_prob(aln.cigar()),
             interval: aln.take_interval(),
-            read_end, ln_prob,
+            read_end: ReadEnd::from_record(record),
         }
     }
 
@@ -76,7 +106,7 @@ impl fmt::Display for MateAln {
 
 /// Preliminary, unpaired, read alignments.
 /// Keys: read name hash, values: all alignments for the read pair.
-pub struct PrelimAlignments {
+pub(crate) struct PrelimAlignments {
     contigs: Rc<ContigNames>,
     alns: IntMap<Vec<MateAln>>,
 }
@@ -85,13 +115,15 @@ impl PrelimAlignments {
     /// Creates `PrelimAlignments` from records.
     /// Only store read pairs where at least one alignment (for at least one read),
     /// has probability over `min_ln_prob`.
-    pub fn from_records<I>(
+    pub(crate) fn from_records<I, W>(
         records: I,
         contigs: Rc<ContigNames>,
         err_prof: &ErrorProfile,
         min_ln_prob: f64,
-    ) -> Self
+        mut dbg_writer: W,
+    ) -> io::Result<Self>
     where I: Iterator<Item = Record>,
+          W: DbgWrite,
     {
         log::info!("[{}] Reading read alignments, alignment ln-probability threshold = {:.1}",
             contigs.tag(), min_ln_prob);
@@ -109,45 +141,33 @@ impl PrelimAlignments {
             let hash = fnv1a(record.qname());
             if hash != curr_hash {
                 if best_prob >= min_ln_prob {
-                    if DEBUG_ALNS {
-                        log::debug!("    Saving {} alignments for hash {}  (prob {:.1})",
-                            curr_alns.len(), curr_hash, best_prob);
-                    }
+                    dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len(), best_prob)?;
                     // Assert must not be removed, or converted into debug_assert!
                     assert!(alns.insert(curr_hash, mem::replace(&mut curr_alns, Vec::new())).is_none(),
                         "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
-                } else {
-                    if DEBUG_ALNS {
-                        log::debug!("    Ignoring {} alignments for hash {}  (prob {:.1})",
-                            curr_alns.len(), curr_hash, best_prob);
-                    }
+                } else if !curr_alns.is_empty() {
+                    dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len(), best_prob)?;
                     curr_alns.clear();
-                }
-                if DEBUG_ALNS {
-                    log::debug!("    Read {},  hash {}:", String::from_utf8_lossy(record.qname()), hash);
                 }
                 curr_hash = hash;
                 best_prob = f64::NEG_INFINITY;
             }
             let mate_aln = MateAln::from_record(&record, Rc::clone(&contigs), err_prof);
+            dbg_writer.write_mate_aln(if best_prob.is_finite() { &[] } else { record.qname() }, hash, &mate_aln)?;
             best_prob = best_prob.max(mate_aln.ln_prob);
             curr_alns.push(mate_aln);
         }
 
         if best_prob >= min_ln_prob {
-            if DEBUG_ALNS {
-                log::debug!("    Saving {} alignments for hash {}  (prob {:.1})",
-                    curr_alns.len(), curr_hash, best_prob);
-            }
+            dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len(), best_prob)?;
             // Assert must not be removed, or converted into debug_assert!
             assert!(alns.insert(curr_hash, curr_alns).is_none(),
                 "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
-        } else if DEBUG_ALNS {
-            log::debug!("    Ignoring {} alignments for hash {}  (prob {:.1})",
-                curr_alns.len(), curr_hash, best_prob);
+        } else if !curr_alns.is_empty() {
+            dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len(), best_prob)?;
         }
 
-        Self { contigs, alns }
+        Ok(Self { contigs, alns })
     }
 
     /// Find paired-end alignment locations for each contig.
@@ -343,44 +363,53 @@ impl fmt::Display for PairAlignment {
     }
 }
 
-/// Structure, required for `ReadPairAlignments::multi_contig_alns`.
-/// Stores multiple contigs (do not repeat), and their ln-coefficients.
-/// Use-case: coeff = ln(contig multiplicity).
-pub struct SeveralContigs {
-    contigs: Vec<ContigId>,
-    coeffs: Vec<f64>,
-    /// Sum of coefficients.
+/// Contigs group: multiple contigs (each appears only once), and their multiplicities.
+pub struct ContigsGroup {
+    ids: Vec<ContigId>,
+    multiplicities: Vec<u8>,
+    /// Log-multiplicities.
+    ln_coeffs: Vec<f64>,
+    /// logsumexp(ln_coeffs).
     sum_coeff: f64,
 }
 
-impl SeveralContigs {
-    /// Creates `SeveralContigs` from a slice of contig ids (may repeat).
+impl ContigsGroup {
+    /// Creates `ContigsGroup` from a slice of contig ids (may repeat).
     /// Assumes that the total number of contigs is small, and, therefore, is not the most sofisticated.
     pub fn new(contigs: &[ContigId]) -> Self {
-        let mut dedup_contigs = Vec::new();
-        let mut coeffs = Vec::new();
+        let n = contigs.len();
+        let mut dedup_contigs = Vec::with_capacity(n);
+        let mut multiplicities = Vec::with_capacity(n);
+        let mut ln_coeffs = Vec::with_capacity(n);
         for contig in contigs {
             if !dedup_contigs.contains(contig) {
                 dedup_contigs.push(*contig);
                 let multiplicity = contigs.iter().fold(0, |acc, contig2| acc + (contig == contig2) as u8);
-                coeffs.push(f64::from(multiplicity).ln());
+                multiplicities.push(multiplicity);
+                ln_coeffs.push(f64::from(multiplicity).ln());
             }
         }
         Self {
-            contigs: dedup_contigs,
-            sum_coeff: Ln::sum(&coeffs),
-            coeffs,
+            ids: dedup_contigs,
+            multiplicities,
+            sum_coeff: Ln::sum(&ln_coeffs),
+            ln_coeffs,
         }
     }
 
-    /// Returns iterator over pairs `(ContigId, ln_coef)`.
-    pub fn iter<'a>(&'a self) -> std::iter::Zip<std::slice::Iter<'a, ContigId>, std::slice::Iter<'a, f64>> {
-        self.contigs.iter().zip(self.coeffs.iter())
+    /// Returns contig ids.
+    pub fn ids(&self) -> &[ContigId] {
+        &self.ids
     }
 
-    /// Returns contig ids.
-    pub fn contigs(&self) -> &[ContigId] {
-        &self.contigs
+    /// Number of unique contigs in the group.
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Number of times each unique contig appears in the group (same order as `.ids()`).
+    pub fn multiplicities(&self) -> &[u8] {
+        &self.multiplicities
     }
 }
 
@@ -427,17 +456,17 @@ impl ReadPairAlignments {
     /// Any alignments that were in the vector before, stay as they are and in the same order.
     pub fn multi_contig_alns(&self,
         out_alns: &mut Vec<PairAlignment>,
-        contigs: &SeveralContigs,
+        contigs_group: &ContigsGroup,
         prob_diff: f64,
     ) -> usize {
         let start_len = out_alns.len();
         // Probability of being unmapped to any of the contigs.
-        let unmapped_prob = self.unmapped_prob + contigs.sum_coeff;
+        let unmapped_prob = self.unmapped_prob + contigs_group.sum_coeff;
         // Current threshold, is updated during the for-loop.
         let mut thresh_prob = unmapped_prob - prob_diff;
-        for (&contig_id, &coef) in contigs.iter() {
+        for (&contig_id, &coeff) in contigs_group.ids.iter().zip(&contigs_group.ln_coeffs) {
             for paln in self.contig_alns(contig_id) {
-                let prob = paln.ln_prob + coef;
+                let prob = paln.ln_prob + coeff;
                 if prob >= thresh_prob {
                     thresh_prob = thresh_prob.max(prob - prob_diff);
                     out_alns.push(paln.clone_with_prob(prob));
@@ -494,14 +523,13 @@ impl AllPairAlignments {
     /// Calculates sum probability of multiple contigs.
     /// For each read pair, calculates sum probability to map to any of the contigs,
     /// but all alignments less probable than `best_prob - prob_diff` are discarded.
-    pub fn sum_multi_contig_prob(&self, contig_ids: &[ContigId], prob_diff: f64) -> f64 {
-        let contigs = SeveralContigs::new(contig_ids);
+    pub fn sum_multi_contig_prob(&self, contigs_group: &ContigsGroup, prob_diff: f64) -> f64 {
         let mut total_prob = 0.0;
         // Buffer with current alignments.
         let mut curr_alns = Vec::new();
 
         for paired_alns in self.0.iter() {
-            paired_alns.multi_contig_alns(&mut curr_alns, &contigs, prob_diff);
+            paired_alns.multi_contig_alns(&mut curr_alns, contigs_group, prob_diff);
             total_prob += Ln::map_sum(&curr_alns, PairAlignment::ln_prob);
         }
         total_prob

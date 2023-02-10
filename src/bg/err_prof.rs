@@ -56,7 +56,6 @@ impl OpCounts<u64> {
     ///
     /// Clipping is ignored.
     fn get_profile(&self, err_prob_mult: f64) -> ErrorProfile {
-        assert!(0.5 <= err_prob_mult, "Error prob. multiplier ({:.5}) should not be too low", err_prob_mult);
         // Clipping is ignored.
         let read_len = self.matches + self.mismatches + self.insertions;
         let read_lenf = read_len as f64;
@@ -133,8 +132,6 @@ impl ErrorProfile {
     pub fn estimate<'a, I>(records: I, max_clipping: f64, err_prob_mult: f64) -> ErrorProfile
     where I: Iterator<Item = &'a Record>,
     {
-        assert!(max_clipping >= 0.0 && max_clipping <= 1.0,
-            "Maximum clipping ({:.5}) must be between 0 and 1", max_clipping);
         log::info!("    Estimating read error profiles");
         let mut prof_builder = OpCounts::<u64>::default();
         // Used reads, secondary alignments, large clipping.

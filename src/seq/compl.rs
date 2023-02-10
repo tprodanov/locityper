@@ -120,8 +120,8 @@ pub fn linguistic_complexity(seq: &[u8], w: usize, k1: usize, k2: usize
     }
     abund[..halfw].fill(0);
     abund[n - halfw..].fill(0);
-    let coef = 1.0 / divisor;
-    abund.into_iter().map(move |a| if a == 0 { f32::NAN } else { coef * a as f32 })
+    let coeff = 1.0 / divisor;
+    abund.into_iter().map(move |a| if a == 0 { f32::NAN } else { coeff * a as f32 })
 }
 
 /// Linguistic complexity of a sequence, with k-mer size between 1 and 3 (see `linguistic_complexity`).

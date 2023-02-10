@@ -41,6 +41,16 @@ impl Default for Params {
     }
 }
 
+impl Params {
+    /// Checks all parameter values.
+    pub fn check(&self) {
+        self.depth.check();
+        assert!(0.2 <= self.err_prob_mult, "Error prob. multiplier ({:.5}) should not be too low", self.err_prob_mult);
+        assert!(0.0 <= self.max_clipping && self.max_clipping <= 1.0, "Max clipping ({:.5}) must be within [0, 1]",
+            self.max_clipping);
+    }
+}
+
 /// Various background distributions, including
 /// - read depth distribution,
 /// - insert size distribution,

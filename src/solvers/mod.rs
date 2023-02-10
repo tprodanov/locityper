@@ -22,18 +22,18 @@ pub use crate::solvers::{
 };
 
 pub trait SolverBuilder {
-    type S<'a>: Solver<'a>;
+    type S: Solver;
 
     /// Sets seed.
     /// Can panic if the seed does not fit the model, or if the solver is deterministic.
     fn set_seed(&mut self, seed: u64) -> &mut Self;
 
     /// Builds the solver.
-    fn build<'a>(&self, assignments: ReadAssignment<'a>) -> Self::S<'a>;
+    fn build(&self, assignments: ReadAssignment) -> Self::S;
 }
 
 /// Trait that distributes the reads between their possible alignments
-pub trait Solver<'a> {
+pub trait Solver {
     /// Static function that returns true, if running the method multiple times will produce the same results
     /// irrespective of the seed.
     fn is_determenistic() -> bool;
@@ -48,11 +48,10 @@ pub trait Solver<'a> {
     fn is_finished(&self) -> bool;
 
     /// Return the current read assignments.
-    // Comment: Lifetime 'a outlives 'b.
-    fn current_assignments<'b>(&'b self) -> &'b ReadAssignment<'a> where 'a: 'b;
+    fn current_assignments(&self) -> &ReadAssignment;
 
     /// Finish solving, consume the solver and return the read assignments.
-    fn finish(self) -> ReadAssignment<'a>;
+    fn finish(self) -> ReadAssignment;
 }
 
 /// Initialize reads based on their best alignment.
@@ -61,13 +60,13 @@ fn init_best(possible_alns: &[PairAlignment]) -> usize {
 }
 
 /// Distribute read assignment in at most `max_iters` iterations.
-pub fn solve<'a, B, I, W>(
-    mut assgns: ReadAssignment<'a>,
+pub fn solve<B, I, W>(
+    mut assgns: ReadAssignment,
     mut solver_builder: B,
     seeds: I,
     max_iters: u32,
     dbg_writer: &mut W
-) -> io::Result<ReadAssignment<'a>>
+) -> io::Result<ReadAssignment>
 where B: SolverBuilder,
       I: Iterator<Item = u64>,
       W: DbgWrite,
@@ -79,7 +78,7 @@ where B: SolverBuilder,
     let mut outer = 0;
     for seed in seeds {
         outer += 1;
-        let mut solver = if B::S::<'a>::is_determenistic() {
+        let mut solver = if B::S::is_determenistic() {
             solver_builder.build(assgns)
         } else {
             solver_builder.set_seed(seed).build(assgns)
@@ -115,7 +114,7 @@ where B: SolverBuilder,
             log::error!("Likelihood estimates diverged by {} ({} and {})", divergence, last_lik, assgns.likelihood());
         }
 
-        if B::S::<'a>::is_determenistic() {
+        if B::S::is_determenistic() {
             break;
         }
     }

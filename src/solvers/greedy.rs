@@ -43,7 +43,7 @@ impl GreedyBuilder {
 }
 
 impl SolverBuilder for GreedyBuilder {
-    type S<'a> = GreedySolver<'a>;
+    type S = GreedySolver;
 
     /// Sets seed.
     fn set_seed(&mut self, seed: u64) -> &mut Self {
@@ -52,7 +52,7 @@ impl SolverBuilder for GreedyBuilder {
     }
 
     /// Builds the solver.
-    fn build<'a>(&self, assignments: ReadAssignment<'a>) -> Self::S<'a> {
+    fn build(&self, assignments: ReadAssignment) -> Self::S {
         GreedySolver {
             sample_size: min(self.sample_size, assignments.non_trivial_reads().len()),
             rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set")),
@@ -69,8 +69,8 @@ impl SolverBuilder for GreedyBuilder {
 ///
 /// In one step, the solver examines `sample_size` read pairs, and selects the best read pair to switch location.
 /// If no improvement was made for `plato_iters` iterations, the solver stops.
-pub struct GreedySolver<'a> {
-    assignments: ReadAssignment<'a>,
+pub struct GreedySolver {
+    assignments: ReadAssignment,
     rng: SmallRng,
     is_finished: bool,
     buffer: Vec<f64>,
@@ -82,9 +82,9 @@ pub struct GreedySolver<'a> {
     curr_plato: u32,
 }
 
-impl<'a> GreedySolver<'a> {
+impl GreedySolver {
     /// Creates GreedySolver with default parameters (seed `GreedyBuilder::default`).
-    pub fn new(assignments: ReadAssignment<'a>, seed: u64) -> Self {
+    pub fn new(assignments: ReadAssignment, seed: u64) -> Self {
         Self::builder().set_seed(seed).build(assignments)
     }
 
@@ -94,7 +94,7 @@ impl<'a> GreedySolver<'a> {
     }
 }
 
-impl<'a> Solver<'a> for GreedySolver<'a> {
+impl Solver for GreedySolver {
     /// Returns false, the method is not determenistic.
     fn is_determenistic() -> bool { false }
 
@@ -139,12 +139,12 @@ impl<'a> Solver<'a> for GreedySolver<'a> {
     }
 
     /// Return the current read assignments.
-    fn current_assignments<'b>(&'b self) -> &'b ReadAssignment<'a> where 'a: 'b {
+    fn current_assignments(&self) -> &ReadAssignment {
         &self.assignments
     }
 
     /// Finish solving, consume the solver and return the read assignments.
-    fn finish(self) -> ReadAssignment<'a> {
+    fn finish(self) -> ReadAssignment {
         self.assignments
     }
 }

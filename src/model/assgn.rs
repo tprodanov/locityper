@@ -1,9 +1,10 @@
 use std::{
-    rc::Rc,
     cmp::min,
     io::{self, Error, ErrorKind},
+    rc::Rc,
+    cell::RefCell,
 };
-use once_cell::unsync::OnceCell;
+use intmap::{IntMap, Entry};
 use statrs::distribution::Discrete;
 #[cfg(feature = "stochastic")]
 use rand::Rng;
@@ -14,13 +15,13 @@ use crate::{
         interv::Interval,
     },
     math::{
-        nbinom::{NBinom, UniformNBinom, CachedDistr},
+        nbinom::{UniformNBinom, CachedDistr},
         Ln,
     },
     bg::{self,
         depth::GC_BINS,
     },
-    model::locs::{TwoIntervals, PairAlignment, SeveralContigs, AllPairAlignments},
+    model::locs::{TwoIntervals, PairAlignment, ContigsGroup, AllPairAlignments},
 };
 
 /// Stores k-mer counts for each input k-mer.
@@ -75,18 +76,24 @@ impl Discrete<u32, f64> for AlwaysOneDistr {
 /// Store read depth probabilities for values between 0 and 127 for each GC content.
 const CACHE_SIZE: usize = 256;
 
+type DistrPtr = Rc<dyn Discrete<u32, f64>>;
+
 /// Store cached depth distbrutions.
 pub struct CachedDepthDistrs<'a> {
     /// Background read depth distribution.
     bg_depth: &'a bg::depth::ReadDepth,
     /// Multiplication coefficient: assume that read depth is `mul_coef` * bg read depth.
     mul_coef: f64,
-    /// Regular read depth distributions (`* mul_coef`).
-    regular: Vec<OnceCell<CachedDistr<NBinom>>>,
-    /// Read depth distributions at the boundary windows.
-    boundary: Vec<OnceCell<CachedDistr<UniformNBinom>>>,
+
     /// Distribution for proxy window with unmapped reads.
-    unmapped: AlwaysOneDistr,
+    unmapped: DistrPtr,
+    /// Bad window distribution.
+    bad_window: DistrPtr,
+
+    /// Read depth distributions in regular windows. Key `= GC_BINS * cn + gc_content`.
+    regular: RefCell<IntMap<DistrPtr>>,
+    /// Read depth distributions in windows close to the region boundary. Key `= GC_BINS * cn + gc_content`.
+    boundary: RefCell<IntMap<DistrPtr>>,
 }
 
 impl<'a> CachedDepthDistrs<'a> {
@@ -98,27 +105,50 @@ impl<'a> CachedDepthDistrs<'a> {
     pub fn new(bg_depth: &'a bg::depth::ReadDepth, mul_coef: f64) -> Self {
         Self {
             bg_depth, mul_coef,
-            regular: vec![OnceCell::new(); GC_BINS],
-            boundary: vec![OnceCell::new(); GC_BINS],
-            unmapped: AlwaysOneDistr,
+            unmapped: Rc::new(AlwaysOneDistr),
+            bad_window: Rc::new(AlwaysOneDistr),
+            regular: RefCell::new(IntMap::new()),
+            boundary: RefCell::new(IntMap::new()),
         }
     }
 
-    /// Regular read depth distribution at GC-content (`bg_depth * mul_coef`).
-    pub fn regular_distr(&self, gc_content: usize) -> &CachedDistr<NBinom> {
-        self.regular[gc_content].get_or_init(||
-            self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef).cached(CACHE_SIZE))
+    /// Returns a pointer to unmapped distribution (`AlwaysOneDistr`).
+    pub fn unmapped_distr(&self) -> DistrPtr {
+        Rc::clone(&self.unmapped)
     }
 
-    /// Boundary read depth distribution at GC-content (`bg_depth * mul_coef`).
-    ///
-    /// Designated for boundary windows, this distribution is uniform at values < mean NBinom value.
-    pub fn boundary_distr(&self, gc_content: usize) -> &CachedDistr<UniformNBinom> {
-        self.boundary[gc_content].get_or_init(|| {
-            let distr = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef);
-            let half_uniform = UniformNBinom::new(distr.mean().ceil() as u32, distr, None);
-            CachedDistr::new(half_uniform, CACHE_SIZE)
-        })
+    /// Returns a pointer to distribution within bad windows (`AlwaysOneDistr`).
+    pub fn bad_window_distr(&self) -> DistrPtr {
+        Rc::clone(&self.bad_window)
+    }
+
+    /// Returns read depth distribution in regular windows at GC-content and contig CN.
+    pub fn regular_distr(&self, gc_content: usize, contig_cn: usize) -> DistrPtr {
+        let key = (contig_cn * GC_BINS + gc_content) as u64;
+        match self.regular.borrow_mut().entry(key) {
+            Entry::Occupied(entry) => Rc::clone(&entry.get()),
+            Entry::Vacant(entry) => {
+                let distr = self.bg_depth.depth_distribution(gc_content)
+                    .mul(self.mul_coef * contig_cn as f64)
+                    .cached(CACHE_SIZE);
+                Rc::clone(&entry.insert(Rc::new(distr)))
+            },
+        }
+    }
+
+    /// Returns read depth distribution in boundary windows at GC-content and contig CN.
+    /// Boundary distribution is created from regular Neg.Binomial on the right and uniform distribution on the left.
+    pub fn boundary_distr(&self, gc_content: usize, contig_cn: usize) -> DistrPtr {
+        let key = (contig_cn * GC_BINS + gc_content) as u64;
+        match self.boundary.borrow_mut().entry(key) {
+            Entry::Occupied(entry) => Rc::clone(&entry.get()),
+            Entry::Vacant(entry) => {
+                let bg_distr = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef * contig_cn as f64);
+                let half_uniform = UniformNBinom::new(bg_distr.mean().ceil() as u32, bg_distr, None);
+                let distr = CachedDistr::new(half_uniform, CACHE_SIZE);
+                Rc::clone(&entry.insert(Rc::new(distr)))
+            },
+        }
     }
 }
 
@@ -126,10 +156,10 @@ impl<'a> CachedDepthDistrs<'a> {
 pub struct ContigWindows {
     /// Window size.
     window_size: u32,
+    /// Relevant contigs and their copy numbers.
+    contigs_group: ContigsGroup,
     /// All contig names.
-    contigs: Rc<ContigNames>,
-    /// Subset of contigs, to which the reads are assigned (length: n_contigs).
-    ids: Vec<ContigId>,
+    contig_names: Rc<ContigNames>,
     /// Start index for each contig id (length: n-contigs + 1).
     /// Contig with index `i` will have windows between `wshifts[i]..wshifts[i + 1]`.
     wshifts: Vec<u32>,
@@ -143,21 +173,21 @@ const INIT_WSHIFT: u32 = 1;
 impl ContigWindows {
     /// Creates new `ContigWindows`.
     /// Functionally, this constructor only counts the number of windows per each contig.
-    pub fn new(window_size: u32, contigs: Rc<ContigNames>, ids: Vec<ContigId>) -> Self {
-        let mut wshifts = Vec::with_capacity(ids.len() + 1);
+    pub fn new(window_size: u32, contigs_group: ContigsGroup, contig_names: Rc<ContigNames>) -> Self {
+        let mut wshifts = Vec::with_capacity(contigs_group.len() + 1);
         let mut curr_windows = INIT_WSHIFT;
         wshifts.push(curr_windows);
-        for &id in ids.iter() {
+        for &id in contigs_group.ids() {
             // Ceiling division.
-            curr_windows += (contigs.get_len(id) + window_size - 1) / window_size;
+            curr_windows += (contig_names.get_len(id) + window_size - 1) / window_size;
             wshifts.push(curr_windows);
         }
-        Self { window_size, contigs, ids, wshifts }
+        Self { window_size, contigs_group, contig_names, wshifts }
     }
 
     /// Returns the number of contigs.
     pub fn len(&self) -> usize {
-        self.ids.len()
+        self.contigs_group.len()
     }
 
     /// Returns the total number of windows.
@@ -168,10 +198,10 @@ impl ContigWindows {
     /// Returns the window-shift for `contig` (windows for contig are stored starting with this shift).
     /// Works linearly from the number of contigs.
     pub fn window_shift(&self, contig: ContigId) -> u32 {
-        if let Some(i) = self.ids.iter().position(|&id| id == contig) {
+        if let Some(i) = self.contigs_group.ids().iter().position(|&id| id == contig) {
             self.wshifts[i]
         } else {
-            panic!("Contig {} is not in the contig set", self.contigs.get_name(contig))
+            panic!("Contig {} is not in the contig set", self.contig_names.get_name(contig))
         }
     }
 
@@ -196,27 +226,28 @@ impl ContigWindows {
     }
 
     /// Returns read depth distributions for all windows in a set of contigs.
-    fn identify_depth_distributions<'a>(
+    fn identify_depth_distributions(
         &self,
         ref_seqs: &[Vec<u8>],
-        cached_distrs: &'a CachedDepthDistrs<'a>,
+        cached_distrs: &CachedDepthDistrs<'_>,
         kmer_counts: &KmerCounts,
         params: &Params,
-    ) -> DistrsVec<'a> {
+    ) -> Vec<DistrPtr> {
         assert!(kmer_counts.k % 2 == 1, "k-mer ({}) size must be odd!", kmer_counts.k);
         let halfk = kmer_counts.k / 2;
-        let mut distrs: DistrsVec<'a> = Vec::with_capacity(self.total_windows() as usize);
+        let mut distrs: Vec<DistrPtr> = Vec::with_capacity(self.total_windows() as usize);
         debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
-        distrs.push(Box::new(&cached_distrs.unmapped));
+        distrs.push(cached_distrs.unmapped_distr());
 
         // Normal windows, boundary windows, windows without rare k-mers.
         let mut window_counts = [0_32, 0, 0];
         let window_size = cached_distrs.bg_depth.window_size();
         let gc_padding = cached_distrs.bg_depth.gc_padding();
-        for (i, &contig_id) in self.ids.iter().enumerate() {
+        for (i, (&contig_id, &contig_cn)) in
+                self.contigs_group.ids().iter().zip(self.contigs_group.multiplicities()).enumerate() {
             let curr_kmer_counts = &kmer_counts.counts[contig_id.ix()];
             let n_windows = self.wshifts[i + 1] - self.wshifts[i];
-            let contig_len = self.contigs.get_len(contig_id);
+            let contig_len = self.contig_names.get_len(contig_id);
             let ref_seq = &ref_seqs[contig_id.ix()];
             assert_eq!(contig_len as usize, ref_seq.len(), "Contig length and reference length do not match!");
 
@@ -232,7 +263,7 @@ impl ContigWindows {
                 log::debug!("    {:?}", &curr_kmer_counts[start.saturating_sub(halfk) as usize..
                     min(end - halfk, contig_len - kmer_counts.k + 1) as usize]);
                 if rare_kmers < params.rare_kmers {
-                    distrs.push(Box::new(&AlwaysOneDistr));
+                    distrs.push(cached_distrs.bad_window_distr());
                     window_counts[2] += 1;
                     continue;
                 }
@@ -241,10 +272,10 @@ impl ContigWindows {
                     &ref_seq[start.saturating_sub(gc_padding) as usize..min(end + gc_padding, contig_len) as usize])
                     .round() as usize;
                 if end <= params.boundary_size || start + params.boundary_size >= contig_len {
-                    distrs.push(Box::new(cached_distrs.boundary_distr(gc_content)));
+                    distrs.push(cached_distrs.boundary_distr(gc_content, usize::from(contig_cn)));
                     window_counts[1] += 1;
                 } else {
-                    distrs.push(Box::new(cached_distrs.regular_distr(gc_content)));
+                    distrs.push(cached_distrs.regular_distr(gc_content, usize::from(contig_cn)));
                     window_counts[0] += 1;
                 }
             }
@@ -256,10 +287,8 @@ impl ContigWindows {
     }
 }
 
-type DistrsVec<'a> = Vec<Box<&'a dyn Discrete<u32, f64>>>;
-
 /// Read assignment to a vector of contigs and the corresponding likelihoods.
-pub struct ReadAssignment<'a> {
+pub struct ReadAssignment {
     /// Contigs subset, to which reads the reads are assigned,
     /// plus the number of windows (and shifts) at each window.
     contig_windows: ContigWindows,
@@ -269,7 +298,7 @@ pub struct ReadAssignment<'a> {
     depth: Vec<u32>,
 
     /// Read depth distribution at each window (length: `contig_windows.total_windows()`).
-    depth_distrs: DistrsVec<'a>,
+    depth_distrs: Vec<DistrPtr>,
 
     /// A vector of possible read alignments to the vector of contigs (length: n_reads).
     read_locs: Vec<PairAlignment>,
@@ -310,7 +339,7 @@ impl Default for Params {
             boundary_size: 1000,
             prob_diff: Ln::from_log10(8.0),
             rare_thresh: 5,
-            rare_kmers: 20,
+            rare_kmers: 5,
         }
     }
 }
@@ -321,21 +350,20 @@ impl Params {
     }
 }
 
-impl<'a> ReadAssignment<'a> {
+impl ReadAssignment {
     /// Creates an instance that stores read assignments to given contigs.
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
-        contigs: &SeveralContigs,
+        contigs_group: ContigsGroup,
         contig_names: Rc<ContigNames>,
         all_ref_seqs: &[Vec<u8>],
         kmer_counts: &KmerCounts,
-        cached_distrs: &'a CachedDepthDistrs<'a>,
+        cached_distrs: &CachedDepthDistrs<'_>,
         all_alns: &AllPairAlignments,
         params: &Params,
     ) -> Self {
         params.check();
-        let contig_windows = ContigWindows::new(cached_distrs.bg_depth.window_size(), contig_names,
-            contigs.contigs().to_vec());
+        let contig_windows = ContigWindows::new(cached_distrs.bg_depth.window_size(), contigs_group, contig_names);
         let depth_distrs = contig_windows.identify_depth_distributions(all_ref_seqs, cached_distrs, kmer_counts, params);
 
         let mut ix = 0;
@@ -343,7 +371,8 @@ impl<'a> ReadAssignment<'a> {
         let mut read_ixs = vec![ix];
         let mut non_trivial_reads = Vec::new();
         for (rp, paired_alns) in all_alns.iter().enumerate() {
-            let new_alns = paired_alns.multi_contig_alns(&mut read_locs, &contigs, params.prob_diff);
+            let new_alns = paired_alns.multi_contig_alns(&mut read_locs, &contig_windows.contigs_group,
+                params.prob_diff);
             debug_assert!(new_alns > 0, "Read pair {} has zero possible alignment locations", rp);
             assert!(new_alns <= u16::MAX as usize, "Read pair {} has too many alignment locations ({})", rp, new_alns);
             ix += new_alns;
