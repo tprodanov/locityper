@@ -5,7 +5,7 @@ use std::{
 use htslib::bam::Record;
 use crate::{
     seq::cigar::{Operation, Cigar, RAW_OPERATIONS},
-    math::distr::{DiscretePmf, NBinom, Multinomial},
+    math::distr::{NBinom, Multinomial},
     bg::ser::{JsonSer, LoadError},
 };
 

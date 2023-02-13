@@ -1,6 +1,6 @@
 use std::{
-    cmp::min,
-    fmt::{self, Write},
+    cmp::{min, max},
+    fmt,
 };
 use super::{DiscretePmf, WithMoments, DiscreteCdf};
 
@@ -17,7 +17,7 @@ impl Uniform {
     pub fn new(a: u32, b: u32) -> Self {
         Self {
             a, b,
-            lnp: f64::from(b - a + 1).ln(),
+            lnp: -f64::from(b - a + 1).ln(),
         }
     }
 }
@@ -45,11 +45,11 @@ impl WithMoments for Uniform {
 
 impl DiscreteCdf for Uniform {
     fn cdf(&self, k: u32) -> f64 {
-        f64::from(min(self.b, k).saturating_sub(self.a)) / f64::from(self.b - self.a + 1)
+        f64::from((min(self.b, k) + 1).saturating_sub(self.a)) / f64::from(self.b - self.a + 1)
     }
 
     fn sf(&self, k: u32) -> f64 {
-        f64::from(self.b.saturating_sub(k)) / f64::from(self.b - self.a + 1)
+        f64::from(self.b.saturating_sub(max(k, self.a.saturating_sub(1)))) / f64::from(self.b - self.a + 1)
     }
 }
 
