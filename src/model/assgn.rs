@@ -5,7 +5,6 @@ use std::{
     cell::RefCell,
 };
 use intmap::{IntMap, Entry};
-use statrs::distribution::Discrete;
 #[cfg(feature = "stochastic")]
 use rand::Rng;
 use crate::{
@@ -16,8 +15,8 @@ use crate::{
         interv::Interval,
     },
     math::{
-        nbinom::{UniformNBinom, CachedDistr},
         Ln,
+        distr::{DiscretePmf, WithMoments, NBinom, Uniform, Chimeric, Mixure, LinearCache},
     },
     bg::{self,
         depth::GC_BINS,
@@ -69,17 +68,17 @@ impl KmerCounts {
 }
 
 /// Fake proxy distribution, that has 1.0 probability for all values.
-struct AlwaysOneDistr;
+pub struct AlwaysOneDistr;
 
-impl Discrete<u32, f64> for AlwaysOneDistr {
-    fn pmf(&self, _: u32) -> f64 { 1.0 }
+impl DiscretePmf for AlwaysOneDistr {
     fn ln_pmf(&self, _: u32) -> f64 { 0.0 }
 }
 
 /// Store read depth probabilities for values between 0 and 127 for each GC content.
 const CACHE_SIZE: usize = 256;
 
-type DistrPtr = Rc<dyn Discrete<u32, f64>>;
+type DistrPtr = Rc<dyn DiscretePmf>;
+type DistrBox = Box<dyn DiscretePmf>;
 
 /// Store cached depth distbrutions.
 pub struct CachedDepthDistrs<'a> {
@@ -89,11 +88,11 @@ pub struct CachedDepthDistrs<'a> {
     mul_coef: f64,
 
     /// Distribution for proxy window with unmapped reads.
-    unmapped: DistrPtr,
+    unmapped: Rc<AlwaysOneDistr>,
     /// Read depth distributions in regular windows. Key `= GC_BINS * cn + gc_content`.
-    regular: RefCell<IntMap<DistrPtr>>,
+    regular: RefCell<IntMap<Rc<LinearCache<NBinom>>>>,
     /// Read depth distributions in windows close to the region boundary. Key `= GC_BINS * cn + gc_content`.
-    boundary: RefCell<IntMap<DistrPtr>>,
+    boundary: RefCell<IntMap<Rc<LinearCache<Chimeric<Uniform, NBinom>>>>>,
 }
 
 impl<'a> CachedDepthDistrs<'a> {
@@ -112,12 +111,12 @@ impl<'a> CachedDepthDistrs<'a> {
     }
 
     /// Returns a pointer to unmapped distribution (`AlwaysOneDistr`).
-    pub fn unmapped_distr(&self) -> DistrPtr {
+    pub fn unmapped_distr(&self) -> Rc<AlwaysOneDistr> {
         Rc::clone(&self.unmapped)
     }
 
     /// Returns read depth distribution in regular windows at GC-content and contig CN.
-    pub fn regular_distr(&self, gc_content: usize, contig_cn: usize) -> DistrPtr {
+    pub fn regular_distr(&self, gc_content: usize, contig_cn: usize) -> Rc<LinearCache<NBinom>> {
         let key = (contig_cn * GC_BINS + gc_content) as u64;
         match self.regular.borrow_mut().entry(key) {
             Entry::Occupied(entry) => Rc::clone(&entry.get()),
@@ -132,40 +131,18 @@ impl<'a> CachedDepthDistrs<'a> {
 
     /// Returns read depth distribution in boundary windows at GC-content and contig CN.
     /// Boundary distribution is created from regular Neg.Binomial on the right and uniform distribution on the left.
-    pub fn boundary_distr(&self, gc_content: usize, contig_cn: usize) -> DistrPtr {
+    pub fn boundary_distr(&self, gc_content: usize, contig_cn: usize) -> Rc<LinearCache<Chimeric<Uniform, NBinom>>> {
         let key = (contig_cn * GC_BINS + gc_content) as u64;
         match self.boundary.borrow_mut().entry(key) {
             Entry::Occupied(entry) => Rc::clone(&entry.get()),
             Entry::Vacant(entry) => {
                 let bg_distr = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef * contig_cn as f64);
-                let half_uniform = UniformNBinom::new(bg_distr.mean().ceil() as u32, bg_distr, None);
-                let distr = CachedDistr::new(half_uniform, CACHE_SIZE);
-                Rc::clone(&entry.insert(Rc::new(distr)))
+                let partition = bg_distr.mean().ceil() as u32;
+                let half_uniform = Chimeric::new_smooth(partition, Uniform::new(0, partition), bg_distr);
+                let cached_half_uniform = LinearCache::new(half_uniform, CACHE_SIZE);
+                Rc::clone(&entry.insert(Rc::new(cached_half_uniform)))
             },
         }
-    }
-}
-
-/// Weighted distribution: calculates P(x)^weight.
-/// Note, resulting values will not sum to one anymore.
-struct WeightedDistr {
-    distr: DistrPtr,
-    weight: f64,
-}
-
-impl WeightedDistr {
-    fn new(distr: DistrPtr, weight: f64) -> Self {
-        Self { distr, weight }
-    }
-}
-
-impl Discrete<u32, f64> for WeightedDistr {
-    fn ln_pmf(&self, x: u32) -> f64 {
-        self.weight * self.distr.ln_pmf(x)
-    }
-
-    fn pmf(&self, x: u32) -> f64 {
-        self.ln_pmf(x).exp()
     }
 }
 
@@ -275,12 +252,12 @@ impl ContigWindows {
         cached_distrs: &CachedDepthDistrs<'_>,
         kmer_counts: &KmerCounts,
         params: &Params,
-    ) -> Vec<WeightedDistr> {
+    ) -> Vec<DistrBox> {
         assert!(kmer_counts.k % 2 == 1, "k-mer ({}) size must be odd!", kmer_counts.k);
         let halfk = kmer_counts.k / 2;
-        let mut distrs: Vec<WeightedDistr> = Vec::with_capacity(self.total_windows() as usize);
+        let mut distrs: Vec<DistrBox> = Vec::with_capacity(self.total_windows() as usize);
         debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
-        distrs.push(WeightedDistr::new(cached_distrs.unmapped_distr(), 1.0));
+        distrs.push(Box::new(cached_distrs.unmapped_distr()));
 
         // Normal windows, boundary windows.
         let mut window_counts1 = [0_u16, 0];
@@ -317,14 +294,23 @@ impl ContigWindows {
                 let gc_content = seq::gc_content(
                     &ref_seq[start.saturating_sub(gc_padding) as usize..min(end + gc_padding, contig_len) as usize])
                     .round() as usize;
-                let distr = if end <= params.boundary_size || start + params.boundary_size >= contig_len {
+                let reg_distr = cached_distrs.regular_distr(gc_content, usize::from(contig_cn));
+                let uniform_max = (reg_distr.mean() * params.mixure_mean_mult).ceil() as u32;
+                let distr: DistrPtr = if end <= params.boundary_size || start + params.boundary_size >= contig_len {
                     window_counts1[1] += 1;
                     cached_distrs.boundary_distr(gc_content, usize::from(contig_cn))
                 } else {
                     window_counts1[0] += 1;
-                    cached_distrs.regular_distr(gc_content, usize::from(contig_cn))
+                    reg_distr
                 };
-                distrs.push(WeightedDistr::new(distr, weight));
+
+                if weight == 0.0 {
+                    distrs.push(Box::new(Uniform::new(0, uniform_max)));
+                } else if weight == 1.0 {
+                    distrs.push(Box::new(distr));
+                } else {
+                    distrs.push(Box::new(Mixure::new(distr, weight, Uniform::new(0, uniform_max))));
+                }
             }
         }
         log::debug!("    There are {} windows: {} regular, {} boundary;   uniqueness: {} good, {} adequate, {} bad",
@@ -332,6 +318,37 @@ impl ContigWindows {
                 window_counts2[0], window_counts2[1], window_counts2[2]);
         assert_eq!(self.total_windows() as usize, distrs.len());
         distrs
+    }
+}
+
+/// Read depth model parameters.
+#[derive(Clone, Debug)]
+pub struct Params {
+    /// Boundary size: in the left-most and right-most `boundary_size` bp, use boundary read depth distributions,
+    /// instead of regular ones.
+    pub boundary_size: u32,
+    /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
+    pub prob_diff: f64,
+
+    /// Average k-mer frequency is calculated for a window in question.
+    /// If the value is less-or-equal than `rare_kmer`, the window received a weight = 1.
+    /// If the value equals to `semicommon_kmer`, weight would be 0.5.
+    pub rare_kmer: f64,
+    pub semicommon_kmer: f64,
+
+    /// When creating mixure distribution, use `Uniform{0, nbinom.mean() * mixure_mean_mult}`.
+    mixure_mean_mult: f64,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            boundary_size: 1000,
+            prob_diff: Ln::from_log10(8.0),
+            rare_kmer: 3.0,
+            semicommon_kmer: 5.0,
+            mixure_mean_mult: 3.0,
+        }
     }
 }
 
@@ -346,7 +363,7 @@ pub struct ReadAssignment {
     depth: Vec<u32>,
 
     /// Read depth distribution at each window (length: `contig_windows.total_windows()`).
-    depth_distrs: Vec<WeightedDistr>,
+    depth_distrs: Vec<DistrBox>,
 
     /// A vector of possible read alignments to the vector of contigs (length: n_reads).
     read_locs: Vec<PairAlignment>,
@@ -365,33 +382,6 @@ pub struct ReadAssignment {
 
     /// Total ln-probability of the current read assignments (read depth probabilities + alignment probabilities).
     likelihood: f64,
-}
-
-/// Read depth model parameters.
-#[derive(Clone, Debug)]
-pub struct Params {
-    /// Boundary size: in the left-most and right-most `boundary_size` bp, use boundary read depth distributions,
-    /// instead of regular ones.
-    pub boundary_size: u32,
-    /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
-    pub prob_diff: f64,
-
-    /// Average k-mer frequency is calculated for a window in question.
-    /// If the value is less-or-equal than `rare_kmer`, the window received a weight = 1.
-    /// If the value equals to `semicommon_kmer`, weight would be 0.5.
-    pub rare_kmer: f64,
-    pub semicommon_kmer: f64,
-}
-
-impl Default for Params {
-    fn default() -> Self {
-        Self {
-            boundary_size: 1000,
-            prob_diff: Ln::from_log10(8.0),
-            rare_kmer: 3.0,
-            semicommon_kmer: 5.0,
-        }
-    }
 }
 
 impl Params {

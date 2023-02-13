@@ -1,6 +1,5 @@
 //! Traits and structures related to insert size (distance between read mates).
 
-use statrs::distribution::Discrete;
 use htslib::bam::record::{Record, Aux};
 use crate::{
     algo::{
@@ -9,7 +8,7 @@ use crate::{
         bisect,
     },
     bg::ser::{JsonSer, LoadError},
-    math::nbinom::{NBinom, CachedDistr},
+    math::distr::{DiscretePmf, NBinom, LinearCache},
 };
 
 /// Trait for insert size distribution.
@@ -48,7 +47,7 @@ pub struct InsertNegBinom {
     max_size: u32,
     /// Log-probabilities of (FR/RF) orientation, and of (RR/FF) orientation.
     orient_probs: [f64; 2],
-    distr: CachedDistr<NBinom>,
+    distr: LinearCache<NBinom>,
 }
 
 impl InsertNegBinom {

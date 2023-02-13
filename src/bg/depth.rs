@@ -15,7 +15,7 @@ use crate::{
         bisect,
     },
     bg::ser::{JsonSer, LoadError, parse_f64_arr},
-    math::nbinom::NBinom,
+    math::distr::NBinom,
 };
 
 pub trait DepthDistr {
