@@ -28,7 +28,7 @@ pub trait WithMoments {
 }
 
 /// Discrete distribution with CDF, SF and quantile functions.
-pub trait DiscreteCdf: WithMoments {
+pub trait DiscreteCdf {
     /// Cumulative distribution function: P(X <= k).
     fn cdf(&self, k: u32) -> f64;
 
@@ -36,7 +36,9 @@ pub trait DiscreteCdf: WithMoments {
     fn sf(&self, k: u32) -> f64 {
         1.0 - self.cdf(k)
     }
+}
 
+pub trait WithQuantile: DiscreteCdf + WithMoments {
     /// Inverse CDF function: returns approximate such `x` that `cdf(x) = q`.
     fn quantile(&self, q: f64) -> f64 {
         if q <= 0.0 {
@@ -80,3 +82,19 @@ impl<T: DiscretePmf + ?Sized> DiscretePmf for std::rc::Rc<T> {
         self.deref().ln_pmf(k)
     }
 }
+
+impl<T: DiscreteCdf + ?Sized> DiscreteCdf for std::rc::Rc<T> {
+    fn cdf(&self, k: u32) -> f64 {
+        self.deref().cdf(k)
+    }
+
+    fn sf(&self, k: u32) -> f64 {
+        self.deref().sf(k)
+    }
+}
+
+impl<T: DiscreteCdf + WithMoments> WithQuantile for T {}
+
+pub trait DiscretePmfCdf: DiscretePmf + DiscreteCdf {}
+
+impl<T: DiscretePmf + DiscreteCdf> DiscretePmfCdf for T {}

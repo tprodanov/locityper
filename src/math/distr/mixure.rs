@@ -1,5 +1,5 @@
 use crate::math::Ln;
-use super::DiscretePmf;
+use super::{DiscretePmf, WithMoments, DiscreteCdf};
 
 /// Mixure of two distributions with different weights.
 #[derive(Clone)]
@@ -30,5 +30,25 @@ impl<T, U> Mixure<T, U> {
 impl<T: DiscretePmf, U: DiscretePmf> DiscretePmf for Mixure<T, U> {
     fn ln_pmf(&self, k: u32) -> f64 {
         Ln::add(self.lnw1 + self.distr1.ln_pmf(k), self.lnw2 + self.distr2.ln_pmf(k))
+    }
+}
+
+impl<T: WithMoments, U: WithMoments> WithMoments for Mixure<T, U> {
+    fn mean(&self) -> f64 {
+        self.lnw1.exp() * self.distr1.mean() + self.lnw2.exp() * self.distr2.mean()
+    }
+
+    fn variance(&self) -> f64 {
+        (2.0 * self.lnw1).exp() * self.distr1.variance() + (2.0 * self.lnw2).exp() * self.distr2.variance()
+    }
+}
+
+impl<T: DiscreteCdf, U: DiscreteCdf> DiscreteCdf for Mixure<T, U> {
+    fn cdf(&self, k: u32) -> f64 {
+        self.lnw1.exp() * self.distr1.cdf(k) + self.lnw2.exp() * self.distr2.cdf(k)
+    }
+
+    fn sf(&self, k: u32) -> f64 {
+        self.lnw1.exp() * self.distr1.sf(k) + self.lnw2.exp() * self.distr2.sf(k)
     }
 }

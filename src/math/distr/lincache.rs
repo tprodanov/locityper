@@ -2,7 +2,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 use once_cell::unsync::OnceCell;
 use crate::bg::ser::{JsonSer, LoadError};
 
-use super::{DiscretePmf, WithMoments};
+use super::{DiscretePmf, DiscreteCdf, WithMoments};
 
 /// Distribution with a fixed number of cached `ln_pmf` values.
 #[derive(Clone)]
@@ -41,6 +41,16 @@ impl<D: DiscretePmf> DiscretePmf for LinearCache<D> {
         } else {
             self.distr.ln_pmf(k)
         }
+    }
+}
+
+impl<D: DiscreteCdf> DiscreteCdf for LinearCache<D> {
+    fn cdf(&self, k: u32) -> f64 {
+        self.distr.cdf(k)
+    }
+
+    fn sf(&self, k: u32) -> f64 {
+        self.distr.sf(k)
     }
 }
 

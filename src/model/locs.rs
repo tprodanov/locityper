@@ -366,6 +366,7 @@ impl fmt::Display for PairAlignment {
 /// Contigs group: multiple contigs (each appears only once), and their multiplicities.
 pub struct ContigsGroup {
     ids: Vec<ContigId>,
+    contigs: Rc<ContigNames>,
     multiplicities: Vec<u8>,
     /// Log-multiplicities.
     ln_coeffs: Vec<f64>,
@@ -376,24 +377,23 @@ pub struct ContigsGroup {
 impl ContigsGroup {
     /// Creates `ContigsGroup` from a slice of contig ids (may repeat).
     /// Assumes that the total number of contigs is small, and, therefore, is not the most sofisticated.
-    pub fn new(contigs: &[ContigId]) -> Self {
-        let n = contigs.len();
+    pub fn new(contig_ids: &[ContigId], contigs: Rc<ContigNames>) -> Self {
+        let n = contig_ids.len();
         let mut dedup_contigs = Vec::with_capacity(n);
         let mut multiplicities = Vec::with_capacity(n);
         let mut ln_coeffs = Vec::with_capacity(n);
-        for contig in contigs {
+        for contig in contig_ids {
             if !dedup_contigs.contains(contig) {
                 dedup_contigs.push(*contig);
-                let multiplicity = contigs.iter().fold(0, |acc, contig2| acc + (contig == contig2) as u8);
+                let multiplicity = contig_ids.iter().fold(0, |acc, contig2| acc + (contig == contig2) as u8);
                 multiplicities.push(multiplicity);
                 ln_coeffs.push(f64::from(multiplicity).ln());
             }
         }
         Self {
             ids: dedup_contigs,
-            multiplicities,
             sum_coeff: Ln::sum(&ln_coeffs),
-            ln_coeffs,
+            contigs, multiplicities, ln_coeffs,
         }
     }
 
@@ -410,6 +410,24 @@ impl ContigsGroup {
     /// Number of times each unique contig appears in the group (same order as `.ids()`).
     pub fn multiplicities(&self) -> &[u8] {
         &self.multiplicities
+    }
+
+    /// Returns the associated contig names.
+    pub fn contigs(&self) -> &Rc<ContigNames> {
+        &self.contigs
+    }
+}
+
+impl fmt::Display for ContigsGroup {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[{}]", self.contigs.tag())?;
+        for (&id, &mult) in self.ids.iter().zip(&self.multiplicities) {
+            write!(f, " {}", self.contigs.get_name(id))?;
+            if mult != 1 {
+                write!(f, "(x{})", mult)?;
+            }
+        }
+        Ok(())
     }
 }
 

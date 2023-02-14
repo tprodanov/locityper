@@ -55,3 +55,23 @@ impl<T: DiscretePmf, U: DiscretePmf> DiscretePmf for Chimeric<T, U> {
         }
     }
 }
+
+impl<T: DiscreteCdf, U: DiscreteCdf> DiscreteCdf for Chimeric<T, U> {
+    fn cdf(&self, k: u32) -> f64 {
+        if k <= self.partition {
+            self.lnw1.exp() * self.distr1.cdf(k)
+        } else {
+            self.lnw1.exp() * self.distr1.cdf(self.partition)
+                + self.lnw2.exp() * (self.distr2.cdf(k) - self.distr2.cdf(self.partition))
+        }
+    }
+
+    fn sf(&self, k: u32) -> f64 {
+        if k >= self.partition {
+            self.lnw2.exp() * self.distr2.sf(k)
+        } else {
+            self.lnw2.exp() * self.distr2.sf(self.partition)
+                + self.lnw1.exp() * (self.distr1.cdf(self.partition) - self.distr1.cdf(k))
+        }
+    }
+}

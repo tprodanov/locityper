@@ -25,6 +25,8 @@ pub use crate::solvers::{
     greedy::GreedySolver,
     anneal::SimulatedAnnealing,
 };
+#[cfg(feature = "gurobi")]
+pub use crate::solvers::gurobi::GurobiSolver;
 
 /// Trait that distributes the reads between their possible alignments
 pub trait Solver {
