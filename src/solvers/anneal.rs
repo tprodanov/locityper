@@ -4,15 +4,12 @@ use rand::{
     SeedableRng,
     rngs::SmallRng,
 };
-use crate::{
-    model::assgn::ReadAssignment,
-    solvers::{self, SolverBuilder, Solver},
-};
+use crate::model::assgn::ReadAssignment;
+use super::Solver;
 
 /// Builder, that constructs `SimulatedAnnealing`.
 #[derive(Clone)]
 pub struct AnnealingBuilder {
-    seed: Option<u64>,
     /// Overall, annealing performs exactly `steps` iterations.
     steps: u32,
     /// On each iteration, it randomly checks `max_tries` elements, until one fits.
@@ -26,7 +23,6 @@ impl Default for AnnealingBuilder {
     /// Creates default AnnealingBuilder: seed is not set, steps 10000, and max_tries (per step) is 50.
     fn default() -> Self {
         Self {
-            seed: None,
             steps: 10000,
             max_tries: 50,
             init_prob: 0.1,
@@ -44,22 +40,12 @@ impl AnnealingBuilder {
         self.max_tries = max_tries;
         self
     }
-}
-
-impl SolverBuilder for AnnealingBuilder {
-    type S = SimulatedAnnealing;
-
-    /// Sets seed.
-    fn set_seed(&mut self, seed: u64) -> &mut Self {
-        self.seed = Some(seed);
-        self
-    }
 
     /// Builds the solver.
-    fn build(&self, assignments: ReadAssignment) -> Self::S {
+    pub fn build(&self, assignments: ReadAssignment) -> SimulatedAnnealing {
         SimulatedAnnealing {
             assignments,
-            rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set")),
+            rng: SmallRng::seed_from_u64(0),
             curr_step: 0,
             steps: self.steps,
             max_tries: self.max_tries,
@@ -87,8 +73,8 @@ pub struct SimulatedAnnealing {
 
 impl SimulatedAnnealing {
     /// Creates GreedySolver with default parameters (seed `AnnealingBuilder::default`).
-    pub fn new(assignments: ReadAssignment, seed: u64) -> Self {
-        Self::builder().set_seed(seed).build(assignments)
+    pub fn default(assignments: ReadAssignment) -> Self {
+        AnnealingBuilder::default().build(assignments)
     }
 
     /// Creates AnnealingBuilder.
@@ -98,12 +84,14 @@ impl SimulatedAnnealing {
 }
 
 impl Solver for SimulatedAnnealing {
-    /// Returns false, the method is not determenistic.
-    fn is_determenistic() -> bool { false }
+    fn is_seedable() -> bool { true }
 
-    /// Initialize read alignments. Returns current likelihood.
-    fn initialize(&mut self) -> f64 {
-        let lik = self.assignments.init_assignments(solvers::init_best);
+    fn set_seed(&mut self, seed: u64) {
+        self.rng = SmallRng::seed_from_u64(seed);
+    }
+
+    fn initialize(&mut self) {
+        self.assignments.init_assignments(super::init_best);
         let mut neg_sum = 0.0;
         let mut neg_count = 0;
         for _ in 0..max(100, self.max_tries) {
@@ -118,7 +106,6 @@ impl Solver for SimulatedAnnealing {
         } else {
             self.init_prob.ln() * neg_count as f64 / neg_sum
         };
-        lik
     }
 
     /// Perform one iteration, and return the likelihood improvement.
@@ -137,18 +124,19 @@ impl Solver for SimulatedAnnealing {
         0.0
     }
 
-    /// Returns true if the solver is finished.
     fn is_finished(&self) -> bool {
         self.curr_step >= self.steps
     }
 
-    /// Return the current read assignments.
     fn current_assignments(&self) -> &ReadAssignment {
         &self.assignments
     }
 
-    /// Finish solving, consume the solver and return the read assignments.
-    fn finish(self) -> ReadAssignment {
+    fn recalculate_likelihood(&mut self) {
+        self.assignments.recalc_likelihood();
+    }
+
+    fn take(self) -> ReadAssignment {
         self.assignments
     }
 }

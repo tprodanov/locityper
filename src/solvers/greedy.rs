@@ -8,13 +8,12 @@ use rand::{
 use crate::{
     algo::vec_ext::F64Ext,
     model::assgn::ReadAssignment,
-    solvers::{SolverBuilder, Solver},
 };
+use super::Solver;
 
 /// Builder, that constructs `GreedySolver`.
 #[derive(Clone)]
 pub struct GreedyBuilder {
-    seed: Option<u64>,
     sample_size: usize,
     plato_iters: u32,
 }
@@ -23,7 +22,6 @@ impl Default for GreedyBuilder {
     /// Creates default GreedyBuilder: seed is not set, sample size is 100, and there can be up to 5 plato iterations.
     fn default() -> Self {
         Self {
-            seed: None,
             sample_size: 100,
             plato_iters: 5,
         }
@@ -40,22 +38,12 @@ impl GreedyBuilder {
         self.plato_iters = plato_iters;
         self
     }
-}
-
-impl SolverBuilder for GreedyBuilder {
-    type S = GreedySolver;
-
-    /// Sets seed.
-    fn set_seed(&mut self, seed: u64) -> &mut Self {
-        self.seed = Some(seed);
-        self
-    }
 
     /// Builds the solver.
-    fn build(&self, assignments: ReadAssignment) -> Self::S {
+    pub fn build(&self, assignments: ReadAssignment) -> GreedySolver {
         GreedySolver {
             sample_size: min(self.sample_size, assignments.non_trivial_reads().len()),
-            rng: SmallRng::seed_from_u64(self.seed.expect("GreedySolver: seed is not set")),
+            rng: SmallRng::seed_from_u64(0),
             assignments,
             is_finished: false,
             buffer: Vec::with_capacity(16),
@@ -84,8 +72,8 @@ pub struct GreedySolver {
 
 impl GreedySolver {
     /// Creates GreedySolver with default parameters (seed `GreedyBuilder::default`).
-    pub fn new(assignments: ReadAssignment, seed: u64) -> Self {
-        Self::builder().set_seed(seed).build(assignments)
+    pub fn new(assignments: ReadAssignment) -> Self {
+        GreedyBuilder::default().build(assignments)
     }
 
     /// Creates GreedyBuilder.
@@ -95,14 +83,16 @@ impl GreedySolver {
 }
 
 impl Solver for GreedySolver {
-    /// Returns false, the method is not determenistic.
-    fn is_determenistic() -> bool { false }
+    fn is_seedable() -> bool { true }
 
-    /// Initialize read alignments. Returns current likelihood.
-    fn initialize(&mut self) -> f64 {
+    fn set_seed(&mut self, seed: u64) {
+        self.rng = SmallRng::seed_from_u64(seed);
+    }
+
+    fn initialize(&mut self) {
         // self.assignments.init_assignments(solvers::init_best)
         // self.assignments.init_assignments(|_| 0)
-        self.assignments.init_assignments(|alns| self.rng.gen_range(0..alns.len()))
+        self.assignments.init_assignments(|alns| self.rng.gen_range(0..alns.len()));
     }
 
     /// Perform one iteration, and return the likelihood improvement.
@@ -143,8 +133,11 @@ impl Solver for GreedySolver {
         &self.assignments
     }
 
-    /// Finish solving, consume the solver and return the read assignments.
-    fn finish(self) -> ReadAssignment {
+    fn recalculate_likelihood(&mut self) {
+        self.assignments.recalc_likelihood();
+    }
+
+    fn take(self) -> ReadAssignment {
         self.assignments
     }
 }

@@ -28,6 +28,9 @@ where T: DiscretePmf + DiscreteCdf + Debug,
         let cdf1 = distr1.cdf(partition);
         let sf2 = distr2.sf(partition);
 
+        // Solution to the pair of equations:
+        // (i)   cdf1 * weight1  +  sf2 * weight2   =   1,
+        // (ii) (weight1 * pmf1) / (weight2 * pmf2) = ratio.
         let weight1 = val2 / (cdf1 * val2 + sf2 * val1);
         let weight2 = val1 * weight1 / val2;
         Self {

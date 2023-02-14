@@ -12,6 +12,11 @@ pub mod dbg;
 pub mod greedy;
 #[cfg(feature = "stochastic")]
 pub mod anneal;
+// #[cfg(any(feature = "gurobi", feature = "other_ilp"))]
+#[cfg(feature = "gurobi")]
+pub mod ilp;
+#[cfg(feature = "gurobi")]
+pub mod gurobi;
 
 pub use crate::solvers::dbg::{DbgWrite, NoDbg, DbgWriter};
 use crate::solvers::dbg::Iteration;
@@ -21,25 +26,17 @@ pub use crate::solvers::{
     anneal::SimulatedAnnealing,
 };
 
-pub trait SolverBuilder {
-    type S: Solver;
+/// Trait that distributes the reads between their possible alignments
+pub trait Solver {
+    /// Returns true if the solver can take seed.
+    fn is_seedable() -> bool;
 
     /// Sets seed.
     /// Can panic if the seed does not fit the model, or if the solver is deterministic.
-    fn set_seed(&mut self, seed: u64) -> &mut Self;
+    fn set_seed(&mut self, seed: u64);
 
-    /// Builds the solver.
-    fn build(&self, assignments: ReadAssignment) -> Self::S;
-}
-
-/// Trait that distributes the reads between their possible alignments
-pub trait Solver {
-    /// Static function that returns true, if running the method multiple times will produce the same results
-    /// irrespective of the seed.
-    fn is_determenistic() -> bool;
-
-    /// Initialize read alignments. Returns current likelihood.
-    fn initialize(&mut self) -> f64;
+    /// Resets and initializes anew read assignments.
+    fn initialize(&mut self);
 
     /// Perform one iteration, and return the likelihood improvement.
     fn step(&mut self) -> f64;
@@ -50,8 +47,11 @@ pub trait Solver {
     /// Return the current read assignments.
     fn current_assignments(&self) -> &ReadAssignment;
 
-    /// Finish solving, consume the solver and return the read assignments.
-    fn finish(self) -> ReadAssignment;
+    /// Recalculate likelihood and check if it matches the stored one.
+    fn recalculate_likelihood(&mut self);
+
+    /// Consumes solver and returns the read assignments.
+    fn take(self) -> ReadAssignment;
 }
 
 /// Initialize reads based on their best alignment.
@@ -60,65 +60,60 @@ fn init_best(possible_alns: &[PairAlignment]) -> usize {
 }
 
 /// Distribute read assignment in at most `max_iters` iterations.
-pub fn solve<B, I, W>(
-    mut assgns: ReadAssignment,
-    mut solver_builder: B,
+pub fn solve<S, I, W>(
+    mut solver: S,
     seeds: I,
     max_iters: u32,
     dbg_writer: &mut W
 ) -> io::Result<ReadAssignment>
-where B: SolverBuilder,
+where S: Solver,
       I: Iterator<Item = u64>,
       W: DbgWrite,
 {
     let mut best_lik = f64::NEG_INFINITY;
-    let mut last_lik = best_lik;
-    let mut best_assgns: Vec<u16> = assgns.read_assignments().to_vec();
+    let mut last_lik = f64::NEG_INFINITY;
+    let mut best_assgns: Vec<u16> = solver.current_assignments().read_assignments().to_vec();
 
     let mut outer = 0;
     for seed in seeds {
-        outer += 1;
-        let mut solver = if B::S::is_determenistic() {
-            solver_builder.build(assgns)
-        } else {
-            solver_builder.set_seed(seed).build(assgns)
-        };
-
-        last_lik = solver.initialize();
-        dbg_writer.write(solver.current_assignments(), Iteration::Init(outer))?;
-        if last_lik > best_lik {
-            best_lik = last_lik;
-            best_assgns.clone_from_slice(solver.current_assignments().read_assignments());
+        if S::is_seedable() {
+            solver.set_seed(seed);
+        } else if outer > 0 {
+            break;
         }
 
-        for inner in 1..=max_iters {
-            solver.step();
+        outer += 1;
+        for inner in 0..=max_iters {
+            if inner == 0 {
+                solver.initialize();
+            } else {
+                solver.step();
+            }
             last_lik = solver.current_assignments().likelihood();
             if last_lik > best_lik {
                 best_lik = last_lik;
                 best_assgns.clone_from_slice(solver.current_assignments().read_assignments());
             }
 
-            if solver.is_finished() {
+            if inner == 0 {
+                dbg_writer.write(solver.current_assignments(), Iteration::Init(outer))?;
+            } else if solver.is_finished() {
                 dbg_writer.write(solver.current_assignments(), Iteration::Last(outer, inner))?;
                 break;
             } else {
                 dbg_writer.write(solver.current_assignments(), Iteration::Step(outer, inner))?;
             }
         }
-        assgns = solver.finish();
-        assgns.recalc_likelihood();
-        let divergence = (last_lik - assgns.likelihood()).abs();
-        assert!(divergence < 1e-2, "Likelihood estimates diverged too much {} and {}", last_lik, assgns.likelihood());
+        solver.recalculate_likelihood();
+        let new_lik = solver.current_assignments().likelihood();
+        let divergence = (last_lik - new_lik).abs();
+        assert!(divergence < 1e-2, "Likelihood estimates diverged too much {} and {}", last_lik, new_lik);
         if divergence > 1e-6 {
-            log::error!("Likelihood estimates diverged by {} ({} and {})", divergence, last_lik, assgns.likelihood());
-        }
-
-        if B::S::is_determenistic() {
-            break;
+            log::error!("Likelihood estimates diverged by {} ({} and {})", divergence, last_lik, new_lik);
         }
     }
 
+    let mut assgns = solver.take();
     if last_lik < best_lik {
         assgns.set_assignments(&best_assgns);
     }
