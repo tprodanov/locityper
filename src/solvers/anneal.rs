@@ -84,13 +84,17 @@ impl SimulatedAnnealing {
 }
 
 impl Solver for SimulatedAnnealing {
+    type Error = ();
+
     fn is_seedable() -> bool { true }
 
-    fn set_seed(&mut self, seed: u64) {
+    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
         self.rng = SmallRng::seed_from_u64(seed);
+        Ok(())
     }
 
-    fn initialize(&mut self) {
+    fn initialize(&mut self) -> Result<(), Self::Error> {
+        self.curr_step = 0;
         self.assignments.init_assignments(super::init_best);
         let mut neg_sum = 0.0;
         let mut neg_count = 0;
@@ -106,10 +110,11 @@ impl Solver for SimulatedAnnealing {
         } else {
             self.init_prob.ln() * neg_count as f64 / neg_sum
         };
+        Ok(())
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> f64 {
+    fn step(&mut self) -> Result<f64, Self::Error> {
         if self.curr_step >= self.steps {
             log::warn!("SimulatedAnnealing is finished, but `step` is called one more time.")
         }
@@ -118,10 +123,10 @@ impl Solver for SimulatedAnnealing {
         for _ in 0..self.max_tries {
             let (rp, new_assign, improv) = self.assignments.random_reassignment(&mut self.rng);
             if improv > 0.0 || (temp > 0.0 && self.rng.gen_range(0.0..=1.0) <= (self.coeff * improv / temp).exp()) {
-                return self.assignments.reassign(rp, new_assign);
+                return Ok(self.assignments.reassign(rp, new_assign));
             }
         }
-        0.0
+        Ok(0.0)
     }
 
     fn is_finished(&self) -> bool {

@@ -83,20 +83,25 @@ impl GreedySolver {
 }
 
 impl Solver for GreedySolver {
+    type Error = ();
+
     fn is_seedable() -> bool { true }
 
-    fn set_seed(&mut self, seed: u64) {
+    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
         self.rng = SmallRng::seed_from_u64(seed);
+        Ok(())
     }
 
-    fn initialize(&mut self) {
+    fn initialize(&mut self) -> Result<(), Self::Error> {
+        self.is_finished = false;
         // self.assignments.init_assignments(solvers::init_best)
         // self.assignments.init_assignments(|_| 0)
         self.assignments.init_assignments(|alns| self.rng.gen_range(0..alns.len()));
+        Ok(())
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> f64 {
+    fn step(&mut self) -> Result<f64, Self::Error> {
         if self.is_finished {
             log::warn!("GreedySolver is finished, but `step` is called one more time.")
         }
@@ -120,7 +125,7 @@ impl Solver for GreedySolver {
             self.curr_plato += 1;
             self.is_finished = self.curr_plato > self.plato_iters;
         }
-        best_improv
+        Ok(best_improv)
     }
 
     /// Returns true if the solver is finished.
