@@ -12,25 +12,22 @@ pub struct GurobiSolver {
     model: Model,
     assignments: ReadAssignment,
     is_finished: bool,
+    assignment_vars: Vec<Var>,
 }
 
 impl GurobiSolver {
-    pub fn new(assgns: ReadAssignment, depth_step: u32) -> Result<Self, grb::Error> {
-        let mut model = Model::new(&format!("{}", assgns.contigs_group()))?;
-        let contig_windows = assgns.contig_windows();
+    pub fn new(assignments: ReadAssignment, depth_step: u32) -> Result<Self, grb::Error> {
+        let mut model = Model::new(&format!("{}", assignments.contigs_group()))?;
+        let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
 
         let mut by_window_vars: Vec<Vec<Var>> = vec![Vec::new(); total_windows];
         let mut window_trivial_depth = vec![0; total_windows];
-        // let mut assignment_vars = Vec::new();
-        // let mut assignment_coefs = Vec::new();
-        // let mut depth_vars = Vec::new();
-        // let mut depth_coefs = Vec::new();
 
         let mut objective = expr::LinExpr::new();
         let mut assignment_vars = Vec::new();
-        for rp in 0..assgns.total_reads() {
-            let read_locs = assgns.read_locs(rp);
+        for rp in 0..assignments.total_reads() {
+            let read_locs = assignments.read_locs(rp);
             if read_locs.len() == 1 {
                 let loc = &read_locs[0];
                 let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
@@ -40,7 +37,7 @@ impl GurobiSolver {
                 continue;
             }
 
-            assignment_vars.clear();
+            let prev_len = assignment_vars.len();
             for (j, loc) in read_locs.iter().enumerate() {
                 // TODO: Remove names later.
                 let var = add_binvar!(model, name: &format!("R{}_{}", rp, j))?;
@@ -54,13 +51,13 @@ impl GurobiSolver {
                     by_window_vars[w2 as usize].push(var);
                 }
             }
-            model.add_constr(&format!("R{}", rp), c!( (&assignment_vars).grb_sum() == 1 ))?;
+            model.add_constr(&format!("R{}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
         }
 
         let mut depth_vars = Vec::new();
         for w in INIT_WSHIFT as usize..total_windows {
-            let depth_distr = assgns.depth_distr(w);
-            let depth_bound = assgns.depth_bound(w);
+            let depth_distr = assignments.depth_distr(w);
+            let depth_bound = assignments.depth_bound(w);
             let bin_probs = split_depth(depth_distr.deref(), depth_step, depth_bound);
             let nbins = bin_probs.len();
 
@@ -82,8 +79,12 @@ impl GurobiSolver {
                 };
                 depth_vars.push(var);
                 objective.add_term(prob, var);
-                constr1.add_term(-f64::from(min_depth), var);
-                constr2.add_term(-f64::from(max_depth), var);
+                if min_depth > 0 {
+                    constr1.add_term(-f64::from(min_depth), var);
+                }
+                if max_depth > 0 {
+                    constr2.add_term(-f64::from(max_depth), var);
+                }
             }
             model.add_constr(&format!("D{}_base", w), c!( (&depth_vars).grb_sum() == 1 ))?;
             model.add_constr(&format!("D{}_min", w), c!( constr1 >= 0 ))?;
@@ -92,12 +93,24 @@ impl GurobiSolver {
         model.set_objective(objective, grb::ModelSense::Maximize)?;
         model.write("model.lp")?;
 
-        unimplemented!()
-        // Self {
-        //     model,
-        //     assgns,
-        //     is_finished: false,
-        // }
+        Ok(Self {
+            model, assignments, assignment_vars,
+            is_finished: false,
+        })
+    }
+
+    /// Query read assignments from the ILP solution, and set them in the `self.assignments`.
+    fn set_assignments(&mut self) -> Result<(), grb::Error> {
+        let vals = self.model.get_obj_attr_batch(attr::X, self.assignment_vars.iter().cloned())?;
+        let mut i = 0;
+        self.assignments.init_assignments(|locs| {
+            let j = i + locs.len();
+            let new_assgn = vals[i..j].iter().position(|&v| v == 1.0).expect("Read has no assignment!");
+            i = j;
+            new_assgn
+        });
+        assert_eq!(i, vals.len(), "Numbers of total read assignments do not match");
+        Ok(())
     }
 }
 
@@ -107,7 +120,7 @@ impl Solver for GurobiSolver {
     fn is_seedable() -> bool { true }
 
     fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
-        self.model.set_param(parameter::IntParam::Seed, seed as i32)
+        self.model.set_param(parameter::IntParam::Seed, (seed % 0x7fffffff) as i32)
     }
 
     /// Resets and initializes anew read assignments.
@@ -119,7 +132,16 @@ impl Solver for GurobiSolver {
 
     /// Perform one iteration, and return the likelihood improvement.
     fn step(&mut self) -> Result<f64, Self::Error> {
-        unimplemented!()
+        let old_lik = self.assignments.likelihood();
+        log::debug!("Start optimization.");
+        self.model.optimize()?;
+        let ilp_lik = self.model.get_attr(attr::ObjVal)?;
+        self.set_assignments()?;
+        let new_lik = self.assignments.likelihood();
+        log::debug!("Finished ({:?}). Resulting likelihood: {:.5} & {:.5}",
+            self.model.status()?, ilp_lik, new_lik);
+        self.is_finished = true;
+        Ok(new_lik - old_lik)
     }
 
     /// Returns true if the solver is finished.

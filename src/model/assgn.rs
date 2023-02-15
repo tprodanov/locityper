@@ -84,8 +84,9 @@ impl DiscreteCdf for AlwaysOneDistr {
     }
 }
 
-/// All depth values over  0.999 quantile of the Neg.Binomial distribution will be binned together, in one bin.
-const DEPTH_BOUND_QUANTILE: f64 = 0.999;
+/// All depth values over 2x 0.99 quantile of the Neg.Binomial distribution will be binned together, in one bin.
+const DEPTH_BOUND_QUANTILE: f64 = 0.99;
+const DEPTH_BOUND_MULT: f64 = 2.0;
 
 /// Store read depth probabilities for values between 0 and 127 for each GC content.
 const CACHE_SIZE: usize = 256;
@@ -168,7 +169,7 @@ impl<'a> CachedDepthDistrs<'a> {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 let bg_distr = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef * contig_cn as f64);
-                let d = bg_distr.quantile(DEPTH_BOUND_QUANTILE).ceil() as u32;
+                let d = (DEPTH_BOUND_MULT * bg_distr.quantile(DEPTH_BOUND_QUANTILE)).ceil() as u32;
                 *entry.insert(d)
             }
         }
@@ -180,6 +181,7 @@ impl<'a> CachedDepthDistrs<'a> {
 /// For each bin, returns `ln(sum(probs))` for the corresponding read depth values.
 pub(crate) fn split_depth<D>(distr: &D, step: u32, depth_bound: u32) -> Vec<f64>
 where D: DiscretePmf + DiscreteCdf + ?Sized {
+    // TODO: Rework from lowest to highest.
     assert!(step > 0 && depth_bound > 0);
     let reg_bins = depth_bound / step + 1;
     debug_assert!(reg_bins * step > depth_bound && (reg_bins - 1) * step <= depth_bound);
@@ -344,7 +346,7 @@ impl ContigWindows {
                     F64Ext::mean(&curr_kmer_counts[start_ix..end_ix])
                 } else { 0.0 };
                 let weight = sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer);
-                log::debug!("{}:{}  ({}-{})   {:.4}  -> {:.4}", contig_id, j, start, end, mean_kmer_freq, weight);
+                // log::debug!("{}:{}  ({}-{})   {:.4}  -> {:.4}", contig_id, j, start, end, mean_kmer_freq, weight);
                 if mean_kmer_freq <= params.rare_kmer {
                     window_counts2[0] += 1;
                 } else if mean_kmer_freq <= params.semicommon_kmer {
