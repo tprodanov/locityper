@@ -1,4 +1,5 @@
 /target
 /logs
+/*.log
 Cargo.lock
 /src/test.rs

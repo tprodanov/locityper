@@ -176,34 +176,6 @@ impl<'a> CachedDepthDistrs<'a> {
     }
 }
 
-/// Splits read depth into bins `0..step`, `step..2*step`, and so on, until `depth_bound`.
-/// Finally, last bin is `depth_bound + 1..`.
-/// For each bin, returns `ln(sum(probs))` for the corresponding read depth values.
-pub(crate) fn split_depth<D>(distr: &D, step: u32, depth_bound: u32) -> Vec<f64>
-where D: DiscretePmf + DiscreteCdf + ?Sized {
-    // TODO: Rework from lowest to highest.
-    assert!(step > 0 && depth_bound > 0);
-    let reg_bins = depth_bound / step + 1;
-    debug_assert!(reg_bins * step > depth_bound && (reg_bins - 1) * step <= depth_bound);
-    let mut res = Vec::with_capacity(reg_bins as usize + 1);
-
-    if step == 1 {
-        for k in 0..=depth_bound {
-            res.push(distr.ln_pmf(k));
-        }
-    } else {
-        for i in 0..reg_bins {
-            let mut sum_prob = f64::NEG_INFINITY;
-            for k in step * i..min(step * i + step, depth_bound + 1) {
-                sum_prob = Ln::add(sum_prob, distr.ln_pmf(k));
-            }
-            res.push(sum_prob);
-        }
-    }
-    res.push(distr.sf(depth_bound).ln());
-    res
-}
-
 /// Calculates weight of a positive value x.
 /// If x <= c1, returns 1.
 /// If x = c2, returns 0.5 (returns ln 0.5).
@@ -304,24 +276,20 @@ impl ContigWindows {
         }
     }
 
-    /// For each window in the contig group, identifies appropriate read depth distribution and returns two vectors:
-    /// - Vector of distributions,
-    /// - Vector of maximum allowed read depth values (used in the ILP solvers).
+    /// For each window in the contig group, identifies appropriate read depth distribution.
     fn identify_depth_distributions(
         &mut self,
         ref_seqs: &[Vec<u8>],
         cached_distrs: &CachedDepthDistrs<'_>,
         kmer_counts: &KmerCounts,
         params: &Params,
-    ) -> (Vec<DistrBox>, Vec<u32>)
+    ) -> Vec<DistrBox>
     {
         assert!(kmer_counts.k % 2 == 1, "k-mer ({}) size must be odd!", kmer_counts.k);
         let halfk = kmer_counts.k / 2;
         let mut distrs: Vec<DistrBox> = Vec::with_capacity(self.total_windows() as usize);
-        let mut depth_bounds = Vec::with_capacity(self.total_windows() as usize);
         debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
         distrs.push(Box::new(cached_distrs.unmapped_distr()));
-        depth_bounds.push(u32::MAX);
 
         // Normal windows, boundary windows.
         let mut window_counts1 = [0_u16, 0];
@@ -366,7 +334,6 @@ impl ContigWindows {
                     cached_distrs.regular_distr(gc_content, usize::from(contig_cn))
                 };
                 let depth_bound = cached_distrs.depth_bound(gc_content, usize::from(contig_cn));
-                depth_bounds.push(depth_bound);
 
                 if weight == 0.0 {
                     distrs.push(Box::new(Uniform::new(0, depth_bound)));
@@ -381,8 +348,7 @@ impl ContigWindows {
             self.total_windows() - 1, window_counts1[0], window_counts1[1],
                 window_counts2[0], window_counts2[1], window_counts2[2]);
         debug_assert_eq!(self.total_windows() as usize, distrs.len());
-        debug_assert_eq!(self.total_windows() as usize, depth_bounds.len());
-        (distrs, depth_bounds)
+        distrs
     }
 }
 
@@ -426,10 +392,6 @@ pub struct ReadAssignment {
     /// Read depth distribution at each window (length: `contig_windows.total_windows()`).
     depth_distrs: Vec<DistrBox>,
 
-    /// Read depth bounds for each window (used in the ILP solvers).
-    /// Depth over this bound is possible, but will not be binned in separate bins.
-    depth_bounds: Vec<u32>,
-
     /// A vector of possible read alignments to the vector of contigs (length: n_reads).
     read_locs: Vec<PairAlignment>,
 
@@ -470,7 +432,7 @@ impl ReadAssignment {
     ) -> Self {
         params.check();
         let mut contig_windows = ContigWindows::new(cached_distrs.bg_depth.window_size(), contigs_group);
-        let (depth_distrs, depth_bounds) = contig_windows.identify_depth_distributions(
+        let depth_distrs = contig_windows.identify_depth_distributions(
             all_ref_seqs, cached_distrs, kmer_counts, params);
 
         let mut ix = 0;
@@ -494,7 +456,7 @@ impl ReadAssignment {
         Self {
             contig_windows,
             depth: vec![0; n_windows],
-            depth_distrs, depth_bounds, read_locs, read_ixs, non_trivial_reads,
+            depth_distrs, read_locs, read_ixs, non_trivial_reads,
             read_assgn: vec![0; n_reads],
             likelihood: f64::NAN,
         }
@@ -736,12 +698,8 @@ impl ReadAssignment {
         &self.read_locs[self.read_ixs[rp]..self.read_ixs[rp + 1]]
     }
 
+    /// Returns read depth distribution for the window.
     pub fn depth_distr(&self, window: usize) -> &DistrBox {
         &self.depth_distrs[window]
-    }
-
-    /// Returns depth bound for the corresponding window (see `DEPTH_BOUND_QUANTILE`).
-    pub fn depth_bound(&self, window: usize) -> u32 {
-        self.depth_bounds[window]
     }
 }

@@ -1,11 +1,7 @@
-use std::{
-    ops::Deref,
-    cmp::min,
-    result::Result,
-};
+use std::result::Result;
 use grb::*;
 use grb::expr::GurobiSum;
-use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW, INIT_WSHIFT, split_depth};
+use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW, INIT_WSHIFT};
 use super::Solver;
 
 pub struct GurobiSolver {
@@ -16,8 +12,12 @@ pub struct GurobiSolver {
 }
 
 impl GurobiSolver {
-    pub fn new(assignments: ReadAssignment, depth_step: u32) -> Result<Self, grb::Error> {
+    pub fn new(mut assignments: ReadAssignment) -> Result<Self, grb::Error> {
+        assignments.init_assignments(|_| 0);
         let mut model = Model::new(&format!("{}", assignments.contigs_group()))?;
+        model.set_param(parameter::IntParam::Threads, 0)?;
+        model.set_param(parameter::IntParam::LogToConsole, 0)?;
+
         let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
 
@@ -56,42 +56,29 @@ impl GurobiSolver {
 
         let mut depth_vars = Vec::new();
         for w in INIT_WSHIFT as usize..total_windows {
-            let depth_distr = assignments.depth_distr(w);
-            let depth_bound = assignments.depth_bound(w);
-            let bin_probs = split_depth(depth_distr.deref(), depth_step, depth_bound);
-            let nbins = bin_probs.len();
+            let potential_min_depth = window_trivial_depth[w] as u32;
+            let potential_max_depth = potential_min_depth + by_window_vars[w].len() as u32;
 
             depth_vars.clear();
-            let wsum: Expr = window_trivial_depth[w] + (&by_window_vars[w]).grb_sum();
-            let mut constr1 = wsum.clone().into_linexpr()?;
-            let mut constr2 = wsum.into_linexpr()?;
-            for (bin, &prob) in bin_probs.iter().enumerate() {
-                let min_depth;
-                let max_depth;
-                let var = if bin == nbins - 1 {
-                    min_depth = depth_bound + 1;
-                    max_depth = u32::MAX;
-                    add_binvar!(model, name: &format!("D{}_{}..", w, min_depth))?
-                } else {
-                    min_depth = bin as u32 * depth_step;
-                    max_depth = min((bin as u32 + 1) * depth_step - 1, depth_bound);
-                    add_binvar!(model, name: &format!("D{}_{}..{}", w, min_depth, max_depth + 1))?
-                };
+            let depth_distr = assignments.depth_distr(w);
+            let mut constr = (&by_window_vars[w]).grb_sum().into_linexpr()?;
+            if potential_min_depth > 0 {
+                constr.add_constant(f64::from(potential_min_depth));
+            }
+            for depth in potential_min_depth..=potential_max_depth {
+                let var = add_binvar!(model, name: &format!("D{}_{}", w, depth))?;
                 depth_vars.push(var);
+                let prob = depth_distr.ln_pmf(depth);
+                if depth > 0 {
+                    constr.add_term(-f64::from(depth), var);
+                }
                 objective.add_term(prob, var);
-                if min_depth > 0 {
-                    constr1.add_term(-f64::from(min_depth), var);
-                }
-                if max_depth > 0 {
-                    constr2.add_term(-f64::from(max_depth), var);
-                }
             }
             model.add_constr(&format!("D{}_base", w), c!( (&depth_vars).grb_sum() == 1 ))?;
-            model.add_constr(&format!("D{}_min", w), c!( constr1 >= 0 ))?;
-            model.add_constr(&format!("D{}_max", w), c!( constr2 <= 0 ))?;
+            model.add_constr(&format!("D{}_eq", w), c!( constr == 0 ))?;
         }
         model.set_objective(objective, grb::ModelSense::Maximize)?;
-        model.write("model.lp")?;
+        // model.write("model.lp")?;
 
         Ok(Self {
             model, assignments, assignment_vars,
@@ -126,20 +113,23 @@ impl Solver for GurobiSolver {
     /// Resets and initializes anew read assignments.
     fn initialize(&mut self) -> Result<(), Self::Error> {
         self.is_finished = false;
-        self.assignments.init_assignments(|_| 0);
         self.model.reset()
     }
 
     /// Perform one iteration, and return the likelihood improvement.
     fn step(&mut self) -> Result<f64, Self::Error> {
         let old_lik = self.assignments.likelihood();
-        log::debug!("Start optimization.");
         self.model.optimize()?;
         let ilp_lik = self.model.get_attr(attr::ObjVal)?;
         self.set_assignments()?;
         let new_lik = self.assignments.likelihood();
-        log::debug!("Finished ({:?}). Resulting likelihood: {:.5} & {:.5}",
-            self.model.status()?, ilp_lik, new_lik);
+        let status = self.model.status()?;
+        if status != Status::Optimal {
+            log::error!("Gurobi achieved non-optimal status {:?}", status);
+        }
+        if (ilp_lik - new_lik).abs() > 1e-5 {
+            log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, new_lik);
+        }
         self.is_finished = true;
         Ok(new_lik - old_lik)
     }
