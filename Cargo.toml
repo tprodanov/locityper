@@ -16,9 +16,10 @@ log = { version = "0.4", default-features = false }
 simplelog = { version = "0.12", default-features = false, features = ["termcolor"] }
 rand = { version =  "0.8.5", default-features = false, features = ["small_rng", "alloc"], optional = true }
 grb = { version = "1.3.0", default-features = false, optional = true }
+highs = { version = "1.5.0", default-features = false, optional = true }
 
 [features]
-default = ["stochastic", "gurobi"]
+default = ["stochastic", "gurobi", "highs"]
 stochastic = ["dep:rand"]
-gurobi = ["ilp", "dep:grb"]
-ilp = []
+gurobi = ["dep:grb"]
+highs = ["dep:highs"]

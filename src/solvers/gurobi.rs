@@ -20,7 +20,6 @@ impl GurobiSolver {
 
         let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
-
         let mut by_window_vars: Vec<Vec<Var>> = vec![Vec::new(); total_windows];
         let mut window_trivial_depth = vec![0; total_windows];
 
@@ -56,21 +55,22 @@ impl GurobiSolver {
 
         let mut depth_vars = Vec::new();
         for w in INIT_WSHIFT as usize..total_windows {
+            let depth_distr = assignments.depth_distr(w);
             let potential_min_depth = window_trivial_depth[w] as u32;
             let potential_max_depth = potential_min_depth + by_window_vars[w].len() as u32;
+            if potential_min_depth == potential_max_depth {
+                objective.add_constant(depth_distr.ln_pmf(potential_min_depth));
+                continue;
+            }
 
             depth_vars.clear();
-            let depth_distr = assignments.depth_distr(w);
             let mut constr = (&by_window_vars[w]).grb_sum().into_linexpr()?;
-            if potential_min_depth > 0 {
-                constr.add_constant(f64::from(potential_min_depth));
-            }
             for depth in potential_min_depth..=potential_max_depth {
                 let var = add_binvar!(model, name: &format!("D{}_{}", w, depth))?;
                 depth_vars.push(var);
                 let prob = depth_distr.ln_pmf(depth);
-                if depth > 0 {
-                    constr.add_term(-f64::from(depth), var);
+                if depth > potential_min_depth {
+                    constr.add_term(-f64::from(depth - potential_min_depth), var);
                 }
                 objective.add_term(prob, var);
             }
@@ -78,7 +78,7 @@ impl GurobiSolver {
             model.add_constr(&format!("D{}_eq", w), c!( constr == 0 ))?;
         }
         model.set_objective(objective, grb::ModelSense::Maximize)?;
-        // model.write("model.lp")?;
+        model.write("model.lp")?;
 
         Ok(Self {
             model, assignments, assignment_vars,

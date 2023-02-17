@@ -17,6 +17,8 @@ pub mod greedy;
 pub mod anneal;
 #[cfg(feature = "gurobi")]
 pub mod gurobi;
+#[cfg(feature = "highs")]
+pub mod highs;
 
 pub use crate::solvers::dbg::{DbgWrite, NoDbg, DbgWriter};
 use crate::solvers::dbg::Iteration;
@@ -27,6 +29,8 @@ pub use crate::solvers::{
 };
 #[cfg(feature = "gurobi")]
 pub use crate::solvers::gurobi::GurobiSolver;
+#[cfg(feature = "highs")]
+pub use crate::solvers::highs::HighsSolver;
 
 /// Trait that distributes the reads between their possible alignments
 pub trait Solver {
