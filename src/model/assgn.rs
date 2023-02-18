@@ -534,13 +534,18 @@ impl ReadAssignment {
     }
 
     /// Returns the current read-pair alignment given the read pair with index `rp`.
-    pub fn current_pair_alignment(&self, rp: usize) -> &PairAlignment {
+    pub fn current_read_aln(&self, rp: usize) -> &PairAlignment {
         &self.read_locs[self.read_ixs[rp] + self.read_assgn[rp] as usize]
     }
 
     /// Returns the total number of possible alignments for the read pair `rp`.
     pub fn count_possible_alns(&self, rp: usize) -> usize {
         self.read_ixs[rp + 1] - self.read_ixs[rp]
+    }
+
+    /// Returns possible read locations for the read pair `rp`.
+    pub fn possible_read_alns(&self, rp: usize) -> &[PairAlignment] {
+        &self.read_locs[self.read_ixs[rp]..self.read_ixs[rp + 1]]
     }
 
     /// Iterates over possible read reassignments, and adds likelihood differences to the vector `buffer`.
@@ -691,11 +696,6 @@ impl ReadAssignment {
     /// Returns all information about windows.
     pub fn contig_windows(&self) -> &ContigWindows {
         &self.contig_windows
-    }
-
-    /// Returns possible read locations for the read pair `rp`.
-    pub fn read_locs(&self, rp: usize) -> &[PairAlignment] {
-        &self.read_locs[self.read_ixs[rp]..self.read_ixs[rp + 1]]
     }
 
     /// Returns read depth distribution for the window.

@@ -1,7 +1,7 @@
 use std::result::Result;
 use grb::*;
 use grb::expr::GurobiSum;
-use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW, INIT_WSHIFT};
+use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW};
 use super::Solver;
 
 pub struct GurobiSolver {
@@ -26,9 +26,9 @@ impl GurobiSolver {
         let mut objective = expr::LinExpr::new();
         let mut assignment_vars = Vec::new();
         for rp in 0..assignments.total_reads() {
-            let read_locs = assignments.read_locs(rp);
-            if read_locs.len() == 1 {
-                let loc = &read_locs[0];
+            let read_alns = assignments.possible_read_alns(rp);
+            if read_alns.len() == 1 {
+                let loc = &read_alns[0];
                 let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
                 window_trivial_depth[w1 as usize] += 1;
                 window_trivial_depth[w2 as usize] += 1;
@@ -37,7 +37,7 @@ impl GurobiSolver {
             }
 
             let prev_len = assignment_vars.len();
-            for (j, loc) in read_locs.iter().enumerate() {
+            for (j, loc) in read_alns.iter().enumerate() {
                 // TODO: Remove names later.
                 let var = add_binvar!(model, name: &format!("R{}_{}", rp, j))?;
                 assignment_vars.push(var);
@@ -45,16 +45,20 @@ impl GurobiSolver {
                 let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
                 if w1 != UNMAPPED_WINDOW {
                     by_window_vars[w1 as usize].push(var);
+                } else {
+                    window_trivial_depth[w1 as usize] += 1;
                 }
                 if w2 != UNMAPPED_WINDOW {
                     by_window_vars[w2 as usize].push(var);
+                } else {
+                    window_trivial_depth[w2 as usize] += 1;
                 }
             }
             model.add_constr(&format!("R{}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
         }
 
         let mut depth_vars = Vec::new();
-        for w in INIT_WSHIFT as usize..total_windows {
+        for w in 0..total_windows {
             let depth_distr = assignments.depth_distr(w);
             let potential_min_depth = window_trivial_depth[w] as u32;
             let potential_max_depth = potential_min_depth + by_window_vars[w].len() as u32;
@@ -68,11 +72,10 @@ impl GurobiSolver {
             for depth in potential_min_depth..=potential_max_depth {
                 let var = add_binvar!(model, name: &format!("D{}_{}", w, depth))?;
                 depth_vars.push(var);
-                let prob = depth_distr.ln_pmf(depth);
                 if depth > potential_min_depth {
                     constr.add_term(-f64::from(depth - potential_min_depth), var);
                 }
-                objective.add_term(prob, var);
+                objective.add_term(depth_distr.ln_pmf(depth), var);
             }
             model.add_constr(&format!("D{}_base", w), c!( (&depth_vars).grb_sum() == 1 ))?;
             model.add_constr(&format!("D{}_eq", w), c!( constr == 0 ))?;
