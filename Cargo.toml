@@ -17,11 +17,12 @@ simplelog = { version = "0.12", default-features = false, features = ["termcolor
 rand = { version =  "0.8.5", default-features = false, features = ["small_rng", "alloc"], optional = true }
 grb = { version = "1.3.0", default-features = false, optional = true }
 good_lp = { version = "1.3.3", default-features = false, optional = true }
+highs = { version = "1.3.3", default-features = false, optional = true }
 
 [features]
-default = ["stochastic", "gurobi", "highs"]
+default = ["stochastic", "gurobi", "highs", "cbc"]
 stochastic = ["dep:rand"]
 gurobi = ["dep:grb"]
 ilp = []
-highs = ["ilp", "good_lp/highs"]
+highs = ["ilp", "good_lp/highs", "dep:highs"]
 cbc = ["ilp", "good_lp/coin_cbc"]

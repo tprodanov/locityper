@@ -19,6 +19,8 @@ pub mod anneal;
 pub mod gurobi;
 #[cfg(feature = "ilp")]
 pub mod ilp;
+#[cfg(feature = "highs")]
+pub mod highs;
 
 pub use crate::solvers::dbg::{DbgWrite, NoDbg, DbgWriter};
 use crate::solvers::dbg::Iteration;
