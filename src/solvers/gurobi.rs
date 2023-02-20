@@ -1,6 +1,8 @@
-use std::result::Result;
-use grb::*;
-use grb::expr::GurobiSum;
+use std::{fmt, result::Result};
+use grb::{
+    *,
+    expr::{LinExpr, GurobiSum},
+};
 use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW};
 use super::Solver;
 
@@ -13,74 +15,74 @@ pub struct GurobiSolver {
 
 impl GurobiSolver {
     pub fn new(mut assignments: ReadAssignment) -> Result<Self, grb::Error> {
-        assignments.init_assignments(|_| 0);
         let mut model = Model::new(&format!("{}", assignments.contigs_group()))?;
         model.set_param(parameter::IntParam::Threads, 0)?;
         model.set_param(parameter::IntParam::LogToConsole, 0)?;
 
         let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
-        let mut by_window_vars: Vec<Vec<Var>> = vec![Vec::new(); total_windows];
-        let mut window_trivial_depth = vec![0; total_windows];
-
-        let mut objective = expr::LinExpr::new();
+        let mut window_depth = vec![(0_u32, 0_u32); total_windows];
+        let mut window_depth_constrs = vec![LinExpr::new(); total_windows];
+        let mut objective = LinExpr::new();
         let mut assignment_vars = Vec::new();
         for rp in 0..assignments.total_reads() {
             let read_alns = assignments.possible_read_alns(rp);
             if read_alns.len() == 1 {
                 let loc = &read_alns[0];
                 let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
-                window_trivial_depth[w1 as usize] += 1;
-                window_trivial_depth[w2 as usize] += 1;
+                window_depth[w1 as usize].0 += 1;
+                window_depth[w2 as usize].0 += 1;
                 objective.add_constant(loc.ln_prob());
                 continue;
             }
 
             let prev_len = assignment_vars.len();
             for (j, loc) in read_alns.iter().enumerate() {
-                let var = add_binvar!(model, name: &format!("R{}_{}", rp, j))?;
+                let var = add_binvar!(model, name: &format!("R{:x}_{}", rp, j))?;
                 assignment_vars.push(var);
                 objective.add_term(loc.ln_prob(), var);
                 let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
-                if w1 != UNMAPPED_WINDOW {
-                    by_window_vars[w1 as usize].push(var);
-                } else {
-                    window_trivial_depth[w1 as usize] += 1;
-                }
-                if w2 != UNMAPPED_WINDOW {
-                    by_window_vars[w2 as usize].push(var);
-                } else {
-                    window_trivial_depth[w2 as usize] += 1;
+                let inc = if w1 == w2 { 2 } else { 1 };
+                for &w in &[w1, w2] {
+                    if w == UNMAPPED_WINDOW {
+                        window_depth[w as usize].0 += inc;
+                    } else {
+                        window_depth[w as usize].1 += inc;
+                        window_depth_constrs[w as usize].add_term(f64::from(inc), var);
+                    }
+                    if inc == 2 {
+                        break;
+                    }
                 }
             }
-            model.add_constr(&format!("R{}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
+            model.add_constr(&format!("R{:x}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
         }
 
         let mut depth_vars = Vec::new();
-        for w in 0..total_windows {
+        for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
             let depth_distr = assignments.depth_distr(w);
-            let potential_min_depth = window_trivial_depth[w] as u32;
-            let potential_max_depth = potential_min_depth + by_window_vars[w].len() as u32;
-            if potential_min_depth == potential_max_depth {
-                objective.add_constant(depth_distr.ln_pmf(potential_min_depth));
+            let (trivial_reads, non_trivial_reads) = window_depth[w];
+            if non_trivial_reads == 0 {
+                objective.add_constant(depth_distr.ln_pmf(trivial_reads));
                 continue;
             }
 
             depth_vars.clear();
-            let mut constr = (&by_window_vars[w]).grb_sum().into_linexpr()?;
-            for depth in potential_min_depth..=potential_max_depth {
-                let var = add_binvar!(model, name: &format!("D{}_{}", w, depth))?;
+            for depth_inc in 0..=non_trivial_reads {
+                let depth = trivial_reads + depth_inc;
+                let var = add_binvar!(model, name: &format!("D{:x}_{}", w, depth))?;
                 depth_vars.push(var);
-                if depth > potential_min_depth {
-                    constr.add_term(-f64::from(depth - potential_min_depth), var);
+                if depth_inc > 0 {
+                    depth_constr0.add_term(-f64::from(depth_inc), var);
                 }
                 objective.add_term(depth_distr.ln_pmf(depth), var);
             }
-            model.add_constr(&format!("D{}_base", w), c!( (&depth_vars).grb_sum() == 1 ))?;
-            model.add_constr(&format!("D{}_eq", w), c!( constr == 0 ))?;
+            model.add_constr(&format!("D{:x}_base", w), c!( (&depth_vars).grb_sum() == 1 ))?;
+            model.add_constr(&format!("D{:x}_eq", w), c!( depth_constr0 == 0 ))?;
         }
         model.set_objective(objective, grb::ModelSense::Maximize)?;
-        model.write("model.lp")?;
+        // model.write("model.lp")?;
+        assignments.init_assignments(|_| 0);
 
         Ok(Self {
             model, assignments, assignment_vars,
@@ -153,5 +155,11 @@ impl Solver for GurobiSolver {
     /// Consumes solver and returns the read assignments.
     fn take(self) -> ReadAssignment {
         self.assignments
+    }
+}
+
+impl fmt::Display for GurobiSolver {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Gurobi")
     }
 }

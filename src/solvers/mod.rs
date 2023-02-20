@@ -1,6 +1,6 @@
 use std::{
     io,
-    fmt::Debug,
+    fmt::{Display, Debug},
 };
 use crate::{
     algo::vec_ext::IterExt,
@@ -33,7 +33,7 @@ pub use self::gurobi::GurobiSolver;
 pub use self::highs::HighsSolver;
 
 /// Trait that distributes the reads between their possible alignments
-pub trait Solver {
+pub trait Solver: Display {
     type Error: Debug;
 
     /// Returns true if the solver can take seed.

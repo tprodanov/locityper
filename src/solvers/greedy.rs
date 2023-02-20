@@ -1,4 +1,4 @@
-use std::cmp::min;
+use std::{fmt, cmp::min};
 use rand::{
     Rng,
     SeedableRng,
@@ -144,5 +144,11 @@ impl Solver for GreedySolver {
 
     fn take(self) -> ReadAssignment {
         self.assignments
+    }
+}
+
+impl fmt::Display for GreedySolver {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Greedy({},{})", self.sample_size, self.plato_iters)
     }
 }

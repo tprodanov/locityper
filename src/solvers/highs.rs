@@ -1,3 +1,4 @@
+use std::fmt;
 use highs::{RowProblem, Col, Sense, HighsModelStatus as Status};
 use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW};
 use super::Solver;
@@ -151,5 +152,11 @@ impl Solver for HighsSolver {
     /// Consumes solver and returns the read assignments.
     fn take(self) -> ReadAssignment {
         self.assignments
+    }
+}
+
+impl fmt::Display for HighsSolver {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "HiGHS")
     }
 }
