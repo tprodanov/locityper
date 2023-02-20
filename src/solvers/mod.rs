@@ -17,20 +17,20 @@ pub mod greedy;
 pub mod anneal;
 #[cfg(feature = "gurobi")]
 pub mod gurobi;
-#[cfg(feature = "ilp")]
-pub mod ilp;
 #[cfg(feature = "highs")]
 pub mod highs;
 
-pub use crate::solvers::dbg::{DbgWrite, NoDbg, DbgWriter};
-use crate::solvers::dbg::Iteration;
+pub use self::dbg::{DbgWrite, NoDbg, DbgWriter};
+use self::dbg::Iteration;
 #[cfg(feature = "stochastic")]
-pub use crate::solvers::{
+pub use self::{
     greedy::GreedySolver,
     anneal::SimulatedAnnealing,
 };
 #[cfg(feature = "gurobi")]
-pub use crate::solvers::gurobi::GurobiSolver;
+pub use self::gurobi::GurobiSolver;
+#[cfg(feature = "highs")]
+pub use self::highs::HighsSolver;
 
 /// Trait that distributes the reads between their possible alignments
 pub trait Solver {
@@ -43,11 +43,11 @@ pub trait Solver {
     /// Can panic if the seed does not fit the model, or if the solver is deterministic.
     fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error>;
 
-    /// Resets and initializes anew read assignments.
-    fn initialize(&mut self) -> Result<(), Self::Error>;
+    /// Resets the solver.
+    fn reset(&mut self) -> Result<(), Self::Error>;
 
-    /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<f64, Self::Error>;
+    /// Perform one iteration.
+    fn step(&mut self) -> Result<(), Self::Error>;
 
     /// Returns true if the solver is finished.
     fn is_finished(&self) -> bool;
@@ -105,7 +105,7 @@ where S: Solver,
         outer += 1;
         for inner in 0..=max_iters {
             if inner == 0 {
-                solver.initialize().map_err(Error::SolverErr)?;
+                solver.reset().map_err(Error::SolverErr)?;
             } else {
                 solver.step().map_err(Error::SolverErr)?;
             }

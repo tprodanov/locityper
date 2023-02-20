@@ -1,16 +1,18 @@
-use highs::{RowProblem, Col, Model, Sense, HighsModelStatus as Status};
+use highs::{RowProblem, Col, Sense, HighsModelStatus as Status};
 use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW};
 use super::Solver;
 
 pub struct HighsSolver {
-    model: Option<Model>,
+    problem: RowProblem,
     #[allow(dead_code)]
     const_term: f64,
     assignments: ReadAssignment,
+    seed: Option<i32>,
+    is_finished: bool,
 }
 
 impl HighsSolver {
-    pub fn new(assignments: ReadAssignment) -> Self {
+    pub fn new(mut assignments: ReadAssignment) -> Self {
         let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
         // Number of trivial and non-trivial reads mapped to a window.
@@ -73,13 +75,11 @@ impl HighsSolver {
             depth_constr1.clear();
         }
 
-        log::debug!("Try optimize");
-        let mut model = problem.try_optimise(Sense::Maximise).unwrap();
-        log::debug!("Constructed model");
-        model.set_option("parallel", "off");
+        assignments.init_assignments(|_| 0);
         Self {
-            model: Some(model),
-            const_term, assignments,
+            problem, const_term, assignments,
+            seed: None,
+            is_finished: false,
         }
     }
 
@@ -100,36 +100,42 @@ impl HighsSolver {
 impl Solver for HighsSolver {
     type Error = ();
 
-    fn is_seedable() -> bool { false }
+    fn is_seedable() -> bool { true }
 
-    fn set_seed(&mut self, _seed: u64) -> Result<(), Self::Error> {
-        panic!("Cannot set seed to the Highs solver!")
+    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
+        self.seed = Some((seed % 0x7fffffff) as i32);
+        Ok(())
     }
 
     /// Resets and initializes anew read assignments.
-    fn initialize(&mut self) -> Result<(), Self::Error> {
-        assert!(self.model.is_some(), "Cannot run `HighsSolver::initialize` twice!");
-        self.assignments.init_assignments(|_| 0);
+    fn reset(&mut self) -> Result<(), Self::Error> {
+        self.seed = None;
+        self.is_finished = true;
         Ok(())
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<f64, Self::Error> {
-        let solved_model = self.model.take().expect("Cannot run `HighsSolver::step` twice!").solve();
+    fn step(&mut self) -> Result<(), Self::Error> {
+        let mut model = self.problem.clone().try_optimise(Sense::Maximise).unwrap();
+        model.set_option("parallel", "off");
+        if let Some(seed) = self.seed {
+            model.set_option("random_seed", seed);
+        }
+        model.make_quiet();
+
+        let solved_model = model.solve();
         if solved_model.status() != Status::Optimal {
             panic!("Highs model finished with non-optimal status {:?}", solved_model.status());
         }
-        let old_lik = self.assignments.likelihood();
         let solution = solved_model.get_solution();
         self.set_assignments(solution.columns());
-        let new_lik = self.assignments.likelihood();
-        Ok(new_lik - old_lik)
+        self.is_finished = true;
+        Ok(())
     }
 
     /// Returns true if the solver is finished.
     fn is_finished(&self) -> bool {
-        self.model.is_none()
-        // unimplemented!()
+        self.is_finished
     }
 
     /// Return the current read assignments.

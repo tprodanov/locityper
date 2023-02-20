@@ -93,7 +93,7 @@ impl Solver for SimulatedAnnealing {
         Ok(())
     }
 
-    fn initialize(&mut self) -> Result<(), Self::Error> {
+    fn reset(&mut self) -> Result<(), Self::Error> {
         self.curr_step = 0;
         self.assignments.init_assignments(super::init_best);
         let mut neg_sum = 0.0;
@@ -114,7 +114,7 @@ impl Solver for SimulatedAnnealing {
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<f64, Self::Error> {
+    fn step(&mut self) -> Result<(), Self::Error> {
         if self.curr_step >= self.steps {
             log::warn!("SimulatedAnnealing is finished, but `step` is called one more time.")
         }
@@ -123,10 +123,11 @@ impl Solver for SimulatedAnnealing {
         for _ in 0..self.max_tries {
             let (rp, new_assign, improv) = self.assignments.random_reassignment(&mut self.rng);
             if improv > 0.0 || (temp > 0.0 && self.rng.gen_range(0.0..=1.0) <= (self.coeff * improv / temp).exp()) {
-                return Ok(self.assignments.reassign(rp, new_assign));
+                self.assignments.reassign(rp, new_assign);
+                return Ok(())
             }
         }
-        Ok(0.0)
+        Ok(())
     }
 
     fn is_finished(&self) -> bool {

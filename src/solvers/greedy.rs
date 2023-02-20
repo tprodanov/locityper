@@ -92,7 +92,7 @@ impl Solver for GreedySolver {
         Ok(())
     }
 
-    fn initialize(&mut self) -> Result<(), Self::Error> {
+    fn reset(&mut self) -> Result<(), Self::Error> {
         self.is_finished = false;
         // self.assignments.init_assignments(solvers::init_best)
         // self.assignments.init_assignments(|_| 0)
@@ -101,7 +101,7 @@ impl Solver for GreedySolver {
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<f64, Self::Error> {
+    fn step(&mut self) -> Result<(), Self::Error> {
         if self.is_finished {
             log::warn!("GreedySolver is finished, but `step` is called one more time.")
         }
@@ -125,7 +125,7 @@ impl Solver for GreedySolver {
             self.curr_plato += 1;
             self.is_finished = self.curr_plato > self.plato_iters;
         }
-        Ok(best_improv)
+        Ok(())
     }
 
     /// Returns true if the solver is finished.

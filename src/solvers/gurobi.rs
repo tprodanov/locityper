@@ -38,7 +38,6 @@ impl GurobiSolver {
 
             let prev_len = assignment_vars.len();
             for (j, loc) in read_alns.iter().enumerate() {
-                // TODO: Remove names later.
                 let var = add_binvar!(model, name: &format!("R{}_{}", rp, j))?;
                 assignment_vars.push(var);
                 objective.add_term(loc.ln_prob(), var);
@@ -113,28 +112,27 @@ impl Solver for GurobiSolver {
         self.model.set_param(parameter::IntParam::Seed, (seed % 0x7fffffff) as i32)
     }
 
-    /// Resets and initializes anew read assignments.
-    fn initialize(&mut self) -> Result<(), Self::Error> {
+    /// Resets the solver.
+    fn reset(&mut self) -> Result<(), Self::Error> {
         self.is_finished = false;
         self.model.reset()
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<f64, Self::Error> {
-        let old_lik = self.assignments.likelihood();
+    fn step(&mut self) -> Result<(), Self::Error> {
         self.model.optimize()?;
-        let ilp_lik = self.model.get_attr(attr::ObjVal)?;
         self.set_assignments()?;
-        let new_lik = self.assignments.likelihood();
         let status = self.model.status()?;
         if status != Status::Optimal {
             log::error!("Gurobi achieved non-optimal status {:?}", status);
         }
-        if (ilp_lik - new_lik).abs() > 1e-5 {
-            log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, new_lik);
+        let ilp_lik = self.model.get_attr(attr::ObjVal)?;
+        let assgn_lik = self.assignments.likelihood();
+        if (ilp_lik - assgn_lik).abs() > 1e-5 {
+            log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, assgn_lik);
         }
         self.is_finished = true;
-        Ok(new_lik - old_lik)
+        Ok(())
     }
 
     /// Returns true if the solver is finished.
