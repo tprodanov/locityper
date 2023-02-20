@@ -1,5 +1,6 @@
 use std::{
     io,
+    time::Instant,
     fmt::{Display, Debug},
 };
 use crate::{
@@ -10,7 +11,6 @@ use crate::{
     },
 };
 
-pub mod dbg;
 #[cfg(feature = "stochastic")]
 pub mod greedy;
 #[cfg(feature = "stochastic")]
@@ -20,8 +20,6 @@ pub mod gurobi;
 #[cfg(feature = "highs")]
 pub mod highs;
 
-pub use self::dbg::{DbgWrite, NoDbg, DbgWriter};
-use self::dbg::Iteration;
 #[cfg(feature = "stochastic")]
 pub use self::{
     greedy::GreedySolver,
@@ -80,25 +78,39 @@ impl<E: Debug> From<io::Error> for Error<E> {
 }
 
 /// Distribute read assignment in at most `max_iters` iterations.
-pub fn solve<S, I, W>(
-    mut solver: S,
+///
+/// dbg_writer writes intermediate likelihood values and runtime for each seed.
+/// Format: `assignment-tag  solver  runtime  seed  likelihood`.
+pub fn solve<S, F, I, W, U>(
+    assgns: ReadAssignment,
+    build: F,
     seeds: I,
     max_iters: u32,
-    dbg_writer: &mut W
+    dbg_writer: &mut W,
+    assgn_writer: &mut U,
 ) -> Result<ReadAssignment, Error<S::Error>>
 where S: Solver,
+      F: Fn(ReadAssignment) -> S,
       I: Iterator<Item = u64>,
-      W: DbgWrite,
+      W: io::Write,
+      U: io::Write,
 {
     let mut best_lik = f64::NEG_INFINITY;
     let mut last_lik = f64::NEG_INFINITY;
-    let mut best_assgns: Vec<u16> = solver.current_assignments().read_assignments().to_vec();
+    let mut best_assgns: Vec<u16> = assgns.read_assignments().to_vec();
 
+    let start_time = Instant::now();
+    let mut solver = build(assgns);
+    let prefix = format!("{}\t{}", solver.current_assignments().contigs_group().to_string(), solver);
+    let duration = Instant::now().duration_since(start_time);
+    writeln!(dbg_writer, "{}\t{}.{:06}\tstart\tNA", prefix, duration.as_secs(), duration.subsec_micros())?;
     let mut outer = 0;
-    for seed in seeds {
+    for mut seed in seeds {
         if S::is_seedable() {
             solver.set_seed(seed).map_err(Error::SolverErr)?;
-        } else if outer > 0 {
+        } else if outer == 0 {
+            seed = 0;
+        } else {
             break;
         }
 
@@ -115,28 +127,31 @@ where S: Solver,
                 best_assgns.clone_from_slice(solver.current_assignments().read_assignments());
             }
 
-            if inner == 0 {
-                dbg_writer.write(solver.current_assignments(), Iteration::Init(outer))?;
-            } else if solver.is_finished() {
-                dbg_writer.write(solver.current_assignments(), Iteration::Last(outer, inner))?;
+            if solver.is_finished() {
                 break;
-            } else {
-                dbg_writer.write(solver.current_assignments(), Iteration::Step(outer, inner))?;
             }
         }
-        solver.recalculate_likelihood();
-        let new_lik = solver.current_assignments().likelihood();
-        let divergence = (last_lik - new_lik).abs();
-        assert!(divergence < 1e-2, "Likelihood estimates diverged too much {} and {}", last_lik, new_lik);
-        if divergence > 1e-6 {
-            log::error!("Likelihood estimates diverged by {} ({} and {})", divergence, last_lik, new_lik);
-        }
+        let duration = Instant::now().duration_since(start_time);
+        writeln!(dbg_writer, "{}\t{}.{:06}\t{:X}\t{:.5}", prefix, duration.as_secs(), duration.subsec_micros(),
+            seed, last_lik)?;
+
+        // solver.recalculate_likelihood();
+        // let new_lik = solver.current_assignments().likelihood();
+        // let divergence = (last_lik - new_lik).abs();
+        // assert!(divergence < 1e-2, "Likelihood estimates diverged too much {} and {}", last_lik, new_lik);
+        // if divergence > 1e-6 {
+        //     log::error!("Likelihood estimates diverged by {} ({} and {})", divergence, last_lik, new_lik);
+        // }
     }
 
     let mut assgns = solver.take();
     if last_lik < best_lik {
         assgns.set_assignments(&best_assgns);
     }
-    dbg_writer.write(&assgns, Iteration::Best)?;
+    let duration = Instant::now().duration_since(start_time);
+    writeln!(dbg_writer, "{}\t{}.{:06}\tbest\t{:.5}", prefix, duration.as_secs(), duration.subsec_micros(), best_lik)?;
+
+    // if TypeId::of
+    assgns.write_csv(&prefix, assgn_writer)?;
     Ok(assgns)
 }

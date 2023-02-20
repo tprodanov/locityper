@@ -528,11 +528,6 @@ impl ReadAssignment {
         &self.read_assgn
     }
 
-    /// Returns iterator over pair (read depth, read depth ln-prob) for all windows.
-    pub fn depth_lik_iter(&self) -> impl Iterator<Item = (u32, f64)> + std::iter::ExactSizeIterator + '_ {
-        self.depth.iter().zip(&self.depth_distrs).map(|(&d, distr)| (d, distr.ln_pmf(d)))
-    }
-
     /// Returns the current read-pair alignment given the read pair with index `rp`.
     pub fn current_read_aln(&self, rp: usize) -> &PairAlignment {
         &self.read_locs[self.read_ixs[rp] + self.read_assgn[rp] as usize]
@@ -701,5 +696,16 @@ impl ReadAssignment {
     /// Returns read depth distribution for the window.
     pub fn depth_distr(&self, window: usize) -> &DistrBox {
         &self.depth_distrs[window]
+    }
+
+    /// Write CSV in the following format (separated with `\t`):
+    /// First line: `prefix  NA      NA     likelihood`.
+    /// Next lines: `prefix  window  depth  depth_lik`.
+    pub fn write_csv<W: io::Write>(&self, prefix: &str, f: &mut W) -> io::Result<()> {
+        writeln!(f, "{}\tNA\tNA\t{:.5}", prefix, self.likelihood())?;
+        for (w, (&depth, depth_distr)) in self.depth.iter().zip(&self.depth_distrs).enumerate() {
+            writeln!(f, "{}\t{}\t{}\t{:.2}", prefix, w, depth, depth_distr.ln_pmf(depth))?;
+        }
+        Ok(())
     }
 }
