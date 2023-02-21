@@ -1,6 +1,7 @@
 use std::{
     io,
     time::Instant,
+    any::TypeId,
     fmt::{Display, Debug},
 };
 use crate::{
@@ -85,7 +86,6 @@ pub fn solve<S, F, I, W, U>(
     assgns: ReadAssignment,
     build: F,
     seeds: I,
-    max_iters: u32,
     dbg_writer: &mut W,
     assgn_writer: &mut U,
 ) -> Result<ReadAssignment, Error<S::Error>>
@@ -93,17 +93,23 @@ where S: Solver,
       F: Fn(ReadAssignment) -> S,
       I: Iterator<Item = u64>,
       W: io::Write,
-      U: io::Write,
+      U: io::Write + 'static,
 {
     let mut best_lik = f64::NEG_INFINITY;
     let mut last_lik = f64::NEG_INFINITY;
     let mut best_assgns: Vec<u16> = assgns.read_assignments().to_vec();
 
-    let start_time = Instant::now();
+    let mut last_instant = Instant::now();
+    let mut update_timer = || {
+        let new_instant = Instant::now();
+        let duration = new_instant.duration_since(last_instant);
+        last_instant = new_instant;
+        duration
+    };
     let mut solver = build(assgns);
     let prefix = format!("{}\t{}", solver.current_assignments().contigs_group().to_string(), solver);
-    let duration = Instant::now().duration_since(start_time);
-    writeln!(dbg_writer, "{}\t{}.{:06}\tstart\tNA", prefix, duration.as_secs(), duration.subsec_micros())?;
+    let dur = update_timer();
+    writeln!(dbg_writer, "{}\t{}.{:06}\tstart\tNA", prefix, dur.as_secs(), dur.subsec_micros())?;
     let mut outer = 0;
     for mut seed in seeds {
         if S::is_seedable() {
@@ -115,7 +121,7 @@ where S: Solver,
         }
 
         outer += 1;
-        for inner in 0..=max_iters {
+        for inner in 0.. {
             if inner == 0 {
                 solver.reset().map_err(Error::SolverErr)?;
             } else {
@@ -126,32 +132,20 @@ where S: Solver,
                 best_lik = last_lik;
                 best_assgns.clone_from_slice(solver.current_assignments().read_assignments());
             }
-
             if solver.is_finished() {
                 break;
             }
         }
-        let duration = Instant::now().duration_since(start_time);
-        writeln!(dbg_writer, "{}\t{}.{:06}\t{:X}\t{:.5}", prefix, duration.as_secs(), duration.subsec_micros(),
-            seed, last_lik)?;
-
-        // solver.recalculate_likelihood();
-        // let new_lik = solver.current_assignments().likelihood();
-        // let divergence = (last_lik - new_lik).abs();
-        // assert!(divergence < 1e-2, "Likelihood estimates diverged too much {} and {}", last_lik, new_lik);
-        // if divergence > 1e-6 {
-        //     log::error!("Likelihood estimates diverged by {} ({} and {})", divergence, last_lik, new_lik);
-        // }
+        let dur = update_timer();
+        writeln!(dbg_writer, "{}\t{}.{:06}\t{:X}\t{:.5}", prefix, dur.as_secs(), dur.subsec_micros(), seed, last_lik)?;
     }
 
     let mut assgns = solver.take();
     if last_lik < best_lik {
         assgns.set_assignments(&best_assgns);
     }
-    let duration = Instant::now().duration_since(start_time);
-    writeln!(dbg_writer, "{}\t{}.{:06}\tbest\t{:.5}", prefix, duration.as_secs(), duration.subsec_micros(), best_lik)?;
-
-    // if TypeId::of
-    assgns.write_csv(&prefix, assgn_writer)?;
+    if TypeId::of::<U>() != TypeId::of::<io::Sink>() {
+        assgns.write_csv(&prefix, assgn_writer)?;
+    }
     Ok(assgns)
 }
