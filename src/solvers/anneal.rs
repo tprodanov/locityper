@@ -83,7 +83,7 @@ pub struct SimulatedAnnealing {
 
 impl SimulatedAnnealing {
     /// Creates GreedySolver with default parameters (seed `AnnealingBuilder::default`).
-    pub fn default(assignments: ReadAssignment) -> Self {
+    pub fn new(assignments: ReadAssignment) -> Self {
         AnnealingBuilder::default().build(assignments)
     }
 
@@ -105,6 +105,7 @@ impl Solver for SimulatedAnnealing {
 
     fn reset(&mut self) -> Result<(), Self::Error> {
         self.curr_temp = 1.0;
+        self.curr_plato = 0;
         self.assignments.init_assignments(super::init_best);
 
         let mut neg_sum = 0.0;
@@ -158,7 +159,7 @@ impl Solver for SimulatedAnnealing {
 
 impl fmt::Display for SimulatedAnnealing {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SimAnneal({:.2e},{:.2e},{})", self.builder.cooling_temp, self.builder.init_prob,
+        write!(f, "SimAnneal({:e},{:e},{})", self.builder.cooling_temp, self.builder.init_prob,
             self.builder.plato_iters)
     }
 }

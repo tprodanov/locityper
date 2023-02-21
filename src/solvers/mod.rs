@@ -32,7 +32,7 @@ pub use self::gurobi::GurobiSolver;
 pub use self::highs::HighsSolver;
 
 /// Trait that distributes the reads between their possible alignments
-pub trait Solver: Display {
+pub trait Solver: Display + Display {
     type Error: Debug;
 
     /// Returns true if the solver can take seed.
@@ -106,9 +106,13 @@ where S: Solver,
         last_instant = new_instant;
         duration
     };
+
+    let contigs_group_str = assgns.contigs_group().to_string();
     let mut solver = build(assgns);
-    let prefix = format!("{}\t{}", solver.current_assignments().contigs_group().to_string(), solver);
+    let solver_str = solver.to_string();
+    log::debug!("Solving {} with {}", contigs_group_str, solver_str);
     let dur = update_timer();
+    let prefix = format!("{}\t{}", contigs_group_str, solver_str);
     writeln!(dbg_writer, "{}\t{}.{:06}\tstart\tNA", prefix, dur.as_secs(), dur.subsec_micros())?;
     let mut outer = 0;
     for mut seed in seeds {
@@ -137,13 +141,14 @@ where S: Solver,
             }
         }
         let dur = update_timer();
-        writeln!(dbg_writer, "{}\t{}.{:06}\t{:X}\t{:.5}", prefix, dur.as_secs(), dur.subsec_micros(), seed, last_lik)?;
+        writeln!(dbg_writer, "{}\t{}.{:06}\t{:X}\t{:.8}", prefix, dur.as_secs(), dur.subsec_micros(), seed, last_lik)?;
     }
 
     let mut assgns = solver.take();
     if last_lik < best_lik {
         assgns.set_assignments(&best_assgns);
     }
+    log::debug!("Solved  {} with {}.  ln-likelihood: {:.3}", contigs_group_str, solver_str, best_lik);
     if TypeId::of::<U>() != TypeId::of::<io::Sink>() {
         assgns.write_csv(&prefix, assgn_writer)?;
     }

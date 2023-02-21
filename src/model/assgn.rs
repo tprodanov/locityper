@@ -702,9 +702,9 @@ impl ReadAssignment {
     /// First line: `prefix  NA      NA     likelihood`.
     /// Next lines: `prefix  window  depth  depth_lik`.
     pub fn write_csv<W: io::Write>(&self, prefix: &str, f: &mut W) -> io::Result<()> {
-        writeln!(f, "{}\tNA\tNA\t{:.5}", prefix, self.likelihood())?;
+        writeln!(f, "{}\tNA\tNA\t{:.8}", prefix, self.likelihood())?;
         for (w, (&depth, depth_distr)) in self.depth.iter().zip(&self.depth_distrs).enumerate() {
-            writeln!(f, "{}\t{}\t{}\t{:.2}", prefix, w, depth, depth_distr.ln_pmf(depth))?;
+            writeln!(f, "{}\t{}\t{}\t{:.5}", prefix, w, depth, depth_distr.ln_pmf(depth))?;
         }
         Ok(())
     }

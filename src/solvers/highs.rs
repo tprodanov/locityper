@@ -1,19 +1,19 @@
 use std::fmt;
-use highs::{RowProblem, Col, Sense, HighsModelStatus as Status};
+use highs::{RowProblem, Model, Col, Sense, HighsModelStatus as Status};
 use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW};
 use super::Solver;
 
 pub struct HighsSolver {
-    problem: RowProblem,
+    model: Option<Model>,
     #[allow(dead_code)]
     const_term: f64,
     assignments: ReadAssignment,
-    seed: Option<i32>,
-    is_finished: bool,
+    solver_type: String,
 }
 
 impl HighsSolver {
-    pub fn new(mut assignments: ReadAssignment) -> Self {
+    /// Creates a new HiGHS solver. Possible `solver_type` values: `choose`, `simplex`, or `ipm`.
+    pub fn new(solver_type: String, mut assignments: ReadAssignment) -> Self {
         let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
         // Number of trivial and non-trivial reads mapped to a window.
@@ -77,10 +77,15 @@ impl HighsSolver {
         }
 
         assignments.init_assignments(|_| 0);
+        let mut model = problem.optimise(Sense::Maximise);
+        model.set_option("parallel", "off");
+        model.set_option("presolve", "on");
+        model.set_option("solver", &solver_type as &str);
+        model.make_quiet();
+
         Self {
-            problem, const_term, assignments,
-            seed: None,
-            is_finished: false,
+            model: Some(model),
+            const_term, assignments, solver_type,
         }
     }
 
@@ -89,9 +94,9 @@ impl HighsSolver {
         let mut i = 0;
         self.assignments.init_assignments(|locs| {
             let j = i + locs.len();
-            let new_assgn = vals[i..j].iter()
-                .position(|&v| v >= 0.99999 && v <= 1.00001)
-                .expect("Read has no assignment!");
+            // Take argmax because HiGHS does not always output reasonable solutions,
+            // this way we always have a read assignment.
+            let new_assgn = crate::algo::vec_ext::F64Ext::argmax(&vals[i..j]).0;
             i = j;
             new_assgn
         });
@@ -101,42 +106,32 @@ impl HighsSolver {
 impl Solver for HighsSolver {
     type Error = ();
 
-    fn is_seedable() -> bool { true }
+    fn is_seedable() -> bool { false }
 
-    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
-        self.seed = Some((seed % 0x7fffffff) as i32);
-        Ok(())
+    fn set_seed(&mut self, _seed: u64) -> Result<(), Self::Error> {
+        // Even so it is possible to set seed to Highs Solver, results are always the same.
+        panic!("Cannot set seed to HiGHS");
     }
 
     /// Resets and initializes anew read assignments.
     fn reset(&mut self) -> Result<(), Self::Error> {
-        self.seed = None;
-        self.is_finished = true;
         Ok(())
     }
 
     /// Perform one iteration, and return the likelihood improvement.
     fn step(&mut self) -> Result<(), Self::Error> {
-        let mut model = self.problem.clone().try_optimise(Sense::Maximise).unwrap();
-        model.set_option("parallel", "off");
-        if let Some(seed) = self.seed {
-            model.set_option("random_seed", seed);
-        }
-        model.make_quiet();
-
-        let solved_model = model.solve();
+        let solved_model = self.model.take().expect("Cannot run HighsSolver::step twice!").solve();
         if solved_model.status() != Status::Optimal {
             panic!("Highs model finished with non-optimal status {:?}", solved_model.status());
         }
         let solution = solved_model.get_solution();
         self.set_assignments(solution.columns());
-        self.is_finished = true;
         Ok(())
     }
 
     /// Returns true if the solver is finished.
     fn is_finished(&self) -> bool {
-        self.is_finished
+        self.model.is_none()
     }
 
     /// Return the current read assignments.
@@ -157,6 +152,6 @@ impl Solver for HighsSolver {
 
 impl fmt::Display for HighsSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "HiGHS")
+        write!(f, "HiGHS({})", self.solver_type)
     }
 }
