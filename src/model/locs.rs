@@ -298,7 +298,7 @@ pub(crate) enum TwoIntervals {
     Both(Interval, Interval),
     First(Interval),
     Second(Interval),
-    None,
+    // None,
 }
 
 /// Alignment of the read pair. At most one of two alignments may be missing!
@@ -324,7 +324,7 @@ impl PairAlignment {
     pub fn contig_id(&self) -> ContigId {
         match &self.intervals {
             TwoIntervals::Both(x, _) | TwoIntervals::First(x) | TwoIntervals::Second(x) => x.contig_id(),
-            TwoIntervals::None => panic!("Both mates are unmapped, contig id is unavailable!"),
+            // TwoIntervals::None => panic!("Both mates are unmapped, contig id is unavailable!"),
         }
     }
 
@@ -347,7 +347,7 @@ impl fmt::Debug for PairAlignment {
             TwoIntervals::Both(aln1, aln2) => write!(f, "Pair({:?}, {:?}, {:.2})", aln1, aln2, self.ln_prob),
             TwoIntervals::First(aln1) => write!(f, "Pair({:?}, *, {:.2})", aln1, self.ln_prob),
             TwoIntervals::Second(aln2) => write!(f, "Pair(*, {:?}, {:.2})", aln2, self.ln_prob),
-            TwoIntervals::None => write!(f, "Pair(*, *, {:.2})", self.ln_prob),
+            // TwoIntervals::None => write!(f, "Pair(*, *, {:.2})", self.ln_prob),
         }
     }
 }
@@ -358,7 +358,7 @@ impl fmt::Display for PairAlignment {
             TwoIntervals::Both(aln1, aln2) => write!(f, "Pair({}, {}, {:.2})", aln1, aln2, self.ln_prob),
             TwoIntervals::First(aln1) => write!(f, "Pair({}, *, {:.2})", aln1, self.ln_prob),
             TwoIntervals::Second(aln2) => write!(f, "Pair(*, {}, {:.2})", aln2, self.ln_prob),
-            TwoIntervals::None => write!(f, "Pair(*, *, {:.2})", self.ln_prob),
+            // TwoIntervals::None => write!(f, "Pair(*, *, {:.2})", self.ln_prob),
         }
     }
 }
@@ -383,12 +383,15 @@ impl ContigsGroup {
         let mut multiplicities = Vec::with_capacity(n);
         let mut ln_coeffs = Vec::with_capacity(n);
         for contig in contig_ids {
-            if !dedup_contigs.contains(contig) {
-                dedup_contigs.push(*contig);
-                let multiplicity = contig_ids.iter().fold(0, |acc, contig2| acc + (contig == contig2) as u8);
-                multiplicities.push(multiplicity);
-                ln_coeffs.push(f64::from(multiplicity).ln());
-            }
+            // if !dedup_contigs.contains(contig) {
+            //     dedup_contigs.push(*contig);
+            //     let multiplicity = contig_ids.iter().fold(0, |acc, contig2| acc + (contig == contig2) as u8);
+            //     multiplicities.push(multiplicity);
+            //     ln_coeffs.push(f64::from(multiplicity).ln());
+            // }
+            dedup_contigs.push(*contig);
+            multiplicities.push(1);
+            ln_coeffs.push(0.0);
         }
         Self {
             ids: dedup_contigs,
@@ -439,7 +442,8 @@ pub struct ReadPairAlignments {
     /// Hash of the read name.
     name_hash: u64,
 
-    /// Probability of being unmapped for one contig.
+    /// Probability of that both read mates are unmapped.
+    /// Needs to be normalized by ploidy.
     unmapped_prob: f64,
 
     /// All pair-read alignments, sorted by contig id.
@@ -457,13 +461,14 @@ impl ReadPairAlignments {
         self.unmapped_prob
     }
 
-    /// For a given contig, returns all alignments to this contig.
-    /// Note, that one or both mate may be unmapped.
-    pub fn contig_alns(&self, contig_id: ContigId) -> &[PairAlignment] {
+    /// For a given contig, returns
+    /// - index of the first appropriate alignment,
+    /// - all alignments to the contig.
+    pub fn contig_alns(&self, contig_id: ContigId) -> (usize, &[PairAlignment]) {
         let i = bisect::left_by(&self.pair_alns, |paln| paln.contig_id().cmp(&contig_id));
         let j = bisect::right_by_approx(&self.pair_alns, |paln| paln.contig_id().cmp(&contig_id),
             i, self.pair_alns.len(), BISECT_RIGHT_STEP);
-        &self.pair_alns[i..j]
+        (i, &self.pair_alns[i..j])
     }
 
     /// For a given several contigs and their coefficients,
@@ -486,7 +491,7 @@ impl ReadPairAlignments {
         // Current threshold, is updated during the for-loop.
         let mut thresh_prob = unmapped_prob - prob_diff;
         for (&contig_id, &coeff) in contigs_group.ids.iter().zip(&contigs_group.ln_coeffs) {
-            for paln in self.contig_alns(contig_id) {
+            for paln in self.contig_alns(contig_id).1 {
                 let prob = paln.ln_prob + coeff;
                 if prob >= thresh_prob {
                     thresh_prob = thresh_prob.max(prob - prob_diff);
@@ -504,12 +509,13 @@ impl ReadPairAlignments {
                 i += 1;
             }
         }
-        if unmapped_prob >= thresh_prob {
-            out_alns.push(PairAlignment {
-                intervals: TwoIntervals::None,
-                ln_prob: unmapped_prob
-            });
-        }
+        unimplemented!();
+        // if unmapped_prob >= thresh_prob {
+        //     out_alns.push(PairAlignment {
+        //         intervals: TwoIntervals::None,
+        //         ln_prob: unmapped_prob
+        //     });
+        // }
         out_alns.len() - start_len
     }
 }
@@ -534,7 +540,7 @@ impl AllPairAlignments {
     pub fn sum_contig_prob(&self, contig_id: ContigId) -> f64 {
         let mut total_prob = 0.0;
         for paired_alns in self.0.iter() {
-            let curr_paired_alns = paired_alns.contig_alns(contig_id);
+            let curr_paired_alns = paired_alns.contig_alns(contig_id).1;
             let unmapped_prob = paired_alns.unmapped_prob();
             total_prob += Ln::map_sum_init(curr_paired_alns, PairAlignment::ln_prob, unmapped_prob);
         }

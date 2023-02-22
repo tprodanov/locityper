@@ -264,6 +264,7 @@ impl ContigWindows {
     /// Returns a pair of window indices of the pair alignment.
     /// If one (or both) of the mates are unmapped, returns `UNMAPPED_WINDOW`.
     pub fn get_pair_window_ixs(&self, paln: &PairAlignment) -> (u32, u32) {
+        unimplemented!();
         match paln.intervals() {
             TwoIntervals::Both(aln1, aln2) => {
                 debug_assert_eq!(aln1.contig_id(), aln2.contig_id(), "Read mates are mapped to diff. contigs!");
@@ -272,7 +273,7 @@ impl ContigWindows {
             },
             TwoIntervals::First(aln1) => (self.get_window_ix(aln1), UNMAPPED_WINDOW),
             TwoIntervals::Second(aln2) => (UNMAPPED_WINDOW, self.get_window_ix(aln2)),
-            TwoIntervals::None => (UNMAPPED_WINDOW, UNMAPPED_WINDOW),
+            // TwoIntervals::None => (UNMAPPED_WINDOW, UNMAPPED_WINDOW),
         }
     }
 
