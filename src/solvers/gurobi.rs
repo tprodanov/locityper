@@ -18,8 +18,8 @@ impl GurobiSolver {
     pub fn new(mut assignments: ReadAssignment) -> Result<Self, grb::Error> {
         let env = Env::new("")?;
         let mut model = Model::with_env(&format!("{}", assignments.contigs_group()), &env)?;
-        model.set_param(parameter::IntParam::Threads, 0)?;
         model.set_param(parameter::IntParam::OutputFlag, 0)?;
+        model.set_param(parameter::IntParam::Threads, 1)?;
 
         let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
@@ -84,8 +84,6 @@ impl GurobiSolver {
         }
         model.set_objective(objective, grb::ModelSense::Maximize)?;
         // model.write("model.lp")?;
-        model.set_param(parameter::IntParam::Threads, 0)?;
-        model.set_param(parameter::IntParam::OutputFlag, 0)?;
 
         assignments.init_assignments(|_| 0);
         Ok(Self {
@@ -125,8 +123,8 @@ impl Solver for GurobiSolver {
     fn reset(&mut self) -> Result<(), Self::Error> {
         self.is_finished = false;
         self.model.reset()?;
-        self.model.set_param(parameter::IntParam::Threads, 0)?;
         self.model.set_param(parameter::IntParam::OutputFlag, 0)?;
+        self.model.set_param(parameter::IntParam::Threads, 1)?;
         if let Some(seed) = self.seed.take() {
             self.model.set_param(parameter::IntParam::Seed, seed)?;
         }

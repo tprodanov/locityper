@@ -699,13 +699,27 @@ impl ReadAssignment {
     }
 
     /// Write CSV in the following format (separated with `\t`):
-    /// First line: `prefix  NA      NA     likelihood`.
-    /// Next lines: `prefix  window  depth  depth_lik`.
+    /// General lines: `prefix  contig  window  depth  depth_lik`.
+    /// Last line:     `prefix  NA      read_lik  depth_lik  sum_lik`.
     pub fn write_csv<W: io::Write>(&self, prefix: &str, f: &mut W) -> io::Result<()> {
-        writeln!(f, "{}\tNA\tNA\t{:.8}", prefix, self.likelihood())?;
-        for (w, (&depth, depth_distr)) in self.depth.iter().zip(&self.depth_distrs).enumerate() {
-            writeln!(f, "{}\t{}\t{}\t{:.5}", prefix, w, depth, depth_distr.ln_pmf(depth))?;
+        let unmapped_reads = self.depth[UNMAPPED_WINDOW as usize];
+        let unmapped_prob = self.depth_distrs[UNMAPPED_WINDOW as usize].ln_pmf(unmapped_reads);
+        let mut sum_depth_lik = unmapped_prob;
+        writeln!(f, "{}\tunmapped\tNA\t{}\t{:.3}", prefix, unmapped_reads, unmapped_prob)?;
+
+        let contigs = &self.contig_windows.contig_names;
+        for (i, contig_id) in self.contig_windows.contigs_group.ids().iter().enumerate() {
+            let curr_prefix = format!("{}\t{}\t", prefix, contigs.get_name(*contig_id));
+            let wshift = self.contig_windows.wshifts[i] as usize;
+            for w in wshift..self.contig_windows.wshifts[i + 1] as usize {
+                let depth = self.depth[w];
+                let ln_prob = self.depth_distrs[w].ln_pmf(depth);
+                writeln!(f, "{}{}\t{}\t{:.3}", curr_prefix, w - wshift, depth, ln_prob)?;
+                sum_depth_lik += ln_prob;
+            }
         }
+        let lik = self.likelihood;
+        writeln!(f, "{}\tNA\t{:.8}\t{:.8}\t{:.8}", prefix, lik - sum_depth_lik, sum_depth_lik, lik)?;
         Ok(())
     }
 }

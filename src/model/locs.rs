@@ -420,9 +420,12 @@ impl ContigsGroup {
 
 impl fmt::Display for ContigsGroup {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[{}]", self.contigs.tag())?;
-        for (&id, &mult) in self.ids.iter().zip(&self.multiplicities) {
-            write!(f, " {}", self.contigs.get_name(id))?;
+        // write!(f, "[{}]", self.contigs.tag())?;
+        for (i, (&id, &mult)) in self.ids.iter().zip(&self.multiplicities).enumerate() {
+            if i > 0 {
+                write!(f, ",")?;
+            }
+            write!(f, "{}", self.contigs.get_name(id))?;
             if mult != 1 {
                 write!(f, "(x{})", mult)?;
             }
