@@ -308,7 +308,7 @@ impl ContigWindows {
             for j in 0..n_windows {
                 let start = window_size * j;
                 let end = start + window_size;
-                let mean_kmer_freq = if end - start >= kmer_counts.k {
+                let mean_kmer_freq = if min(contig_len, end) - start >= kmer_counts.k {
                     let start_ix = start.saturating_sub(halfk) as usize;
                     let end_ix = min(end - halfk, contig_len - kmer_counts.k + 1) as usize;
                     F64Ext::mean(&curr_kmer_counts[start_ix..end_ix])

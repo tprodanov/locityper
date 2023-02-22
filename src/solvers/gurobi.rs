@@ -11,13 +11,15 @@ pub struct GurobiSolver {
     assignments: ReadAssignment,
     is_finished: bool,
     assignment_vars: Vec<Var>,
+    seed: Option<i32>,
 }
 
 impl GurobiSolver {
     pub fn new(mut assignments: ReadAssignment) -> Result<Self, grb::Error> {
-        let mut model = Model::new(&format!("{}", assignments.contigs_group()))?;
+        let env = Env::new("")?;
+        let mut model = Model::with_env(&format!("{}", assignments.contigs_group()), &env)?;
         model.set_param(parameter::IntParam::Threads, 0)?;
-        model.set_param(parameter::IntParam::LogToConsole, 0)?;
+        model.set_param(parameter::IntParam::OutputFlag, 0)?;
 
         let contig_windows = assignments.contig_windows();
         let total_windows = contig_windows.total_windows() as usize;
@@ -82,11 +84,14 @@ impl GurobiSolver {
         }
         model.set_objective(objective, grb::ModelSense::Maximize)?;
         // model.write("model.lp")?;
-        assignments.init_assignments(|_| 0);
+        model.set_param(parameter::IntParam::Threads, 0)?;
+        model.set_param(parameter::IntParam::OutputFlag, 0)?;
 
+        assignments.init_assignments(|_| 0);
         Ok(Self {
             model, assignments, assignment_vars,
             is_finished: false,
+            seed: None,
         })
     }
 
@@ -96,7 +101,8 @@ impl GurobiSolver {
         let mut i = 0;
         self.assignments.init_assignments(|locs| {
             let j = i + locs.len();
-            let new_assgn = vals[i..j].iter().position(|&v| v == 1.0).expect("Read has no assignment!");
+            let new_assgn = vals[i..j].iter().position(|&v| v >= 0.9999 && v <= 1.0001)
+                .expect("Read has no assignment!");
             i = j;
             new_assgn
         });
@@ -111,13 +117,20 @@ impl Solver for GurobiSolver {
     fn is_seedable() -> bool { true }
 
     fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
-        self.model.set_param(parameter::IntParam::Seed, (seed % 0x7fffffff) as i32)
+        self.seed = Some((seed % 0x7fffffff) as i32);
+        Ok(())
     }
 
     /// Resets the solver.
     fn reset(&mut self) -> Result<(), Self::Error> {
         self.is_finished = false;
-        self.model.reset()
+        self.model.reset()?;
+        self.model.set_param(parameter::IntParam::Threads, 0)?;
+        self.model.set_param(parameter::IntParam::OutputFlag, 0)?;
+        if let Some(seed) = self.seed.take() {
+            self.model.set_param(parameter::IntParam::Seed, seed)?;
+        }
+        Ok(())
     }
 
     /// Perform one iteration, and return the likelihood improvement.

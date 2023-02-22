@@ -110,7 +110,7 @@ where S: Solver,
     let contigs_group_str = assgns.contigs_group().to_string();
     let mut solver = build(assgns);
     let solver_str = solver.to_string();
-    log::debug!("Solving {} with {}", contigs_group_str, solver_str);
+    log::debug!("    Solving {} with {}.", contigs_group_str, solver_str);
     let dur = update_timer();
     let prefix = format!("{}\t{}", contigs_group_str, solver_str);
     writeln!(dbg_writer, "{}\t{}.{:06}\tstart\tNA", prefix, dur.as_secs(), dur.subsec_micros())?;
@@ -148,7 +148,7 @@ where S: Solver,
     if last_lik < best_lik {
         assgns.set_assignments(&best_assgns);
     }
-    log::debug!("Solved  {} with {}.  ln-likelihood: {:.3}", contigs_group_str, solver_str, best_lik);
+    log::debug!("    Solved  {} with {}.  ln-likelihood: {:.3}", contigs_group_str, solver_str, best_lik);
     if TypeId::of::<U>() != TypeId::of::<io::Sink>() {
         assgns.write_csv(&prefix, assgn_writer)?;
     }
