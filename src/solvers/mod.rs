@@ -7,7 +7,7 @@ use std::{
 use crate::{
     algo::vec_ext::IterExt,
     model::{
-        locs::PairAlignment,
+        windows::ReadWindows,
         assgn::ReadAssignment,
     },
 };
@@ -62,8 +62,8 @@ pub trait Solver: Display + Display {
 }
 
 /// Initialize reads based on their best alignment.
-fn init_best(possible_alns: &[PairAlignment]) -> usize {
-    IterExt::argmax(possible_alns.iter().map(PairAlignment::ln_prob)).0
+fn init_best(possible_alns: &[ReadWindows]) -> usize {
+    IterExt::argmax(possible_alns.iter().map(ReadWindows::ln_prob)).0
 }
 
 #[derive(Debug)]
@@ -107,12 +107,12 @@ where S: Solver,
         duration
     };
 
-    let contigs_group_str = assgns.contigs_group().to_string();
+    let contigs_str = assgns.contig_windows().ids_str();
     let mut solver = build(assgns);
     let solver_str = solver.to_string();
-    log::debug!("    Solving {} with {}.", contigs_group_str, solver_str);
+    log::debug!("    Solving {} with {}.", contigs_str, solver_str);
     let dur = update_timer();
-    let prefix = format!("{}\t{}", contigs_group_str, solver_str);
+    let prefix = format!("{}\t{}", contigs_str, solver_str);
     writeln!(dbg_writer, "{}\t{}.{:06}\tstart\tNA", prefix, dur.as_secs(), dur.subsec_micros())?;
     let mut outer = 0;
     for mut seed in seeds {
@@ -148,7 +148,7 @@ where S: Solver,
     if last_lik < best_lik {
         assgns.set_assignments(&best_assgns);
     }
-    log::debug!("    Solved  {} with {}.  ln-likelihood: {:.3}", contigs_group_str, solver_str, best_lik);
+    log::debug!("    Solved  {} with {}.  ln-likelihood: {:.3}", contigs_str, solver_str, best_lik);
     if TypeId::of::<U>() != TypeId::of::<io::Sink>() {
         assgns.write_csv(&prefix, assgn_writer)?;
     }

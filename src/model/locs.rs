@@ -363,80 +363,6 @@ impl fmt::Display for PairAlignment {
     }
 }
 
-/// Contigs group: multiple contigs (each appears only once), and their multiplicities.
-pub struct ContigsGroup {
-    ids: Vec<ContigId>,
-    contigs: Rc<ContigNames>,
-    multiplicities: Vec<u8>,
-    /// Log-multiplicities.
-    ln_coeffs: Vec<f64>,
-    /// logsumexp(ln_coeffs).
-    sum_coeff: f64,
-}
-
-impl ContigsGroup {
-    /// Creates `ContigsGroup` from a slice of contig ids (may repeat).
-    /// Assumes that the total number of contigs is small, and, therefore, is not the most sofisticated.
-    pub fn new(contig_ids: &[ContigId], contigs: Rc<ContigNames>) -> Self {
-        let n = contig_ids.len();
-        let mut dedup_contigs = Vec::with_capacity(n);
-        let mut multiplicities = Vec::with_capacity(n);
-        let mut ln_coeffs = Vec::with_capacity(n);
-        for contig in contig_ids {
-            // if !dedup_contigs.contains(contig) {
-            //     dedup_contigs.push(*contig);
-            //     let multiplicity = contig_ids.iter().fold(0, |acc, contig2| acc + (contig == contig2) as u8);
-            //     multiplicities.push(multiplicity);
-            //     ln_coeffs.push(f64::from(multiplicity).ln());
-            // }
-            dedup_contigs.push(*contig);
-            multiplicities.push(1);
-            ln_coeffs.push(0.0);
-        }
-        Self {
-            ids: dedup_contigs,
-            sum_coeff: Ln::sum(&ln_coeffs),
-            contigs, multiplicities, ln_coeffs,
-        }
-    }
-
-    /// Returns contig ids.
-    pub fn ids(&self) -> &[ContigId] {
-        &self.ids
-    }
-
-    /// Number of unique contigs in the group.
-    pub fn len(&self) -> usize {
-        self.ids.len()
-    }
-
-    /// Number of times each unique contig appears in the group (same order as `.ids()`).
-    pub fn multiplicities(&self) -> &[u8] {
-        &self.multiplicities
-    }
-
-    /// Returns the associated contig names.
-    pub fn contigs(&self) -> &Rc<ContigNames> {
-        &self.contigs
-    }
-}
-
-impl fmt::Display for ContigsGroup {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // write!(f, "[{}]", self.contigs.tag())?;
-        for (i, (&id, &mult)) in self.ids.iter().zip(&self.multiplicities).enumerate() {
-            if i > 0 {
-                write!(f, ",")?;
-            }
-            write!(f, "{}", self.contigs.get_name(id))?;
-            if mult != 1 {
-                write!(f, "(x{})", mult)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Read-pair alignments for a single read-pair.
 pub struct ReadPairAlignments {
     /// Hash of the read name.
@@ -470,54 +396,6 @@ impl ReadPairAlignments {
             i, self.pair_alns.len(), BISECT_RIGHT_STEP);
         (i, &self.pair_alns[i..j])
     }
-
-    /// For a given several contigs and their coefficients,
-    /// appends all pair-alignments to `out_alns`, and returns the number of added alignments.
-    ///
-    /// Alignments may include `None` alignments, where both mates do not map to the contigs.
-    ///
-    /// Output pair-alignments with ln-probability worse than `best_prob - prob_diff` are discarded.
-    /// Remaining alignments have random order, and non-normalized probabilities.
-    ///
-    /// Any alignments that were in the vector before, stay as they are and in the same order.
-    pub fn multi_contig_alns(&self,
-        out_alns: &mut Vec<PairAlignment>,
-        contigs_group: &ContigsGroup,
-        prob_diff: f64,
-    ) -> usize {
-        let start_len = out_alns.len();
-        // Probability of being unmapped to any of the contigs.
-        let unmapped_prob = self.unmapped_prob + contigs_group.sum_coeff;
-        // Current threshold, is updated during the for-loop.
-        let mut thresh_prob = unmapped_prob - prob_diff;
-        for (&contig_id, &coeff) in contigs_group.ids.iter().zip(&contigs_group.ln_coeffs) {
-            for paln in self.contig_alns(contig_id).1 {
-                let prob = paln.ln_prob + coeff;
-                if prob >= thresh_prob {
-                    thresh_prob = thresh_prob.max(prob - prob_diff);
-                    out_alns.push(paln.clone_with_prob(prob));
-                }
-            }
-        }
-
-        // As threshold was updated during the for-loop, some alignments in the beginning may need to removed.
-        let mut i = start_len;
-        while i < out_alns.len() {
-            if out_alns[i].ln_prob < thresh_prob {
-                out_alns.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
-        unimplemented!();
-        // if unmapped_prob >= thresh_prob {
-        //     out_alns.push(PairAlignment {
-        //         intervals: TwoIntervals::None,
-        //         ln_prob: unmapped_prob
-        //     });
-        // }
-        out_alns.len() - start_len
-    }
 }
 
 /// All read-pair alignments for all read-pairs.
@@ -543,21 +421,6 @@ impl AllPairAlignments {
             let curr_paired_alns = paired_alns.contig_alns(contig_id).1;
             let unmapped_prob = paired_alns.unmapped_prob();
             total_prob += Ln::map_sum_init(curr_paired_alns, PairAlignment::ln_prob, unmapped_prob);
-        }
-        total_prob
-    }
-
-    /// Calculates sum probability of multiple contigs.
-    /// For each read pair, calculates sum probability to map to any of the contigs,
-    /// but all alignments less probable than `best_prob - prob_diff` are discarded.
-    pub fn sum_multi_contig_prob(&self, contigs_group: &ContigsGroup, prob_diff: f64) -> f64 {
-        let mut total_prob = 0.0;
-        // Buffer with current alignments.
-        let mut curr_alns = Vec::new();
-
-        for paired_alns in self.0.iter() {
-            paired_alns.multi_contig_alns(&mut curr_alns, contigs_group, prob_diff);
-            total_prob += Ln::map_sum(&curr_alns, PairAlignment::ln_prob);
         }
         total_prob
     }

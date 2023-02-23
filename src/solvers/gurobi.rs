@@ -3,7 +3,10 @@ use grb::{
     *,
     expr::{LinExpr, GurobiSum},
 };
-use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW};
+use crate::model::{
+    windows::UNMAPPED_WINDOW,
+    assgn::ReadAssignment,
+};
 use super::Solver;
 
 pub struct GurobiSolver {
@@ -16,13 +19,13 @@ pub struct GurobiSolver {
 
 impl GurobiSolver {
     pub fn new(mut assignments: ReadAssignment) -> Result<Self, grb::Error> {
+        let contig_windows = assignments.contig_windows();
         let env = Env::new("")?;
-        let mut model = Model::with_env(&format!("{}", assignments.contigs_group()), &env)?;
+        let mut model = Model::with_env(&contig_windows.ids_str(), &env)?;
         model.set_param(parameter::IntParam::OutputFlag, 0)?;
         model.set_param(parameter::IntParam::Threads, 1)?;
 
-        let contig_windows = assignments.contig_windows();
-        let total_windows = contig_windows.total_windows() as usize;
+        let total_windows = contig_windows.n_windows() as usize;
         let mut window_depth = vec![(0_u32, 0_u32); total_windows];
         let mut window_depth_constrs = vec![LinExpr::new(); total_windows];
         let mut objective = LinExpr::new();
@@ -31,7 +34,7 @@ impl GurobiSolver {
             let read_alns = assignments.possible_read_alns(rp);
             if read_alns.len() == 1 {
                 let loc = &read_alns[0];
-                let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
+                let (w1, w2) = loc.windows();
                 window_depth[w1 as usize].0 += 1;
                 window_depth[w2 as usize].0 += 1;
                 objective.add_constant(loc.ln_prob());
@@ -43,7 +46,7 @@ impl GurobiSolver {
                 let var = add_binvar!(model, name: &format!("R{:x}_{}", rp, j))?;
                 assignment_vars.push(var);
                 objective.add_term(loc.ln_prob(), var);
-                let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
+                let (w1, w2) = loc.windows();
                 let inc = if w1 == w2 { 2 } else { 1 };
                 for &w in &[w1, w2] {
                     if w == UNMAPPED_WINDOW {

@@ -17,18 +17,16 @@ def main():
         help='Input CSV file with distances pairwise distances.')
     parser.add_argument('-t', '--target', metavar='<str>', required=True,
         help='Target tuple of haplotypes (separated by comma, without any spaces).')
-    parser.add_argument('-p', '--power', type=float, metavar='<float>', default=1,
+    parser.add_argument('-m', '--mean', type=float, metavar='<float>', default=1,
         help='Power mean (Hölder mean) parameter [default: %(default)s].')
     parser.add_argument('-o', '--output', type=argparse.FileType('w'), metavar='<file>', default=sys.stdout,
         help='Output CSV file (stdout by default).')
     args = parser.parse_args()
 
     targets = list(map(str.strip, args.target.split(',')))
-    # ploidy = len(targets)
     distances = pd.read_csv(args.dist, delimiter='\t')
-    # contigs = distances.rid.unique()
 
-    power = args.power
+    power = args.mean
     if power == 1:
         mean = np.mean
     elif power == np.inf:

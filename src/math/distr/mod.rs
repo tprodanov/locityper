@@ -94,7 +94,3 @@ impl<T: DiscreteCdf + ?Sized> DiscreteCdf for std::rc::Rc<T> {
 }
 
 impl<T: DiscreteCdf + WithMoments> WithQuantile for T {}
-
-pub trait DiscretePmfCdf: DiscretePmf + DiscreteCdf {}
-
-impl<T: DiscretePmf + DiscreteCdf> DiscretePmfCdf for T {}

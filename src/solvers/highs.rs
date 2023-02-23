@@ -1,6 +1,9 @@
 use std::fmt;
 use highs::{RowProblem, Model, Col, Sense, HighsModelStatus as Status};
-use crate::model::assgn::{ReadAssignment, UNMAPPED_WINDOW};
+use crate::model::{
+    windows::UNMAPPED_WINDOW,
+    assgn::ReadAssignment,
+};
 use super::Solver;
 
 pub struct HighsSolver {
@@ -15,7 +18,7 @@ impl HighsSolver {
     /// Creates a new HiGHS solver. Possible `solver_type` values: `choose`, `simplex`, or `ipm`.
     pub fn new(solver_type: String, mut assignments: ReadAssignment) -> Self {
         let contig_windows = assignments.contig_windows();
-        let total_windows = contig_windows.total_windows() as usize;
+        let total_windows = contig_windows.n_windows() as usize;
         // Number of trivial and non-trivial reads mapped to a window.
         let mut window_depth = vec![(0_u32, 0_u32); total_windows];
         let mut window_depth_constrs: Vec<Vec<(Col, f64)>> = vec![Vec::new(); total_windows];
@@ -27,7 +30,7 @@ impl HighsSolver {
             let read_alns = assignments.possible_read_alns(rp);
             if read_alns.len() == 1 {
                 let loc = &read_alns[0];
-                let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
+                let (w1, w2) = loc.windows();
                 window_depth[w1 as usize].0 += 1;
                 window_depth[w2 as usize].0 += 1;
                 const_term += loc.ln_prob();
@@ -37,7 +40,7 @@ impl HighsSolver {
             for loc in read_alns.iter() {
                 let var = problem.add_integer_column(loc.ln_prob(), 0.0..=1.0);
                 assgn_constr.push((var, 1.0));
-                let (w1, w2) = contig_windows.get_pair_window_ixs(loc);
+                let (w1, w2) = loc.windows();
                 let inc = if w1 == w2 { 2 } else { 1 };
                 for &w in &[w1, w2] {
                     if w == UNMAPPED_WINDOW {
