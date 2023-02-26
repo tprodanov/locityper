@@ -1,7 +1,7 @@
 use std::{
-    cmp::{min, max},
-    io::{self, Error, ErrorKind},
+    cmp::min,
     rc::Rc,
+    io,
 };
 use once_cell::unsync::OnceCell;
 #[cfg(feature = "stochastic")]
@@ -10,7 +10,7 @@ use crate::{
     algo::vec_ext::F64Ext,
     seq::{
         seq,
-        contigs::ContigNames,
+        kmers::KmerCounts,
     },
     math::{
         Ln,
@@ -24,49 +24,6 @@ use super::{
     locs::AllPairAlignments,
     windows::{UNMAPPED_WINDOW, INIT_WSHIFT, ReadWindows, ContigWindows},
 };
-
-/// Stores k-mer counts for each input k-mer.
-pub struct KmerCounts {
-    k: u32,
-    counts: Vec<Vec<u16>>,
-}
-
-impl KmerCounts {
-    /// Load k-mer counts from a string.
-    /// First line is "k=<number>". All consecutive lines contain just a single number.
-    /// Must contain exact number of k-mer as `contigs`.
-    pub fn load(s: &str, contigs: &ContigNames) -> io::Result<Self> {
-        assert!(!contigs.is_empty(), "Cannot load k-mer counts for empty contigs set!");
-        let mut split = s.split('\n');
-        let first = split.next().ok_or_else(|| Error::new(ErrorKind::InvalidData,
-            "Empty file with k-mer counts!"))?;
-        let k = match first.split_once('=') {
-            Some(("k", v)) => v.parse().map_err(|e: std::num::ParseIntError|
-                Error::new(ErrorKind::InvalidData, e))?,
-            _ => return Err(Error::new(ErrorKind::InvalidData,
-                format!("Incorrect k-mer counts format, first line ({}) must be in format \"k=integer\"", first))),
-        };
-
-        let mut counts = Vec::with_capacity(contigs.len());
-        for contig_len in contigs.lengths() {
-            assert!(contig_len >= k, "Contig too short!");
-            let n_kmers = contig_len - k + 1;
-            let mut curr_counts = Vec::with_capacity(n_kmers as usize);
-            for _ in 0..n_kmers {
-                let val: u16 = split.next()
-                    .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Not enough k-mer counts!"))?
-                    .parse().map_err(|e: std::num::ParseIntError| Error::new(ErrorKind::InvalidData, e))?;
-                // We assume that each k-mer appears at least once.
-                curr_counts.push(max(val, 1));
-            }
-            counts.push(curr_counts);
-        }
-        match split.next() {
-            Some("") | None => Ok(Self { k, counts }),
-            _ => Err(Error::new(ErrorKind::InvalidData, "Too many k-mer counts!")),
-        }
-    }
-}
 
 /// Fake proxy distribution, that has 1.0 probability for all values.
 #[derive(Clone, Copy, Debug)]
@@ -215,8 +172,9 @@ fn identify_depth_distributions(
     params: &Params,
 ) -> Vec<DistrBox>
 {
-    assert!(kmer_counts.k % 2 == 1, "k-mer ({}) size must be odd!", kmer_counts.k);
-    let halfk = kmer_counts.k / 2;
+    let k = kmer_counts.kmer_size();
+    assert!(k % 2 == 1, "k-mer ({}) size must be odd!", k);
+    let halfk = k / 2;
     let mut distrs: Vec<DistrBox> = Vec::with_capacity(windows.n_windows() as usize);
     debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
     distrs.push(Box::new(cached_distrs.unmapped_distr()));
@@ -227,7 +185,7 @@ fn identify_depth_distributions(
     assert_eq!(window_size, windows.window_size());
     let gc_padding = cached_distrs.bg_depth.gc_padding();
     for (i, (contig_id, contig_cn)) in windows.contigs_cns().enumerate() {
-        let curr_kmer_counts = &kmer_counts.counts[contig_id.ix()];
+        let curr_kmer_counts = &kmer_counts.counts(contig_id);
         let n_windows = windows.get_n_windows(i);
         let contig_len = windows.contig_names().get_len(contig_id);
         let ref_seq = &ref_seqs[contig_id.ix()];
@@ -236,9 +194,9 @@ fn identify_depth_distributions(
         for j in 0..n_windows {
             let start = window_size * j;
             let end = start + window_size;
-            let mean_kmer_freq = if min(contig_len, end) - start >= kmer_counts.k {
+            let mean_kmer_freq = if min(contig_len, end) - start >= k {
                 let start_ix = start.saturating_sub(halfk) as usize;
-                let end_ix = min(end - halfk, contig_len - kmer_counts.k + 1) as usize;
+                let end_ix = min(end - halfk, contig_len - k + 1) as usize;
                 F64Ext::mean(&curr_kmer_counts[start_ix..end_ix])
             } else { 0.0 };
             let weight = sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer);
