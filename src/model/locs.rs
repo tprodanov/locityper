@@ -4,7 +4,7 @@ use std::{
     fmt, mem,
 };
 use htslib::bam::Record;
-use intmap::IntMap;
+use nohash::IntMap;
 use crate::{
     seq::{
         contigs::{ContigId, ContigNames},
@@ -108,7 +108,7 @@ impl fmt::Display for MateAln {
 /// Keys: read name hash, values: all alignments for the read pair.
 pub(crate) struct PrelimAlignments {
     contigs: Rc<ContigNames>,
-    alns: IntMap<Vec<MateAln>>,
+    alns: IntMap<u64, Vec<MateAln>>,
 }
 
 impl PrelimAlignments {
@@ -128,7 +128,7 @@ impl PrelimAlignments {
         log::info!("[{}] Reading read alignments, alignment ln-probability threshold = {:.1}",
             contigs.tag(), min_ln_prob);
         assert!(min_ln_prob.is_finite(), "PrelimAlignments: min_ln_prob must be finite!");
-        let mut alns = IntMap::new();
+        let mut alns = IntMap::default();
         let mut curr_hash = 0;
         let mut curr_alns = Vec::new();
         let mut best_prob = f64::NEG_INFINITY;
