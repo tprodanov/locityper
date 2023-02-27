@@ -172,7 +172,7 @@ fn identify_depth_distributions(
     params: &Params,
 ) -> Vec<DistrBox>
 {
-    let k = kmer_counts.kmer_size();
+    let k = kmer_counts.k();
     assert!(k % 2 == 1, "k-mer ({}) size must be odd!", k);
     let halfk = k / 2;
     let mut distrs: Vec<DistrBox> = Vec::with_capacity(windows.n_windows() as usize);
@@ -185,7 +185,7 @@ fn identify_depth_distributions(
     assert_eq!(window_size, windows.window_size());
     let gc_padding = cached_distrs.bg_depth.gc_padding();
     for (i, (contig_id, contig_cn)) in windows.contigs_cns().enumerate() {
-        let curr_kmer_counts = &kmer_counts.counts(contig_id);
+        let curr_kmer_counts = &kmer_counts.get(contig_id);
         let n_windows = windows.get_n_windows(i);
         let contig_len = windows.contig_names().get_len(contig_id);
         let ref_seq = &ref_seqs[contig_id.ix()];

@@ -21,7 +21,8 @@ highs = { version = "1.3.3", default-features = false, optional = true }
 getrandom = { version = "0.2.8", default-features = false } # Remove later?
 
 [features]
-default = ["stochastic", "gurobi", "highs"]
+default = ["stochastic", "gurobi", "highs", "devel"]
 stochastic = ["dep:rand"]
 gurobi = ["dep:grb"]
 highs = ["dep:highs"]
+devel = []

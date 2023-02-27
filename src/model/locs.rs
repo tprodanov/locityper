@@ -186,7 +186,7 @@ impl PrelimAlignments {
         for (&name_hash, alns) in self.alns.iter_mut() {
             // log::debug!("Read {}", name_hash);
             // Sort alignments first by contig id, then by read-end.
-            alns.sort_by_key(MateAln::sort_key);
+            alns.sort_unstable_by_key(MateAln::sort_key);
             let pair_alns = identify_pair_alignments(name_hash, alns, insert_distr,
                 unmapped_penalty, prob_diff, ln_ncontigs);
             res.push(pair_alns);
