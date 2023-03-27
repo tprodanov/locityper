@@ -28,7 +28,7 @@ pub(crate) trait DbgWrite {
     fn write_mate_aln(&mut self, qname: &[u8], hash: u64, aln: &MateAln) -> io::Result<()>;
 
     /// Save/ignore `count` mate alignments for read `hash`.
-    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize, best_prob: f64) -> io::Result<()>;
+    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize) -> io::Result<()>;
 
     /// Flush cached data to the writer.
     fn flush(&mut self) -> io::Result<()>;
@@ -36,7 +36,7 @@ pub(crate) trait DbgWrite {
 
 impl DbgWrite for () {
     fn write_mate_aln(&mut self, _qname: &[u8], _hash: u64, _aln: &MateAln) -> io::Result<()> { Ok(()) }
-    fn finalize_mate_alns(&mut self, _hash: u64, _save: bool, _count: usize, _prob: f64) -> io::Result<()> { Ok(()) }
+    fn finalize_mate_alns(&mut self, _hash: u64, _save: bool, _count: usize,) -> io::Result<()> { Ok(()) }
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
@@ -50,8 +50,8 @@ impl<W: io::Write> DbgWrite for &mut W {
         writeln!(self, "\t{}\t{}\t{:.3}", aln.read_end, aln.interval, aln.ln_prob)
     }
 
-    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize, best_prob: f64) -> io::Result<()> {
-        writeln!(self, "{:X}\t{}\t{} alns\t{:.3}", hash, if save { "save" } else { "ignore" }, count, best_prob)
+    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize) -> io::Result<()> {
+        writeln!(self, "{:X}\t{}\t{} alns", hash, if save { "save" } else { "ignore" }, count)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -113,13 +113,16 @@ pub(crate) struct PrelimAlignments {
 
 impl PrelimAlignments {
     /// Creates `PrelimAlignments` from records.
-    /// Only store read pairs where at least one alignment (for at least one read),
-    /// has probability over `min_ln_prob`.
+    ///
+    /// Only store read pairs where at least one read-end alignment
+    /// (i)  has probability over `min_ln_prob` AND
+    /// (ii) middle of the alignment lies within an inner region of any contig (beyond the boundary region).
     pub(crate) fn from_records<I, W>(
         records: I,
         contigs: Rc<ContigNames>,
         err_prof: &ErrorProfile,
         min_ln_prob: f64,
+        boundary_size: u32,
         mut dbg_writer: W,
     ) -> io::Result<Self>
     where I: Iterator<Item = Record>,
@@ -131,7 +134,7 @@ impl PrelimAlignments {
         let mut alns = IntMap::default();
         let mut curr_hash = 0;
         let mut curr_alns = Vec::new();
-        let mut best_prob = f64::NEG_INFINITY;
+        let mut read_fits = false;
 
         for record in records {
             if record.is_unmapped() {
@@ -140,31 +143,36 @@ impl PrelimAlignments {
 
             let hash = fnv1a(record.qname());
             if hash != curr_hash {
-                if best_prob >= min_ln_prob {
-                    dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len(), best_prob)?;
+                if read_fits {
+                    dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len())?;
                     // Assert must not be removed, or converted into debug_assert!
                     assert!(alns.insert(curr_hash, mem::replace(&mut curr_alns, Vec::new())).is_none(),
                         "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
                 } else if !curr_alns.is_empty() {
-                    dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len(), best_prob)?;
+                    dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len())?;
                     curr_alns.clear();
                 }
                 curr_hash = hash;
-                best_prob = f64::NEG_INFINITY;
+                read_fits = false;
             }
+
             let mate_aln = MateAln::from_record(&record, Rc::clone(&contigs), err_prof);
-            dbg_writer.write_mate_aln(if best_prob.is_finite() { &[] } else { record.qname() }, hash, &mate_aln)?;
-            best_prob = best_prob.max(mate_aln.ln_prob);
+            dbg_writer.write_mate_aln(if curr_alns.is_empty() { record.qname() } else { &[] }, hash, &mate_aln)?;
+            if !read_fits && mate_aln.ln_prob >= min_ln_prob {
+                let interval = &mate_aln.interval;
+                let middle = interval.middle();
+                read_fits = middle >= boundary_size && middle + boundary_size < contigs.get_len(interval.contig_id());
+            }
             curr_alns.push(mate_aln);
         }
 
-        if best_prob >= min_ln_prob {
-            dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len(), best_prob)?;
+        if read_fits {
+            dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len())?;
             // Assert must not be removed, or converted into debug_assert!
             assert!(alns.insert(curr_hash, curr_alns).is_none(),
                 "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
         } else if !curr_alns.is_empty() {
-            dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len(), best_prob)?;
+            dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len())?;
         }
 
         Ok(Self { contigs, alns })
