@@ -9,6 +9,7 @@ use crate::{
     model::{
         windows::ReadWindows,
         assgn::ReadAssignment,
+        locs::AllPairAlignments,
     },
 };
 
@@ -82,18 +83,21 @@ impl<E: Debug> From<io::Error> for Error<E> {
 ///
 /// dbg_writer writes intermediate likelihood values and runtime for each seed.
 /// Format: `assignment-tag  solver  runtime  seed  likelihood`.
-pub fn solve<S, F, I, W, U>(
+pub fn solve<S, F, I, W, U, V>(
     assgns: ReadAssignment,
     build: F,
     seeds: I,
+    all_alns: &AllPairAlignments,
     dbg_writer: &mut W,
-    assgn_writer: &mut U,
+    depth_writer: &mut U,
+    reads_writer: &mut V,
 ) -> Result<ReadAssignment, Error<S::Error>>
 where S: Solver,
       F: Fn(ReadAssignment) -> S,
       I: Iterator<Item = u64>,
       W: io::Write,
       U: io::Write + 'static,
+      V: io::Write + 'static,
 {
     let mut best_lik = f64::NEG_INFINITY;
     let mut last_lik = f64::NEG_INFINITY;
@@ -150,7 +154,10 @@ where S: Solver,
     }
     log::debug!("    Solved  {} with {}.  ln-likelihood: {:.3}", contigs_str, solver_str, best_lik);
     if TypeId::of::<U>() != TypeId::of::<io::Sink>() {
-        assgns.write_csv(&prefix, assgn_writer)?;
+        assgns.write_depth(&prefix, depth_writer)?;
+    }
+    if TypeId::of::<V>() != TypeId::of::<io::Sink>() {
+        assgns.write_reads(&prefix, reads_writer, all_alns)?;
     }
     Ok(assgns)
 }

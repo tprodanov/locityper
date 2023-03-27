@@ -21,7 +21,7 @@ use crate::{
     },
 };
 use super::{
-    locs::AllPairAlignments,
+    locs::{AllPairAlignments, TwoIntervals},
     windows::{UNMAPPED_WINDOW, INIT_WSHIFT, ReadWindows, ContigWindows},
 };
 
@@ -557,10 +557,10 @@ impl ReadAssignment {
         &self.depth_distrs[window]
     }
 
-    /// Write CSV in the following format (separated with `\t`):
+    /// Write read depth to a CSV file in the following format (tab-separated):
     /// General lines: `prefix  contig  window  depth  depth_lik`.
     /// Last line:     `prefix  NA      read_lik  depth_lik  sum_lik`.
-    pub fn write_csv<W: io::Write>(&self, prefix: &str, f: &mut W) -> io::Result<()> {
+    pub fn write_depth<W: io::Write>(&self, prefix: &str, f: &mut W) -> io::Result<()> {
         let unmapped_reads = self.depth[UNMAPPED_WINDOW as usize];
         let unmapped_prob = self.depth_distrs[UNMAPPED_WINDOW as usize].ln_pmf(unmapped_reads);
         let mut sum_depth_lik = unmapped_prob;
@@ -579,6 +579,36 @@ impl ReadAssignment {
         }
         let lik = self.likelihood;
         writeln!(f, "{}\tNA\t{:.8}\t{:.8}\t{:.8}", prefix, lik - sum_depth_lik, sum_depth_lik, lik)?;
+        Ok(())
+    }
+
+    /// Write reads and their assignments to a CSV file in the following format (tab-separated):
+    /// `prefix  read_hash  aln1  aln2  w1  w2  prob  selected`
+    pub fn write_reads<W: io::Write>(&self, prefix: &str, f: &mut W, all_alns: &AllPairAlignments) -> io::Result<()> {
+        assert_eq!(all_alns.len() + 1, self.read_ixs.len());
+        for (rp, paired_alns) in all_alns.iter().enumerate() {
+            let hash = paired_alns.name_hash();
+            let start_ix = self.read_ixs[rp];
+            let end_ix = self.read_ixs[rp + 1];
+            let curr_ix = start_ix + self.read_assgn[rp] as usize;
+
+            for i in start_ix..end_ix {
+                write!(f, "{}\t{:X}\t", prefix, hash)?;
+
+                let curr_windows = &self.read_windows[i];
+                let (w1, w2) = curr_windows.windows();
+                if w1 == UNMAPPED_WINDOW && w2 == UNMAPPED_WINDOW {
+                    write!(f, "*\t*\t")?;
+                } else {
+                    match paired_alns.ith_aln(curr_windows.ix() as usize).intervals() {
+                        TwoIntervals::Both(aln1, aln2) => write!(f, "{}\t{}\t", aln1, aln2),
+                        TwoIntervals::First(aln1) => write!(f, "{}\t*\t", aln1),
+                        TwoIntervals::Second(aln2) => write!(f, "*\t{}\t", aln2),
+                    }?;
+                }
+                writeln!(f, "{}\t{}\t{:.3}\t{}", w1, w2, curr_windows.ln_prob(), (i == curr_ix) as u8)?;
+            }
+        }
         Ok(())
     }
 }

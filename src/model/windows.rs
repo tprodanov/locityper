@@ -16,7 +16,6 @@ pub(crate) const INIT_WSHIFT: u32 = 1;
 /// Alignment of a read pair to a specific contig windows.
 pub struct ReadWindows {
     /// Index in the list of read-pair alignments.
-    #[allow(dead_code)]
     ix: u32,
     /// Window for each read-end (UNMAPPED_WINDOW if unmapped).
     windows: (u32, u32),
@@ -38,6 +37,11 @@ impl ReadWindows {
     /// Returns ln-probability of the alignment.
     pub fn ln_prob(&self) -> f64 {
         self.ln_prob
+    }
+
+    /// Index of the read-pair alignment across all alignments for the read pair.
+    pub(crate) fn ix(&self) -> u32 {
+        self.ix
     }
 }
 

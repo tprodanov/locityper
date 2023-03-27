@@ -396,6 +396,11 @@ impl ReadPairAlignments {
             i, self.pair_alns.len(), BISECT_RIGHT_STEP);
         (i, &self.pair_alns[i..j])
     }
+
+    /// Return `i`-th alignment of all alignments for the read pair.
+    pub fn ith_aln(&self, i: usize) -> &PairAlignment {
+        &self.pair_alns[i]
+    }
 }
 
 /// All read-pair alignments for all read-pairs.
@@ -428,5 +433,9 @@ impl AllPairAlignments {
     /// Returns iterator over `ReadPairAlignments` for all read pairs.
     pub fn iter(&self) -> std::slice::Iter<'_, ReadPairAlignments> {
         self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 }
