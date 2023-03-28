@@ -4,6 +4,7 @@ pub mod math;
 pub mod bg;
 pub mod model;
 pub mod solvers;
+pub mod command;
 
 mod test;
 
@@ -34,5 +35,7 @@ fn init_logger() {
 
 fn main() {
     init_logger();
-    test::test();
+    // test::test();
+    let args: Vec<_> = std::env::args().collect();
+    command::run(&args);
 }
