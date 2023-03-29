@@ -120,51 +120,58 @@ const BG_REGIONS: [&'static str; 1] = ["chr17:72062001-76562000"];
 /// If `bg_region` is set, try to parse it. Otherwise, iterate over `BG_REGIONS`.
 ///
 /// Returns error if no interval is appropriate (chromosome not in the contig set, or interval is out of bounds).
-// fn select_bg_interval(
-//     fasta_filename: impl AsRef<Path>,
-//     contigs: &Rc<ContigNames>,
-//     bg_region: &Option<String>
-// ) -> Result<Interval, Error>
-// {
-//     if let Some(s) = bg_region {
-//         let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
-//             format!("Input fasta '{}' does not contain region {}", fasta_filename.display(), s)))?;
-//         return if contigs.in_bounds(&region) {
-//             Ok(region)
-//         } else {
-//             Err(Error::InvalidInput(format!("Region {} is out of bounds", s)))
-//         };
-//     }
+fn select_bg_interval(
+    fasta_filename: &Path,
+    contigs: &Rc<ContigNames>,
+    bg_region: &Option<String>
+) -> Result<Interval, Error>
+{
+    if let Some(s) = bg_region {
+        let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
+            format!("Input fasta '{}' does not contain region {}", fasta_filename.display(), s)))?;
+        return if contigs.in_bounds(&region) {
+            Ok(region)
+        } else {
+            Err(Error::InvalidInput(format!("Region {} is out of bounds", s)))
+        };
+    }
 
-//     for s in BG_REGIONS.iter() {
-//         if let Ok(region) = Interval::parse(s, contigs) {
-//             if contigs.in_bounds(&region) {
-//                 return Ok(region);
-//             } else {
-//                 log::error!("Chromosome {} is in the input fasta file '{}', but is shorter than expected",
-//                     fasta_filename.display(), interval.contig_name());
-//             }
-//         }
-//     }
-//     Err(Error::InvalidInput(format!(
-//         "Input fasta '{}' does not contain any of the default background regions. \
-//         Consider setting region via --region or use a different fasta file.", fasta_filename)))
-// }
+    for s in BG_REGIONS.iter() {
+        if let Ok(region) = Interval::parse(s, contigs) {
+            if contigs.in_bounds(&region) {
+                return Ok(region);
+            } else {
+                log::error!("Chromosome {} is in the input fasta file '{}', but is shorter than expected",
+                    fasta_filename.display(), region.contig_name());
+            }
+        }
+    }
+    Err(Error::InvalidInput(format!(
+        "Input fasta '{}' does not contain any of the default background regions. \
+        Consider setting region via --region or use a different fasta file.", fasta_filename.display())))
+}
 
 fn extract_bg_region(
-    fasta_filename: impl AsRef<Path>,
+    fasta_filename: &Path,
     mut bg_path: PathBuf,
     bg_region: &Option<String>
 ) -> Result<(), Error>
 {
-    // TODO: Replace unwrap with the corresponding function.
-    // let fasta = IndexedReader::from_file(fasta_filename.as_ref().to_str().expect("REPLACE LATER").to_string()).unwrap();
-    // let contigs = Rc::new(ContigNames::from_index("genome".to_string(), &fasta.index));
-    // let region = select_bg_interval(fasta_filename, &contigs, bg_region);
+    let mut fasta = IndexedReader::from_file(&fasta_filename)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let contigs = Rc::new(ContigNames::from_index("genome".to_string(), &fasta.index));
+    let region = select_bg_interval(fasta_filename, &contigs, bg_region)?;
 
-    // fs::create_dir(&bg_path)?;
-    // bg_path.push("bg.fasta");
-    // log::info!("Writing background region to '{}'", bg_path.display());
+    fasta.fetch(region.contig_name(), u64::from(region.start()), u64::from(region.end()))?;
+    let mut seq = Vec::new();
+    fasta.read(&mut seq)?;
+    crate::seq::standardize(&mut seq);
+
+    fs::create_dir(&bg_path)?;
+    bg_path.push("bg.fasta");
+    log::info!("Writing background region {} to '{}'", region, bg_path.display());
+    let mut fasta_writer = fs::File::create(&bg_path).map(io::BufWriter::new)?;
+    crate::seq::write_fasta(&mut fasta_writer, b"bg", &seq)?;
     Ok(())
 }
 

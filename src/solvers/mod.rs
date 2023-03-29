@@ -2,7 +2,7 @@ use std::{
     io,
     time::Instant,
     any::TypeId,
-    fmt::{Display, Debug},
+    fmt::Display,
 };
 use crate::{
     algo::vec_ext::IterExt,

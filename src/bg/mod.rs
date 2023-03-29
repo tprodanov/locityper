@@ -69,7 +69,6 @@ impl BgDistr {
     {
         log::info!("Estimating background parameters");
         log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
-        // TODO: Consider using lighter dependency (such as faimm).
         fasta.fetch(interval.contig_name(), u64::from(interval.start()), u64::from(interval.end()))?;
         let mut ref_seq = Vec::new();
         fasta.read(&mut ref_seq)?;

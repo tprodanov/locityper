@@ -10,6 +10,11 @@ pub mod dist;
 pub use interv::Interval;
 pub use contigs::{ContigId, ContigNames};
 
+use std::{
+    cmp::min,
+    io::{self, Write},
+};
+
 /// Make nucleotide sequence standard: only letters A,C,G,T,N.
 pub fn standardize(seq: &mut [u8]) {
     for nt in seq.iter_mut() {
@@ -39,4 +44,20 @@ pub fn gc_count(seq: &[u8]) -> u32 {
 /// Calculate GC-content (between 0 and 100).
 pub fn gc_content(seq: &[u8]) -> f64 {
     100.0 * f64::from(gc_count(seq)) / seq.len() as f64
+}
+
+/// Write a single sequence to the FASTA file.
+/// Use this function instead of `bio::fasta::Writer` as the latter uses writes into a single lines, without splitting.
+pub fn write_fasta<W: Write>(f: &mut W, name: &[u8], seq: &[u8]) -> io::Result<()> {
+    const WIDTH: usize = 120;
+    f.write_all(b">")?;
+    f.write_all(name)?;
+    f.write_all(b"\n")?;
+
+    let n = seq.len();
+    for i in (0..n).step_by(WIDTH) {
+        f.write_all(&seq[i..min(i + WIDTH, n)])?;
+        f.write_all(b"\n")?;
+    }
+    Ok(())
 }
