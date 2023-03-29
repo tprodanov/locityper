@@ -1,8 +1,11 @@
 use std::fmt;
 use highs::{RowProblem, Model, Col, Sense, HighsModelStatus as Status};
-use crate::model::{
-    windows::UNMAPPED_WINDOW,
-    assgn::ReadAssignment,
+use crate::{
+    Error,
+    model::{
+        windows::UNMAPPED_WINDOW,
+        assgn::ReadAssignment,
+    },
 };
 use super::Solver;
 
@@ -107,23 +110,23 @@ impl HighsSolver {
 }
 
 impl Solver for HighsSolver {
-    type Error = ();
-
     fn is_seedable() -> bool { false }
 
-    fn set_seed(&mut self, _seed: u64) -> Result<(), Self::Error> {
+    fn set_seed(&mut self, _seed: u64) -> Result<(), Error> {
         // Even so it is possible to set seed to Highs Solver, results are always the same.
-        panic!("Cannot set seed to HiGHS");
+        Err(Error::solver("HiGHS", "Impossible to set seed"))
     }
 
     /// Resets and initializes anew read assignments.
-    fn reset(&mut self) -> Result<(), Self::Error> {
+    fn reset(&mut self) -> Result<(), Error> {
         Ok(())
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<(), Self::Error> {
-        let solved_model = self.model.take().expect("Cannot run HighsSolver::step twice!").solve();
+    fn step(&mut self) -> Result<(), Error> {
+        let solved_model = self.model.take()
+            .ok_or_else(|| Error::solver("HiGHS", "Cannot run Solver::step twice"))?
+            .solve();
         if solved_model.status() != Status::Optimal {
             panic!("Highs model finished with non-optimal status {:?}", solved_model.status());
         }

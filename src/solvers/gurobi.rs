@@ -3,9 +3,12 @@ use grb::{
     *,
     expr::{LinExpr, GurobiSum},
 };
-use crate::model::{
-    windows::UNMAPPED_WINDOW,
-    assgn::ReadAssignment,
+use crate::{
+    Error,
+    model::{
+        windows::UNMAPPED_WINDOW,
+        assgn::ReadAssignment,
+    },
 };
 use super::Solver;
 
@@ -18,7 +21,7 @@ pub struct GurobiSolver {
 }
 
 impl GurobiSolver {
-    pub fn new(mut assignments: ReadAssignment) -> Result<Self, grb::Error> {
+    pub fn new(mut assignments: ReadAssignment) -> Result<Self, Error> {
         let contig_windows = assignments.contig_windows();
         let env = Env::new("")?;
         let mut model = Model::with_env(&contig_windows.ids_str(), &env)?;
@@ -97,33 +100,31 @@ impl GurobiSolver {
     }
 
     /// Query read assignments from the ILP solution, and set them in the `self.assignments`.
-    fn set_assignments(&mut self) -> Result<(), grb::Error> {
+    fn set_assignments(&mut self) -> Result<(), Error> {
         let vals = self.model.get_obj_attr_batch(attr::X, self.assignment_vars.iter().cloned())?;
         let mut i = 0;
-        self.assignments.init_assignments(|locs| {
+        self.assignments.try_init_assignments::<_, Error>(|locs| {
             let j = i + locs.len();
             let new_assgn = vals[i..j].iter().position(|&v| v >= 0.9999 && v <= 1.0001)
-                .expect("Read has no assignment!");
+                .ok_or_else(|| Error::solver("Gurobi", "Cannot identify read assignment (output is not 0/1)"))?;
             i = j;
-            new_assgn
-        });
+            Ok(new_assgn)
+        })?;
         assert_eq!(i, vals.len(), "Numbers of total read assignments do not match");
         Ok(())
     }
 }
 
 impl Solver for GurobiSolver {
-    type Error = grb::Error;
-
     fn is_seedable() -> bool { true }
 
-    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
+    fn set_seed(&mut self, seed: u64) -> Result<(), Error> {
         self.seed = Some((seed % 0x7fffffff) as i32);
         Ok(())
     }
 
     /// Resets the solver.
-    fn reset(&mut self) -> Result<(), Self::Error> {
+    fn reset(&mut self) -> Result<(), Error> {
         self.is_finished = false;
         self.model.reset()?;
         self.model.set_param(parameter::IntParam::OutputFlag, 0)?;
@@ -135,7 +136,7 @@ impl Solver for GurobiSolver {
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<(), Self::Error> {
+    fn step(&mut self) -> Result<(), Error> {
         self.model.optimize()?;
         self.set_assignments()?;
         let status = self.model.status()?;

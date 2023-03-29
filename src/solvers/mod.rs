@@ -31,23 +31,22 @@ pub use self::{
 pub use self::gurobi::GurobiSolver;
 #[cfg(feature = "highs")]
 pub use self::highs::HighsSolver;
+use crate::Error;
 
 /// Trait that distributes the reads between their possible alignments
 pub trait Solver: Display + Display {
-    type Error: Debug;
-
     /// Returns true if the solver can take seed.
     fn is_seedable() -> bool;
 
     /// Sets seed.
     /// Can panic if the seed does not fit the model, or if the solver is deterministic.
-    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error>;
+    fn set_seed(&mut self, seed: u64) -> Result<(), Error>;
 
     /// Resets the solver.
-    fn reset(&mut self) -> Result<(), Self::Error>;
+    fn reset(&mut self) -> Result<(), Error>;
 
     /// Perform one iteration.
-    fn step(&mut self) -> Result<(), Self::Error>;
+    fn step(&mut self) -> Result<(), Error>;
 
     /// Returns true if the solver is finished.
     fn is_finished(&self) -> bool;
@@ -67,18 +66,6 @@ fn init_best(possible_alns: &[ReadWindows]) -> usize {
     IterExt::argmax(possible_alns.iter().map(ReadWindows::ln_prob)).0
 }
 
-#[derive(Debug)]
-pub enum Error<E: Debug> {
-    IoErr(io::Error),
-    SolverErr(E),
-}
-
-impl<E: Debug> From<io::Error> for Error<E> {
-    fn from(err: io::Error) -> Self {
-        Self::IoErr(err)
-    }
-}
-
 /// Distribute read assignment in at most `max_iters` iterations.
 ///
 /// dbg_writer writes intermediate likelihood values and runtime for each seed.
@@ -91,7 +78,7 @@ pub fn solve<S, F, I, W, U, V>(
     dbg_writer: &mut W,
     depth_writer: &mut U,
     reads_writer: &mut V,
-) -> Result<ReadAssignment, Error<S::Error>>
+) -> Result<ReadAssignment, Error>
 where S: Solver,
       F: Fn(ReadAssignment) -> S,
       I: Iterator<Item = u64>,
@@ -121,7 +108,7 @@ where S: Solver,
     let mut outer = 0;
     for mut seed in seeds {
         if S::is_seedable() {
-            solver.set_seed(seed).map_err(Error::SolverErr)?;
+            solver.set_seed(seed)?;
         } else if outer == 0 {
             seed = 0;
         } else {
@@ -131,9 +118,9 @@ where S: Solver,
         outer += 1;
         for inner in 0.. {
             if inner == 0 {
-                solver.reset().map_err(Error::SolverErr)?;
+                solver.reset()?;
             } else {
-                solver.step().map_err(Error::SolverErr)?;
+                solver.step()?;
             }
             last_lik = solver.current_assignments().likelihood();
             if last_lik > best_lik {

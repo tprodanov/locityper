@@ -51,7 +51,7 @@ pub fn run(argv: &[String]) {
         std::process::exit(1);
     }
     match &argv[1] as &str {
-        "create" => create::run(&argv[2..]),
+        "create" => create::run(&argv[2..]).unwrap(),
         "help" | "h" | "--help" | "-h" => print_help(),
         "version" | "--version" | "-V" => print_version(),
         "cite" => print_citation(),

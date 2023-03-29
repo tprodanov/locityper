@@ -6,7 +6,9 @@ pub mod model;
 pub mod solvers;
 pub mod command;
 
+mod err;
 mod test;
+pub use err::Error;
 
 fn init_logger() {
     use fern::{

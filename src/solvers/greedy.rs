@@ -6,6 +6,7 @@ use rand::{
     seq::SliceRandom,
 };
 use crate::{
+    Error,
     algo::vec_ext::F64Ext,
     model::assgn::ReadAssignment,
 };
@@ -83,16 +84,14 @@ impl GreedySolver {
 }
 
 impl Solver for GreedySolver {
-    type Error = ();
-
     fn is_seedable() -> bool { true }
 
-    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
+    fn set_seed(&mut self, seed: u64) -> Result<(), Error> {
         self.rng = SmallRng::seed_from_u64(seed);
         Ok(())
     }
 
-    fn reset(&mut self) -> Result<(), Self::Error> {
+    fn reset(&mut self) -> Result<(), Error> {
         self.is_finished = false;
         // self.assignments.init_assignments(solvers::init_best)
         // self.assignments.init_assignments(|_| 0)
@@ -101,7 +100,7 @@ impl Solver for GreedySolver {
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<(), Self::Error> {
+    fn step(&mut self) -> Result<(), Error> {
         if self.is_finished {
             log::warn!("GreedySolver is finished, but `step` is called one more time.")
         }

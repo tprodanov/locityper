@@ -3,7 +3,10 @@ use rand::{
     Rng, SeedableRng,
     rngs::SmallRng,
 };
-use crate::model::assgn::ReadAssignment;
+use crate::{
+    Error,
+    model::assgn::ReadAssignment,
+};
 use super::Solver;
 
 /// Builder, that constructs `SimulatedAnnealing`.
@@ -94,16 +97,14 @@ impl SimulatedAnnealing {
 }
 
 impl Solver for SimulatedAnnealing {
-    type Error = ();
-
     fn is_seedable() -> bool { true }
 
-    fn set_seed(&mut self, seed: u64) -> Result<(), Self::Error> {
+    fn set_seed(&mut self, seed: u64) -> Result<(), Error> {
         self.rng = SmallRng::seed_from_u64(seed);
         Ok(())
     }
 
-    fn reset(&mut self) -> Result<(), Self::Error> {
+    fn reset(&mut self) -> Result<(), Error> {
         self.curr_temp = 1.0;
         self.curr_plato = 0;
         self.assignments.init_assignments(super::init_best);
@@ -127,7 +128,7 @@ impl Solver for SimulatedAnnealing {
     }
 
     /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<(), Self::Error> {
+    fn step(&mut self) -> Result<(), Error> {
         let (rp, new_assign, improv) = self.assignments.random_reassignment(&mut self.rng);
         if improv > 0.0 || (self.curr_temp > 0.0
                 && self.rng.gen_range(0.0..=1.0) <= (self.coeff * improv / self.curr_temp).exp()) {

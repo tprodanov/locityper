@@ -326,11 +326,10 @@ impl ReadAssignment {
         }
     }
 
-    /// Initialize read assignments and return total likelihood.
-    /// Must provide function, that provides initial assignment for all read pairs with at least two possible locations.
-    /// Signature: `select_init(read_windows) -> initial_index`.
-    pub fn init_assignments<F>(&mut self, mut select_init: F) -> f64
-    where F: FnMut(&[ReadWindows]) -> usize,
+    /// Try to initialize read assignments and return total likelihood.
+    /// Same as `init_assignments`, but the `select_init` function may fail.
+    pub fn try_init_assignments<F, E>(&mut self, mut select_init: F) -> Result<f64, E>
+    where F: FnMut(&[ReadWindows]) -> Result<usize, E>,
     {
         self.depth.fill(0);
         for (rp, assgn_mut) in self.read_assgn.iter_mut().enumerate() {
@@ -340,7 +339,7 @@ impl ReadAssignment {
             if start_ix + 1 == end_ix {
                 assgn = 0;
             } else {
-                assgn = select_init(&self.read_windows[start_ix..end_ix]);
+                assgn = select_init(&self.read_windows[start_ix..end_ix])?;
                 assert!(start_ix + assgn < end_ix,
                     "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
             }
@@ -350,7 +349,16 @@ impl ReadAssignment {
             *assgn_mut = assgn as u16;
         }
         self.recalc_likelihood();
-        self.likelihood
+        Ok(self.likelihood)
+    }
+
+    /// Initialize read assignments and return total likelihood.
+    /// Must provide function, that provides initial assignment for all read pairs with at least two possible locations.
+    /// Signature: `select_init(read_windows) -> initial_index`.
+    pub fn init_assignments<F>(&mut self, mut select_init: F) -> f64
+    where F: FnMut(&[ReadWindows]) -> usize,
+    {
+        self.try_init_assignments::<_, ()>(|windows| Ok(select_init(windows))).expect("Error is impossible")
     }
 
     /// Sets current read assignments with the new ones.

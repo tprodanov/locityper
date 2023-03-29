@@ -35,7 +35,7 @@ impl Interval {
     }
 
     /// Parse interval name from string "name:start-end", where start is 1-based, inclusive.
-    pub fn parse(contig_names: Rc<ContigNames>, s: &str) -> Result<Self, String> {
+    pub fn parse(s: &str, contig_names: Rc<ContigNames>) -> Result<Self, String> {
         if let Some((name, coord)) = s.split_once(':') {
             if let Some((start, end)) = coord.split_once('-') {
                 if let Some(contig_id) = contig_names.try_get_id(name) {
