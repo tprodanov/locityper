@@ -94,7 +94,7 @@ impl ContigNames {
             }
 
             let mut ref_seq = record.seq().to_vec();
-            crate::seq::seq::standardize(&mut ref_seq);
+            super::standardize(&mut ref_seq);
             names_lengths.push((record.id().to_string(), u32::try_from(ref_seq.len()).unwrap()));
             seqs.push(ref_seq.to_vec());
         }

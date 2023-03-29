@@ -7,8 +7,7 @@ use htslib::bam::Record;
 use nohash::IntMap;
 use crate::{
     seq::{
-        contigs::{ContigId, ContigNames},
-        interv::Interval,
+        Interval, ContigId, ContigNames,
         aln::{Strand, ReadEnd, Alignment},
     },
     bg::{

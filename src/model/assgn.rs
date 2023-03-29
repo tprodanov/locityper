@@ -9,7 +9,7 @@ use rand::Rng;
 use crate::{
     algo::vec_ext::F64Ext,
     seq::{
-        seq,
+        self,
         kmers::KmerCounts,
     },
     math::{

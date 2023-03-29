@@ -1,8 +1,7 @@
 use std::rc::Rc;
 use std::fmt;
 use std::cmp::{min, max, Ordering};
-// use num_format::{Locale, WriteFormatted};
-use crate::seq::contigs::{ContigId, ContigNames};
+use super::{ContigId, ContigNames};
 
 /// Genomic interval.
 #[derive(Clone)]

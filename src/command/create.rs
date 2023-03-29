@@ -10,10 +10,7 @@ use bio::io::fasta::IndexedReader;
 use colored::Colorize;
 use crate::{
     Error,
-    seq::{
-        contigs::ContigNames,
-        interv::Interval,
-    },
+    seq::{Interval, ContigNames},
 };
 
 struct Args {

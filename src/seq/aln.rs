@@ -6,8 +6,7 @@ use htslib::bam::{
 };
 use crate::{
     seq::{
-        contigs::{ContigId, ContigNames},
-        interv::Interval,
+        Interval, ContigId, ContigNames,
         cigar::Cigar,
     },
 };

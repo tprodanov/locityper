@@ -5,9 +5,8 @@ use htslib::bam::{
 };
 use crate::{
     seq::{
+        self, Interval,
         cigar::{Operation, CigarItem},
-        interv::Interval,
-        seq,
     },
     algo::{
         vec_ext::{VecExt, F64Ext, IterExt},

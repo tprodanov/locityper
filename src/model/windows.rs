@@ -4,7 +4,7 @@ use std::{
 };
 use crate::{
     math::Ln,
-    seq::contigs::{ContigId, ContigNames},
+    seq::{ContigId, ContigNames},
 };
 use super::locs::{TwoIntervals, ReadPairAlignments};
 

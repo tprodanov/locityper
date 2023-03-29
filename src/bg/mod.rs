@@ -13,10 +13,7 @@ use crate::{
         err_prof::ErrorProfile,
         ser::{JsonSer, LoadError},
     },
-    seq::{
-        seq,
-        interv::Interval,
-    },
+    seq::{self, Interval},
 };
 
 /// Parameters for background distributions estimation.
