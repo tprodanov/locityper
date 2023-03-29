@@ -6,6 +6,9 @@ pub enum Error {
     Io(io::Error),
     /// Solver finished with an error: `(solver_name, error_description)`.
     Solver(&'static str, String),
+    /// Error, produced by an argument parser.
+    Lexopt(lexopt::Error),
+    InvalidInput(String),
 }
 
 impl From<io::Error> for Error {
@@ -21,7 +24,14 @@ impl From<grb::Error> for Error {
     }
 }
 
+impl From<lexopt::Error> for Error {
+    fn from(e: lexopt::Error) -> Self {
+        Self::Lexopt(e)
+    }
+}
+
 impl Error {
+    /// Converts an error, produced by a solver.
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {
         Self::Solver(solver_name, s.into())
     }

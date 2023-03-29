@@ -3,13 +3,17 @@
 use std::{
     io, fs,
     cmp::max,
+    rc::Rc,
     path::{Path, PathBuf},
 };
 use bio::io::fasta::IndexedReader;
 use colored::Colorize;
-use crate::seq::{
-    contigs::ContigNames,
-    interv::Interval,
+use crate::{
+    Error,
+    seq::{
+        contigs::ContigNames,
+        interv::Interval,
+    },
 };
 
 struct Args {
@@ -112,29 +116,64 @@ fn process_args(mut args: Args) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
+/// Calculate background read distributions based on one of these regions.
 const BG_REGIONS: [&'static str; 1] = ["chr17:72062001-76562000"];
+
+/// Returns the first appropriate interval for the contig names.
+/// If `bg_region` is set, try to parse it. Otherwise, iterate over `BG_REGIONS`.
+///
+/// Returns error if no interval is appropriate (chromosome not in the contig set, or interval is out of bounds).
+// fn select_bg_interval(
+//     fasta_filename: impl AsRef<Path>,
+//     contigs: &Rc<ContigNames>,
+//     bg_region: &Option<String>
+// ) -> Result<Interval, Error>
+// {
+//     if let Some(s) = bg_region {
+//         let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
+//             format!("Input fasta '{}' does not contain region {}", fasta_filename.display(), s)))?;
+//         return if contigs.in_bounds(&region) {
+//             Ok(region)
+//         } else {
+//             Err(Error::InvalidInput(format!("Region {} is out of bounds", s)))
+//         };
+//     }
+
+//     for s in BG_REGIONS.iter() {
+//         if let Ok(region) = Interval::parse(s, contigs) {
+//             if contigs.in_bounds(&region) {
+//                 return Ok(region);
+//             } else {
+//                 log::error!("Chromosome {} is in the input fasta file '{}', but is shorter than expected",
+//                     fasta_filename.display(), interval.contig_name());
+//             }
+//         }
+//     }
+//     Err(Error::InvalidInput(format!(
+//         "Input fasta '{}' does not contain any of the default background regions. \
+//         Consider setting region via --region or use a different fasta file.", fasta_filename)))
+// }
 
 fn extract_bg_region(
     fasta_filename: impl AsRef<Path>,
     mut bg_path: PathBuf,
     bg_region: &Option<String>
-) -> io::Result<()> {
-    // let fasta = fasta::IndexedReader::from_file(fasta_filename)?;
-    // let contigs = ContigNames::from_index("genome".to_string(), &fasta.index);
-    // if let Some(region) = bg_region {
-    //     // Interval::parse(region, &contigs).map_err(|_| Error::new(ErrorKind::))
-    // }
-    // for region in contigs.iter()
+) -> Result<(), Error>
+{
+    // TODO: Replace unwrap with the corresponding function.
+    // let fasta = IndexedReader::from_file(fasta_filename.as_ref().to_str().expect("REPLACE LATER").to_string()).unwrap();
+    // let contigs = Rc::new(ContigNames::from_index("genome".to_string(), &fasta.index));
+    // let region = select_bg_interval(fasta_filename, &contigs, bg_region);
 
     // fs::create_dir(&bg_path)?;
     // bg_path.push("bg.fasta");
-    // log::info!("Writing background regions to '{}'", bg_path.display());
+    // log::info!("Writing background region to '{}'", bg_path.display());
     Ok(())
 }
 
-pub(super) fn run(argv: &[String]) -> io::Result<()> {
-    let mut args = parse_args(argv).unwrap();
-    let db_path = args.database.as_ref().unwrap();
+pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+    let args = parse_args(argv)?;
+    let db_path = args.database.as_ref().expect("Error is impossible");
     if db_path.exists() {
         if args.force {
             log::warn!("Completely removing output directory '{}'", db_path.display());
@@ -145,6 +184,6 @@ pub(super) fn run(argv: &[String]) -> io::Result<()> {
     }
     fs::create_dir(db_path)?;
 
-    extract_bg_region(args.fasta.as_ref().unwrap(), db_path.join("bg"), &args.bg_region)?;
+    extract_bg_region(args.fasta.as_ref().expect("Error is impossible"), db_path.join("bg"), &args.bg_region)?;
     Ok(())
 }

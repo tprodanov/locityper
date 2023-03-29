@@ -1,6 +1,7 @@
 pub mod create;
 
 use colored::Colorize;
+use crate::Error;
 
 /// Print tool version and authors.
 fn print_version() {
@@ -45,16 +46,17 @@ fn print_help() {
     println!("    {:<7}  Show citation information.", "cite".red());
 }
 
-pub fn run(argv: &[String]) {
+pub fn run(argv: &[String]) -> Result<(), Error> {
     if argv.len() <= 1 {
         print_help();
         std::process::exit(1);
     }
     match &argv[1] as &str {
-        "create" => create::run(&argv[2..]).unwrap(),
+        "create" => create::run(&argv[2..])?,
         "help" | "h" | "--help" | "-h" => print_help(),
         "version" | "--version" | "-V" => print_version(),
         "cite" => print_citation(),
         cmd => panic!("Unknown command {}", cmd),
     }
+    Ok(())
 }

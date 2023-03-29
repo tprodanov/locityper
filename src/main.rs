@@ -39,5 +39,5 @@ fn main() {
     init_logger();
     // test::test();
     let args: Vec<_> = std::env::args().collect();
-    command::run(&args);
+    command::run(&args).unwrap();
 }

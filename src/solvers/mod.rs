@@ -39,7 +39,7 @@ pub trait Solver: Display + Display {
     fn is_seedable() -> bool;
 
     /// Sets seed.
-    /// Can panic if the seed does not fit the model, or if the solver is deterministic.
+    /// Returns error if the seed does not fit the model, or if the solver is deterministic.
     fn set_seed(&mut self, seed: u64) -> Result<(), Error>;
 
     /// Resets the solver.

@@ -147,6 +147,11 @@ impl ContigNames {
     pub fn lengths(&self) -> std::iter::Cloned<std::slice::Iter<'_, u32>> {
         self.lengths.iter().cloned()
     }
+
+    /// Returns true if the interval is in bounds for its contig (interval end does not exceed contig length).
+    pub fn in_bounds(&self, interval: &super::Interval) -> bool {
+        interval.end() <= self.get_len(interval.contig_id())
+    }
 }
 
 impl fmt::Debug for ContigNames {

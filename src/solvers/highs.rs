@@ -109,12 +109,14 @@ impl HighsSolver {
     }
 }
 
+const HIGHS_NAME: &'static str = "HiGHS";
+
 impl Solver for HighsSolver {
     fn is_seedable() -> bool { false }
 
     fn set_seed(&mut self, _seed: u64) -> Result<(), Error> {
         // Even so it is possible to set seed to Highs Solver, results are always the same.
-        Err(Error::solver("HiGHS", "Impossible to set seed"))
+        Err(Error::solver(HIGHS_NAME, "Impossible to set seed"))
     }
 
     /// Resets and initializes anew read assignments.
@@ -125,10 +127,11 @@ impl Solver for HighsSolver {
     /// Perform one iteration, and return the likelihood improvement.
     fn step(&mut self) -> Result<(), Error> {
         let solved_model = self.model.take()
-            .ok_or_else(|| Error::solver("HiGHS", "Cannot run Solver::step twice"))?
+            .ok_or_else(|| Error::solver(HIGHS_NAME, "Cannot run Solver::step twice"))?
             .solve();
         if solved_model.status() != Status::Optimal {
-            panic!("Highs model finished with non-optimal status {:?}", solved_model.status());
+            return Err(Error::solver(HIGHS_NAME,
+                format!("Model finished with non-optimal status {:?}", solved_model.status())));
         }
         let solution = solved_model.get_solution();
         self.set_assignments(solution.columns());
