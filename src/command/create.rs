@@ -11,10 +11,10 @@ enum Input {
 
 struct Args {
     input: Input,
-    database: String,
+    database: Option<String>,
     kmer_size: u8,
     jellyfish: String,
-    bg_region: String,
+    bg_region: Option<String>,
     threads: u8,
 }
 
@@ -22,10 +22,10 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             input: Input::None,
-            database: "".to_string(),
+            database: None,
             kmer_size: 25,
             jellyfish: "jellyfish".to_string(),
-            bg_region: "chr17:72062001-76562000".to_string(),
+            bg_region: None,
             threads: 4,
         }
     }
@@ -33,34 +33,35 @@ impl Default for Args {
 
 fn print_help() {
     let defaults = Args::default();
-    println!("{}", "Create an empty database of complex loci.\n".bold().bright_yellow());
+    println!("{}", "Create an empty database of complex loci.\n".yellow());
     println!("{} {} create (-f genome.fa | -a col.agc[@sample]) -d out_dir [arguments]",
-        "Usage:".bold().red(), env!("CARGO_PKG_NAME"));
+        "Usage:".bold(), env!("CARGO_PKG_NAME"));
 
-    println!("\n{}", "Input/output arguments:".bold().red());
+    println!("\n{}", "Input/output arguments:".bold());
     println!("    {:<15} {:<10}  Input FASTA file.",
-        "-f, --fasta".green(), "FILE".cyan());
+        "-f, --fasta".green(), "FILE".yellow());
     println!("    {:<15} {:<10}  Genome collection in AGC format.\n\
         {:<30}  Optional sample name after '@' (use first sample by default).",
-        "-a, --agc".green(), "FILE[@STR]".cyan(), "");
-    println!("    {:<15} {:<10}  Output database directory.", "-d, --db".green(), "DIR".cyan());
+        "-a, --agc".green(), "FILE[@STR]".yellow(), "");
+    println!("    {:<15} {:<10}  Output database directory.", "-d, --db".green(), "DIR".yellow());
 
-    println!("\n{}", "Counting k-mers:".bold().red());
+    println!("\n{}", "Counting k-mers:".bold());
     println!("    {:<15} {:<10}  k-mer size [{}].",
-        "-k, --kmer".green(), "INT".cyan(), defaults.kmer_size);
+        "-k, --kmer".green(), "INT".yellow(), defaults.kmer_size);
     println!("    {:<15} {:<10}  Jellyfish executable [{}].",
-        "-j, --jellyfish".green(), "EXE".cyan(), defaults.jellyfish);
+        "-j, --jellyfish".green(), "EXE".yellow(), defaults.jellyfish);
 
-    println!("\n{}", "Background regions:".bold().red());
-    println!("    {:<15} {:<10}  Calculate background distributions based on reads,\n\
-        {:<30}  mapped to this region [{}].",
-        "-r, --region".green(), "REGION".cyan(), "", defaults.bg_region);
+    println!("\n{}", "Background regions:".bold());
+    println!("    {:<15} {:<10}  Calculate background distributions based on reads, mapped to this region.\n\
+        {:<30}  Defaults to: chr17:72062001-76562000 (GRCh38).",
+        "-r, --region".green(), "REGION".yellow(), "");
+    // TODO: Write default regions from some array.
 
-    println!("\n{}", "Execution parameters:".bold().red());
+    println!("\n{}", "Execution parameters:".bold());
     println!("    {:<15} {:<10}  Number of threads [{}].",
-        "-@, --threads".green(), "INT".cyan(), defaults.threads);
+        "-@, --threads".green(), "INT".yellow(), defaults.threads);
 
-    println!("\n{}", "Other parameters:".bold().red());
+    println!("\n{}", "Other parameters:".bold());
     println!("    {:<15} {:<10}  Show this help message.", "-h, --help".green(), "");
     println!("    {:<15} {:<10}  Show version.", "-V, --version".green(), "");
 }
@@ -90,7 +91,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 };
             }
             Short('d') | Long("database") => {
-                args.database = parser.value()?.parse()?;
+                args.database = Some(parser.value()?.parse()?);
             }
 
             Short('k') | Long("kmer") => {
@@ -100,7 +101,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.jellyfish = parser.value()?.parse()?;
             }
             Short('r') | Long("region") => {
-                args.bg_region = parser.value()?.parse()?;
+                args.bg_region = Some(parser.value()?.parse()?);
             }
             Short('@') | Long("threads") => {
                 args.threads = parser.value()?.parse()?;
@@ -121,15 +122,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 }
 
 fn process_args(mut args: Args) -> Result<Args, lexopt::Error> {
-    if args.threads == 0 {
-        args.threads = 1;
-    }
-    if args.input == Input::None {
-        Err("Please provide input file with --fasta OR --agc.")?;
-    }
-    if args.database.is_empty() {
-        Err("Please provide database directory with --db.")?;
-    }
+    args.threads = std::cmp::max(args.threads, 1);
     Ok(args)
 }
 

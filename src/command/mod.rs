@@ -4,7 +4,7 @@ use colored::Colorize;
 
 /// Print tool version and authors.
 fn print_version() {
-    println!("{} {}{}", env!("CARGO_PKG_NAME").underline(), "v".green(), env!("CARGO_PKG_VERSION").green());
+    println!("{} {}", env!("CARGO_PKG_NAME").underline(), format!("v{}", env!("CARGO_PKG_VERSION")).green());
     let authors: Vec<_> = env!("CARGO_PKG_AUTHORS").split(':').collect();
     let n = authors.len();
     if n == 0 {
@@ -33,13 +33,13 @@ fn print_citation() {
 fn print_help() {
     print_version();
     println!("\n{} {} command [arguments]",
-        "Usage:".bold().red(), env!("CARGO_PKG_NAME"));
+        "Usage:".bold(), env!("CARGO_PKG_NAME"));
 
-    println!("\n{}", "[ Creating database ]".green());
+    println!("\n{}", "[ Creating database ]".bold());
     println!("    {:<7}  Create an empty database.", "create".red());
     println!("    {:<7}  Add complex locus/loci to the database.", "add".red());
 
-    println!("\n{}", "[ General help ]".green());
+    println!("\n{}", "[ General help ]".bold());
     println!("    {:<7}  Show this help message.", "help".red());
     println!("    {:<7}  Show version.", "version".red());
     println!("    {:<7}  Show citation information.", "cite".red());
@@ -52,8 +52,8 @@ pub fn run(argv: &[String]) {
     }
     match &argv[1] as &str {
         "create" => create::run(&argv[2..]),
-        "help" => print_help(),
-        "version" => print_version(),
+        "help" | "h" | "--help" | "-h" => print_help(),
+        "version" | "--version" | "-V" => print_version(),
         "cite" => print_citation(),
         cmd => panic!("Unknown command {}", cmd),
     }
