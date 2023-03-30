@@ -21,6 +21,7 @@ highs = { version = "1.3.3", default-features = false, optional = true }
 getrandom = { version = "0.2.8", default-features = false } # Remove later?
 lexopt = { version = "0.3", default-features = false }
 colored = { version = "2.0", default-features = false }
+which = { version = "4.4", default-features = false }
 
 [features]
 default = ["stochastic", "gurobi", "highs", "devel"]

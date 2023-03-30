@@ -1,9 +1,11 @@
 //! Create a new database.
 
 use std::{
-    io, fs,
+    fs,
+    io::{self, Read, Seek},
     cmp::max,
     rc::Rc,
+    process::Command,
     path::{Path, PathBuf},
 };
 use bio::io::fasta::IndexedReader;
@@ -18,9 +20,9 @@ struct Args {
     database: Option<PathBuf>,
     kmer_size: u8,
     bg_region: Option<String>,
-    threads: u8,
+    threads: u16,
     force: bool,
-    jellyfish: String,
+    jellyfish: PathBuf,
 }
 
 impl Default for Args {
@@ -32,7 +34,7 @@ impl Default for Args {
             bg_region: None,
             threads: 4,
             force: false,
-            jellyfish: "jellyfish".to_string(),
+            jellyfish: PathBuf::from("jellyfish"),
         }
     }
 }
@@ -65,7 +67,7 @@ fn print_help() {
     println!("    {:<15} {:<6}  Force rewrite output directory.",
         "-F, --force".green(), "");
     println!("    {:<15} {:<6}  Jellyfish executable [{}].",
-        "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish);
+        "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:<15} {:<6}  Show this help message.", "-h, --help".green(), "");
@@ -99,17 +101,18 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             _ => Err(arg.unexpected())?,
         }
     }
-    process_args(args)
+    Ok(args)
 }
 
-fn process_args(mut args: Args) -> Result<Args, lexopt::Error> {
+fn process_args(mut args: Args) -> Result<Args, Error> {
     args.threads = max(args.threads, 1);
     if args.database.is_none() {
-        Err("Database directory is not provided (see -d/--database)")?;
+        Err(lexopt::Error::from("Database directory is not provided (see -d/--database)"))?;
     }
     if args.fasta.is_none() {
-        Err("Fasta file is not provided (see -f/--fasta)")?;
+        Err(lexopt::Error::from("Fasta file is not provided (see -f/--fasta)"))?;
     }
+    args.jellyfish = super::find_exe(args.jellyfish)?;
     Ok(args)
 }
 
@@ -151,22 +154,20 @@ fn select_bg_interval(
         Consider setting region via --region or use a different fasta file.", fasta_filename.display())))
 }
 
-fn extract_bg_region(
-    fasta_filename: &Path,
-    mut bg_path: PathBuf,
-    bg_region: &Option<String>
+/// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
+/// The sequence is then written to the `$bg_path/bg.fasta`.
+fn extract_bg_region<R: Read + Seek>(
+    fasta: &mut IndexedReader<R>,
+    db_path: &Path,
+    region: &Interval,
 ) -> Result<(), Error>
 {
-    let mut fasta = IndexedReader::from_file(&fasta_filename)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let contigs = Rc::new(ContigNames::from_index("genome".to_string(), &fasta.index));
-    let region = select_bg_interval(fasta_filename, &contigs, bg_region)?;
-
     fasta.fetch(region.contig_name(), u64::from(region.start()), u64::from(region.end()))?;
     let mut seq = Vec::new();
     fasta.read(&mut seq)?;
     crate::seq::standardize(&mut seq);
 
+    let mut bg_path = db_path.join("bg");
     fs::create_dir(&bg_path)?;
     bg_path.push("bg.fasta");
     log::info!("Writing background region {} to '{}'", region, bg_path.display());
@@ -175,8 +176,39 @@ fn extract_bg_region(
     Ok(())
 }
 
+fn run_jellyfish(
+    db_path: &Path,
+    fasta_filename: &Path,
+    jellyfish: &Path,
+    kmer_size: u8,
+    threads: u16,
+    genome_size: u64,
+) -> Result<(), Error> {
+    let mut jf_path = db_path.join("jf");
+    fs::create_dir(&jf_path)?;
+    jf_path.push(&format!("{}.jf", kmer_size));
+
+    let mut command = Command::new(jellyfish);
+    command
+        .args(&["count", "--canonical", "--lower-count=2", "--out-counter-len=1",
+            &format!("--mer-len={}", kmer_size),
+            &format!("--threads={}", threads),
+            &format!("--size={}", genome_size)])
+        .arg("--output").arg(&jf_path)
+        .arg(fasta_filename);
+    log::info!("Counting {}-mers in {} threads, output: {}", kmer_size, threads, jf_path.display());
+    log::debug!("    {:?}", command);
+
+    let output = command.output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Error::SubcommandFail(output))
+    }
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let args = parse_args(argv)?;
+    let args: Args = process_args(parse_args(argv)?)?;
     let db_path = args.database.as_ref().expect("Error is impossible");
     if db_path.exists() {
         if args.force {
@@ -188,6 +220,14 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     }
     fs::create_dir(db_path)?;
 
-    extract_bg_region(args.fasta.as_ref().expect("Error is impossible"), db_path.join("bg"), &args.bg_region)?;
+    let fasta_filename = args.fasta.as_ref().expect("Error is impossible");
+    let mut fasta = IndexedReader::from_file(&fasta_filename)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let contigs = Rc::new(ContigNames::from_index("genome".to_string(), &fasta.index));
+    let region = select_bg_interval(&fasta_filename, &contigs, &args.bg_region)?;
+    extract_bg_region(&mut fasta, &db_path, &region)?;
+
+    run_jellyfish(&db_path, &fasta_filename, &args.jellyfish, args.kmer_size, args.threads, contigs.genome_size())?;
+    log::info!("Success!");
     Ok(())
 }

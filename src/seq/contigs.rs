@@ -152,6 +152,11 @@ impl ContigNames {
     pub fn in_bounds(&self, interval: &super::Interval) -> bool {
         interval.end() <= self.get_len(interval.contig_id())
     }
+
+    /// Returns sum length of all contigs.
+    pub fn genome_size(&self) -> u64 {
+        self.lengths().map(u64::from).sum()
+    }
 }
 
 impl fmt::Debug for ContigNames {

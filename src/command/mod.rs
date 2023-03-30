@@ -1,7 +1,13 @@
 pub mod create;
 
+use std::path::PathBuf;
 use colored::Colorize;
 use crate::Error;
+
+/// Finds an executable, and returns Error, if executable is not available.
+fn find_exe(p: PathBuf) -> Result<PathBuf, Error> {
+    which::which(&p).map_err(|_| Error::NoExec(p))
+}
 
 /// Print tool version and authors.
 fn print_version() {

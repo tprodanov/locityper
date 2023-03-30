@@ -1,4 +1,7 @@
-use std::io;
+use std::{
+    io,
+    path::PathBuf,
+};
 
 /// General enum, representing possible errors.
 #[derive(Debug)]
@@ -8,6 +11,10 @@ pub enum Error {
     Solver(&'static str, String),
     /// Error, produced by an argument parser.
     Lexopt(lexopt::Error),
+    /// Executable not found.
+    NoExec(PathBuf),
+    /// Subcommand failed.
+    SubcommandFail(std::process::Output),
     InvalidInput(String),
 }
 
