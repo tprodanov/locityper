@@ -33,17 +33,25 @@ pub(super) fn print_version() {
     println!();
 }
 
-/// Returns a buffered file OR stdin if filename is `"-"`.
-pub(super) fn file_or_stdin(filename: &Path) -> Result<Box<dyn BufRead>, Error> {
+/// Returns
+/// - stdin if filename is `-`,
+/// - gzip reader if filename ends with `.gz`,
+/// - regular text file otherwise.
+pub(super) fn open(filename: &Path) -> Result<Box<dyn BufRead>, Error> {
     if filename == OsStr::new("-") {
         Ok(Box::new(BufReader::new(stdin())))
     } else {
-        Ok(Box::new(BufReader::new(File::open(filename)?)))
+        let file = File::open(filename)?;
+        if filename.ends_with(".gz") {
+            Ok(Box::new(BufReader::new(flate2::read::GzDecoder::new(file))))
+        } else {
+            Ok(Box::new(BufReader::new(file)))
+        }
     }
 }
 
-/// Returns a buffered file OR stdout if filename is `"-"`.
-pub(super) fn file_or_stdout(filename: &Path) -> Result<Box<dyn Write>, Error> {
+/// Creates a buffered file OR stdout if filename is `-`.
+pub(super) fn create_uncompressed(filename: &Path) -> Result<Box<dyn Write>, Error> {
     if filename == OsStr::new("-") {
         Ok(Box::new(BufWriter::new(stdout())))
     } else {

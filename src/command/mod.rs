@@ -5,7 +5,7 @@ mod add;
 use colored::Colorize;
 
 use crate::Error;
-use common::{find_exe, print_version, file_or_stdin, file_or_stdout};
+use common::{find_exe, print_version};
 
 fn print_citation() {
     print_version();

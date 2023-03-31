@@ -1,7 +1,16 @@
-
-use std::path::{Path, PathBuf};
+use std::{
+    io::{BufRead, Read, Seek},
+    rc::Rc,
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
+use bio::io::fasta::IndexedReader;
 use colored::Colorize;
-use crate::Error;
+use const_format::str_repeat;
+use crate::{
+    Error,
+    seq::{Interval, NamedInterval, ContigNames},
+};
 
 struct Args {
     database: Option<PathBuf>,
@@ -32,7 +41,7 @@ impl Default for Args {
 fn print_help() {
     const KEY: usize = 15;
     const VAL: usize = 4;
-    let empty = format!("{:#width$}", "", width = KEY + VAL + 5);
+    const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
     println!("{}", "Adds complex locus/loci to the database.".yellow());
@@ -46,21 +55,21 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  PanGenie input VCF file. Encodes variation across pangenome samples.\n\
-        {empty}  Must be compressed and indexed with `tabix`.",
+        {EMPTY}  Must be compressed and indexed with `tabix`.",
         "-v, --vcf".green(), "FILE".yellow());
 
     println!("\n{}", "Complex loci coordinates:".bold());
     println!("    {:KEY$} {:VAL$}  Complex locus coordinates. Multiple loci are allowed.\n\
-        {empty}  Format: 'chrom:start-end' or 'chrom:start-end@name',\n\
-        {empty}  where 'name' is the locus name (must be unique).",
+        {EMPTY}  Format: 'chrom:start-end' or 'chrom:start-end@name',\n\
+        {EMPTY}  where 'name' is the locus name (must be unique).",
         "-l, --locus".green(), "STR+".yellow());
     println!("    {:KEY$} {:VAL$}  BED file with complex loci coordinates. May be repeated multiple times.\n\
-        {empty}  If fourth column is present, it is used for the locus name (must be unique).",
+        {EMPTY}  If fourth column is present, it is used for the locus name (must be unique).",
         "-L, --loci-bed".green(), "FILE".yellow());
 
     // println!("\n{}", "Optional parameters:".bold());
     // println!("    {:KEY$} {:VAL$}  Extend loci boundaries by at most {} bp,\n\
-    //     {empty}  in order to select the best ")
+    //     {EMPTY}  in order to select the best ")
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
@@ -119,7 +128,47 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
     Ok(args)
 }
 
+/// Loads named interval from a list of loci and a list of BED files. Names must not repeat.
+fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) -> Result<Vec<NamedInterval>, Error> {
+    let mut intervals = Vec::new();
+    let mut names = HashSet::new();
+    for locus in loci.iter() {
+        let interval = NamedInterval::parse(locus, contigs)?;
+        if !names.insert(interval.name().to_string()) {
+            return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
+        }
+        intervals.push(interval);
+    }
+
+    for filename in bed_files.iter() {
+        for line in super::common::open(filename)?.lines() {
+            let interval = NamedInterval::parse_bed(&mut line?.split('\t'), contigs)?;
+            if !names.insert(interval.name().to_string()) {
+                return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
+            }
+            intervals.push(interval);
+        }
+    }
+    Ok(intervals)
+}
+
+fn extract_locus<R>(contigs: &ContigNames, fasta: &mut IndexedReader<R>, locus: &NamedInterval) -> Result<(), Error>
+where R: Read + Seek,
+{
+    log::info!("Analyzing locus {}", locus);
+    Ok(())
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = process_args(parse_args(argv)?)?;
+
+    // unwrap as args.reference was previously checked to be Some.
+    let ref_filename = args.reference.as_ref().unwrap();
+    let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
+    let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
+    for locus in loci.iter() {
+        extract_locus(&contigs, &mut fasta, locus)?;
+    }
+
     Ok(())
 }

@@ -16,6 +16,7 @@ pub enum Error {
     /// Subcommand failed.
     SubcommandFail(std::process::Output),
     InvalidInput(String),
+    ParsingError(String),
 }
 
 impl From<io::Error> for Error {

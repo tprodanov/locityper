@@ -7,7 +7,7 @@ pub mod kmers;
 #[cfg(feature = "devel")]
 pub mod dist;
 
-pub use interv::Interval;
+pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames};
 
 use std::{

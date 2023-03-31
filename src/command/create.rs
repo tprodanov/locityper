@@ -10,6 +10,7 @@ use std::{
 };
 use bio::io::fasta::IndexedReader;
 use colored::Colorize;
+use const_format::str_repeat;
 use crate::{
     Error,
     seq::{Interval, ContigNames},
@@ -42,10 +43,10 @@ impl Default for Args {
 fn print_help() {
     const KEY: usize = 16;
     const VAL: usize = 4;
-    let empty = format!("{:#width$}", "", width = KEY + VAL + 5);
+    const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
-    println!("{}", "Create an empty database of complex loci.".yellow());
+    println!("{}", "Create an EMPTY database of complex loci.".yellow());
 
     println!("\n{} {} create -d db -r reference.fa [arguments]",
         "Usage:".bold(), env!("CARGO_PKG_NAME"));
@@ -60,7 +61,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  k-mer size [{}].",
         "-k, --kmer".green(), "INT".yellow(), defaults.kmer_size);
     println!("    {:KEY$} {:VAL$}  Calculate background distributions based on reads, mapped to this region.\n\
-        {empty}  Defaults to: chr17:72062001-76562000 (GRCh38).",
+        {EMPTY}  Defaults to: chr17:72062001-76562000 (GRCh38).",
         "-b, --background".green(), "STR".yellow());
     // TODO: Parse default regions from BG_REGIONS.
 
@@ -226,9 +227,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     // unwrap as args.reference was previously checked to be Some.
     let ref_filename = args.reference.as_ref().unwrap();
-    let mut fasta = IndexedReader::from_file(&ref_filename)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let contigs = Rc::new(ContigNames::from_index("genome".to_string(), &fasta.index));
+    let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
     let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
     extract_bg_region(&mut fasta, &db_path, &region)?;
 

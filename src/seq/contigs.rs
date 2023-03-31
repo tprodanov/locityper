@@ -1,8 +1,11 @@
 use std::{
-    collections::HashMap,
     fmt, io,
+    fs::File,
+    rc::Rc,
+    collections::HashMap,
+    path::Path,
 };
-use bio::io::fasta::{FastaRead, Index, Record};
+use bio::io::fasta::{self, FastaRead};
 
 /// Contig identificator - newtype over u16.
 /// Can be converted to `usize` using `id.ix()` method.
@@ -77,20 +80,25 @@ impl ContigNames {
 
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
-    pub fn from_index(tag: String, index: &Index) -> Self {
+    pub fn from_index(tag: String, index: &fasta::Index) -> Self {
         Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
     }
 
     /// Reads all entries from fasta and saves them into memory.
     /// Returns pair (ContigNames, Vec<nt sequence>).
-    pub fn from_fasta<R: FastaRead>(tag: String, reader: &mut R) -> io::Result<(Self, Vec<Vec<u8>>)> {
+    pub fn load_fasta<P>(filename: &P, tag: String) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
+    where P: AsRef<Path> + fmt::Debug
+    {
+        let mut reader = fasta::Reader::from_file(filename)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let mut names_lengths = Vec::new();
         let mut seqs = Vec::new();
-        let mut record = Record::new();
+        let mut record = fasta::Record::new();
         loop {
             reader.read(&mut record)?;
             if record.is_empty() {
-                return Ok((Self::new(tag, names_lengths.into_iter()), seqs));
+                let contigs = Self::new(tag, names_lengths.into_iter());
+                return Ok((Rc::new(contigs), seqs));
             }
 
             let mut ref_seq = record.seq().to_vec();
@@ -98,6 +106,16 @@ impl ContigNames {
             names_lengths.push((record.id().to_string(), u32::try_from(ref_seq.len()).unwrap()));
             seqs.push(ref_seq.to_vec());
         }
+    }
+
+    /// Loads indexed fasta and stored contig names and lengths.
+    pub fn load_indexed_fasta<P>(filename: &P, tag: String) -> io::Result<(Rc<Self>, fasta::IndexedReader<File>)>
+    where P: AsRef<Path> + fmt::Debug
+    {
+        let fasta = fasta::IndexedReader::from_file(&filename)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let contigs = ContigNames::from_index(tag, &fasta.index);
+        Ok((Rc::new(contigs), fasta))
     }
 
     pub fn is_empty(&self) -> bool {

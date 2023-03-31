@@ -22,6 +22,10 @@ getrandom = { version = "0.2.8", default-features = false } # Remove later?
 lexopt = { version = "0.3", default-features = false }
 colored = { version = "2.0", default-features = false }
 which = { version = "4.4", default-features = false }
+regex = { version = "1.7", default-features = false, features = ["std", "perf"] }
+lazy_static = { version = "1.4", default-features = false }
+const_format = { version = "0.2.30", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [features]
 default = ["stochastic", "gurobi", "highs", "devel"]
