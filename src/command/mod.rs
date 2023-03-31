@@ -1,34 +1,11 @@
-pub mod create;
+mod common;
+mod create;
+mod add;
 
-use std::path::PathBuf;
 use colored::Colorize;
+
 use crate::Error;
-
-/// Finds an executable, and returns Error, if executable is not available.
-fn find_exe(p: PathBuf) -> Result<PathBuf, Error> {
-    which::which(&p).map_err(|_| Error::NoExec(p))
-}
-
-/// Print tool version and authors.
-fn print_version() {
-    println!("{} {}", env!("CARGO_PKG_NAME").underline(), format!("v{}", env!("CARGO_PKG_VERSION")).green());
-    let authors: Vec<_> = env!("CARGO_PKG_AUTHORS").split(':').collect();
-    let n = authors.len();
-    if n == 0 {
-        return;
-    }
-    print!("Created by ");
-    for (i, author) in authors.iter().enumerate() {
-        if i == 0 {
-            print!("{}", author.bright_blue());
-        } else if i < n - 1 {
-            print!(", {}", author.bright_blue());
-        } else {
-            print!(" and {}", author.bright_blue());
-        }
-    }
-    println!();
-}
+use common::{find_exe, print_version, file_or_stdin, file_or_stdout};
 
 fn print_citation() {
     print_version();
@@ -59,6 +36,7 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
     }
     match &argv[1] as &str {
         "create" => create::run(&argv[2..])?,
+        "add" => add::run(&argv[2..])?,
         "help" | "h" | "--help" | "-h" => print_help(),
         "version" | "--version" | "-V" => print_version(),
         "cite" => print_citation(),

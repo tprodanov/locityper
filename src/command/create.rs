@@ -16,7 +16,7 @@ use crate::{
 };
 
 struct Args {
-    fasta: Option<PathBuf>,
+    reference: Option<PathBuf>,
     database: Option<PathBuf>,
     kmer_size: u8,
     bg_region: Option<String>,
@@ -28,7 +28,7 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            fasta: None,
+            reference: None,
             database: None,
             kmer_size: 25,
             bg_region: None,
@@ -40,38 +40,41 @@ impl Default for Args {
 }
 
 fn print_help() {
+    const KEY: usize = 16;
+    const VAL: usize = 4;
+    let empty = format!("{:#width$}", "", width = KEY + VAL + 5);
+
     let defaults = Args::default();
     println!("{}", "Create an empty database of complex loci.".yellow());
-    println!("Counts k-mers and extracts region for background parameters calculation.");
 
-    println!("\n{} {} create -d db -f genome.fa [arguments]",
+    println!("\n{} {} create -d db -r reference.fa [arguments]",
         "Usage:".bold(), env!("CARGO_PKG_NAME"));
 
     println!("\n{}", "Input/output arguments:".bold());
-    println!("    {:<15} {:<6}  Output database directory.",
+    println!("    {:KEY$} {:VAL$}  Output database directory.",
         "-d, --db".green(), "DIR".yellow());
-    println!("    {:<15} {:<6}  Input FASTA file. Used for k-mer counting and must contain --region.",
-        "-f, --fasta".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
+        "-r, --reference".green(), "FILE".yellow());
 
     println!("\n{}", "Optional parameters:".bold());
-    println!("    {:<15} {:<6}  k-mer size [{}].",
+    println!("    {:KEY$} {:VAL$}  k-mer size [{}].",
         "-k, --kmer".green(), "INT".yellow(), defaults.kmer_size);
-    println!("    {:<15} {:<6}  Calculate background distributions based on reads, mapped to this region.\n\
-        {:<26}  Defaults to: chr17:72062001-76562000 (GRCh38).",
-        "-r, --region".green(), "REGION".yellow(), "");
-    // TODO: Write default regions from some array.
+    println!("    {:KEY$} {:VAL$}  Calculate background distributions based on reads, mapped to this region.\n\
+        {empty}  Defaults to: chr17:72062001-76562000 (GRCh38).",
+        "-b, --background".green(), "STR".yellow());
+    // TODO: Parse default regions from BG_REGIONS.
 
     println!("\n{}", "Execution parameters:".bold());
-    println!("    {:<15} {:<6}  Number of threads [{}].",
+    println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
-    println!("    {:<15} {:<6}  Force rewrite output directory.",
+    println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), "");
-    println!("    {:<15} {:<6}  Jellyfish executable [{}].",
+    println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
 
     println!("\n{}", "Other parameters:".bold());
-    println!("    {:<15} {:<6}  Show this help message.", "-h, --help".green(), "");
-    println!("    {:<15} {:<6}  Show version.", "-V, --version".green(), "");
+    println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
+    println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
@@ -82,10 +85,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     while let Some(arg) = parser.next()? {
         match arg {
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
-            Short('f') | Long("fasta") => args.fasta = Some(parser.value()?.parse()?),
+            Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
 
             Short('k') | Long("kmer") => args.kmer_size = parser.value()?.parse()?,
-            Short('r') | Long("region") => args.bg_region = Some(parser.value()?.parse()?),
+            Short('b') | Long("bg") | Long("background") => args.bg_region = Some(parser.value()?.parse()?),
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
             Short('j') | Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
@@ -109,8 +112,8 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
     if args.database.is_none() {
         Err(lexopt::Error::from("Database directory is not provided (see -d/--database)"))?;
     }
-    if args.fasta.is_none() {
-        Err(lexopt::Error::from("Fasta file is not provided (see -f/--fasta)"))?;
+    if args.reference.is_none() {
+        Err(lexopt::Error::from("Reference fasta file is not provided (see -r/--reference)"))?;
     }
     args.jellyfish = super::find_exe(args.jellyfish)?;
     Ok(args)
@@ -124,14 +127,14 @@ const BG_REGIONS: [&'static str; 1] = ["chr17:72062001-76562000"];
 ///
 /// Returns error if no interval is appropriate (chromosome not in the contig set, or interval is out of bounds).
 fn select_bg_interval(
-    fasta_filename: &Path,
+    ref_filename: &Path,
     contigs: &Rc<ContigNames>,
     bg_region: &Option<String>
 ) -> Result<Interval, Error>
 {
     if let Some(s) = bg_region {
         let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
-            format!("Input fasta '{}' does not contain region {}", fasta_filename.display(), s)))?;
+            format!("Reference file '{}' does not contain region {}", ref_filename.display(), s)))?;
         return if contigs.in_bounds(&region) {
             Ok(region)
         } else {
@@ -144,14 +147,14 @@ fn select_bg_interval(
             if contigs.in_bounds(&region) {
                 return Ok(region);
             } else {
-                log::error!("Chromosome {} is in the input fasta file '{}', but is shorter than expected",
-                    fasta_filename.display(), region.contig_name());
+                log::error!("Chromosome {} is in the reference file '{}', but is shorter than expected",
+                    ref_filename.display(), region.contig_name());
             }
         }
     }
     Err(Error::InvalidInput(format!(
-        "Input fasta '{}' does not contain any of the default background regions. \
-        Consider setting region via --region or use a different fasta file.", fasta_filename.display())))
+        "Reference file '{}' does not contain any of the default background regions. \
+        Consider setting region via --region or use a different reference file.", ref_filename.display())))
 }
 
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
@@ -178,7 +181,7 @@ fn extract_bg_region<R: Read + Seek>(
 
 fn run_jellyfish(
     db_path: &Path,
-    fasta_filename: &Path,
+    ref_filename: &Path,
     jellyfish: &Path,
     kmer_size: u8,
     threads: u16,
@@ -195,7 +198,7 @@ fn run_jellyfish(
             &format!("--threads={}", threads),
             &format!("--size={}", genome_size)])
         .arg("--output").arg(&jf_path)
-        .arg(fasta_filename);
+        .arg(ref_filename);
     log::info!("Counting {}-mers in {} threads, output: {}", kmer_size, threads, jf_path.display());
     log::debug!("    {:?}", command);
 
@@ -209,7 +212,8 @@ fn run_jellyfish(
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args: Args = process_args(parse_args(argv)?)?;
-    let db_path = args.database.as_ref().expect("Error is impossible");
+    // unwrap as args.database was previously checked to be Some.
+    let db_path = args.database.as_ref().unwrap();
     if db_path.exists() {
         if args.force {
             log::warn!("Completely removing output directory '{}'", db_path.display());
@@ -220,14 +224,15 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     }
     fs::create_dir(db_path)?;
 
-    let fasta_filename = args.fasta.as_ref().expect("Error is impossible");
-    let mut fasta = IndexedReader::from_file(&fasta_filename)
+    // unwrap as args.reference was previously checked to be Some.
+    let ref_filename = args.reference.as_ref().unwrap();
+    let mut fasta = IndexedReader::from_file(&ref_filename)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     let contigs = Rc::new(ContigNames::from_index("genome".to_string(), &fasta.index));
-    let region = select_bg_interval(&fasta_filename, &contigs, &args.bg_region)?;
+    let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
     extract_bg_region(&mut fasta, &db_path, &region)?;
 
-    run_jellyfish(&db_path, &fasta_filename, &args.jellyfish, args.kmer_size, args.threads, contigs.genome_size())?;
+    run_jellyfish(&db_path, &ref_filename, &args.jellyfish, args.kmer_size, args.threads, contigs.genome_size())?;
     log::info!("Success!");
     Ok(())
 }

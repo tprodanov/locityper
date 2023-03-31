@@ -358,7 +358,8 @@ impl ReadAssignment {
     pub fn init_assignments<F>(&mut self, mut select_init: F) -> f64
     where F: FnMut(&[ReadWindows]) -> usize,
     {
-        self.try_init_assignments::<_, ()>(|windows| Ok(select_init(windows))).expect("Error is impossible")
+        // unwrap as select_init never returns Err.
+        self.try_init_assignments::<_, ()>(|windows| Ok(select_init(windows))).unwrap()
     }
 
     /// Sets current read assignments with the new ones.

@@ -110,7 +110,7 @@ fn write_dist<W: Write>(f: &mut W, inters: u32, size1: u32, size2: u32) -> io::R
 }
 
 /// Finds all matching positions between two sets.
-/// `positions*`: key = canonical k-mer, value =
+/// `positions*`: key = canonical k-mer, value = k-mer positions.
 fn find_kmer_matches(
         positions1: &IntMap<u64, Vec<u32>>,
         positions2: &IntMap<u64, Vec<u32>>,
