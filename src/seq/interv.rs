@@ -13,16 +13,16 @@ use super::{ContigId, ContigNames};
 /// many possible contig names: `[0-9A-Za-z!#$%&+./:;?@^_|~-][0-9A-Za-z!#$%&*+./:;=?@^_|~-]*`.
 ///
 /// However, here we provide a bit more limiting pattern for contig names.
-const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=^-]*";
+const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=@^-]*";
 
 /// Interval: `contig:start-end`.
 const INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9]+)-([0-9]+)$", CONTIG_PATTERN);
 
 /// Name of the interval (almost the same as `CONTIG_PATTERN`, but includes `:`).
-const NAME_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z:+._|~=^-]*";
+const NAME_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*";
 
 /// Optionally named interval: `contig:start-end[@name]`.
-const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9]+)-([0-9]+)(@{})?$", CONTIG_PATTERN, NAME_PATTERN);
+const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9]+)-([0-9]+)(={})?$", CONTIG_PATTERN, NAME_PATTERN);
 
 lazy_static! {
     static ref NAME_RE: Regex = Regex::new(formatcp!("^{}$", NAME_PATTERN)).unwrap();
@@ -124,6 +124,11 @@ impl Interval {
         (self.start + self.end) / 2
     }
 
+    /// Returns start and end of the interval.
+    pub fn range(&self) -> (u32, u32) {
+        (self.start, self.end)
+    }
+
     /// Get interval length.
     #[inline]
     pub fn len(&self) -> u32 {
@@ -172,6 +177,17 @@ impl Interval {
     pub fn bed_string(&self) -> String {
         format!("{}\t{}\t{}", self.contig_name(), self.start, self.end)
     }
+
+    /// Expand the interval by `left` and `right` bp to the left and to the right.
+    /// Limit new start to 0 and new end to the contig length.
+    pub fn expand(&self, left: u32, right: u32) -> Self {
+        Self {
+            contigs: Rc::clone(&self.contigs),
+            contig_id: self.contig_id,
+            start: self.start.saturating_sub(left),
+            end: min(self.end + right, self.contigs.get_len(self.contig_id)),
+        }
+    }
 }
 
 impl fmt::Debug for Interval {
@@ -211,6 +227,7 @@ impl PartialOrd for Interval {
 }
 
 /// Stores an interval with its name.
+#[derive(Clone)]
 pub struct NamedInterval {
     interval: Interval,
     /// Name of the interval, must satisfy the `NAME_PATTERN` regular expression.

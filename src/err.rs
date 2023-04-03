@@ -11,12 +11,15 @@ pub enum Error {
     Solver(&'static str, String),
     /// Error, produced by an argument parser.
     Lexopt(lexopt::Error),
+    /// rust_htslib error.
+    Htslib(htslib::errors::Error),
     /// Executable not found.
     NoExec(PathBuf),
     /// Subcommand failed.
     SubcommandFail(std::process::Output),
     InvalidInput(String),
     ParsingError(String),
+    RuntimeError(String),
 }
 
 impl From<io::Error> for Error {
@@ -35,6 +38,18 @@ impl From<grb::Error> for Error {
 impl From<lexopt::Error> for Error {
     fn from(e: lexopt::Error) -> Self {
         Self::Lexopt(e)
+    }
+}
+
+impl From<htslib::errors::Error> for Error {
+    fn from(e: htslib::errors::Error) -> Self {
+        Self::Htslib(e)
+    }
+}
+
+impl From<std::str::Utf8Error> for Error {
+    fn from(_: std::str::Utf8Error) -> Self {
+        Self::ParsingError("Failed to parse a string: not a valid UTF-8".to_string())
     }
 }
 

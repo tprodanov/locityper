@@ -1,6 +1,6 @@
 use std::{
-    io::{BufWriter, Write, BufReader, BufRead, stdin, stdout},
-    fs::File,
+    io::{self, BufWriter, Write, BufReader, BufRead, stdin, stdout},
+    fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
 };
@@ -57,4 +57,17 @@ pub(super) fn create_uncompressed(filename: &Path) -> Result<Box<dyn Write>, Err
     } else {
         Ok(Box::new(BufWriter::new(File::create(filename)?)))
     }
+}
+
+/// Finds all filenames with appropriate extension in the directory.
+pub fn find_filenames(dir: &Path, ext: &OsStr) -> io::Result<Vec<PathBuf>> {
+    let mut res = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file() && path.extension() == Some(ext) {
+            res.push(path);
+        }
+    }
+    Ok(res)
 }

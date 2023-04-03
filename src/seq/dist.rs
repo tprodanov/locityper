@@ -7,7 +7,7 @@ use nohash::IntMap;
 use bio::alignment::sparse::lcskpp;
 use super::{
     contigs::{ContigId, ContigNames},
-    kmers::{KmerCounts, canonical_kmers, N_KMER},
+    kmers::{KmerCounts, KmerCount, canonical_kmers, N_KMER},
 };
 
 struct ContigKmers<'a> {
@@ -24,7 +24,7 @@ struct ContigKmers<'a> {
 }
 
 impl<'a> ContigKmers<'a> {
-    fn new(contig_id: ContigId, seq: &'a [u8], kmer_counts: &'a KmerCounts, threshold: u8) -> Self {
+    fn new(contig_id: ContigId, seq: &'a [u8], kmer_counts: &'a KmerCounts, threshold: KmerCount) -> Self {
         let ref_occurances = kmer_counts.get(contig_id);
         let k: u8 = kmer_counts.k().try_into().unwrap();
         let canon_kmers = canonical_kmers(seq, k);
@@ -176,7 +176,7 @@ pub fn find_differences<W, I>(
     contigs: &ContigNames,
     ref_seqs: &[Vec<u8>],
     kmer_counts: &KmerCounts,
-    rare_threshold: u8,
+    rare_threshold: KmerCount,
     pairs: I,
 ) -> io::Result<()>
 where W: Write,

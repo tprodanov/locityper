@@ -21,7 +21,7 @@ impl ContigId {
         ContigId(val.try_into().expect("Contig ID too large"))
     }
 
-    /// Get `u32` value of the contig id.
+    /// Get `u16` value of the contig id.
     #[inline]
     pub fn get(self) -> u16 {
         self.0

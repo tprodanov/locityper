@@ -5,11 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 use bio::io::fasta::IndexedReader;
+use htslib::bcf::{self, Read as TbxRead};
 use colored::Colorize;
 use const_format::str_repeat;
 use crate::{
     Error,
-    seq::{Interval, NamedInterval, ContigNames},
+    seq::{Interval, NamedInterval, ContigNames, kmers::JfKmerGetter},
 };
 
 struct Args {
@@ -20,6 +21,7 @@ struct Args {
     loci: Vec<String>,
     bed_files: Vec<PathBuf>,
 
+    max_expansion: u32,
     jellyfish: PathBuf,
 }
 
@@ -33,6 +35,7 @@ impl Default for Args {
             loci: Vec::new(),
             bed_files: Vec::new(),
 
+            max_expansion: 2000,
             jellyfish: PathBuf::from("jellyfish"),
         }
     }
@@ -60,16 +63,16 @@ fn print_help() {
 
     println!("\n{}", "Complex loci coordinates:".bold());
     println!("    {:KEY$} {:VAL$}  Complex locus coordinates. Multiple loci are allowed.\n\
-        {EMPTY}  Format: 'chrom:start-end' or 'chrom:start-end@name',\n\
+        {EMPTY}  Format: 'chrom:start-end' or 'chrom:start-end=name',\n\
         {EMPTY}  where 'name' is the locus name (must be unique).",
         "-l, --locus".green(), "STR+".yellow());
     println!("    {:KEY$} {:VAL$}  BED file with complex loci coordinates. May be repeated multiple times.\n\
         {EMPTY}  If fourth column is present, it is used for the locus name (must be unique).",
         "-L, --loci-bed".green(), "FILE".yellow());
 
-    // println!("\n{}", "Optional parameters:".bold());
-    // println!("    {:KEY$} {:VAL$}  Extend loci boundaries by at most {} bp,\n\
-    //     {EMPTY}  in order to select the best ")
+    println!("\n{}", "Optional parameters:".bold());
+    println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
+        "-e, --expand".green(), "INT".yellow(), "INT".yellow(), defaults.max_expansion);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
@@ -95,6 +98,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.loci.extend(parser.values()?.map(ValueExt::string).collect::<Result<Vec<_>, _>>()?),
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
 
+            Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('j') | Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -152,22 +156,72 @@ fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) 
     Ok(intervals)
 }
 
-fn extract_locus<R>(contigs: &ContigNames, fasta: &mut IndexedReader<R>, locus: &NamedInterval) -> Result<(), Error>
+/// Expand input locus to the left and to the right, such that
+/// - Required: there are no bubbles on the boundary,
+/// - Optional: k-mers on the boundary are rare (do not appear in the Jellyfish output).
+fn expand_locus(
+    locus: &NamedInterval,
+    variants: &mut bcf::IndexedReader,
+    max_expansion: u32,
+) -> Result<NamedInterval, Error> {
+    // if max_expansion == 0 {
+    //     return Ok(locus.clone());
+    // }
+
+    // Best locus coordinates (start, end) would be within
+    // outer_start <= start <= inner_start  <  inner_end <= end <= outer_end.
+    let inner_interval = locus.interval();
+    let (inner_start, inner_end) = inner_interval.range();
+    let (outer_start, outer_end) = inner_interval.expand(max_expansion, max_expansion).range();
+
+    let contig_rid = variants.header().name2rid(inner_interval.contig_name().as_bytes())?;
+    variants.fetch(contig_rid, u64::from(outer_start), Some(u64::from(outer_end)))?;
+    let records: Vec<_> = variants.records().collect::<Result<_, _>>()?;
+    for record in records.iter() {
+
+    }
+
+    unimplemented!()
+}
+
+fn extract_locus<R>(
+    locus: &NamedInterval,
+    fasta: &mut IndexedReader<R>,
+    variants: &mut bcf::IndexedReader,
+    kmer_getter: &JfKmerGetter,
+    max_expansion: u32,
+) -> Result<(), Error>
 where R: Read + Seek,
 {
     log::info!("Analyzing locus {}", locus);
+    let locus_interv = locus.interval();
+    let (inner_start, inner_end) = inner_interval.range();
+    let (outer_start, outer_end) = inner_interval.expand(max_expansion, max_expansion).range();
+
     Ok(())
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = process_args(parse_args(argv)?)?;
-
-    // unwrap as args.reference was previously checked to be Some.
+    // unwrap as argsuments were previously checked to be Some.
+    let db_path = args.database.as_ref().unwrap();
     let ref_filename = args.reference.as_ref().unwrap();
+    let vcf_filename = args.variants.as_ref().unwrap();
+
     let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
+
+    let mut variants = bcf::IndexedReader::from_path(vcf_filename)?;
+    let mut jf_filenames = super::common::find_filenames(&db_path.join("jf"), "jf".as_ref())?;
+    if jf_filenames.len() != 1 {
+        return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
+            db_path.display(), jf_filenames.len())));
+    }
+    // unwrap, as we know that there is exactly one filename.
+    JfKmerGetter::new(args.jellyfish.clone(), jf_filenames.pop().unwrap())?;
+
     for locus in loci.iter() {
-        extract_locus(&contigs, &mut fasta, locus)?;
+        extract_locus(locus, &mut fasta, &mut variants)?;
     }
 
     Ok(())
