@@ -166,10 +166,7 @@ fn extract_bg_region<R: Read + Seek>(
     region: &Interval,
 ) -> Result<(), Error>
 {
-    fasta.fetch(region.contig_name(), u64::from(region.start()), u64::from(region.end()))?;
-    let mut seq = Vec::new();
-    fasta.read(&mut seq)?;
-    crate::seq::standardize(&mut seq);
+    let seq = region.fetch_seq(fasta)?;
 
     let mut bg_path = db_path.join("bg");
     fs::create_dir(&bg_path)?;
@@ -229,9 +226,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let ref_filename = args.reference.as_ref().unwrap();
     let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
     let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
-    extract_bg_region(&mut fasta, &db_path, &region)?;
 
+    extract_bg_region(&mut fasta, &db_path, &region)?;
     run_jellyfish(&db_path, &ref_filename, &args.jellyfish, args.kmer_size, args.threads, contigs.genome_size())?;
+    fs::create_dir(&db_path.join("loci"))?;
     log::info!("Success!");
     Ok(())
 }

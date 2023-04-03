@@ -13,7 +13,7 @@ use crate::{
         err_prof::ErrorProfile,
         ser::{JsonSer, LoadError},
     },
-    seq::{self, Interval},
+    seq::Interval,
 };
 
 /// Parameters for background distributions estimation.
@@ -69,10 +69,7 @@ impl BgDistr {
     {
         log::info!("Estimating background parameters");
         log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
-        fasta.fetch(interval.contig_name(), u64::from(interval.start()), u64::from(interval.end()))?;
-        let mut ref_seq = Vec::new();
-        fasta.read(&mut ref_seq)?;
-        seq::standardize(&mut ref_seq);
+        let ref_seq = interval.fetch_seq(fasta)?;
 
         let insert_sz = InsertNegBinom::estimate(records.iter());
         let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);

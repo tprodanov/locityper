@@ -6,7 +6,7 @@ use std::{
 };
 use crate::{
     Error,
-    seq::{Interval, ContigId, ContigNames},
+    seq::{ContigId, ContigNames},
 };
 
 /// Store k-mer counts as u16.
@@ -132,6 +132,7 @@ impl JfKmerGetter {
             .and_then(|s| s.parse().ok())
             .ok_or_else(||
                 Error::ParsingError(format!("Cannot parse jellyfish database filename '{}'", jf_db.display())))?;
+        assert!(k % 2 == 1, "k-mer size ({}) must be odd!", k);
         Ok(Self { jf_exe, jf_db, k })
     }
 
@@ -142,9 +143,11 @@ impl JfKmerGetter {
 
     /// Returns all k-mers in the sequence.
     pub fn fetch(&self, seq: &[u8]) -> Result<Vec<KmerCount>, Error> {
-        let mut child = Command::new(&self.jf_exe)
+        let child = Command::new(&self.jf_exe)
             .stdin(Stdio::piped())
-            .args(&["query", "-s", "-"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(&["query", "-s", "/dev/stdin"])
             .arg(&self.jf_db)
             .spawn()?;
 
@@ -163,12 +166,16 @@ impl JfKmerGetter {
         let exp_size = (seq.len() + 1).saturating_sub(self.k as usize);
         let mut counts: Vec<KmerCount> = Vec::with_capacity(exp_size);
         for line in jf_out.split('\n') {
+            if line.is_empty() {
+                break;
+            }
             let count = line.split_once(' ')
                 .map(|tup| tup.1)
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(||
                     Error::ParsingError(format!("Failed to parse Jellyfish output line '{}'", line)))?;
-            counts.push(count);
+            // Assume that each k-mer appears at least 1.
+            counts.push(max(count, 1));
         }
 
         if counts.len() != exp_size {

@@ -62,3 +62,23 @@ pub fn write_fasta<W: Write>(f: &mut W, name: &[u8], seq: &[u8]) -> io::Result<(
     }
     Ok(())
 }
+
+/// Finds runs of Ns in the sequence and returns pairs (start, end).
+pub fn n_runs(seq: &[u8]) -> Vec<(u32, u32)> {
+    let mut start = 0;
+    let mut n_run = false;
+    let mut runs = Vec::new();
+    for (i, &nt) in seq.iter().enumerate() {
+        if nt == b'N' && !n_run {
+            start = i as u32;
+            n_run = true;
+        } else if nt != b'N' && n_run {
+            runs.push((start, i as u32));
+            n_run = false;
+        }
+    }
+    if n_run {
+        runs.push((start, seq.len() as u32));
+    }
+    runs
+}

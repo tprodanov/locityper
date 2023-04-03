@@ -1,16 +1,28 @@
 use std::{
+    cmp::max,
     io::{BufRead, Read, Seek},
     rc::Rc,
     collections::HashSet,
     path::{Path, PathBuf},
 };
-use bio::io::fasta::IndexedReader;
-use htslib::bcf::{self, Read as TbxRead};
+use bio::io::fasta;
+use htslib::bcf::{
+    self,
+    Read as VcfRead,
+    record::Record as VcfRecord,
+};
 use colored::Colorize;
 use const_format::str_repeat;
 use crate::{
     Error,
-    seq::{Interval, NamedInterval, ContigNames, kmers::JfKmerGetter},
+    algo::{
+        bisect,
+        vec_ext::{VecExt, IterExt},
+    },
+    seq::{
+        self, Interval, NamedInterval, ContigNames,
+        kmers::{KmerCount, JfKmerGetter},
+    },
 };
 
 struct Args {
@@ -22,6 +34,7 @@ struct Args {
     bed_files: Vec<PathBuf>,
 
     max_expansion: u32,
+    moving_window: u32,
     jellyfish: PathBuf,
 }
 
@@ -36,6 +49,7 @@ impl Default for Args {
             bed_files: Vec::new(),
 
             max_expansion: 2000,
+            moving_window: 100,
             jellyfish: PathBuf::from("jellyfish"),
         }
     }
@@ -73,6 +87,9 @@ fn print_help() {
     println!("\n{}", "Optional parameters:".bold());
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
         "-e, --expand".green(), "INT".yellow(), "INT".yellow(), defaults.max_expansion);
+    println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
+        {EMPTY}  moving windows of size {} bp [{}].",
+        "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.moving_window);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
@@ -99,6 +116,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
 
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
+            Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
             Short('j') | Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -129,6 +147,8 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
         Err(lexopt::Error::from("Complex loci are not provided (see -l/--locus and -L/--loci-bed)"))?;
     }
     args.jellyfish = super::find_exe(args.jellyfish)?;
+    // Make window size odd.
+    args.moving_window += 1 - args.moving_window % 2;
     Ok(args)
 }
 
@@ -156,72 +176,154 @@ fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) 
     Ok(intervals)
 }
 
-/// Expand input locus to the left and to the right, such that
-/// - Required: there are no bubbles on the boundary,
-/// - Optional: k-mers on the boundary are rare (do not appear in the Jellyfish output).
-fn expand_locus(
-    locus: &NamedInterval,
-    variants: &mut bcf::IndexedReader,
-    max_expansion: u32,
-) -> Result<NamedInterval, Error> {
-    // if max_expansion == 0 {
-    //     return Ok(locus.clone());
-    // }
+#[derive(Debug, Clone, Copy)]
+enum Side { Left, Right }
 
-    // Best locus coordinates (start, end) would be within
-    // outer_start <= start <= inner_start  <  inner_end <= end <= outer_end.
-    let inner_interval = locus.interval();
-    let (inner_start, inner_end) = inner_interval.range();
-    let (outer_start, outer_end) = inner_interval.expand(max_expansion, max_expansion).range();
+/// Find possible islands, where
+/// - the variation graph contains no bubbles,
+/// - reference sequence contains no Ns,
+/// - and where the average k-mer frequency is smallest.
+///
+/// Returns best position, if found.
+fn find_best_boundary(
+    side: Side,
+    outer_start: u32,
+    mov_window: u32,
+    seq: &[u8],
+    vars: &[VcfRecord],
+    kmer_getter: &JfKmerGetter,
+) -> Result<Option<u32>, Error>
+{
+    let halfw = mov_window / 2;
+    let outer_end = outer_start + seq.len() as u32;
+    // New position can only be selected between `start` and `end`, where k-mer counts will be defined.
+    let start = outer_start + halfw;
+    let end = outer_end - halfw;
+    log::debug!("Find possible islands {}-{} ({} bp),   window {}", outer_start, outer_end, outer_end - outer_start, mov_window);
+    log::debug!("                      {}-{} ({} bp)", start, end, end - start);
+    let mut levels = vec![(start, end, 1)];
 
-    let contig_rid = variants.header().name2rid(inner_interval.contig_name().as_bytes())?;
-    variants.fetch(contig_rid, u64::from(outer_start), Some(u64::from(outer_end)))?;
-    let records: Vec<_> = variants.records().collect::<Result<_, _>>()?;
-    for record in records.iter() {
-
+    /// Skip 20 bp around variants.
+    const VAR_MARGIN: u32 = 20;
+    log::debug!("    {} variants:", vars.len());
+    for var in vars.iter() {
+        log::debug!("        Variant {}-{}", var.pos(), var.end());
+        levels.push(((var.pos() as u32).saturating_sub(VAR_MARGIN), var.end() as u32 + VAR_MARGIN, -1));
+    }
+    for (run_start, run_end) in seq::n_runs(seq) {
+        log::debug!("        N-run   {}-{}", outer_start + run_start, outer_start + run_end);
+        levels.push((outer_start + run_start, outer_start + run_end, -1));
+    }
+    // Find regions with depth == 1:
+    // +1 when inside the region, -1 when there is a bubble, -1 when there is an N run.
+    let islands = seq::interv::split_disjoint(&levels, |depth| depth == 1);
+    if islands.is_empty() {
+        return Ok(None);
     }
 
-    unimplemented!()
+    let k = kmer_getter.k();
+    let kmer_counts: Vec<f64> = kmer_getter.fetch(&seq)?.into_iter().map(f64::from).collect();
+    let divisor = f64::from(mov_window + 1 - k);
+    // Average k-mer counts for each window of size `mov_window` over k-mers of size `k`.
+    // Only defined for indices between `start` and `end`.
+    let aver_kmer_freqs: Vec<f64> = VecExt::moving_window_sums(&kmer_counts, (mov_window + 1 - k) as usize)
+        .into_iter().map(|count| count / divisor).collect();
+    debug_assert_eq!(aver_kmer_freqs.len() as u32, end - start);
+
+    let mut best_pos = 0;
+    let mut best_sum = f64::INFINITY;
+    log::debug!("{} islands", islands.len());
+    let islands_iter: Box<dyn Iterator<Item = _>> = match side {
+        Side::Left => Box::new(islands.iter().rev()),
+        Side::Right => Box::new(islands.iter()),
+    };
+    for (isl_start, isl_end, _) in islands_iter {
+        let (i, s) = match side {
+            Side::Left => IterExt::argmin(
+                aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize].iter().rev().cloned()),
+            Side::Right => IterExt::argmin(
+                aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize].iter().cloned()),
+        };
+        log::debug!("    Island {}-{} ({} bp)    {:?}", isl_start, isl_end, isl_end - isl_start,
+            &aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize]);
+        let pos = match side {
+            Side::Left => isl_end - 1 - i as u32,
+            Side::Right => isl_start + i as u32,
+        };
+        log::debug!("    pos = {},  s = {:.4}", pos, s);
+        if s == 1.0 {
+            // Better frequency is not achievable.
+            return Ok(Some(pos));
+        } else if s < best_sum {
+            best_sum = s;
+            best_pos = pos;
+        }
+    }
+    Ok(Some(best_pos))
 }
 
-fn extract_locus<R>(
+/// Add `locus` to the database.
+fn add_locus<R>(
     locus: &NamedInterval,
-    fasta: &mut IndexedReader<R>,
-    variants: &mut bcf::IndexedReader,
+    fasta_file: &mut fasta::IndexedReader<R>,
+    vcf_file: &mut bcf::IndexedReader,
     kmer_getter: &JfKmerGetter,
     max_expansion: u32,
+    mov_window: u32,
 ) -> Result<(), Error>
 where R: Read + Seek,
 {
     log::info!("Analyzing locus {}", locus);
-    let locus_interv = locus.interval();
-    let (inner_start, inner_end) = inner_interval.range();
-    let (outer_start, outer_end) = inner_interval.expand(max_expansion, max_expansion).range();
+    let inner_interv = locus.interval();
+    // Add extra half-window to each sides.
+    let halfw = mov_window / 2;
+    let outer_interv = inner_interv.expand(max_expansion + halfw, max_expansion + halfw);
+    let outer_seq = outer_interv.fetch_seq(fasta_file)?;
+
+    let vcf_rid = vcf_file.header().name2rid(outer_interv.contig_name().as_bytes())?;
+    vcf_file.fetch(vcf_rid, u64::from(outer_interv.start()), Some(u64::from(outer_interv.end())))?;
+    let vcf_recs: Vec<_> = vcf_file.records().collect::<Result<_, _>>()?;
+
+    // Best locus coordinates (start, end) would be within
+    // outer_start + halfw <= start <= inner_start  <  inner_end <= end <= outer_end - halfw.
+    let (inner_start, inner_end) = inner_interv.range();
+    let (outer_start, outer_end) = outer_interv.range();
+    let left_var_ix = bisect::right_by(&vcf_recs, |var| var.pos().cmp(&i64::from(inner_start)));
+    // Extending locus to the left.
+    // TODO: Check if outer_start + halfw <= inner_start.
+    find_best_boundary(
+        Side::Left, outer_start, mov_window,
+        // Reference sequence outer_start..inner_start + halfw.
+        &outer_seq[..(halfw + inner_start - outer_start) as usize],
+        &vcf_recs[..left_var_ix],
+        kmer_getter,
+    )?;
 
     Ok(())
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let args = process_args(parse_args(argv)?)?;
+    let mut args = process_args(parse_args(argv)?)?;
     // unwrap as argsuments were previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
     let ref_filename = args.reference.as_ref().unwrap();
     let vcf_filename = args.variants.as_ref().unwrap();
 
-    let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
+    let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
-    let mut variants = bcf::IndexedReader::from_path(vcf_filename)?;
+    let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
     let mut jf_filenames = super::common::find_filenames(&db_path.join("jf"), "jf".as_ref())?;
     if jf_filenames.len() != 1 {
         return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
             db_path.display(), jf_filenames.len())));
     }
     // unwrap, as we know that there is exactly one filename.
-    JfKmerGetter::new(args.jellyfish.clone(), jf_filenames.pop().unwrap())?;
+    let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_filenames.pop().unwrap())?;
+    args.moving_window = max(kmer_getter.k(), args.moving_window);
 
     for locus in loci.iter() {
-        extract_locus(locus, &mut fasta, &mut variants)?;
+        add_locus(locus, &mut fasta_file, &mut vcf_file, &kmer_getter, args.max_expansion, args.moving_window)?;
     }
 
     Ok(())

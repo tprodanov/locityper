@@ -1,11 +1,13 @@
 use std::{
     fmt,
+    io::{self, Read, Seek},
     rc::Rc,
     cmp::{min, max, Ordering},
 };
 use regex::Regex;
 use lazy_static::lazy_static;
 use const_format::formatcp;
+use bio::io::fasta;
 use crate::Error;
 use super::{ContigId, ContigNames};
 
@@ -188,6 +190,15 @@ impl Interval {
             end: min(self.end + right, self.contigs.get_len(self.contig_id)),
         }
     }
+
+    /// Fetches sequence of the interval from an indexed fasta reader.
+    pub fn fetch_seq<R: Read + Seek>(&self, fasta: &mut fasta::IndexedReader<R>) -> io::Result<Vec<u8>> {
+        fasta.fetch(self.contig_name(), u64::from(self.start), u64::from(self.end))?;
+        let mut seq = Vec::with_capacity(self.len() as usize);
+        fasta.read(&mut seq)?;
+        crate::seq::standardize(&mut seq);
+        Ok(seq)
+    }
 }
 
 impl fmt::Debug for Interval {
@@ -304,4 +315,46 @@ impl fmt::Display for NamedInterval {
             fmt::Display::fmt(&self.interval, f)
         }
     }
+}
+
+/// Split intervals (start, end, depth) into disjoint intervals with fixed depth.
+/// Depth is summed for overlapping intervals.
+/// Only output intervals for which `keep(depth)` is true.
+pub(crate) fn split_disjoint<P>(intervals: &[(u32, u32, i32)], mut keep: P) -> Vec<(u32, u32, i32)>
+where P: FnMut(i32) -> bool,
+{
+    let mut res = Vec::new();
+    if intervals.len() == 0 {
+        return res;
+    }
+    let mut endpoints = Vec::with_capacity(intervals.len() * 2);
+    // Starts of interval: positive depth.
+    endpoints.extend(intervals.iter().map(|(start, _end, depth)| (*start, *depth)));
+    // Ends of interval: negative depth.
+    endpoints.extend(intervals.iter().map(|(_start, end, depth)| (*end, -depth)));
+    endpoints.sort_unstable();
+
+    let mut curr_start = endpoints[0].0;
+    let mut pushed_end = curr_start;
+    let mut curr_depth = 0;
+    let mut pushed_depth = 0;
+
+    for (curr_end, depth) in endpoints {
+        // Add interval (curr_start, curr_end, curr_depth), if needed.
+        // and then update curr_depth += depth.
+        if curr_start < curr_end && keep(curr_depth) {
+            if pushed_end == curr_start && pushed_depth == curr_depth {
+                res.last_mut().unwrap().1 = curr_end;
+            } else {
+                res.push((curr_start, curr_end, curr_depth));
+                pushed_depth = curr_depth;
+            }
+            pushed_end = curr_end;
+        }
+        curr_depth += depth;
+        curr_start = curr_end;
+    }
+    // No need to do anything after the last endpoint.
+    debug_assert_eq!(curr_depth, 0);
+    res
 }
