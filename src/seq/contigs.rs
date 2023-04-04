@@ -157,13 +157,13 @@ impl ContigNames {
     }
 
     /// Returns iterator over all contig names.
-    pub fn names(&self) -> std::slice::Iter<'_, String> {
-        self.names.iter()
+    pub fn names(&self) -> &[String] {
+        &self.names
     }
 
     /// Returns iterator over all contig lengths.
-    pub fn lengths(&self) -> std::iter::Cloned<std::slice::Iter<'_, u32>> {
-        self.lengths.iter().cloned()
+    pub fn lengths(&self) -> &[u32] {
+        &self.lengths
     }
 
     /// Returns true if the interval is in bounds for its contig (interval end does not exceed contig length).
@@ -173,7 +173,7 @@ impl ContigNames {
 
     /// Returns sum length of all contigs.
     pub fn genome_size(&self) -> u64 {
-        self.lengths().map(u64::from).sum()
+        self.lengths.iter().cloned().map(u64::from).sum()
     }
 }
 

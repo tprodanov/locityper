@@ -1,8 +1,9 @@
 use std::{
     cmp::{min, max},
-    io::{BufRead, Read, Seek, Write},
-    fs,
+    io::{BufRead, Read, Seek, Write, BufWriter},
+    fs::File,
     rc::Rc,
+    process::Command,
     collections::HashSet,
     path::{Path, PathBuf},
 };
@@ -22,7 +23,7 @@ use crate::{
     },
     seq::{
         self, NamedInterval, ContigNames,
-        kmers::{JfKmerGetter, KmerCounts},
+        kmers::JfKmerGetter,
     },
 };
 
@@ -251,7 +252,7 @@ fn find_best_boundary(
         return Ok(None);
     }
 
-    let kmer_counts: Vec<f64> = kmer_getter.fetch_one(&seq)?.into_iter().map(f64::from).collect();
+    let kmer_counts: Vec<f64> = kmer_getter.fetch(&seq)?.into_iter().map(f64::from).collect();
     let divisor = f64::from(mov_window + 1 - k);
     // Average k-mer counts for each window of size `mov_window` over k-mers of size `k`.
     // Only defined for indices between `start` and `end`.
@@ -275,7 +276,13 @@ fn write_locus(
     kmer_getter: &JfKmerGetter,
 ) -> Result<(), Error>
 {
-    let mut fasta_out = super::common::create_gzip(&locus_dir.join("haplotypes.fasta.gz"))?;
+    let mut bed_out = File::create(locus_dir.join("ref.bed"))?;
+    bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
+    bed_out.sync_all()?;
+    std::mem::drop(bed_out);
+
+    let fasta_filename = locus_dir.join("haplotypes.fasta");
+    let mut fasta_out = File::create(&fasta_filename).map(BufWriter::new)?;
     for (name, seq) in seqs.iter() {
         let descr = match &ref_name {
             Some(ref_name) if ref_name == name => Some(locus.interval().to_string()),
@@ -286,15 +293,16 @@ fn write_locus(
     fasta_out.flush()?;
     std::mem::drop(fasta_out);
 
-    let mut bed_out = fs::File::create(locus_dir.join("ref.bed"))?;
-    bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
-    bed_out.sync_all()?;
-    std::mem::drop(bed_out);
-
-    log::info!("Counting k-mers");
-    let kmer_counts = KmerCounts::create(seqs.iter().map(|(_name, seq)| &seq as &[u8]), kmer_getter)?;
+    log::debug!("    Counting k-mers for {}", locus);
+    let contig_lengths: Vec<_> = seqs.iter().map(|(_name, seq)| seq.len() as u32).collect();
+    let kmer_counts = kmer_getter.fetch_fasta(&fasta_filename, &contig_lengths)?;
     let mut kmers_out = super::common::create_gzip(&locus_dir.join("kmers.gz"))?;
     kmer_counts.save(&mut kmers_out)?;
+
+    let gzip_output = Command::new("gzip").arg("--force").arg(&fasta_filename).output()?;
+    if !gzip_output.status.success() {
+        return Err(Error::SubcommandFail(gzip_output));
+    }
     Ok(())
 }
 
