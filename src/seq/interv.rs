@@ -295,6 +295,14 @@ impl NamedInterval {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Creates a new interval with updated start and end.
+    /// Name remains the same if it was set explicitely, otherwise it is created from the new interval positions.
+    pub fn with_new_range(&self, new_start: u32, new_end: u32) -> Self {
+        let new_interval = Interval::new(
+            Rc::clone(self.interval.contigs()), self.interval.contig_id(), new_start, new_end);
+        Self::new(new_interval, if self.explicit_name { Some(&self.name) } else { None }).unwrap()
+    }
 }
 
 impl fmt::Debug for NamedInterval {

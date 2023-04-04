@@ -1,6 +1,6 @@
 use std::{
     fmt::Write,
-    ops::{Add, AddAssign, Sub},
+    ops::{Add, Sub},
 };
 
 /// Static methods extending slices.
@@ -154,33 +154,35 @@ impl IterExt {
         F64Ext::quantile_sorted(&v, q)
     }
 
-    /// Finds the index of the minimal value in the iterator and the value itself.
-    /// Panics on an empty iterator (or full of NANs).
-    pub fn argmin(it: impl Iterator<Item = f64>) -> (usize, f64) {
-        let mut k = usize::MAX;
-        let mut m = f64::INFINITY;
-        for (i, v) in it.enumerate() {
-            if v < m {
-                k = i;
-                m = v;
+    /// Finds an index of an optimal value `opt`, according `is_better`.
+    /// Unless stochastic, `is_better` will return `is_better(opt, e)` for all other `e` in the iterator.
+    pub fn arg_optimal<T, I, F>(mut it: I, is_better: F) -> (usize, T)
+    where T: Copy,
+          I: Iterator<Item = T>,
+          F: Fn(T, T) -> bool,
+    {
+        let mut k = 0;
+        let mut opt = it.next().expect("arg_best: empty iterator!");
+        for (i, e) in it.enumerate() {
+            if is_better(e, opt) {
+                k = i + 1;
+                opt = e;
             }
         }
-        assert_ne!(k, usize::MAX, "argmin: empty iterator or all values are NAN!");
-        (k, m)
+        (k, opt)
     }
 
-    /// Finds the index of the maximal value in the iterator and the value itself.
-    /// Panics on an empty iterator (or full of NANs).
+    /// Finds an index of the minimal value in the iterator and the value itself.
+    /// If the minimal value appears several times, returns the index of the first value.
+    /// Panics on an empty iterator.
+    pub fn argmin(it: impl Iterator<Item = f64>) -> (usize, f64) {
+        Self::arg_optimal(it, |opt, e| opt < e)
+    }
+
+    /// Finds an index of the maximal value in the iterator and the value itself.
+    /// If the maximal value appears several times, returns the index of the first value.
+    /// Panics on an empty iterator.
     pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
-        let mut k = usize::MAX;
-        let mut m = f64::NEG_INFINITY;
-        for (i, v) in it.enumerate() {
-            if v > m {
-                k = i;
-                m = v;
-            }
-        }
-        assert_ne!(k, usize::MAX, "argmax: empty iterator or all values are NAN!");
-        (k, m)
+        Self::arg_optimal(it, |opt, e| opt > e)
     }
 }

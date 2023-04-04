@@ -17,7 +17,7 @@ use crate::{
     Error,
     algo::{
         bisect,
-        vec_ext::{VecExt, IterExt},
+        vec_ext::{VecExt, F64Ext, IterExt},
     },
     seq::{
         self, Interval, NamedInterval, ContigNames,
@@ -176,52 +176,74 @@ fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) 
     Ok(intervals)
 }
 
+/// Best position (across equals) is Minimal/Maximal.
 #[derive(Debug, Clone, Copy)]
-enum Side { Left, Right }
+enum PosLoc { Min, Max }
+
+/// Across the islands `(start, end)`, finds the position with the smallest `aver_kmer_freq` value.
+/// If there are several optimal position, returns
+fn find_optimal_pos<I>(pos_loc: PosLoc, start: u32, aver_kmer_freqs: &[f64], islands: I) -> u32
+where I: Iterator<Item = (u32, u32)>,
+{
+    let mut best_pos = 0;
+    let mut best_freq = f64::INFINITY;
+    for (isl_start, isl_end) in islands {
+        let subvec = &aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize];
+        let (i, s) = match pos_loc {
+            PosLoc::Min => F64Ext::argmin(subvec),
+            // Finds last argmin.
+            PosLoc::Max => IterExt::arg_optimal(subvec.iter().cloned(), |opt, e| opt <= e),
+        };
+        if s <= 1.0 {
+            // Best frequency is already achieved.
+            return isl_start + i as u32;
+        } else if s < best_freq {
+            best_freq = s;
+            best_pos = isl_start + i as u32;
+        }
+    }
+    best_pos
+}
 
 /// Find possible islands, where
 /// - the variation graph contains no bubbles,
 /// - reference sequence contains no Ns,
-/// - and where the average k-mer frequency is smallest.
+/// - average k-mer frequency is the smallest,
+/// - position is closest to the boundary.
 ///
 /// Returns best position, if found.
 fn find_best_boundary(
-    side: Side,
-    outer_start: u32,
+    pos_loc: PosLoc,
     mov_window: u32,
+    seq_shift: u32,
     seq: &[u8],
     vars: &[VcfRecord],
     kmer_getter: &JfKmerGetter,
 ) -> Result<Option<u32>, Error>
 {
     let halfw = mov_window / 2;
-    let outer_end = outer_start + seq.len() as u32;
     // New position can only be selected between `start` and `end`, where k-mer counts will be defined.
-    let start = outer_start + halfw;
-    let end = outer_end - halfw;
-    log::debug!("Find possible islands {}-{} ({} bp),   window {}", outer_start, outer_end, outer_end - outer_start, mov_window);
-    log::debug!("                      {}-{} ({} bp)", start, end, end - start);
-    let mut levels = vec![(start, end, 1)];
+    let start = seq_shift + halfw;
+    let end = seq_shift + seq.len() as u32 - halfw;
 
     /// Skip 20 bp around variants.
     const VAR_MARGIN: u32 = 20;
-    log::debug!("    {} variants:", vars.len());
-    for var in vars.iter() {
-        log::debug!("        Variant {}-{}", var.pos(), var.end());
-        levels.push(((var.pos() as u32).saturating_sub(VAR_MARGIN), var.end() as u32 + VAR_MARGIN, -1));
-    }
-    for (run_start, run_end) in seq::n_runs(seq) {
-        log::debug!("        N-run   {}-{}", outer_start + run_start, outer_start + run_end);
-        levels.push((outer_start + run_start, outer_start + run_end, -1));
-    }
-    // Find regions with depth == 1:
-    // +1 when inside the region, -1 when there is a bubble, -1 when there is an N run.
+    let k = kmer_getter.k();
+    let nrun_margin = max(VAR_MARGIN, k);
+    let nruns = seq::n_runs(seq);
+
+    let mut levels = Vec::with_capacity(1 + vars.len() + nruns.len());
+    levels.push((start, end, 1));
+    levels.extend(vars.iter().map(|var|
+        ((var.pos() as u32).saturating_sub(VAR_MARGIN), var.end() as u32 + VAR_MARGIN, -1)));
+    levels.extend(nruns.into_iter().map(|(run_start, run_end)|
+        ((seq_shift + run_start).saturating_sub(nrun_margin), seq_shift + run_end + nrun_margin, -1)));
+    // Find regions with depth == 1: +1 when inside the region, -1 when there is a bubble, -1 when there is an N run.
     let islands = seq::interv::split_disjoint(&levels, |depth| depth == 1);
     if islands.is_empty() {
         return Ok(None);
     }
 
-    let k = kmer_getter.k();
     let kmer_counts: Vec<f64> = kmer_getter.fetch(&seq)?.into_iter().map(f64::from).collect();
     let divisor = f64::from(mov_window + 1 - k);
     // Average k-mer counts for each window of size `mov_window` over k-mers of size `k`.
@@ -230,36 +252,12 @@ fn find_best_boundary(
         .into_iter().map(|count| count / divisor).collect();
     debug_assert_eq!(aver_kmer_freqs.len() as u32, end - start);
 
-    let mut best_pos = 0;
-    let mut best_sum = f64::INFINITY;
-    log::debug!("{} islands", islands.len());
-    let islands_iter: Box<dyn Iterator<Item = _>> = match side {
-        Side::Left => Box::new(islands.iter().rev()),
-        Side::Right => Box::new(islands.iter()),
-    };
-    for (isl_start, isl_end, _) in islands_iter {
-        let (i, s) = match side {
-            Side::Left => IterExt::argmin(
-                aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize].iter().rev().cloned()),
-            Side::Right => IterExt::argmin(
-                aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize].iter().cloned()),
-        };
-        log::debug!("    Island {}-{} ({} bp)    {:?}", isl_start, isl_end, isl_end - isl_start,
-            &aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize]);
-        let pos = match side {
-            Side::Left => isl_end - 1 - i as u32,
-            Side::Right => isl_start + i as u32,
-        };
-        log::debug!("    pos = {},  s = {:.4}", pos, s);
-        if s == 1.0 {
-            // Better frequency is not achievable.
-            return Ok(Some(pos));
-        } else if s < best_sum {
-            best_sum = s;
-            best_pos = pos;
-        }
-    }
-    Ok(Some(best_pos))
+    // Find position with the smallest average frequency and closest to the boundary.
+    let islands_iter = islands.iter().map(|(isl_start, isl_end, _)| (*isl_start, *isl_end));
+    Ok(Some(match pos_loc {
+        PosLoc::Min => find_optimal_pos(pos_loc, start, &aver_kmer_freqs, islands_iter),
+        PosLoc::Max => find_optimal_pos(pos_loc, start, &aver_kmer_freqs, islands_iter.rev()),
+    }))
 }
 
 /// Add `locus` to the database.
@@ -270,7 +268,7 @@ fn add_locus<R>(
     kmer_getter: &JfKmerGetter,
     max_expansion: u32,
     mov_window: u32,
-) -> Result<(), Error>
+) -> Result<bool, Error>
 where R: Read + Seek,
 {
     log::info!("Analyzing locus {}", locus);
@@ -287,19 +285,42 @@ where R: Read + Seek,
     // Best locus coordinates (start, end) would be within
     // outer_start + halfw <= start <= inner_start  <  inner_end <= end <= outer_end - halfw.
     let (inner_start, inner_end) = inner_interv.range();
-    let (outer_start, outer_end) = outer_interv.range();
-    let left_var_ix = bisect::right_by(&vcf_recs, |var| var.pos().cmp(&i64::from(inner_start)));
-    // Extending locus to the left.
-    // TODO: Check if outer_start + halfw <= inner_start.
-    find_best_boundary(
-        Side::Left, outer_start, mov_window,
-        // Reference sequence outer_start..inner_start + halfw.
-        &outer_seq[..(halfw + inner_start - outer_start) as usize],
-        &vcf_recs[..left_var_ix],
-        kmer_getter,
-    )?;
+    let left_var_ix = bisect::right_by(&vcf_recs, |var| var.pos().cmp(&i64::from(inner_start + 1)));
+    let right_var_ix = bisect::left_by(&vcf_recs, |var| var.end().cmp(&i64::from(inner_end)));
 
-    Ok(())
+    // Extend region to the left.
+    let outer_start = outer_interv.start();
+    let new_start = match find_best_boundary(PosLoc::Max, mov_window, outer_start,
+            &outer_seq[..(halfw + inner_start + 1 - outer_start) as usize], &vcf_recs[..left_var_ix], kmer_getter)? {
+        Some(pos) => pos,
+        None => {
+            log::error!("Cannot extend locus {} to the left.\n    \
+                Try increasing -e/--extend parameter or manually modifying region boundaries.", locus);
+            return Ok(false);
+        }
+    };
+
+    // Extend region to the right.
+    let right_shift = inner_end - halfw - 1;
+    let new_end = match find_best_boundary(PosLoc::Min, mov_window, right_shift,
+            &outer_seq[(right_shift - outer_start) as usize..], &vcf_recs[right_var_ix..], kmer_getter)? {
+        Some(pos) => pos + 1,
+        None => {
+            log::error!("Cannot extend locus {} to the right.\n    \
+                Try increasing -e/--extend parameter or manually modifying region boundaries.", locus);
+            return Ok(false);
+        }
+    };
+    let new_locus;
+    if new_start != inner_start || new_end != inner_end {
+        new_locus = locus.with_new_range(new_start, new_end);
+        log::info!("    Extended locus {} by {} bp left and {} bp right. New locus: {}",
+            locus, inner_start - new_start, new_end - inner_end, new_locus.interval());
+    } else {
+        new_locus = locus.clone();
+    }
+
+    Ok(true)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
