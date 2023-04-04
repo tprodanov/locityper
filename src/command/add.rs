@@ -1,5 +1,5 @@
 use std::{
-    cmp::{min, max},
+    cmp::max,
     io::{BufRead, Read, Seek, Write, BufWriter},
     fs::File,
     rc::Rc,
@@ -281,7 +281,7 @@ fn write_locus(
     bed_out.sync_all()?;
     std::mem::drop(bed_out);
 
-    let fasta_filename = locus_dir.join("haplotypes.fasta");
+    let fasta_filename = locus_dir.join("haplotypes.fa");
     let mut fasta_out = File::create(&fasta_filename).map(BufWriter::new)?;
     for (name, seq) in seqs.iter() {
         let descr = match &ref_name {
@@ -353,7 +353,7 @@ where R: Read + Seek,
         Some(pos) => pos + 1,
         None => {
             log::error!("Cannot extend locus {} to the right.\n    \
-                Try increasing -e/--extend parameter or manually modifying region boundaries.", locus);
+                Try increasing -e/--extend parameter or manually modify region boundaries.", locus);
             return Ok(false);
         }
     };
@@ -372,7 +372,7 @@ where R: Read + Seek,
     }
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
-        vcf_file.header(), &vcf_recs[left_var_ix.saturating_sub(1)..min(right_var_ix + 1, vcf_recs.len())])?;
+        vcf_file.header(), &vcf_recs)?;
     // TODO: Check on Ns within sequences + filter very similar sequences.
     write_locus(&dir, &new_locus, &args.ref_name, &seqs, kmer_getter)?;
     Ok(true)

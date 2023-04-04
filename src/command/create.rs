@@ -159,7 +159,7 @@ fn select_bg_interval(
 }
 
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
-/// The sequence is then written to the `$bg_path/bg.fasta.gz`.
+/// The sequence is then written to the `$bg_path/bg.fa.gz`.
 fn extract_bg_region<R: Read + Seek>(
     fasta: &mut IndexedReader<R>,
     db_path: &Path,
@@ -169,7 +169,7 @@ fn extract_bg_region<R: Read + Seek>(
     let seq = region.fetch_seq(fasta)?;
     let mut bg_path = db_path.join("bg");
     fs::create_dir(&bg_path)?;
-    bg_path.push("bg.fasta.gz");
+    bg_path.push("bg.fa.gz");
     log::info!("Writing background region {} to '{}'", region, bg_path.display());
     let mut fasta_writer = super::common::create_gzip(&bg_path)?;
     crate::seq::write_fasta(&mut fasta_writer, "bg", Some(&region.to_string()), &seq)?;
