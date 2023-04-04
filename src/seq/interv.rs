@@ -176,8 +176,8 @@ impl Interval {
     // }
 
     /// Convert interval into bed string (tab separator, 0-indexing).
-    pub fn bed_string(&self) -> String {
-        format!("{}\t{}\t{}", self.contig_name(), self.start, self.end)
+    pub fn bed_fmt<'a>(&'a self) -> BedFormat<'a> {
+        BedFormat(self)
     }
 
     /// Expand the interval by `left` and `right` bp to the left and to the right.
@@ -234,6 +234,15 @@ impl PartialOrd for Interval {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[doc(hidden)]
+pub struct BedFormat<'a>(&'a Interval);
+
+impl<'a> fmt::Display for BedFormat<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}\t{}\t{}", self.0.contig_name(), self.0.start, self.0.end)
     }
 }
 

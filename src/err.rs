@@ -18,6 +18,7 @@ pub enum Error {
     /// Subcommand failed.
     SubcommandFail(std::process::Output),
     InvalidInput(String),
+    InvalidData(String),
     ParsingError(String),
     RuntimeError(String),
 }

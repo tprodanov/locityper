@@ -4,6 +4,7 @@ pub mod cigar;
 pub mod aln;
 pub mod compl;
 pub mod kmers;
+pub mod panvcf;
 #[cfg(feature = "devel")]
 pub mod dist;
 
@@ -49,10 +50,12 @@ pub fn gc_content(seq: &[u8]) -> f64 {
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
 /// writes the sequence into a single line, without splitting.
-pub fn write_fasta<W: Write>(f: &mut W, name: &[u8], seq: &[u8]) -> io::Result<()> {
+pub fn write_fasta<W: Write>(f: &mut W, name: &str, descr: Option<&str>, seq: &[u8]) -> io::Result<()> {
     const WIDTH: usize = 120;
-    f.write_all(b">")?;
-    f.write_all(name)?;
+    write!(f, ">{}", name)?;
+    if let Some(descr) = descr {
+        write!(f, " {}", descr)?;
+    }
     f.write_all(b"\n")?;
 
     let n = seq.len();

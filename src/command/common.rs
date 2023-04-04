@@ -4,6 +4,11 @@ use std::{
     path::{Path, PathBuf},
     ffi::OsStr,
 };
+use flate2::{
+    read::GzDecoder,
+    write::GzEncoder,
+    Compression,
+};
 use colored::Colorize;
 use crate::Error;
 
@@ -43,7 +48,7 @@ pub(super) fn open(filename: &Path) -> Result<Box<dyn BufRead>, Error> {
     } else {
         let file = File::open(filename)?;
         if filename.ends_with(".gz") {
-            Ok(Box::new(BufReader::new(flate2::read::GzDecoder::new(file))))
+            Ok(Box::new(BufReader::new(GzDecoder::new(file))))
         } else {
             Ok(Box::new(BufReader::new(file)))
         }
@@ -59,6 +64,12 @@ pub(super) fn create_uncompressed(filename: &Path) -> Result<Box<dyn Write>, Err
     }
 }
 
+/// Creates a gzip file.
+pub(super) fn create_gzip(filename: &Path) -> Result<BufWriter<GzEncoder<File>>, Error> {
+    let file = File::create(filename)?;
+    Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
+}
+
 /// Finds all filenames with appropriate extension in the directory.
 pub fn find_filenames(dir: &Path, ext: &OsStr) -> io::Result<Vec<PathBuf>> {
     let mut res = Vec::new();
@@ -71,3 +82,12 @@ pub fn find_filenames(dir: &Path, ext: &OsStr) -> io::Result<Vec<PathBuf>> {
     }
     Ok(res)
 }
+
+// /// Appends current command to the end of the file.
+// pub(super) fn update_command_history(filename: &Path) -> io::Result<()> {
+//     let args: Vec<_> = std::env::args().collect();
+//     let mut f = File::options().append(true).open(filename)?;
+//     writeln!(f, "{}\n", args.join(" "))?;
+//     f.sync_all()?;
+//     Ok(())
+// }

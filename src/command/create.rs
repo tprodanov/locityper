@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    io::{self, Read, Seek},
+    io::{Read, Seek},
     cmp::max,
     rc::Rc,
     process::Command,
@@ -159,7 +159,7 @@ fn select_bg_interval(
 }
 
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
-/// The sequence is then written to the `$bg_path/bg.fasta`.
+/// The sequence is then written to the `$bg_path/bg.fasta.gz`.
 fn extract_bg_region<R: Read + Seek>(
     fasta: &mut IndexedReader<R>,
     db_path: &Path,
@@ -167,13 +167,12 @@ fn extract_bg_region<R: Read + Seek>(
 ) -> Result<(), Error>
 {
     let seq = region.fetch_seq(fasta)?;
-
     let mut bg_path = db_path.join("bg");
     fs::create_dir(&bg_path)?;
-    bg_path.push("bg.fasta");
+    bg_path.push("bg.fasta.gz");
     log::info!("Writing background region {} to '{}'", region, bg_path.display());
-    let mut fasta_writer = fs::File::create(&bg_path).map(io::BufWriter::new)?;
-    crate::seq::write_fasta(&mut fasta_writer, b"bg", &seq)?;
+    let mut fasta_writer = super::common::create_gzip(&bg_path)?;
+    crate::seq::write_fasta(&mut fasta_writer, "bg", Some(&region.to_string()), &seq)?;
     Ok(())
 }
 
@@ -198,7 +197,7 @@ fn run_jellyfish(
         .arg("--output").arg(&jf_path)
         .arg(ref_filename);
     log::info!("Counting {}-mers in {} threads, output: {}", kmer_size, threads, jf_path.display());
-    log::debug!("    {:?}", command);
+    log::trace!("    {:?}", command);
 
     let output = command.output()?;
     if output.status.success() {

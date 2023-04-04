@@ -1,6 +1,7 @@
 use std::{
-    cmp::max,
-    io::{BufRead, Read, Seek},
+    cmp::{min, max},
+    io::{BufRead, Read, Seek, Write},
+    fs,
     rc::Rc,
     collections::HashSet,
     path::{Path, PathBuf},
@@ -20,8 +21,8 @@ use crate::{
         vec_ext::{VecExt, F64Ext, IterExt},
     },
     seq::{
-        self, Interval, NamedInterval, ContigNames,
-        kmers::{KmerCount, JfKmerGetter},
+        self, NamedInterval, ContigNames,
+        kmers::JfKmerGetter,
     },
 };
 
@@ -33,6 +34,7 @@ struct Args {
     loci: Vec<String>,
     bed_files: Vec<PathBuf>,
 
+    ref_name: Option<String>,
     max_expansion: u32,
     moving_window: u32,
     jellyfish: PathBuf,
@@ -48,6 +50,7 @@ impl Default for Args {
             loci: Vec::new(),
             bed_files: Vec::new(),
 
+            ref_name: None,
             max_expansion: 2000,
             moving_window: 100,
             jellyfish: PathBuf::from("jellyfish"),
@@ -85,6 +88,9 @@ fn print_help() {
         "-L, --loci-bed".green(), "FILE".yellow());
 
     println!("\n{}", "Optional parameters:".bold());
+    println!("    {:KEY$} {:VAL$}  Reference genome name. If provided, add reference locus sequence\n\
+        {EMPTY}  to the list of potential haplotypes.",
+        "-g, --genome".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
         "-e, --expand".green(), "INT".yellow(), "INT".yellow(), defaults.max_expansion);
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
@@ -115,6 +121,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.loci.extend(parser.values()?.map(ValueExt::string).collect::<Result<Vec<_>, _>>()?),
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
 
+            Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
             Short('j') | Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
@@ -260,22 +267,47 @@ fn find_best_boundary(
     }))
 }
 
+fn write_locus(
+    locus_dir: &Path,
+    locus: &NamedInterval,
+    ref_name: &Option<String>,
+    seqs: &[(String, Vec<u8>)]
+) -> Result<(), Error>
+{
+    let mut fasta_out = super::common::create_gzip(&locus_dir.join("haplotypes.fasta.gz"))?;
+    for (name, seq) in seqs.iter() {
+        let descr = match &ref_name {
+            Some(ref_name) if ref_name == name => Some(locus.interval().to_string()),
+            _ => None,
+        };
+        seq::write_fasta(&mut fasta_out, name, descr.as_ref().map(|s| s as &str), seq)?;
+    }
+    fasta_out.flush()?;
+    std::mem::drop(fasta_out);
+
+    let mut bed_out = fs::File::create(locus_dir.join("ref.bed"))?;
+    bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
+    bed_out.sync_all()?;
+    std::mem::drop(bed_out);
+    Ok(())
+}
+
 /// Add `locus` to the database.
 fn add_locus<R>(
+    loci_dir: &Path,
     locus: &NamedInterval,
     fasta_file: &mut fasta::IndexedReader<R>,
     vcf_file: &mut bcf::IndexedReader,
     kmer_getter: &JfKmerGetter,
-    max_expansion: u32,
-    mov_window: u32,
+    args: &Args,
 ) -> Result<bool, Error>
 where R: Read + Seek,
 {
     log::info!("Analyzing locus {}", locus);
     let inner_interv = locus.interval();
     // Add extra half-window to each sides.
-    let halfw = mov_window / 2;
-    let outer_interv = inner_interv.expand(max_expansion + halfw, max_expansion + halfw);
+    let halfw = args.moving_window / 2;
+    let outer_interv = inner_interv.expand(args.max_expansion + halfw, args.max_expansion + halfw);
     let outer_seq = outer_interv.fetch_seq(fasta_file)?;
 
     let vcf_rid = vcf_file.header().name2rid(outer_interv.contig_name().as_bytes())?;
@@ -290,7 +322,7 @@ where R: Read + Seek,
 
     // Extend region to the left.
     let outer_start = outer_interv.start();
-    let new_start = match find_best_boundary(PosLoc::Max, mov_window, outer_start,
+    let new_start = match find_best_boundary(PosLoc::Max, args.moving_window, outer_start,
             &outer_seq[..(halfw + inner_start + 1 - outer_start) as usize], &vcf_recs[..left_var_ix], kmer_getter)? {
         Some(pos) => pos,
         None => {
@@ -302,7 +334,7 @@ where R: Read + Seek,
 
     // Extend region to the right.
     let right_shift = inner_end - halfw - 1;
-    let new_end = match find_best_boundary(PosLoc::Min, mov_window, right_shift,
+    let new_end = match find_best_boundary(PosLoc::Min, args.moving_window, right_shift,
             &outer_seq[(right_shift - outer_start) as usize..], &vcf_recs[right_var_ix..], kmer_getter)? {
         Some(pos) => pos + 1,
         None => {
@@ -320,6 +352,15 @@ where R: Read + Seek,
         new_locus = locus.clone();
     }
 
+    let dir = loci_dir.join(new_locus.name());
+    if !dir.exists() {
+        std::fs::create_dir(&dir)?;
+    }
+    let seqs = seq::panvcf::reconstruct_sequences(new_start,
+        &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
+        vcf_file.header(), &vcf_recs[left_var_ix.saturating_sub(1)..min(right_var_ix + 1, vcf_recs.len())])?;
+    // TODO: Check on Ns within sequences + filter very similar sequences.
+    write_locus(&dir, &new_locus, &args.ref_name, &seqs)?;
     Ok(true)
 }
 
@@ -343,9 +384,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_filenames.pop().unwrap())?;
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
+    let loci_dir = db_path.join("loci");
     for locus in loci.iter() {
-        add_locus(locus, &mut fasta_file, &mut vcf_file, &kmer_getter, args.max_expansion, args.moving_window)?;
+        add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?;
     }
-
+    log::info!("Success!");
     Ok(())
 }
