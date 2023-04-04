@@ -1,5 +1,5 @@
 use std::{
-    io::{self, ErrorKind, Write},
+    io::{self, Write, BufRead},
     path::PathBuf,
     cmp::{min, max},
     process::{Stdio, Command},
@@ -12,46 +12,74 @@ use crate::{
 /// Store k-mer counts as u16.
 pub type KmerCount = u16;
 
-/// Stores k-mer counts for each input k-mer.
+/// Stores k-mer counts for each input k-mer across a set of sequences.
 pub struct KmerCounts {
     k: u32,
     counts: Vec<Vec<KmerCount>>,
 }
 
 impl KmerCounts {
-    /// Load k-mer counts from a string.
-    /// First line is "k=<number>". All consecutive lines contain just a single number.
-    /// Must contain exact number of k-mer as `contigs`.
-    pub fn load(full_contents: &str, contigs: &ContigNames) -> io::Result<Self> {
+    /// Creates k-mer counts for each sequence in `seqs`.
+    pub fn create<'a>(seqs: impl Iterator<Item = &'a [u8]>, kmer_getter: &JfKmerGetter) -> Result<Self, Error> {
+        Ok(Self {
+            counts: kmer_getter.fetch_multiple(seqs)?,
+            k: kmer_getter.k(),
+        })
+    }
+
+    /// Load k-mer counts from a file (see `save` for format).
+    /// Panics if the number of k-mer counts does not match the contig lengths exactly.
+    pub fn load<R: BufRead>(f: &mut R, contigs: &ContigNames) -> Result<Self, Error> {
         assert!(!contigs.is_empty(), "Cannot load k-mer counts for empty contigs set!");
-        let mut split = full_contents.split('\n');
-        let first = split.next().ok_or_else(|| io::Error::new(ErrorKind::InvalidData,
-            "Empty file with k-mer counts!"))?;
+        let mut lines = f.lines();
+        let first = lines.next().ok_or_else(|| Error::InvalidData("Empty file with k-mer counts!".to_string()))??;
         let k = match first.split_once('=') {
-            Some(("k", v)) => v.parse().map_err(|e: std::num::ParseIntError|
-                io::Error::new(ErrorKind::InvalidData, e))?,
-            _ => return Err(io::Error::new(ErrorKind::InvalidData,
+            Some(("k", v)) => v.parse().map_err(|_| Error::ParsingError(format!("Cannot parse line {}", first)))?,
+            _ => return Err(Error::InvalidData(
                 format!("Incorrect k-mer counts format, first line ({}) must be in format \"k=integer\"", first))),
         };
 
         let mut counts = Vec::with_capacity(contigs.len());
         for contig_len in contigs.lengths() {
-            assert!(contig_len >= k, "Contig too short!");
-            let n_kmers = contig_len - k + 1;
-            let mut curr_counts = Vec::with_capacity(n_kmers as usize);
-            for _ in 0..n_kmers {
-                let val: KmerCount = split.next()
-                    .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "Not enough k-mer counts!"))?
-                    .parse().map_err(|e: std::num::ParseIntError| io::Error::new(ErrorKind::InvalidData, e))?;
-                // We assume that each k-mer appears at least once.
-                curr_counts.push(max(val, 1));
+            let curr_counts = lines.next()
+                .ok_or_else(|| Error::InvalidData(
+                    "File with k-mer counts does not contain enough contigs".to_string()))??
+                .split(' ')
+                .map(str::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| Error::ParsingError(format!("Cannot parse k-mer counts: {}", e)))?;
+
+            if curr_counts.len() as u32 != contig_len - k + 1 {
+                return Err(Error::InvalidData("Incorrect number of k-mers counts".to_string()));
             }
             counts.push(curr_counts);
         }
-        match split.next() {
-            Some("") | None => Ok(Self { k, counts }),
-            _ => Err(io::Error::new(ErrorKind::InvalidData, "Too many k-mer counts!")),
+        match lines.next() {
+            Some(Err(e)) => Err(e)?,
+            Some(Ok(s)) if s.is_empty() => Ok(Self { k, counts }),
+            None => Ok(Self { k, counts }),
+            _ => Err(Error::InvalidData("Too many k-mer counts!".to_string())),
         }
+    }
+
+    /// Writes k-mer counts into file in the following format (for example), each line - new contig:
+    /// ```
+    /// k=25
+    /// 0 0 0 10 24 35 23 9 0 0 0
+    /// 0 0 0 0 0 0
+    /// ```
+    pub fn save<W: Write>(&self, f: &mut W) -> io::Result<()> {
+        writeln!(f, "k={}", self.k)?;
+        for counts in self.counts.iter() {
+            if !counts.is_empty() {
+                write!(f, "{}", counts[0])?;
+                for count in &counts[1..] {
+                    write!(f, " {}", count)?;
+                }
+            }
+            writeln!(f)?;
+        }
+        Ok(())
     }
 
     /// Returns k-mer size.
@@ -141,9 +169,11 @@ impl JfKmerGetter {
         self.k
     }
 
-    /// Returns all k-mers in the sequence.
-    pub fn fetch(&self, seq: &[u8]) -> Result<Vec<KmerCount>, Error> {
-        let child = Command::new(&self.jf_exe)
+    /// Private function, that provides all sequences to Jellyfish, and returns a single vector of k-mer counts.
+    /// k-mers are then split into different sequences in public functions.
+    /// Second returned element: number of k-mers in each sequence.
+    fn fetch_inner<'a>(&self, seqs: impl Iterator<Item = &'a [u8]>) -> Result<(Vec<KmerCount>, Vec<usize>), Error> {
+        let mut child = Command::new(&self.jf_exe)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -151,19 +181,29 @@ impl JfKmerGetter {
             .arg(&self.jf_db)
             .spawn()?;
 
-        {
-            // unwrap as stdin was specified above.
-            let mut child_stdin = child.stdin.as_ref().unwrap();
+        let mut n_kmers = Vec::new();
+        // unwrap as stdin was specified above.
+        let mut child_stdin = child.stdin.take().unwrap();
+        // let mut child_stdin = child.stdin.as_ref().unwrap();
+        log::info!("Writing to child");
+        for seq in seqs {
+            log::debug!("    Sequence of length {}", seq.len());
             child_stdin.write_all(b">\n")?;
             child_stdin.write_all(&seq)?;
+            child_stdin.write_all(b"\n")?;
+            n_kmers.push((seq.len() + 1).saturating_sub(self.k as usize));
         }
+        std::mem::drop(child_stdin);
+
+        log::info!("Finished writing, {:?} kmers", n_kmers);
         let output = child.wait_with_output()?;
+        log::info!("Finished waiting");
         if !output.status.success() {
             return Err(Error::SubcommandFail(output));
         }
 
         let jf_out = std::str::from_utf8(&output.stdout)?;
-        let exp_size = (seq.len() + 1).saturating_sub(self.k as usize);
+        let exp_size = n_kmers.iter().cloned().sum();
         let mut counts: Vec<KmerCount> = Vec::with_capacity(exp_size);
         for line in jf_out.split('\n') {
             if line.is_empty() {
@@ -179,10 +219,31 @@ impl JfKmerGetter {
         }
 
         if counts.len() != exp_size {
-            Err(Error::RuntimeError(format!("Failed to run jellyfish query on sequence of length {}. \
-                Expected {} k-mer counts, found {}", seq.len(), exp_size, counts.len())))
+            Err(Error::RuntimeError(format!("Failed to run `jellyfish query`. \
+                Expected {} k-mer counts, found {}", exp_size, counts.len())))
         } else {
-            Ok(counts)
+            Ok((counts, n_kmers))
         }
+    }
+
+    /// Returns all k-mers in the sequence.
+    pub fn fetch_one(&self, seq: &[u8]) -> Result<Vec<KmerCount>, Error> {
+        self.fetch_inner(std::iter::once(seq)).map(|(counts, _)| counts)
+    }
+
+    /// Returns all k-mers in the multipe sequences.
+    pub fn fetch_multiple<'a>(&self, seqs: impl Iterator<Item = &'a [u8]>) -> Result<Vec<Vec<KmerCount>>, Error> {
+        let mut res = if let Some(capacity) = seqs.size_hint().1 {
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::new()
+        };
+        let (counts, n_kmers) = self.fetch_inner(seqs)?;
+        let mut slice = &counts[..];
+        for n in n_kmers.into_iter() {
+            res.push(slice[..n].to_vec());
+            slice = &slice[n..];
+        }
+        Ok(res)
     }
 }

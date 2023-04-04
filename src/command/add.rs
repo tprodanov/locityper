@@ -22,7 +22,7 @@ use crate::{
     },
     seq::{
         self, NamedInterval, ContigNames,
-        kmers::JfKmerGetter,
+        kmers::{JfKmerGetter, KmerCounts},
     },
 };
 
@@ -251,7 +251,7 @@ fn find_best_boundary(
         return Ok(None);
     }
 
-    let kmer_counts: Vec<f64> = kmer_getter.fetch(&seq)?.into_iter().map(f64::from).collect();
+    let kmer_counts: Vec<f64> = kmer_getter.fetch_one(&seq)?.into_iter().map(f64::from).collect();
     let divisor = f64::from(mov_window + 1 - k);
     // Average k-mer counts for each window of size `mov_window` over k-mers of size `k`.
     // Only defined for indices between `start` and `end`.
@@ -271,7 +271,8 @@ fn write_locus(
     locus_dir: &Path,
     locus: &NamedInterval,
     ref_name: &Option<String>,
-    seqs: &[(String, Vec<u8>)]
+    seqs: &[(String, Vec<u8>)],
+    kmer_getter: &JfKmerGetter,
 ) -> Result<(), Error>
 {
     let mut fasta_out = super::common::create_gzip(&locus_dir.join("haplotypes.fasta.gz"))?;
@@ -289,6 +290,11 @@ fn write_locus(
     bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
     bed_out.sync_all()?;
     std::mem::drop(bed_out);
+
+    log::info!("Counting k-mers");
+    let kmer_counts = KmerCounts::create(seqs.iter().map(|(_name, seq)| &seq as &[u8]), kmer_getter)?;
+    let mut kmers_out = super::common::create_gzip(&locus_dir.join("kmers.gz"))?;
+    kmer_counts.save(&mut kmers_out)?;
     Ok(())
 }
 
@@ -360,7 +366,7 @@ where R: Read + Seek,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
         vcf_file.header(), &vcf_recs[left_var_ix.saturating_sub(1)..min(right_var_ix + 1, vcf_recs.len())])?;
     // TODO: Check on Ns within sequences + filter very similar sequences.
-    write_locus(&dir, &new_locus, &args.ref_name, &seqs)?;
+    write_locus(&dir, &new_locus, &args.ref_name, &seqs, kmer_getter)?;
     Ok(true)
 }
 
