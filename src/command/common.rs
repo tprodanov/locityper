@@ -91,3 +91,10 @@ pub fn find_filenames(dir: &Path, ext: &OsStr) -> io::Result<Vec<PathBuf>> {
 //     f.sync_all()?;
 //     Ok(())
 // }
+
+/// Returns a path with a new suffix appended to the end.
+pub fn append_path(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
+    let mut os_string = path.as_os_str().to_owned();
+    os_string.push(suffix.as_ref());
+    os_string.into()
+}

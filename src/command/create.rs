@@ -10,7 +10,6 @@ use std::{
 };
 use bio::io::fasta::IndexedReader;
 use colored::Colorize;
-use const_format::str_repeat;
 use crate::{
     Error,
     seq::{Interval, ContigNames},
@@ -43,10 +42,10 @@ impl Default for Args {
 fn print_help() {
     const KEY: usize = 16;
     const VAL: usize = 4;
-    const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
+    const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
-    println!("{}", "Create an EMPTY database of complex loci.".yellow());
+    println!("{}", format!("Create an {} database of complex loci.", "empty".bold()).yellow());
 
     println!("\n{} {} create -d db -r reference.fa [arguments]",
         "Usage:".bold(), env!("CARGO_PKG_NAME"));
@@ -60,16 +59,16 @@ fn print_help() {
     println!("\n{}", "Optional parameters:".bold());
     println!("    {:KEY$} {:VAL$}  k-mer size [{}].",
         "-k, --kmer".green(), "INT".yellow(), defaults.kmer_size);
-    println!("    {:KEY$} {:VAL$}  Calculate background distributions based on reads, mapped to this region.\n\
-        {EMPTY}  Defaults to: chr17:72062001-76562000 (GRCh38).",
-        "-b, --background".green(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region. Must not be\n\
+        {EMPTY}  duplicated in the genome. Defaults to: chr17:72062001-76562000 (GRCh38).",
+        "-b, --bg-region".green(), "STR".yellow());
     // TODO: Parse default regions from BG_REGIONS.
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
-        "-F, --force".green(), "");
+        "-F, --force".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
 
@@ -89,10 +88,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
 
             Short('k') | Long("kmer") => args.kmer_size = parser.value()?.parse()?,
-            Short('b') | Long("bg") | Long("background") => args.bg_region = Some(parser.value()?.parse()?),
+            Short('b') | Long("bg") | Long("bg-region") => args.bg_region = Some(parser.value()?.parse()?),
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
-            Short('j') | Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
+            Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();

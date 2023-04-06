@@ -1,7 +1,7 @@
 use std::{
     cmp::max,
     io::{BufRead, Read, Seek, Write, BufWriter},
-    fs::File,
+    fs::{self, File},
     rc::Rc,
     process::Command,
     collections::HashSet,
@@ -14,7 +14,6 @@ use htslib::bcf::{
     record::Record as VcfRecord,
 };
 use colored::Colorize;
-use const_format::str_repeat;
 use crate::{
     Error,
     algo::{
@@ -26,6 +25,7 @@ use crate::{
         kmers::JfKmerGetter,
     },
 };
+use super::common;
 
 struct Args {
     database: Option<PathBuf>,
@@ -62,7 +62,7 @@ impl Default for Args {
 fn print_help() {
     const KEY: usize = 15;
     const VAL: usize = 4;
-    const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
+    const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
     println!("{}", "Adds complex locus/loci to the database.".yellow());
@@ -125,7 +125,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
-            Short('j') | Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
+            Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -173,7 +173,7 @@ fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) 
     }
 
     for filename in bed_files.iter() {
-        for line in super::common::open(filename)?.lines() {
+        for line in common::open(filename)?.lines() {
             let interval = NamedInterval::parse_bed(&mut line?.split('\t'), contigs)?;
             if !names.insert(interval.name().to_string()) {
                 return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
@@ -296,10 +296,15 @@ fn write_locus(
     log::debug!("    Counting k-mers for {}", locus);
     let contig_lengths: Vec<_> = seqs.iter().map(|(_name, seq)| seq.len() as u32).collect();
     let kmer_counts = kmer_getter.fetch_fasta(&fasta_filename, &contig_lengths)?;
-    let mut kmers_out = super::common::create_gzip(&locus_dir.join("kmers.gz"))?;
+    let mut kmers_out = common::create_gzip(&locus_dir.join("kmers.gz"))?;
     kmer_counts.save(&mut kmers_out)?;
 
-    let gzip_output = Command::new("gzip").arg("--force").arg(&fasta_filename).output()?;
+    let fasta_gzip = common::append_path(&fasta_filename, ".gz");
+    if fasta_gzip.exists() {
+        // Remove file directly, as `gzip --force` is not always available.
+        fs::remove_file(fasta_gzip)?;
+    }
+    let gzip_output = Command::new("gzip").arg(&fasta_filename).output()?;
     if !gzip_output.status.success() {
         return Err(Error::SubcommandFail(gzip_output));
     }
@@ -368,7 +373,7 @@ where R: Read + Seek,
 
     let dir = loci_dir.join(new_locus.name());
     if !dir.exists() {
-        std::fs::create_dir(&dir)?;
+        fs::create_dir(&dir)?;
     }
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
@@ -389,7 +394,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
-    let mut jf_filenames = super::common::find_filenames(&db_path.join("jf"), "jf".as_ref())?;
+    let mut jf_filenames = common::find_filenames(&db_path.join("jf"), "jf".as_ref())?;
     if jf_filenames.len() != 1 {
         return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
             db_path.display(), jf_filenames.len())));

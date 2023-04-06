@@ -1,6 +1,7 @@
 mod common;
 mod create;
 mod add;
+mod preproc;
 
 use colored::Colorize;
 
@@ -15,18 +16,26 @@ fn print_citation() {
 }
 
 fn print_help() {
+    const WIDTH: usize = 8;
     print_version();
     println!("\n{} {} command [arguments]",
         "Usage:".bold(), env!("CARGO_PKG_NAME"));
 
     println!("\n{}", "[ Creating database ]".bold());
-    println!("    {:<7}  Create an empty database.", "create".red());
-    println!("    {:<7}  Add complex locus/loci to the database.", "add".red());
+    println!("    {:WIDTH$}  Create an empty database.", "create".red());
+    println!("    {:WIDTH$}  Add complex locus/loci to the database.", "add".red());
+
+    println!("\n{}", "[ Analysing WGS data ]".bold());
+    println!("    {:WIDTH$}  Preprocess WGS dataset.", "preproc".red());
 
     println!("\n{}", "[ General help ]".bold());
-    println!("    {:<7}  Show this help message.", "help".red());
-    println!("    {:<7}  Show version.", "version".red());
-    println!("    {:<7}  Show citation information.", "cite".red());
+    println!("    {:WIDTH$}  Show this help message.", "help".red());
+    println!("    {:WIDTH$}  Show version.", "version".red());
+    println!("    {:WIDTH$}  Show citation information.", "cite".red());
+}
+
+fn flag() -> impl std::fmt::Display {
+    "░░░".yellow().dimmed()
 }
 
 pub fn run(argv: &[String]) -> Result<(), Error> {
@@ -35,10 +44,12 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
         std::process::exit(1);
     }
     match &argv[1] as &str {
-        "create" => create::run(&argv[2..])?,
-        "add" => add::run(&argv[2..])?,
+        "create" | "c" => create::run(&argv[2..])?,
+        "add" | "a" => add::run(&argv[2..])?,
+        "preproc" | "preprocess" | "p" => preproc::run(&argv[2..])?,
+
         "help" | "h" | "--help" | "-h" => print_help(),
-        "version" | "--version" | "-V" => print_version(),
+        "version" | "V" | "--version" | "-V" => print_version(),
         "cite" => print_citation(),
         cmd => panic!("Unknown command {}", cmd),
     }
