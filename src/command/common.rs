@@ -1,8 +1,11 @@
 use std::{
     io::{self, BufWriter, Write, BufReader, BufRead, stdin, stdout},
+    fmt::{Write as FmtWrite},
     fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
+    borrow::Cow,
+    process::Command,
 };
 use flate2::{
     read::GzDecoder,
@@ -97,4 +100,53 @@ pub fn append_path(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     let mut os_string = path.as_os_str().to_owned();
     os_string.push(suffix.as_ref());
     os_string.into()
+}
+
+/// Replace HOME directory with ~ in the path.
+pub(super) fn tilde_home<'a>(path: &'a Path) -> Cow<'a, str> {
+    lazy_static::lazy_static!{
+        static ref HOME: Option<PathBuf> = std::env::var_os("HOME").map(|s| PathBuf::from(s));
+    }
+    if let Some(home) = (*HOME).as_ref() {
+        match path.strip_prefix(home) {
+            Ok(suffix) => Cow::Owned(Path::new("~").join(suffix).to_string_lossy().into_owned()),
+            Err(_) => path.to_string_lossy(),
+        }
+    } else {
+        path.to_string_lossy()
+    }
+}
+
+/// Converts command into a string, removing quotes if argument has no whitespace, and replacing HOME with ~.
+pub(super) fn fmt_cmd(cmd: &Command) -> String {
+    let prg = tilde_home(cmd.get_program().as_ref());
+    let mut s = if prg.as_ref().contains(char::is_whitespace) {
+        format!("'{}'", prg)
+    } else {
+        prg.into_owned()
+    };
+
+    for arg in cmd.get_args() {
+        let arg = tilde_home(arg.as_ref());
+        if arg.contains(char::is_whitespace) {
+            write!(s, " '{}'", arg).unwrap();
+        } else {
+            write!(s, " {}", arg).unwrap();
+        }
+    }
+    s
+}
+
+pub(super) fn fmt_duration(duration: std::time::Duration) -> String {
+    const IN_HOUR: u64 = 3600;
+    const IN_MINUTE: u64 = 60;
+    let mut seconds = duration.as_secs();
+
+    let mut res = String::new();
+    write!(res, "{}:", seconds / IN_HOUR).unwrap();
+    seconds %= IN_HOUR;
+    write!(res, "{:02}:", seconds / IN_MINUTE).unwrap();
+    seconds %= IN_MINUTE;
+    write!(res, "{:02}.{:03}", seconds, duration.subsec_millis()).unwrap();
+    res
 }

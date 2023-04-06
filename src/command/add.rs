@@ -306,7 +306,7 @@ fn write_locus(
     }
     let gzip_output = Command::new("gzip").arg(&fasta_filename).output()?;
     if !gzip_output.status.success() {
-        return Err(Error::SubcommandFail(gzip_output));
+        return Err(Error::SubprocessFail(gzip_output));
     }
     Ok(())
 }

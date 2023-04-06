@@ -7,6 +7,7 @@ use std::{
     rc::Rc,
     process::Command,
     path::{Path, PathBuf},
+    time::Instant,
 };
 use bio::io::fasta::IndexedReader;
 use colored::Colorize;
@@ -134,7 +135,7 @@ fn select_bg_interval(
 {
     if let Some(s) = bg_region {
         let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
-            format!("Reference file '{}' does not contain region {}", ref_filename.display(), s)))?;
+            format!("Reference file {:?} does not contain region {}", ref_filename, s)))?;
         return if contigs.in_bounds(&region) {
             Ok(region)
         } else {
@@ -147,14 +148,19 @@ fn select_bg_interval(
             if contigs.in_bounds(&region) {
                 return Ok(region);
             } else {
-                log::error!("Chromosome {} is in the reference file '{}', but is shorter than expected",
-                    ref_filename.display(), region.contig_name());
+                log::error!("Chromosome {} is in the reference file {:?}, but is shorter than expected",
+                    region.contig_name(), ref_filename);
             }
         }
     }
     Err(Error::InvalidInput(format!(
-        "Reference file '{}' does not contain any of the default background regions. \
-        Consider setting region via --region or use a different reference file.", ref_filename.display())))
+        "Reference file {:?} does not contain any of the default background regions. \
+        Consider setting region via --region or use a different reference file.", ref_filename)))
+}
+
+/// Given database file, return where the FASTA file with background region is located.
+pub(super) fn bg_fasta_filename(db_path: &Path) -> PathBuf {
+    db_path.join("bg").join("bg.fa.gz")
 }
 
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
@@ -166,10 +172,9 @@ fn extract_bg_region<R: Read + Seek>(
 ) -> Result<(), Error>
 {
     let seq = region.fetch_seq(fasta)?;
-    let mut bg_path = db_path.join("bg");
-    fs::create_dir(&bg_path)?;
-    bg_path.push("bg.fa.gz");
-    log::info!("Writing background region {} to '{}'", region, bg_path.display());
+    let bg_path = bg_fasta_filename(db_path);
+    fs::create_dir(bg_path.parent().unwrap())?;
+    log::info!("Writing background region {} to {:?}", region, bg_path);
     let mut fasta_writer = super::common::create_gzip(&bg_path)?;
     crate::seq::write_fasta(&mut fasta_writer, "bg", Some(&region.to_string()), &seq)?;
     Ok(())
@@ -195,14 +200,16 @@ fn run_jellyfish(
             &format!("--size={}", genome_size)])
         .arg("--output").arg(&jf_path)
         .arg(ref_filename);
-    log::info!("Counting {}-mers in {} threads, output: {}", kmer_size, threads, jf_path.display());
-    log::trace!("    {:?}", command);
+    log::info!("Counting {}-mers in {} threads, output: {:?}", kmer_size, threads, jf_path);
+    log::debug!("    {}", super::fmt_cmd(&command));
 
+    let start = Instant::now();
     let output = command.output()?;
+    log::debug!("    Finished in {:?}", start.elapsed());
     if output.status.success() {
         Ok(())
     } else {
-        Err(Error::SubcommandFail(output))
+        Err(Error::SubprocessFail(output))
     }
 }
 
@@ -212,10 +219,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_path = args.database.as_ref().unwrap();
     if db_path.exists() {
         if args.force {
-            log::warn!("Completely removing output directory '{}'", db_path.display());
+            log::warn!("Completely removing output directory {:?}", db_path);
             fs::remove_dir_all(db_path)?;
         } else {
-            panic!("Output directory '{}' already exists. Remove it or use -F/--force flag.", db_path.display());
+            panic!("Output directory {:?} already exists. Remove it or use -F/--force flag.", db_path);
         }
     }
     fs::create_dir(db_path)?;

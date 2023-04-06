@@ -16,7 +16,7 @@ pub enum Error {
     /// Executable not found.
     NoExec(PathBuf),
     /// Subcommand failed.
-    SubcommandFail(std::process::Output),
+    SubprocessFail(std::process::Output),
     InvalidInput(String),
     InvalidData(String),
     ParsingError(String),

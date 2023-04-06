@@ -151,7 +151,7 @@ impl JfKmerGetter {
             .and_then(std::ffi::OsStr::to_str)
             .and_then(|s| s.parse().ok())
             .ok_or_else(||
-                Error::ParsingError(format!("Cannot parse jellyfish database filename '{}'", jf_db.display())))?;
+                Error::ParsingError(format!("Cannot parse jellyfish database filename {:?}", jf_db)))?;
         assert!(k % 2 == 1, "k-mer size ({}) must be odd!", k);
         Ok(Self { jf_exe, jf_db, k })
     }
@@ -181,7 +181,7 @@ impl JfKmerGetter {
 
         let output = child.wait_with_output()?;
         if !output.status.success() {
-            return Err(Error::SubcommandFail(output));
+            return Err(Error::SubprocessFail(output));
         }
 
         let jf_out = std::str::from_utf8(&output.stdout)?;
@@ -215,7 +215,7 @@ impl JfKmerGetter {
         command.arg("query").arg("-s").arg(fasta_filename).arg(&self.jf_db);
         let output = command.output()?;
         if !output.status.success() {
-            return Err(Error::SubcommandFail(output))
+            return Err(Error::SubprocessFail(output))
         }
 
         let mut jf_lines = std::str::from_utf8(&output.stdout)?.split('\n');
