@@ -6,7 +6,7 @@ mod preproc;
 use colored::Colorize;
 
 use crate::Error;
-use common::{find_exe, print_version, fmt_cmd};
+use common::{find_exe, print_version, fmt_path, fmt_cmd};
 
 fn print_citation() {
     print_version();

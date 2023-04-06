@@ -4,7 +4,6 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
-    borrow::Cow,
     process::Command,
 };
 use flate2::{
@@ -102,39 +101,30 @@ pub fn append_path(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     os_string.into()
 }
 
-/// Replace HOME directory with ~ in the path.
-pub(super) fn tilde_home<'a>(path: &'a Path) -> Cow<'a, str> {
+/// Pretty path formatting: replace $HOME with ~, put quotes around if needed.
+pub(super) fn fmt_path(path: &Path) -> String {
     lazy_static::lazy_static!{
         static ref HOME: Option<PathBuf> = std::env::var_os("HOME").map(|s| PathBuf::from(s));
     }
     if let Some(home) = (*HOME).as_ref() {
-        match path.strip_prefix(home) {
-            Ok(suffix) => Cow::Owned(Path::new("~").join(suffix).to_string_lossy().into_owned()),
-            Err(_) => path.to_string_lossy(),
+        if let Ok(suffix) = path.strip_prefix(home) {
+            let tilde_path = Path::new("~").join(suffix);
+            let s = tilde_path.to_string_lossy();
+            return if s.contains(char::is_whitespace) { format!("'{}'", s) } else { s.into_owned() };
         }
-    } else {
-        path.to_string_lossy()
     }
+    let s = path.to_string_lossy();
+    if s.contains(char::is_whitespace) { format!("'{}'", s) } else { s.into_owned() }
 }
 
 /// Converts command into a string, removing quotes if argument has no whitespace, and replacing HOME with ~.
 pub(super) fn fmt_cmd(cmd: &Command) -> String {
-    let prg = tilde_home(cmd.get_program().as_ref());
-    let mut s = if prg.as_ref().contains(char::is_whitespace) {
-        format!("'{}'", prg)
-    } else {
-        prg.into_owned()
-    };
-
-    for arg in cmd.get_args() {
-        let arg = tilde_home(arg.as_ref());
-        if arg.contains(char::is_whitespace) {
-            write!(s, " '{}'", arg).unwrap();
-        } else {
-            write!(s, " {}", arg).unwrap();
-        }
-    }
-    s
+    std::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(OsStr::as_ref)
+        .map(fmt_path)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(super) fn fmt_duration(duration: std::time::Duration) -> String {

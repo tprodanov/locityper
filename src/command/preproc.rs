@@ -139,22 +139,19 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     if !bg_dir.exists() {
         fs::create_dir(&bg_dir)?;
     } else if args.force {
-        log::warn!("Clearing output directory {:?}", bg_dir);
+        log::warn!("Clearing output directory {}", super::fmt_path(&bg_dir));
         fs::remove_dir_all(&bg_dir)?;
         fs::create_dir(&bg_dir)?;
     }
     Ok(bg_dir)
 }
 
-fn run_strobealign(args: &Args, out_dir: &Path) -> Result<PathBuf, Error> {
+fn run_strobealign(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result<PathBuf, Error> {
     let out_bam = out_dir.join("aln.bam");
     if out_bam.exists() {
-        log::warn!("BAM file {:?} exists, skipping read mapping.", out_bam);
+        log::warn!("BAM file {} exists, skipping read mapping.", super::fmt_path(&out_bam));
         return Ok(out_bam);
     }
-
-    let db_path = args.database.as_ref().unwrap();
-    let fasta_filename = super::create::bg_fasta_filename(db_path);
 
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
@@ -195,7 +192,10 @@ fn run_strobealign(args: &Args, out_dir: &Path) -> Result<PathBuf, Error> {
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args: Args = process_args(parse_args(argv)?)?;
     let out_dir = create_out_dir(&args)?;
-    let _bam_filename = run_strobealign(&args, &out_dir)?;
+
+    let db_path = args.database.as_ref().unwrap();
+    let fasta_filename = super::create::bg_fasta_filename(db_path);
+    let bam_filename = run_strobealign(&args, &fasta_filename, &out_dir)?;
 
     Ok(())
 }
