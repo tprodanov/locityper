@@ -13,7 +13,10 @@ use bio::io::fasta::IndexedReader;
 use colored::Colorize;
 use crate::{
     Error,
-    seq::{Interval, ContigNames},
+    seq::{
+        Interval, ContigNames,
+        kmers::{KmerCounts, JfKmerGetter},
+    },
 };
 
 struct Args {
@@ -166,48 +169,52 @@ pub(super) fn bg_fasta_filename(db_path: &Path) -> PathBuf {
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
 /// The sequence is then written to the `$bg_path/bg.fa.gz`.
 fn extract_bg_region<R: Read + Seek>(
+    region: &Interval,
     fasta: &mut IndexedReader<R>,
     db_path: &Path,
-    region: &Interval,
+    kmer_getter: &JfKmerGetter,
 ) -> Result<(), Error>
 {
     let seq = region.fetch_seq(fasta)?;
     let bg_path = bg_fasta_filename(db_path);
-    fs::create_dir(bg_path.parent().unwrap())?;
+    let bg_dir = bg_path.parent().unwrap();
+    super::mkdir(&bg_dir)?;
     log::info!("Writing background region {} to {}", region, super::fmt_path(&bg_path));
     let mut fasta_writer = super::common::create_gzip(&bg_path)?;
     crate::seq::write_fasta(&mut fasta_writer, "bg", Some(&region.to_string()), &seq)?;
+
+    log::info!("Calculating k-mer counts on the background region.");
+    let kmer_counts = kmer_getter.fetch(&seq)?;
+    let kmer_counts = KmerCounts::new(kmer_getter.k(), vec![kmer_counts], &[seq.len() as u32]);
+    let mut kmers_out = super::common::create_gzip(&bg_dir.join("kmers.gz"))?;
+    kmer_counts.save(&mut kmers_out)?;
     Ok(())
 }
 
-fn run_jellyfish(
-    db_path: &Path,
-    ref_filename: &Path,
-    jellyfish: &Path,
-    kmer_size: u8,
-    threads: u16,
-    genome_size: u64,
-) -> Result<(), Error> {
+fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: u64) -> Result<PathBuf, Error> {
     let mut jf_path = db_path.join("jf");
-    fs::create_dir(&jf_path)?;
-    jf_path.push(&format!("{}.jf", kmer_size));
+    super::mkdir(&jf_path)?;
+    jf_path.push(&format!("{}.jf", args.kmer_size));
+    if jf_path.exists() {
+        log::warn!("{} already exists, skipping k-mer counting!", super::fmt_path(&jf_path));
+        return Ok(jf_path)
+    }
 
-    let mut command = Command::new(jellyfish);
-    command
-        .args(&["count", "--canonical", "--lower-count=2", "--out-counter-len=1",
-            &format!("--mer-len={}", kmer_size),
-            &format!("--threads={}", threads),
+    let mut command = Command::new(&args.jellyfish);
+    command.args(&["count", "--canonical", "--lower-count=2", "--out-counter-len=1",
+            &format!("--mer-len={}", args.kmer_size),
+            &format!("--threads={}", args.threads),
             &format!("--size={}", genome_size)])
         .arg("--output").arg(&jf_path)
         .arg(ref_filename);
-    log::info!("Counting {}-mers in {} threads", kmer_size, threads);
+    log::info!("Counting {}-mers in {} threads", args.kmer_size, args.threads);
     log::debug!("    {}", super::fmt_cmd(&command));
 
     let start = Instant::now();
     let output = command.output()?;
     log::debug!("    Finished in {:?}", start.elapsed());
     if output.status.success() {
-        Ok(())
+        Ok(jf_path)
     } else {
         Err(Error::SubprocessFail(output))
     }
@@ -221,20 +228,20 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         if args.force {
             log::warn!("Completely removing output directory {}", super::fmt_path(db_path));
             fs::remove_dir_all(db_path)?;
-        } else {
-            panic!("Output directory {} already exists. Remove it or use -F/--force flag.", super::fmt_path(db_path));
         }
     }
-    fs::create_dir(db_path)?;
+    super::mkdir(db_path)?;
 
     // unwrap as args.reference was previously checked to be Some.
     let ref_filename = args.reference.as_ref().unwrap();
     let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
-    let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
+    let jf_path = run_jellyfish(&db_path, &ref_filename, &args, contigs.genome_size())?;
+    let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_path)?;
 
-    extract_bg_region(&mut fasta, &db_path, &region)?;
-    run_jellyfish(&db_path, &ref_filename, &args.jellyfish, args.kmer_size, args.threads, contigs.genome_size())?;
-    fs::create_dir(&db_path.join("loci"))?;
+    let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
+    extract_bg_region(&region, &mut fasta, &db_path, &kmer_getter)?;
+
+    super::mkdir(&db_path.join("loci"))?;
     log::info!("Success!");
     Ok(())
 }

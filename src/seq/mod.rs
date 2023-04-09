@@ -50,7 +50,7 @@ pub fn gc_content(seq: &[u8]) -> f64 {
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
 /// writes the sequence into a single line, without splitting.
-pub fn write_fasta<W: Write>(f: &mut W, name: &str, descr: Option<&str>, seq: &[u8]) -> io::Result<()> {
+pub fn write_fasta<W: Write>(mut f: W, name: &str, descr: Option<&str>, seq: &[u8]) -> io::Result<()> {
     const WIDTH: usize = 120;
     write!(f, ">{}", name)?;
     if let Some(descr) = descr {

@@ -60,6 +60,12 @@ impl Interval {
         }
     }
 
+    /// Creates a new interval, covering the full contig.
+    pub fn full_contig(contigs: Rc<ContigNames>, contig_id: ContigId) -> Self {
+        let end = contigs.get_len(contig_id);
+        Self::new(contigs, contig_id, 0, end)
+    }
+
     /// Parses interval from string "name:start-end", where start is 1-based, inclusive.
     pub fn parse(s: &str, contigs: &Rc<ContigNames>) -> Result<Self, Error> {
         lazy_static! {

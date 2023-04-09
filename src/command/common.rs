@@ -140,3 +140,13 @@ pub(super) fn fmt_duration(duration: std::time::Duration) -> String {
     write!(res, "{:02}.{:03}", seconds, duration.subsec_millis()).unwrap();
     res
 }
+
+/// Create directory, if it does not exist yet.
+pub(super) fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    if !path.exists() {
+        fs::create_dir(path)
+    } else {
+        Ok(())
+    }
+}

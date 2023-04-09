@@ -372,9 +372,7 @@ where R: Read + Seek,
     }
 
     let dir = loci_dir.join(new_locus.name());
-    if !dir.exists() {
-        fs::create_dir(&dir)?;
-    }
+    super::mkdir(&dir)?;
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
         vcf_file.header(), &vcf_recs)?;

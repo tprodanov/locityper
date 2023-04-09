@@ -6,9 +6,19 @@ use std::{
     path::{Path, PathBuf},
     process::{Stdio, Command},
     time::Instant,
+    rc::Rc,
 };
 use colored::Colorize;
-use crate::Error;
+use htslib::bam::{
+    self,
+    Read as BamRead,
+    record::Record as BamRecord,
+};
+use crate::{
+    Error,
+    seq::{ContigNames, ContigId, Interval},
+    bg::{Params as BgParams, BgDistr, JsonSer},
+};
 
 struct Args {
     input: Vec<PathBuf>,
@@ -20,6 +30,8 @@ struct Args {
     force: bool,
     strobealign: PathBuf,
     samtools: PathBuf,
+
+    bg_params: BgParams,
 }
 
 impl Default for Args {
@@ -34,6 +46,8 @@ impl Default for Args {
             force: false,
             strobealign: PathBuf::from("strobealign"),
             samtools: PathBuf::from("samtools"),
+
+            bg_params: BgParams::default(),
         }
     }
 }
@@ -131,18 +145,14 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
 
 fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     let out_dir = args.output.as_ref().unwrap();
-    if !out_dir.exists() {
-        fs::create_dir(out_dir)?;
-    }
+    super::mkdir(out_dir)?;
 
     let bg_dir = out_dir.join("bg");
-    if !bg_dir.exists() {
-        fs::create_dir(&bg_dir)?;
-    } else if args.force {
+    if bg_dir.exists() && args.force {
         log::warn!("Clearing output directory {}", super::fmt_path(&bg_dir));
         fs::remove_dir_all(&bg_dir)?;
-        fs::create_dir(&bg_dir)?;
     }
+    super::mkdir(&bg_dir)?;
     Ok(bg_dir)
 }
 
@@ -152,6 +162,7 @@ fn run_strobealign(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result
         log::warn!("BAM file {} exists, skipping read mapping.", super::fmt_path(&out_bam));
         return Ok(out_bam);
     }
+    log::info!("Mapping reads to background region.");
 
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
@@ -173,7 +184,7 @@ fn run_strobealign(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result
         "--bam", // Output BAM.
         "-G", "12", // Ignore reads where any of the mates is unmapped.
         "-F", "3840", // Ignore secondary & supplementary alignments + ignore failed checks.
-        "--min-MQ", const_format::concatcp!(crate::bg::MIN_MAPQ), // Ignore reads with low MAPQ.
+        "--min-MQ", stringify!(crate::bg::MIN_MAPQ), // Ignore reads with low MAPQ.
     ]);
     samtools.arg("-o").arg(&out_bam);
     samtools.stdin(Stdio::from(strobealign_child.stdout.unwrap()));
@@ -195,7 +206,21 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let db_path = args.database.as_ref().unwrap();
     let fasta_filename = super::create::bg_fasta_filename(db_path);
-    let bam_filename = run_strobealign(&args, &fasta_filename, &out_dir)?;
+    let (contigs, mut ref_seqs) = ContigNames::load_fasta(&fasta_filename, "bg".to_string())?;
+    if contigs.len() != 1 {
+        return Err(Error::InvalidData(format!("File {:?} contains more than one region", fasta_filename)));
+    }
+    let ref_seq = ref_seqs.pop().unwrap();
 
+    let bam_filename = run_strobealign(&args, &fasta_filename, &out_dir)?;
+    let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
+    let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
+
+    let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
+    let bg = BgDistr::estimate(&records, &interval, &ref_seq, &args.bg_params)?;
+
+    let params_filename = out_dir.join("params.gz");
+    let mut bg_file = super::common::create_gzip(&params_filename)?;
+    bg.save().write_pretty(&mut bg_file, 4)?;
     Ok(())
 }

@@ -3,18 +3,16 @@ pub mod insertsz;
 pub mod depth;
 pub mod ser;
 
-use std::io::{self, Read, Seek};
+use std::io;
 use htslib::bam::Record;
-use bio::io::fasta::IndexedReader;
-use crate::{
-    bg::{
-        depth::{ReadDepth, ReadDepthParams},
-        insertsz::{InsertNegBinom, InsertDistr},
-        err_prof::ErrorProfile,
-        ser::{JsonSer, LoadError},
-    },
-    seq::Interval,
+use crate::seq::Interval;
+use {
+    depth::{ReadDepth, ReadDepthParams},
+    insertsz::{InsertNegBinom, InsertDistr},
+    err_prof::ErrorProfile,
+    ser::{LoadError},
 };
+pub use ser::JsonSer;
 
 /// Ignore reads with MAPQ < 20.
 pub const MIN_MAPQ: u8 = 20;
@@ -63,16 +61,9 @@ pub struct BgDistr {
 
 impl BgDistr {
     /// Estimates read depth, insert size and error profile given a slice of BAM records.
-    pub fn estimate<R: Read + Seek>(
-            records: &[Record],
-            interval: &Interval,
-            fasta: &mut IndexedReader<R>,
-            params: &Params)
-            -> io::Result<Self>
-    {
+    pub fn estimate(records: &[Record], interval: &Interval, ref_seq: &[u8], params: &Params) -> io::Result<Self> {
         log::info!("Estimating background parameters");
         log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
-        let ref_seq = interval.fetch_seq(fasta)?;
 
         let insert_sz = InsertNegBinom::estimate(records.iter());
         let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);

@@ -6,7 +6,7 @@ use std::{
 };
 use crate::{
     Error,
-    seq::ContigId,
+    seq::{self, ContigId},
 };
 
 /// Store k-mer counts as u16.
@@ -19,6 +19,14 @@ pub struct KmerCounts {
 }
 
 impl KmerCounts {
+    pub fn new(k: u32, counts: Vec<Vec<KmerCount>>, contig_lengths: &[u32]) -> Self {
+        assert_eq!(counts.len(), contig_lengths.len());
+        for (contig_counts, &length) in counts.iter().zip(contig_lengths) {
+            assert_eq!(contig_counts.len(), (length + 1).saturating_sub(k) as usize);
+        }
+        Self { k, counts }
+    }
+
     /// Load k-mer counts from a file (see `save` for format).
     /// Panics if the number of k-mer counts does not match the contig lengths exactly.
     pub fn load<R: BufRead>(f: &mut R, contig_lengths: &[u32]) -> Result<Self, Error> {
@@ -175,11 +183,14 @@ impl JfKmerGetter {
 
         // unwrap as stdin was specified above.
         let mut child_stdin = child.stdin.take().unwrap();
-        child_stdin.write_all(b">\n")?;
-        child_stdin.write_all(&seq)?;
-        std::mem::drop(child_stdin);
+        let owned_seq = seq.to_owned();
+        let handler = std::thread::spawn(move || {
+            seq::write_fasta(child_stdin, "", None, &owned_seq);
+        });
+        // seq::write_fasta(child_stdin, "", None, &seq)?;
 
         let output = child.wait_with_output()?;
+        handler.join().unwrap();
         if !output.status.success() {
             return Err(Error::SubprocessFail(output));
         }
