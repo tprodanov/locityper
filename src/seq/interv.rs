@@ -26,10 +26,6 @@ const NAME_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*";
 /// Optionally named interval: `contig:start-end[@name]`.
 const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9]+)-([0-9]+)(={})?$", CONTIG_PATTERN, NAME_PATTERN);
 
-lazy_static! {
-    static ref NAME_RE: Regex = Regex::new(formatcp!("^{}$", NAME_PATTERN)).unwrap();
-}
-
 /// Genomic interval.
 #[derive(Clone)]
 pub struct Interval {
@@ -268,6 +264,10 @@ impl NamedInterval {
     pub fn new(interval: Interval, name: Option<&str>) -> Result<Self, Error> {
         let explicit_name = name.is_some();
         let name = name.map(Into::into).unwrap_or_else(|| interval.to_string());
+
+        lazy_static! {
+            static ref NAME_RE: Regex = Regex::new(formatcp!("^{}$", NAME_PATTERN)).unwrap();
+        }
         if !NAME_RE.is_match(&name) {
             Err(Error::ParsingError(format!("Interval name '{}' contains forbidden symbols", name)))
         } else {

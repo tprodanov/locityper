@@ -39,6 +39,7 @@ struct Args {
     max_expansion: u32,
     moving_window: u32,
     jellyfish: PathBuf,
+    bwa: PathBuf,
 }
 
 impl Default for Args {
@@ -55,6 +56,7 @@ impl Default for Args {
             max_expansion: 2000,
             moving_window: 100,
             jellyfish: PathBuf::from("jellyfish"),
+            bwa: PathBuf::from("bwa"),
         }
     }
 }
@@ -101,6 +103,8 @@ fn print_help() {
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
+    println!("    {:KEY$} {:VAL$}  BWA executable [{}].",
+        "   --bwa".green(), "EXE".yellow(), defaults.bwa.display());
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -126,6 +130,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
+            Long("bwa") => args.bwa = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -155,6 +160,7 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
         Err(lexopt::Error::from("Complex loci are not provided (see -l/--locus and -L/--loci-bed)"))?;
     }
     args.jellyfish = super::find_exe(args.jellyfish)?;
+    args.bwa = super::find_exe(args.bwa)?;
     // Make window size odd.
     args.moving_window += 1 - args.moving_window % 2;
     Ok(args)
@@ -252,7 +258,9 @@ fn find_best_boundary(
         return Ok(None);
     }
 
-    let kmer_counts: Vec<f64> = kmer_getter.fetch(&seq)?.into_iter().map(f64::from).collect();
+    let kmer_counts: Vec<f64> = kmer_getter.fetch_one(seq.to_vec())?
+        .take_first().into_iter()
+        .map(f64::from).collect();
     let divisor = f64::from(mov_window + 1 - k);
     // Average k-mer counts for each window of size `mov_window` over k-mers of size `k`.
     // Only defined for indices between `start` and `end`.
@@ -272,8 +280,9 @@ fn write_locus(
     locus_dir: &Path,
     locus: &NamedInterval,
     ref_name: &Option<String>,
-    seqs: &[(String, Vec<u8>)],
+    seqs: Vec<(String, Vec<u8>)>,
     kmer_getter: &JfKmerGetter,
+    bwa: &Path,
 ) -> Result<(), Error>
 {
     let mut bed_out = File::create(locus_dir.join("ref.bed"))?;
@@ -281,8 +290,8 @@ fn write_locus(
     bed_out.sync_all()?;
     std::mem::drop(bed_out);
 
-    let fasta_filename = locus_dir.join("haplotypes.fa");
-    let mut fasta_out = File::create(&fasta_filename).map(BufWriter::new)?;
+    let fasta_filename = locus_dir.join("haplotypes.fa.gz");
+    let mut fasta_out = common::create_gzip(&fasta_filename)?;
     for (name, seq) in seqs.iter() {
         let descr = match &ref_name {
             Some(ref_name) if ref_name == name => Some(locus.interval().to_string()),
@@ -294,19 +303,15 @@ fn write_locus(
     std::mem::drop(fasta_out);
 
     log::debug!("    Counting k-mers for {}", locus);
-    let contig_lengths: Vec<_> = seqs.iter().map(|(_name, seq)| seq.len() as u32).collect();
-    let kmer_counts = kmer_getter.fetch_fasta(&fasta_filename, &contig_lengths)?;
+    let seqs = seqs.into_iter().map(|(_name, seq)| seq).collect();
+    let kmer_counts = kmer_getter.fetch(seqs)?;
     let mut kmers_out = common::create_gzip(&locus_dir.join("kmers.gz"))?;
     kmer_counts.save(&mut kmers_out)?;
 
-    let fasta_gzip = common::append_path(&fasta_filename, ".gz");
-    if fasta_gzip.exists() {
-        // Remove file directly, as `gzip --force` is not always available.
-        fs::remove_file(fasta_gzip)?;
-    }
-    let gzip_output = Command::new("gzip").arg(&fasta_filename).output()?;
-    if !gzip_output.status.success() {
-        return Err(Error::SubprocessFail(gzip_output));
+    log::debug!("    Indexing haplotypes for {}", locus);
+    let bwa_output = Command::new(bwa).arg("index").arg(&fasta_filename).output()?;
+    if !bwa_output.status.success() {
+        return Err(Error::SubprocessFail(bwa_output));
     }
     Ok(())
 }
@@ -372,12 +377,16 @@ where R: Read + Seek,
     }
 
     let dir = loci_dir.join(new_locus.name());
+    if dir.exists() {
+        log::warn!("Clearing directory {}", super::fmt_path(&dir));
+        fs::remove_dir_all(&dir)?;
+    }
     super::mkdir(&dir)?;
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
         vcf_file.header(), &vcf_recs)?;
     // TODO: Check on Ns within sequences + filter very similar sequences.
-    write_locus(&dir, &new_locus, &args.ref_name, &seqs, kmer_getter)?;
+    write_locus(&dir, &new_locus, &args.ref_name, seqs, kmer_getter, &args.bwa)?;
     Ok(true)
 }
 
@@ -402,6 +411,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
     let loci_dir = db_path.join("loci");
+    super::mkdir(&loci_dir)?;
     for locus in loci.iter() {
         add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?;
     }

@@ -182,9 +182,3 @@ impl fmt::Debug for ContigNames {
         write!(f, "ContigNames({}, {} entries)", self.tag, self.names.len())
     }
 }
-
-impl fmt::Display for ContigNames {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}

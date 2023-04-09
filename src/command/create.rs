@@ -184,8 +184,7 @@ fn extract_bg_region<R: Read + Seek>(
     crate::seq::write_fasta(&mut fasta_writer, "bg", Some(&region.to_string()), &seq)?;
 
     log::info!("Calculating k-mer counts on the background region.");
-    let kmer_counts = kmer_getter.fetch(&seq)?;
-    let kmer_counts = KmerCounts::new(kmer_getter.k(), vec![kmer_counts], &[seq.len() as u32]);
+    let kmer_counts = kmer_getter.fetch_one(seq)?;
     let mut kmers_out = super::common::create_gzip(&bg_dir.join("kmers.gz"))?;
     kmer_counts.save(&mut kmers_out)?;
     Ok(())

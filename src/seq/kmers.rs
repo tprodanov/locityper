@@ -19,14 +19,6 @@ pub struct KmerCounts {
 }
 
 impl KmerCounts {
-    pub fn new(k: u32, counts: Vec<Vec<KmerCount>>, contig_lengths: &[u32]) -> Self {
-        assert_eq!(counts.len(), contig_lengths.len());
-        for (contig_counts, &length) in counts.iter().zip(contig_lengths) {
-            assert_eq!(contig_counts.len(), (length + 1).saturating_sub(k) as usize);
-        }
-        Self { k, counts }
-    }
-
     /// Load k-mer counts from a file (see `save` for format).
     /// Panics if the number of k-mer counts does not match the contig lengths exactly.
     pub fn load<R: BufRead>(f: &mut R, contig_lengths: &[u32]) -> Result<Self, Error> {
@@ -91,6 +83,14 @@ impl KmerCounts {
     /// Length: contig len - k + 1.
     pub fn get(&self, contig_id: ContigId) -> &[KmerCount] {
         &self.counts[contig_id.ix()]
+    }
+
+    /// Returns all k-mer counts for the first contig (must be the only contig).
+    /// Length: contig len - k + 1.
+    pub fn take_first(mut self) -> Vec<KmerCount> {
+        assert_eq!(self.counts.len(), 1,
+            "Cannot call KmerCounts.take_first when the number of contigs is different than one");
+        self.counts.pop().unwrap()
     }
 }
 
@@ -169,70 +169,34 @@ impl JfKmerGetter {
         self.k
     }
 
-    /// Returns all k-mers in the sequence.
-    /// Commit `29872ee` specifies getting k-mer counts from multiple sequences at the same time,
-    /// unfortunately, Jellyfish starts blocking the stream then.
-    pub fn fetch(&self, seq: &[u8]) -> Result<Vec<KmerCount>, Error> {
+    /// Runs jellyfish to return k-mer counts across all sequences.
+    /// Sequences are consumed, as they are passed to another thread.
+    pub fn fetch(&self, seqs: Vec<Vec<u8>>) -> Result<KmerCounts, Error> {
+        let n_kmers: Vec<_> = seqs.iter()
+            .map(|seq| (seq.len() + 1).saturating_sub(self.k as usize)).collect();
         let mut child = Command::new(&self.jf_exe)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .args(&["query", "-s", "/dev/stdin"])
-            .arg(&self.jf_db)
+            .args(&["query", "-s", "/dev/stdin"]).arg(&self.jf_db)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn()?;
-
-        // unwrap as stdin was specified above.
         let mut child_stdin = child.stdin.take().unwrap();
-        let owned_seq = seq.to_owned();
-        let handler = std::thread::spawn(move || {
-            seq::write_fasta(child_stdin, "", None, &owned_seq);
+        let handler = std::thread::spawn(move || -> Result<(), Error> {
+            for seq in seqs.iter() {
+                seq::write_fasta(&mut child_stdin, "", None, seq)?;
+            }
+            Ok(())
         });
-        // seq::write_fasta(child_stdin, "", None, &seq)?;
 
         let output = child.wait_with_output()?;
-        handler.join().unwrap();
         if !output.status.success() {
             return Err(Error::SubprocessFail(output));
         }
-
-        let jf_out = std::str::from_utf8(&output.stdout)?;
-        let exp_size = (seq.len() + 1).saturating_sub(self.k as usize);
-        let mut counts: Vec<KmerCount> = Vec::with_capacity(exp_size);
-        for line in jf_out.split('\n') {
-            if line.is_empty() {
-                break;
-            }
-            let count = line.split_once(' ')
-                .map(|tup| tup.1)
-                .and_then(|s| s.parse().ok())
-                .ok_or_else(||
-                    Error::ParsingError(format!("Failed to parse Jellyfish output line '{}'", line)))?;
-            // Assume that each k-mer appears at least 1.
-            counts.push(max(count, 1));
-        }
-
-        if counts.len() != exp_size {
-            Err(Error::RuntimeError(format!("Failed to run jellyfish query on sequence of length {}. \
-                Expected {} k-mer counts, found {}", seq.len(), exp_size, counts.len())))
-        } else {
-            Ok(counts)
-        }
-    }
-
-    /// Fetches k-mer counts from the whole fasta file and returns `KmerCounts`.
-    /// `contig_lengths` must exactly match contig lengths from the fasta file.
-    pub fn fetch_fasta(&self, fasta_filename: &Path, contig_lengths: &[u32]) -> Result<KmerCounts, Error> {
-        let mut command = Command::new(&self.jf_exe);
-        command.arg("query").arg("-s").arg(fasta_filename).arg(&self.jf_db);
-        let output = command.output()?;
-        if !output.status.success() {
-            return Err(Error::SubprocessFail(output))
-        }
+        // Handler.join() returns Result<Result<(), crate::Error>, Any>.
+        // expect unwraps the outer Err, then ? returns the inner Err, if any.
+        handler.join().expect("Process failed for unknown reason")?;
 
         let mut jf_lines = std::str::from_utf8(&output.stdout)?.split('\n');
-        let mut counts = Vec::with_capacity(contig_lengths.len());
-        for &contig_len in contig_lengths.iter() {
-            let n = (contig_len + 1).saturating_sub(self.k);
+        let mut counts = Vec::with_capacity(n_kmers.len());
+        for n in n_kmers.into_iter() {
             let mut curr_counts = Vec::with_capacity(n as usize);
             for _ in 0..n {
                 let line = jf_lines.next()
@@ -247,6 +211,7 @@ impl JfKmerGetter {
             }
             counts.push(curr_counts);
         }
+
         match jf_lines.next() {
             Some("") | None => Ok(KmerCounts {
                 counts,
@@ -254,5 +219,11 @@ impl JfKmerGetter {
             }),
             _ => Err(Error::InvalidData("Too many k-mer counts!".to_string())),
         }
+    }
+
+    /// Runs jellyfish and returns k-mer frequencies for all k-mers in the sequence.
+    /// Sequence is consumed, as it needs to be passed to another thread.
+    pub fn fetch_one(&self, seq: Vec<u8>) -> Result<KmerCounts, Error> {
+        self.fetch(vec![seq])
     }
 }
