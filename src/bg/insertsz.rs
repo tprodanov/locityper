@@ -10,6 +10,25 @@ use crate::{
     bg::ser::{JsonSer, LoadError},
     math::distr::{DiscretePmf, NBinom, LinearCache},
 };
+use super::MIN_MAPQ;
+
+/// Insert size calculation parameters.
+#[derive(Clone, Debug)]
+pub struct InsertSizeParams {
+    // Calculate max insert size from input reads as `<quantile_mult> * <quantile>-th insert size quantile`.
+    // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
+    pub quantile: f64,
+    pub quantile_mult: f64,
+}
+
+impl Default for InsertSizeParams {
+    fn default() -> Self {
+        Self {
+            quantile: 0.99,
+            quantile_mult: 3.0,
+        }
+    }
+}
 
 /// Trait for insert size distribution.
 pub trait InsertDistr {
@@ -52,13 +71,7 @@ pub struct InsertNegBinom {
 
 impl InsertNegBinom {
     /// Creates the Neg. Binom. insert size distribution from an iterator of insert sizes.
-    pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>) -> Self {
-        const MIN_MAPQ: u8 = 30;
-        const QUANTILE: f64 = 0.99;
-        const QUANT_MULT: f64 = 3.0;
-        // Calculate max_size from input values as 3.0 * <99-th quantile>.
-        // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
-
+    pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>, params: &InsertSizeParams) -> Self {
         log::info!("    Estimating insert size distribution");
         let mut insert_sizes = Vec::<f64>::new();
         let mut orient_counts = [0_u64; 2];
@@ -81,7 +94,7 @@ impl InsertNegBinom {
             (orient_counts[1] as f64).ln_1p() - total.ln_1p()];
 
         VecExt::sort(&mut insert_sizes);
-        let max_size = QUANT_MULT * F64Ext::quantile_sorted(&insert_sizes, QUANTILE);
+        let max_size = params.quantile_mult * F64Ext::quantile_sorted(&insert_sizes, params.quantile);
         // Find index after the limiting value.
         let m = bisect::right(&insert_sizes, &max_size);
         let lim_insert_sizes = &insert_sizes[..m];
@@ -138,7 +151,7 @@ impl JsonSer for InsertNegBinom {
                 "InsertNegBinom: Failed to parse '{}': missing or incorrect 'ff_prob' field!", obj)))?,
         ];
         Ok(Self {
-            max_size: u32::try_from(max_size).unwrap(),
+            max_size: u32::try_from(max_size).unwrap_or(u32::MAX / 2),
             orient_probs,
             distr: NBinom::new(n, p).cached(max_size),
         })

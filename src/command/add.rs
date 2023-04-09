@@ -1,6 +1,6 @@
 use std::{
     cmp::max,
-    io::{BufRead, Read, Seek, Write, BufWriter},
+    io::{BufRead, Read, Seek, Write},
     fs::{self, File},
     rc::Rc,
     process::Command,
@@ -54,7 +54,7 @@ impl Default for Args {
 
             ref_name: None,
             max_expansion: 2000,
-            moving_window: 100,
+            moving_window: 200,
             jellyfish: PathBuf::from("jellyfish"),
             bwa: PathBuf::from("bwa"),
         }
@@ -203,16 +203,16 @@ where I: Iterator<Item = (u32, u32)>,
     let mut best_freq = f64::INFINITY;
     for (isl_start, isl_end) in islands {
         let subvec = &aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize];
-        let (i, s) = match pos_loc {
+        let (i, opt_freq) = match pos_loc {
             PosLoc::Min => F64Ext::argmin(subvec),
             // Finds last argmin.
             PosLoc::Max => IterExt::arg_optimal(subvec.iter().cloned(), |opt, e| opt <= e),
         };
-        if s <= 1.0 {
+        if opt_freq <= 1.0 {
             // Best frequency is already achieved.
             return isl_start + i as u32;
-        } else if s < best_freq {
-            best_freq = s;
+        } else if opt_freq < best_freq {
+            best_freq = opt_freq;
             best_pos = isl_start + i as u32;
         }
     }
@@ -285,6 +285,7 @@ fn write_locus(
     bwa: &Path,
 ) -> Result<(), Error>
 {
+    log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), super::fmt_path(locus_dir));
     let mut bed_out = File::create(locus_dir.join("ref.bed"))?;
     bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
     bed_out.sync_all()?;
@@ -302,13 +303,13 @@ fn write_locus(
     fasta_out.flush()?;
     std::mem::drop(fasta_out);
 
-    log::debug!("    Counting k-mers for {}", locus);
+    log::debug!("    [{}] Counting k-mers", locus.name());
     let seqs = seqs.into_iter().map(|(_name, seq)| seq).collect();
     let kmer_counts = kmer_getter.fetch(seqs)?;
-    let mut kmers_out = common::create_gzip(&locus_dir.join("kmers.gz"))?;
+    let mut kmers_out = common::create_gzip(&super::create::kmers_filename(&locus_dir))?;
     kmer_counts.save(&mut kmers_out)?;
 
-    log::debug!("    Indexing haplotypes for {}", locus);
+    log::debug!("    [{}] Indexing haplotypes", locus.name());
     let bwa_output = Command::new(bwa).arg("index").arg(&fasta_filename).output()?;
     if !bwa_output.status.success() {
         return Err(Error::SubprocessFail(bwa_output));
@@ -370,18 +371,19 @@ where R: Read + Seek,
     let new_locus;
     if new_start != inner_start || new_end != inner_end {
         new_locus = locus.with_new_range(new_start, new_end);
-        log::info!("    Extended locus {} by {} bp left and {} bp right. New locus: {}",
-            locus, inner_start - new_start, new_end - inner_end, new_locus.interval());
+        log::info!("    [{}] Extending locus by {} bp left and {} bp right. New locus: {}",
+            locus.name(), inner_start - new_start, new_end - inner_end, new_locus.interval());
     } else {
         new_locus = locus.clone();
     }
 
     let dir = loci_dir.join(new_locus.name());
     if dir.exists() {
-        log::warn!("Clearing directory {}", super::fmt_path(&dir));
+        log::warn!("    Clearing directory {}", super::fmt_path(&dir));
         fs::remove_dir_all(&dir)?;
     }
     super::mkdir(&dir)?;
+    log::debug!("    [{}] Reconstructing haplotypes", new_locus.name());
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
         vcf_file.header(), &vcf_recs)?;

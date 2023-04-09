@@ -5,10 +5,13 @@ pub mod ser;
 
 use std::io;
 use htslib::bam::Record;
-use crate::seq::Interval;
+use crate::seq::{
+    Interval,
+    kmers::KmerCounts,
+};
 use {
     depth::{ReadDepth, ReadDepthParams},
-    insertsz::{InsertNegBinom, InsertDistr},
+    insertsz::{InsertNegBinom, InsertDistr, InsertSizeParams},
     err_prof::ErrorProfile,
     ser::{LoadError},
 };
@@ -22,6 +25,10 @@ pub const MIN_MAPQ: u8 = 20;
 pub struct Params {
     /// Background read depth parameters.
     pub depth: ReadDepthParams,
+
+    /// Insert size calculation parameters.
+    pub insert_size: InsertSizeParams,
+
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
     pub err_prob_mult: f64,
@@ -33,6 +40,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             depth: ReadDepthParams::default(),
+            insert_size: InsertSizeParams::default(),
             err_prob_mult: 1.2,
             max_clipping: 0.02,
         }
@@ -61,11 +69,17 @@ pub struct BgDistr {
 
 impl BgDistr {
     /// Estimates read depth, insert size and error profile given a slice of BAM records.
-    pub fn estimate(records: &[Record], interval: &Interval, ref_seq: &[u8], params: &Params) -> io::Result<Self> {
+    pub fn estimate(
+        records: &[Record],
+        interval: &Interval,
+        ref_seq: &[u8],
+        kmer_counts: &KmerCounts,
+        params: &Params,
+    ) -> io::Result<Self> {
         log::info!("Estimating background parameters");
         log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
 
-        let insert_sz = InsertNegBinom::estimate(records.iter());
+        let insert_sz = InsertNegBinom::estimate(records.iter(), &params.insert_size);
         let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);
         let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), &params.depth, insert_sz.max_size());
         Ok(Self { depth, insert_sz, err_prof })

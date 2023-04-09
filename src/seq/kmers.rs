@@ -1,6 +1,6 @@
 use std::{
     io::{self, Write, BufRead},
-    path::{Path, PathBuf},
+    path::PathBuf,
     cmp::{min, max},
     process::{Stdio, Command},
 };
@@ -21,7 +21,7 @@ pub struct KmerCounts {
 impl KmerCounts {
     /// Load k-mer counts from a file (see `save` for format).
     /// Panics if the number of k-mer counts does not match the contig lengths exactly.
-    pub fn load<R: BufRead>(f: &mut R, contig_lengths: &[u32]) -> Result<Self, Error> {
+    pub fn load<R: BufRead>(f: R, contig_lengths: &[u32]) -> Result<Self, Error> {
         assert!(!contig_lengths.is_empty(), "Cannot load k-mer counts for empty contigs set!");
         let mut lines = f.lines();
         let first = lines.next().ok_or_else(|| Error::InvalidData("Empty file with k-mer counts!".to_string()))??;

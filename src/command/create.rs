@@ -15,7 +15,7 @@ use crate::{
     Error,
     seq::{
         Interval, ContigNames,
-        kmers::{KmerCounts, JfKmerGetter},
+        kmers::JfKmerGetter,
     },
 };
 
@@ -166,6 +166,11 @@ pub(super) fn bg_fasta_filename(db_path: &Path) -> PathBuf {
     db_path.join("bg").join("bg.fa.gz")
 }
 
+/// Returns filename of the k-mer counts file in the directory.
+pub(super) fn kmers_filename(dir: &Path) -> PathBuf {
+    dir.join("kmers.gz")
+}
+
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
 /// The sequence is then written to the `$bg_path/bg.fa.gz`.
 fn extract_bg_region<R: Read + Seek>(
@@ -185,7 +190,7 @@ fn extract_bg_region<R: Read + Seek>(
 
     log::info!("Calculating k-mer counts on the background region.");
     let kmer_counts = kmer_getter.fetch_one(seq)?;
-    let mut kmers_out = super::common::create_gzip(&bg_dir.join("kmers.gz"))?;
+    let mut kmers_out = super::common::create_gzip(&kmers_filename(&bg_dir))?;
     kmer_counts.save(&mut kmers_out)?;
     Ok(())
 }

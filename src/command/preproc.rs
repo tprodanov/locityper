@@ -16,9 +16,13 @@ use htslib::bam::{
 };
 use crate::{
     Error,
-    seq::{ContigNames, ContigId, Interval},
     bg::{Params as BgParams, BgDistr, JsonSer},
+    seq::{
+        ContigNames, ContigId, Interval,
+        kmers::KmerCounts,
+    },
 };
+use super::common;
 
 struct Args {
     input: Vec<PathBuf>,
@@ -159,10 +163,10 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
 fn run_strobealign(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result<PathBuf, Error> {
     let out_bam = out_dir.join("aln.bam");
     if out_bam.exists() {
-        log::warn!("BAM file {} exists, skipping read mapping.", super::fmt_path(&out_bam));
+        log::warn!("BAM file {} exists, skipping read mapping", super::fmt_path(&out_bam));
         return Ok(out_bam);
     }
-    log::info!("Mapping reads to background region.");
+    log::info!("Mapping reads to background region");
 
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
@@ -193,7 +197,7 @@ fn run_strobealign(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result
 
     let start = Instant::now();
     let output = samtools.output()?;
-    log::debug!("    Finished in {}", super::common::fmt_duration(start.elapsed()));
+    log::debug!("    Finished in {}", common::fmt_duration(start.elapsed()));
     if !output.status.success() {
         return Err(Error::SubprocessFail(output));
     }
@@ -206,21 +210,26 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let db_path = args.database.as_ref().unwrap();
     let fasta_filename = super::create::bg_fasta_filename(db_path);
-    let (contigs, mut ref_seqs) = ContigNames::load_fasta(&fasta_filename, "bg".to_string())?;
+    let (contigs, mut ref_seqs) = ContigNames::load_fasta(common::open(&fasta_filename)?, "bg".to_string())?;
     if contigs.len() != 1 {
         return Err(Error::InvalidData(format!("File {:?} contains more than one region", fasta_filename)));
     }
     let ref_seq = ref_seqs.pop().unwrap();
 
+    let kmers_filename = super::create::kmers_filename(fasta_filename.parent().unwrap());
+    let kmers_file = common::open(&kmers_filename)?;
+    let kmer_counts = KmerCounts::load(kmers_file, contigs.lengths())?;
+
     let bam_filename = run_strobealign(&args, &fasta_filename, &out_dir)?;
-    let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
+    let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
+    log::debug!("    Loading mapped reads into memory");
     let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
 
     let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
-    let bg = BgDistr::estimate(&records, &interval, &ref_seq, &args.bg_params)?;
+    let bg = BgDistr::estimate(&records, &interval, &ref_seq, &kmer_counts, &args.bg_params)?;
 
     let params_filename = out_dir.join("params.gz");
-    let mut bg_file = super::common::create_gzip(&params_filename)?;
+    let mut bg_file = common::create_gzip(&params_filename)?;
     bg.save().write_pretty(&mut bg_file, 4)?;
     Ok(())
 }

@@ -49,7 +49,7 @@ pub(super) fn open(filename: &Path) -> Result<Box<dyn BufRead>, Error> {
         Ok(Box::new(BufReader::new(stdin())))
     } else {
         let file = File::open(filename)?;
-        if filename.ends_with(".gz") {
+        if filename.extension() == Some("gz".as_ref()) {
             Ok(Box::new(BufReader::new(GzDecoder::new(file))))
         } else {
             Ok(Box::new(BufReader::new(file)))

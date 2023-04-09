@@ -1,5 +1,6 @@
 use std::{
-    fmt, io,
+    fmt,
+    io::{self, Read},
     fs::File,
     rc::Rc,
     collections::HashMap,
@@ -86,11 +87,10 @@ impl ContigNames {
 
     /// Reads all entries from fasta and saves them into memory.
     /// Returns pair (ContigNames, Vec<nt sequence>).
-    pub fn load_fasta<P>(filename: &P, tag: String) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
-    where P: AsRef<Path> + fmt::Debug
+    pub fn load_fasta<R>(stream: R, tag: String) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
+    where R: Read,
     {
-        let mut reader = fasta::Reader::from_file(filename)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut reader = fasta::Reader::new(stream);
         let mut names_lengths = Vec::new();
         let mut seqs = Vec::new();
         let mut record = fasta::Record::new();
