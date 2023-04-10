@@ -115,7 +115,7 @@ pub struct Alignment {
 impl Alignment {
     /// Creates a new Alignment from the record.
     pub fn from_record(record: &Record, contigs: Rc<ContigNames>) -> Self {
-        let cigar = Cigar::infer_ext_cigar(record, ());
+        let cigar = Cigar::infer_ext_cigar_md(record, ());
         let contig_id = ContigId::new(record.tid());
         let start = u32::try_from(record.pos()).unwrap();
         let ref_interval = if cigar.is_empty() {

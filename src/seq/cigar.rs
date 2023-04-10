@@ -232,7 +232,7 @@ impl Cigar {
 
     /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
     /// Second argument: either `()`, or `&mut Vec<u8>`.
-    pub fn infer_ext_cigar<S: SeqOrNone>(rec: &record::Record, mut ref_seq: S) -> Cigar {
+    pub fn infer_ext_cigar_md<S: SeqOrNone>(rec: &record::Record, mut ref_seq: S) -> Cigar {
         let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
             s
         } else {

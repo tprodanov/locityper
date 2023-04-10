@@ -10,7 +10,76 @@ use crate::{
     bg::ser::{JsonSer, LoadError},
     math::distr::{DiscretePmf, NBinom, LinearCache},
 };
-use super::MIN_MAPQ;
+
+/// Group read in pairs.
+/// Only full pairs (both mates are present in some specific region) are stored.
+pub(super) struct ReadMateGrouping<'a> {
+    pairs: Vec<(&'a Record, &'a Record)>,
+}
+
+/// Read is paired and is first mate.
+const FIRST_AND_PAIRED: u16 = 65;
+/// Read is unmapped, mate is unmapped, or alignment is secondary or supplementary, or does not pass some checks.
+const BAD_READ: u16 = 3852;
+
+/// If possible, puts a next possible first mate to `rec1`, and returns true.
+/// Input `rec1` can also be used, if it is appropriate.
+fn next_first_mate<'a>(rec1: &mut &'a Record, records: &mut impl Iterator<Item = &'a Record>) -> bool {
+    // No flags from `BAD_READ`, all flags from `FIRST_AND_PAIRED`.
+    if (rec1.flags() & (BAD_READ | FIRST_AND_PAIRED)) == FIRST_AND_PAIRED {
+        return true;
+    }
+    while let Some(rec) = records.next() {
+        if (rec.flags() & (BAD_READ | FIRST_AND_PAIRED)) == FIRST_AND_PAIRED {
+            *rec1 = rec;
+            return true;
+        }
+    }
+    false
+}
+
+impl<'a> ReadMateGrouping<'a> {
+    /// Group read mates from an unsorted BAM file, possibly filtered.
+    /// This means that consecutive reads are either from the same mate,
+    /// or one of the mates is missing (because it was discarded previously).
+    ///
+    /// Panics, if some of the reads are supplementary/secondary, or any of the mates are unmapped.
+    pub(super) fn from_unsorted_bam(mut records: impl Iterator<Item = &'a Record>, max_reads: Option<usize>) -> Self {
+        let mut rec1 = match records.next() {
+            Some(rec) => rec,
+            None => return Self {
+                pairs: Vec::new(),
+            },
+        };
+
+        let mut pairs = if let Some(n) = max_reads { Vec::with_capacity(n / 2) } else { Vec::new() };
+        loop {
+            if !next_first_mate(&mut rec1, &mut records) {
+                break;
+            }
+            let rec2 = match records.next() {
+                Some(rec) => rec,
+                None => break,
+            };
+            assert_eq!(rec2.flags() & BAD_READ, 0,
+                "ReadMateGrouping failed: read {} has flag {}", String::from_utf8_lossy(rec2.qname()), rec2.flags());
+            if rec2.is_last_in_template() && rec1.qname() == rec2.qname() {
+                pairs.push((rec1, rec2));
+                match records.next() {
+                    Some(rec) => rec1 = rec,
+                    None => break,
+                }
+            } else {
+                rec1 = rec2;
+            }
+        }
+        Self { pairs }
+    }
+
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+}
 
 /// Insert size calculation parameters.
 #[derive(Clone, Debug)]
@@ -71,17 +140,15 @@ pub struct InsertNegBinom {
 
 impl InsertNegBinom {
     /// Creates the Neg. Binom. insert size distribution from an iterator of insert sizes.
-    pub fn estimate<'a>(records: impl Iterator<Item = &'a Record>, params: &InsertSizeParams) -> Self {
-        log::info!("    Estimating insert size distribution");
+    pub(super) fn estimate<'a>(read_pairs: &ReadMateGrouping<'a>, params: &InsertSizeParams) -> Self {
+        log::info!("    Estimating insert size distribution from {} read pairs", read_pairs.len());
         let mut insert_sizes = Vec::<f64>::new();
         let mut orient_counts = [0_u64; 2];
-        for record in records {
-            // 3980 - ignore reads with any mate unmapped, ignore sec./supp. alignments, ignore second mates.
-            if (record.flags() & 3980) == 0 && record.tid() == record.mtid() &&
-                    record.mapq() >= MIN_MAPQ && mate_mapq(record) >= MIN_MAPQ {
-                insert_sizes.push(record.insert_size().abs() as f64);
-                orient_counts[pair_orientation(record) as usize] += 1;
-            }
+        for (first, second) in read_pairs.pairs.iter() {
+            assert_eq!(first.tid(), second.tid(),
+                "Read pair {} appears on different contigs", String::from_utf8_lossy(first.qname()));
+            insert_sizes.push(first.insert_size().abs() as f64);
+            orient_counts[pair_orientation(first) as usize] += 1;
         }
         let total = (orient_counts[0] + orient_counts[1]) as f64;
         log::info!("        Analyzed {} read pairs", total);

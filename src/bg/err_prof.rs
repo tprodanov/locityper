@@ -139,7 +139,7 @@ impl ErrorProfile {
                 read_counts[1] += 1;
                 continue;
             }
-            let cigar = Cigar::infer_ext_cigar(record, ());
+            let cigar = Cigar::infer_ext_cigar_md(record, ());
             let read_prof = OpCounts::<u32>::calculate(&cigar);
             if f64::from(read_prof.clipping) / f64::from(cigar.query_len()) <= max_clipping {
                 prof_builder += &read_prof;

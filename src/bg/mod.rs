@@ -8,10 +8,11 @@ use htslib::bam::Record;
 use crate::seq::{
     Interval,
     kmers::KmerCounts,
+    cigar::CigarItem,
 };
 use {
     depth::{ReadDepth, ReadDepthParams},
-    insertsz::{InsertNegBinom, InsertDistr, InsertSizeParams},
+    insertsz::{InsertNegBinom, InsertDistr},
     err_prof::ErrorProfile,
     ser::{LoadError},
 };
@@ -27,7 +28,7 @@ pub struct Params {
     pub depth: ReadDepthParams,
 
     /// Insert size calculation parameters.
-    pub insert_size: InsertSizeParams,
+    pub insert_size: insertsz::InsertSizeParams,
 
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
@@ -39,8 +40,8 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Self {
-            depth: ReadDepthParams::default(),
-            insert_size: InsertSizeParams::default(),
+            depth: Default::default(),
+            insert_size: Default::default(),
             err_prob_mult: 1.2,
             max_clipping: 0.02,
         }
@@ -55,6 +56,14 @@ impl Params {
         assert!(0.0 <= self.max_clipping && self.max_clipping <= 1.0, "Max clipping ({:.5}) must be within [0, 1]",
             self.max_clipping);
     }
+}
+
+/// Returns true if the alignment has no soft or hard clipping.
+fn is_full_aln(record: &Record) -> bool {
+    let raw_cigar = record.raw_cigar();
+    let n = raw_cigar.len();
+    CigarItem::from_u32(raw_cigar[0]).operation().consumes_ref() &&
+        CigarItem::from_u32(raw_cigar[n - 1]).operation().consumes_ref()
 }
 
 /// Various background distributions, including
@@ -79,7 +88,12 @@ impl BgDistr {
         log::info!("Estimating background parameters");
         log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
 
-        let insert_sz = InsertNegBinom::estimate(records.iter(), &params.insert_size);
+        let full_alns: Vec<&Record> = records.iter()
+            .filter(|record| is_full_aln(record)).collect();
+        let rec_grouping = insertsz::ReadMateGrouping::from_unsorted_bam(
+            full_alns.iter().map(|record| *record), Some(full_alns.len()));
+        let insert_sz = InsertNegBinom::estimate(&rec_grouping, &params.insert_size);
+        log::debug!("insert size: {:?}", insert_sz);
         let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);
         let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), &params.depth, insert_sz.max_size());
         Ok(Self { depth, insert_sz, err_prof })

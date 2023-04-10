@@ -186,8 +186,9 @@ fn run_strobealign(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result
     // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
     samtools.args(&["view",
         "--bam", // Output BAM.
-        "-G", "12", // Ignore reads where any of the mates is unmapped.
-        "-F", "3840", // Ignore secondary & supplementary alignments + ignore failed checks.
+        // Ignore reads where any of the mates is unmapped,
+        // + ignore secondary & supplementary alignments + ignore failed checks.
+        "-F", "3852",
         "--min-MQ", stringify!(crate::bg::MIN_MAPQ), // Ignore reads with low MAPQ.
     ]);
     samtools.arg("-o").arg(&out_bam);
