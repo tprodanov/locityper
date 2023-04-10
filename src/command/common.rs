@@ -150,3 +150,18 @@ pub(super) fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
         Ok(())
     }
 }
+
+/// Counts lines in the stream.
+/// Inspired by `linecount` crate.
+pub(super) fn count_lines<R: BufRead>(mut stream: R) -> io::Result<u64> {
+    const LF: u8 = b'\n';
+    let mut count = 0;
+    let mut line: Vec<u8> = Vec::new();
+    while stream.read_until(LF, &mut line)? > 0 {
+        count += 1;
+    }
+    if line.last() == Some(&LF) {
+        count += 1;
+    }
+    Ok(count)
+}

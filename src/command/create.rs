@@ -57,7 +57,7 @@ fn print_help() {
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Output database directory.",
         "-d, --db".green(), "DIR".yellow());
-    println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
+    println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
         "-r, --reference".green(), "FILE".yellow());
 
     println!("\n{}", "Optional parameters:".bold());

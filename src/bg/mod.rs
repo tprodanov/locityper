@@ -18,9 +18,6 @@ use {
 };
 pub use ser::JsonSer;
 
-/// Ignore reads with MAPQ < 20.
-pub const MIN_MAPQ: u8 = 20;
-
 /// Parameters for background distributions estimation.
 #[derive(Debug, Clone)]
 pub struct Params {
