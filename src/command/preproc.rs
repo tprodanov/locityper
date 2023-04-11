@@ -18,6 +18,7 @@ use htslib::bam::{
 };
 use crate::{
     Error,
+    algo::parse_int,
     bg::{Params as BgParams, BgDistr, JsonSer},
     seq::{
         ContigNames, ContigId, Interval,
@@ -43,6 +44,8 @@ struct Args {
     bg_params: BgParams,
 }
 
+const DEF_N_ALNS: &'static str = "1M";
+
 impl Default for Args {
     fn default() -> Self {
         Self {
@@ -57,7 +60,7 @@ impl Default for Args {
             strobealign: PathBuf::from("strobealign"),
             samtools: PathBuf::from("samtools"),
 
-            n_alns: 500000,
+            n_alns: parse_int(DEF_N_ALNS).unwrap(),
             min_mapq: 20,
             bg_params: BgParams::default(),
         }
@@ -91,7 +94,7 @@ fn print_help() {
     println!("\n{}", "Optional parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Estimate insert size and error profiles from the first {}\n\
         {EMPTY}  alignments to the reference genome [{}].",
-        "-n, --n-alns".green(), "INT".yellow(), "INT".yellow(), defaults.n_alns);
+        "-n, --n-alns".green(), "INT".yellow(), "INT".yellow(), DEF_N_ALNS);
     println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
         "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.min_mapq);
     println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
@@ -125,7 +128,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
 
-            Short('n') | Long("n-alns") => args.n_alns = parser.value()?.parse()?,
+            Short('n') | Long("n-alns") => args.n_alns = parser.value()?.parse_with(parse_int)?,
             Short('q') | Long("min-mapq") | Long("min-mq") => args.min_mapq = parser.value()?.parse()?,
             Long("inter") | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -202,7 +205,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
     strobealign.args(&[
         "-N", "0", // Retain 0 additional alignments.
         "-U", // Do not output unmapped reads.
-        "--no-progress",
+        // "--no-progress",
         "-t", &args.threads.to_string()]); // Specify the number of threads.
     if head_lines.is_some() {
         strobealign.args(&[
@@ -235,7 +238,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
             "--bam", // Output BAM.
             // Ignore reads where any of the mates is unmapped,
             // + ignore secondary & supplementary alignments + ignore failed checks.
-            "-F", "3852",
+            "--excl-flags", "3852",
             "--min-MQ", &args.min_mapq.to_string()
             ])
         .arg("-o").arg(&tmp_bam)
@@ -245,6 +248,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
 
     let start = Instant::now();
     let output = samtools.output()?;
+    log::debug!("");
     log::debug!("    Finished in {}", common::fmt_duration(start.elapsed()));
     if !output.status.success() {
         return Err(Error::SubprocessFail(output));
@@ -285,6 +289,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args: Args = process_args(parse_args(argv)?)?;
     let out_dir = create_out_dir(&args)?;
 
+    log::info!("Loading background non-duplicated region into memory");
     let db_path = args.database.as_ref().unwrap();
     let fasta_filename = super::create::bg_fasta_filename(db_path);
     let (contigs, mut ref_seqs) = ContigNames::load_fasta(common::open(&fasta_filename)?, "bg".to_string())?;

@@ -8,7 +8,10 @@ use regex::Regex;
 use lazy_static::lazy_static;
 use const_format::formatcp;
 use bio::io::fasta;
-use crate::Error;
+use crate::{
+    Error,
+    algo::parse_int,
+};
 use super::{ContigId, ContigNames};
 
 /// SAM file specification (https://samtools.github.io/hts-specs/SAMv1.pdf) allows
@@ -17,14 +20,17 @@ use super::{ContigId, ContigNames};
 /// However, here we provide a bit more limiting pattern for contig names.
 const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=@^-]*";
 
+/// Interval pattern without starting ^ and ending $.
+const INTERVAL_INNER: &'static str = formatcp!("({}):([0-9][0-9_,]*)-([0-9][0-9_,]*)", CONTIG_PATTERN);
+
 /// Interval: `contig:start-end`.
-const INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9]+)-([0-9]+)$", CONTIG_PATTERN);
+const INTERVAL_PATTERN: &'static str = formatcp!("^{}$", INTERVAL_INNER);
 
 /// Name of the interval (almost the same as `CONTIG_PATTERN`, but includes `:`).
 const NAME_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*";
 
 /// Optionally named interval: `contig:start-end[@name]`.
-const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9]+)-([0-9]+)(={})?$", CONTIG_PATTERN, NAME_PATTERN);
+const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^{}(={})?$", INTERVAL_INNER, NAME_PATTERN);
 
 /// Genomic interval.
 #[derive(Clone)]
@@ -62,19 +68,23 @@ impl Interval {
         Self::new(contigs, contig_id, 0, end)
     }
 
+    fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Rc<ContigNames>) -> Result<Self, Error> {
+        let contig_id = contigs.try_get_id(&captures[1])
+            .ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}': unknown contig", s)))?;
+        let start: u32 = parse_int(&captures[2])
+            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
+        let end: u32 = parse_int(&captures[3])
+            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
+        Ok(Self::new(Rc::clone(contigs), contig_id, start - 1, end))
+    }
+
     /// Parses interval from string "name:start-end", where start is 1-based, inclusive.
     pub fn parse(s: &str, contigs: &Rc<ContigNames>) -> Result<Self, Error> {
         lazy_static! {
             static ref RE: Regex = Regex::new(INTERVAL_PATTERN).unwrap();
         }
         let captures = RE.captures(s).ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let contig_id = contigs.try_get_id(&captures[1])
-            .ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}': unknown contig", s)))?;
-        let start: u32 = captures[2].parse()
-            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let end: u32 = captures[3].parse()
-            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        Ok(Self::new(Rc::clone(contigs), contig_id, start - 1, end))
+        Self::from_captures(s, &captures, contigs)
     }
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
@@ -282,14 +292,9 @@ impl NamedInterval {
             static ref RE: Regex = Regex::new(NAMED_INTERVAL_PATTERN).unwrap();
         }
         let captures = RE.captures(s).ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let contig_id = contigs.try_get_id(&captures[1])
-            .ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}': unknown contig", s)))?;
-        let start: u32 = captures[2].parse()
-            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let end: u32 = captures[3].parse()
-            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let interval = Interval::new(Rc::clone(contigs), contig_id, start - 1, end);
-        NamedInterval::new(interval, captures.get(4).map(|m| &m.as_str()[1..]))
+        let interval = Interval::from_captures(s, &captures, contigs)?;
+        let name: Option<&str> = captures.get(4).map(|m| &m.as_str()[1..]);
+        NamedInterval::new(interval, name)
     }
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
