@@ -60,3 +60,14 @@ impl Error {
         Self::Solver(solver_name, s.into())
     }
 }
+
+macro_rules! validate_param {
+    ($cond:expr, $($arg:expr),+) => {{
+        if !($cond) {
+            (
+                Err($crate::Error::InvalidInput(format!($($arg),+)))
+            ?)
+        }
+    }};
+}
+pub(crate) use validate_param;

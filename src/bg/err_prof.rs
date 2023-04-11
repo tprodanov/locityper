@@ -4,8 +4,12 @@ use std::{
 };
 use htslib::bam::Record;
 use crate::{
+    algo::vec_ext::{VecExt, F64Ext},
     seq::cigar::{Operation, Cigar, RAW_OPERATIONS},
-    math::distr::{NBinom, Multinomial},
+    math::{
+        Ln,
+        distr::{NBinom, Multinomial},
+    },
     bg::ser::{JsonSer, LoadError},
 };
 
@@ -66,19 +70,20 @@ impl OpCounts<u64> {
         assert!(corr_match_prob >= 0.5, "Match probability ({:.5}) canont be less than 50%", corr_match_prob);
         assert!(corr_del_prob < 0.5, "Deletion probability ({:.5}) cannot be over 50%", corr_del_prob);
 
-        log::info!("        {:10} matches    ({:.6} -> {:.6})",
+        log::info!("    {:12} matches    ({:.6} -> {:.6})",
             self.matches, self.matches as f64 / read_lenf, corr_match_prob);
-        log::info!("        {:10} mismatches ({:.6} -> {:.6})",
+        log::info!("    {:12} mismatches ({:.6} -> {:.6})",
             self.mismatches, mism_prob, corr_mism_prob);
-        log::info!("        {:10} insertions ({:.6} -> {:.6})",
+        log::info!("    {:12} insertions ({:.6} -> {:.6})",
             self.insertions, ins_prob, corr_ins_prob);
-        log::info!("        {:10} deletions  ({:.6} -> {:.6})",
+        log::info!("    {:12} deletions  ({:.6} -> {:.6})",
             self.deletions, del_prob, corr_del_prob);
 
         ErrorProfile {
             // Probabilities are normalized in Multinomial::new.
             op_distr: Multinomial::new(&[corr_match_prob, corr_ins_prob, corr_del_prob]),
             no_del_prob: 1.0 - corr_del_prob,
+            min_ln_prob: f64::NEG_INFINITY,
         }
     }
 }
@@ -111,46 +116,52 @@ where U: TryInto<T> + Copy,
 /// * Multinomial(P(matches), P(mismatches), P(insertions)),
 /// * Neg.Binomial(p = no_deletion, n = read_length):
 ///       where success = extend read length by one; failure = skip one base-pair in the reference.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct ErrorProfile {
     /// Distribution of matches, mismatches and insertions.
     op_distr: Multinomial,
     /// Probability of success (no deletion) per base-pair in the read sequence.
     /// Used in Neg.Binomial distribution.
     no_del_prob: f64,
+    /// Minimum allowed alignment likelihood (in ln-space).
+    min_ln_prob: f64,
 }
 
 impl ErrorProfile {
     /// Create error profile from the iterator over records.
-    ///
-    /// Ignore all reads that have clipping over `max_clipping * read_len`.
-    ///
-    /// Error probabilities (mismatches, insertions & deletions) are multiplied by `err_prob_mult`
-    pub fn estimate<'a, I>(records: I, max_clipping: f64, err_prob_mult: f64) -> ErrorProfile
+    pub fn estimate<'a, I, F>(
+        records: I,
+        mut cigar_getter: F,
+        max_insert_size: u32,
+        params: &super::Params,
+    ) -> ErrorProfile
     where I: Iterator<Item = &'a Record>,
+          F: Fn(&Record) -> Cigar,
     {
-        log::info!("    Estimating read error profiles");
+        log::info!("Estimating read error profiles");
+        let mut n_reads = 0;
         let mut prof_builder = OpCounts::<u64>::default();
-        // Used reads, secondary alignments, large clipping.
-        let mut read_counts = [0_u64, 0, 0];
+        let mut cigars = Vec::new();
         for record in records {
-            // Unmapped or secondary.
-            if (record.flags() & 3844) != 0 {
-                read_counts[1] += 1;
-                continue;
-            }
-            let cigar = Cigar::infer_ext_cigar_md(record, ());
-            let read_prof = OpCounts::<u32>::calculate(&cigar);
-            if f64::from(read_prof.clipping) / f64::from(cigar.query_len()) <= max_clipping {
-                prof_builder += &read_prof;
-                read_counts[0] += 1;
-            } else {
-                read_counts[2] += 1;
+            assert_eq!(record.flags() & 3844, 0,
+                "Read {} is unmapped or secondary", String::from_utf8_lossy(record.qname()));
+            if !record.is_paired() || ((record.flags() & 12) == 0 && record.tid() == record.mtid()
+                    && record.insert_size().abs() as u32 <= max_insert_size) {
+                n_reads += 1;
+                let cigar = cigar_getter(record);
+                prof_builder += &OpCounts::<u32>::calculate(&cigar);
+                cigars.push(cigar);
             }
         }
-        log::info!("        Used {} reads, ignored {} secondary alignments and {} partially mapped reads.",
-            read_counts[0], read_counts[1], read_counts[2]);
-        prof_builder.get_profile(err_prob_mult)
+        log::info!("    Used {} reads", n_reads);
+        let mut prof = prof_builder.get_profile(params.err_prob_mult);
+
+        let mut probs: Vec<_> = cigars.iter().map(|cigar| prof.ln_prob(cigar)).collect();
+        VecExt::sort(&mut probs);
+        let min_ln_prob = params.err_quantile_mult * F64Ext::quantile_sorted(&probs, params.err_quantile);
+        prof.min_ln_prob = min_ln_prob;
+        log::info!("    Minimum alignment likelihood: 10^({:.2})", Ln::to_log10(min_ln_prob));
+        prof
     }
 
     /// Returns alignment ln-probability.
@@ -173,6 +184,7 @@ impl JsonSer for ErrorProfile {
         json::object!{
             op_distr: self.op_distr.save(),
             no_del_prob: self.no_del_prob,
+            min_ln_prob: self.min_ln_prob,
         }
     }
 
@@ -184,6 +196,8 @@ impl JsonSer for ErrorProfile {
         let op_distr = Multinomial::load(&obj["op_distr"])?;
         let no_del_prob = obj["no_del_prob"].as_f64().ok_or_else(|| LoadError(format!(
             "ErrorProfile: Failed to parse '{}': missing or incorrect 'no_del_prob' field!", obj)))?;
-        Ok(Self { op_distr, no_del_prob })
+        let min_ln_prob = obj["min_ln_prob"].as_f64().ok_or_else(|| LoadError(format!(
+            "ErrorProfile: Failed to parse '{}': missing or incorrect 'min_ln_prob' field!", obj)))?;
+        Ok(Self { op_distr, no_del_prob, min_ln_prob })
     }
 }

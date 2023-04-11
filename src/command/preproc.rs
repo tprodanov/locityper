@@ -27,6 +27,7 @@ use crate::{
     bg::{
         BgDistr, JsonSer, Params as BgParams,
         insertsz::{ReadMateGrouping, InsertDistr},
+        err_prof::ErrorProfile,
     },
 };
 use super::common;
@@ -45,7 +46,7 @@ struct Args {
 
     n_alns: u64,
     min_mapq: u8,
-    bg_params: BgParams,
+    params: BgParams,
 }
 
 const DEF_N_ALNS: &'static str = "1M";
@@ -66,7 +67,7 @@ impl Default for Args {
 
             n_alns: parse_int(DEF_N_ALNS).unwrap(),
             min_mapq: 20,
-            bg_params: BgParams::default(),
+            params: BgParams::default(),
         }
     }
 }
@@ -174,6 +175,7 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
     if args.output.is_none() {
         Err(lexopt::Error::from("Output directory is not provided (see -o/--output)"))?;
     }
+    args.params.validate()?;
     args.strobealign = super::find_exe(args.strobealign)?;
     args.samtools = super::find_exe(args.samtools)?;
     Ok(args)
@@ -207,14 +209,14 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
 
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
-        "-N", "0", // Retain 0 additional alignments.
+        "-N0", // Retain 0 additional alignments.
+        "-R0", // Do not rescue reads,
         "-U", // Do not output unmapped reads.
         // "--no-progress",
         "-t", &args.threads.to_string()]); // Specify the number of threads.
     if head_lines.is_some() {
         strobealign.args(&[
-            "-f", "0.001", // Discard more minimizers to speed up alignment,
-            "-R", "0"]); // Do not rescue reads,
+            "-f", "0.001"]); // Discard more minimizers to speed up alignment
     }
     if args.interleaved {
         strobealign.arg("--interleaved");
@@ -294,10 +296,14 @@ fn process_first_bam(args: &Args, bam_filename: &Path) -> Result<(), Error> {
     let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
     let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
     let full_mappings: Vec<_> = records.iter()
-        .filter(|record| cigar::clipping_rate(record) <= args.bg_params.max_clipping)
+        .filter(|record| cigar::clipping_rate(record) <= args.params.max_clipping)
         .collect();
     let pairings = ReadMateGrouping::from_unsorted_bam(full_mappings.iter().copied(), Some(full_mappings.len()));
-    InsertDistr::estimate(&pairings, &args.bg_params.insert_size);
+    let insert_distr = InsertDistr::estimate(&pairings, &args.params);
+
+    ErrorProfile::estimate(full_mappings.into_iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
+        insert_distr.max_size(), &args.params);
+
     Ok(())
 }
 
@@ -328,7 +334,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     // let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
 
     // let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
-    // let bg = BgDistr::estimate(&records, &interval, &ref_seq, &kmer_counts, &args.bg_params)?;
+    // let bg = BgDistr::estimate(&records, &interval, &ref_seq, &kmer_counts, &args.params)?;
 
     // let params_filename = out_dir.join("params.gz");
     // let mut bg_file = common::create_gzip(&params_filename)?;

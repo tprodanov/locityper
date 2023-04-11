@@ -5,10 +5,13 @@ pub mod ser;
 
 use std::io;
 use htslib::bam::Record;
-use crate::seq::{
-    Interval,
-    kmers::KmerCounts,
-    cigar::CigarItem,
+use crate::{
+    seq::{
+        Interval,
+        kmers::KmerCounts,
+        cigar::CigarItem,
+    },
+    err::{Error, validate_param},
 };
 use {
     depth::{ReadDepth, ReadDepthParams},
@@ -24,34 +27,61 @@ pub struct Params {
     /// Background read depth parameters.
     pub depth: ReadDepthParams,
 
-    /// Insert size calculation parameters.
-    pub insert_size: insertsz::InsertSizeParams,
+    /// When calculating insert size distributions and read error profiles,
+    /// ignore reads with `clipping > max_clipping * read_len`.
+    pub max_clipping: f64,
 
+    // Calculate max insert size from input reads as `<ins_quantile_mult> * <ins_quantile>-th insert size quantile`.
+    // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
+    pub ins_quantile: f64,
+    pub ins_quantile_mult: f64,
+
+    /// Similar as for insert size quantiles, calculate minimal possible alignment probability
+    /// as `<err_quantile_mult> & <err_quantile>` (in log-space).
+    pub err_quantile: f64,
+    pub err_quantile_mult: f64,
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
     pub err_prob_mult: f64,
-    /// When calculating read error profiles, ignore reads with `clipping > max_clipping * read_len`.
-    pub max_clipping: f64,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Self {
             depth: Default::default(),
-            insert_size: Default::default(),
-            err_prob_mult: 1.2,
+
             max_clipping: 0.02,
+
+            ins_quantile: 0.99,
+            ins_quantile_mult: 3.0,
+
+            err_quantile: 0.01,
+            err_quantile_mult: 3.0,
+            err_prob_mult: 1.2,
         }
     }
 }
 
 impl Params {
-    /// Checks all parameter values.
-    pub fn check(&self) {
-        self.depth.check();
-        assert!(0.2 <= self.err_prob_mult, "Error prob. multiplier ({:.5}) should not be too low", self.err_prob_mult);
-        assert!(0.0 <= self.max_clipping && self.max_clipping <= 1.0, "Max clipping ({:.5}) must be within [0, 1]",
-            self.max_clipping);
+    /// Validate all parameter values.
+    pub fn validate(&self) -> Result<(), Error> {
+        // TODO: self.depth.validate();
+
+        validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
+            "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
+
+        validate_param!(0.5 <= self.ins_quantile && self.ins_quantile <= 1.0,
+            "Insert size quantile ({:.5}) must be within [0.5, 1]", self.ins_quantile);
+        validate_param!(self.ins_quantile_mult >= 1.0,
+            "Insert size quantile multiplier ({:.5}) must be at least 1", self.ins_quantile_mult);
+
+        validate_param!(0.0 <= self.err_quantile && self.err_quantile <= 0.5,
+            "Alignment likelihood quantile ({:.5}) must be within [0, 0.5]", self.err_quantile);
+        validate_param!(self.err_quantile_mult >= 1.0,
+            "Alignment likelihood quantile multiplier ({:.5}) must be at least 1", self.err_quantile_mult);
+        validate_param!(0.2 <= self.err_prob_mult,
+            "Error prob. multiplier ({:.5}) should not be too low", self.err_prob_mult);
+        Ok(())
     }
 }
 
@@ -74,27 +104,28 @@ pub struct BgDistr {
 }
 
 impl BgDistr {
-    /// Estimates read depth, insert size and error profile given a slice of BAM records.
-    pub fn estimate(
-        records: &[Record],
-        interval: &Interval,
-        ref_seq: &[u8],
-        kmer_counts: &KmerCounts,
-        params: &Params,
-    ) -> io::Result<Self> {
-        log::info!("Estimating background parameters");
-        log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
+    // /// Estimates read depth, insert size and error profile given a slice of BAM records.
+    // pub fn estimate(
+    //     records: &[Record],
+    //     interval: &Interval,
+    //     ref_seq: &[u8],
+    //     kmer_counts: &KmerCounts,
+    //     params: &Params,
+    // ) -> io::Result<Self> {
+    //     unimplemented!()
+    //     // log::info!("Estimating background parameters");
+    //     // log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
 
-        let full_alns: Vec<&Record> = records.iter()
-            .filter(|record| is_full_aln(record)).collect();
-        let rec_grouping = insertsz::ReadMateGrouping::from_unsorted_bam(
-            full_alns.iter().map(|record| *record), Some(full_alns.len()));
-        let insert_sz = InsertDistr::estimate(&rec_grouping, &params.insert_size);
-        log::debug!("insert size: {:?}", insert_sz);
-        let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);
-        let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), &params.depth, insert_sz.max_size());
-        Ok(Self { depth, insert_sz, err_prof })
-    }
+    //     // let full_alns: Vec<&Record> = records.iter()
+    //     //     .filter(|record| is_full_aln(record)).collect();
+    //     // let rec_grouping = insertsz::ReadMateGrouping::from_unsorted_bam(
+    //     //     full_alns.iter().map(|record| *record), Some(full_alns.len()));
+    //     // let insert_sz = InsertDistr::estimate(&rec_grouping, &params.insert_size);
+    //     // log::debug!("insert size: {:?}", insert_sz);
+    //     // let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);
+    //     // let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), &params.depth, insert_sz.max_size());
+    //     // Ok(Self { depth, insert_sz, err_prof })
+    // }
 
     pub fn depth(&self) -> &ReadDepth {
         &self.depth

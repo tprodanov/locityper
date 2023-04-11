@@ -376,7 +376,7 @@ impl Default for ReadDepthParams {
 }
 
 impl ReadDepthParams {
-    pub fn check(&self) {
+    pub fn validate(&self) {
         assert!(self.ploidy > 0, "Ploidy cannot be zero!");
         assert!(self.edge_padding >= self.gc_padding, "Edge padding must not be smaller than GC padding!");
     }
