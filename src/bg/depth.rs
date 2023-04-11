@@ -6,15 +6,19 @@ use htslib::bam::{
 use crate::{
     seq::{
         self, Interval,
-        cigar::{Operation, CigarItem},
+        cigar::{Operation, CigarItem, Cigar},
+        kmers::KmerCounts,
     },
     algo::{
         vec_ext::{VecExt, F64Ext, IterExt},
         loess::Loess,
         bisect,
     },
-    bg::ser::{JsonSer, LoadError, parse_f64_arr},
     math::distr::NBinom,
+};
+use super::{
+    err_prof::ErrorProfile,
+    ser::{JsonSer, LoadError, parse_f64_arr},
 };
 
 pub trait DepthDistr {
@@ -48,191 +52,121 @@ fn soft_clipping(record: &Record) -> u32 {
 struct WindowCounts {
     start: u32,
     end: u32,
-
     depth1: u32,
     depth2: u32,
-
-    low_mapq_reads: u32,
-    clipped_reads: u32,
-    unpaired_reads: u32,
 }
 
 impl WindowCounts {
-    #[inline]
     fn new(start: u32, end: u32) -> Self {
         WindowCounts {
             start, end,
             depth1: 0,
             depth2: 0,
-            low_mapq_reads: 0,
-            clipped_reads: 0,
-            unpaired_reads: 0,
         }
     }
 
-    fn add_read(&mut self, record: &Record, max_insert_size: i64) {
-        const MAX_CLIPPING: u32 = 4;
-        const MIN_MAPQ: u8 = 30;
+    fn len(&self) -> u32 {
+        self.end - self.start
+    }
 
-        debug_assert!(!record.is_unmapped(), "WindowCounts: Cannot add unmapped read!");
+    fn add_read(&mut self, record: &Record) {
         if record.is_last_in_template() {
             self.depth2 += 1;
         } else {
             self.depth1 += 1;
         }
-        if record.mapq() < MIN_MAPQ {
-            self.low_mapq_reads += 1;
-        }
-        if record.is_paired() {
-            if !record.is_proper_pair() || record.is_mate_unmapped() || record.tid() != record.mtid()
-                    || record.insert_size().abs() > max_insert_size {
-                self.unpaired_reads += 1;
-            }
-        }
-        if soft_clipping(record) > MAX_CLIPPING {
-            self.clipped_reads += 1;
-        }
-    }
-
-    /// Returns the total read depth across first and second read mates.
-    #[inline]
-    fn total_depth(&self) -> u32 {
-        self.depth1 + self.depth2
-    }
-
-    /// Returns the total read depth across first and second read mates, converted to float.
-    fn total_depth_f64(&self) -> f64 {
-        f64::from(self.depth1 + self.depth2)
-    }
-
-    /// Returns the rate of low-mapq reads (low_mapq_reads / total_depth).
-    fn low_mapq_rate(&self) -> f64 {
-        f64::from(self.low_mapq_reads) / f64::from(max(self.total_depth(), 1))
-    }
-
-    /// Returns the rate of clipped reads (clipped_reads / total_depth).
-    fn clipped_rate(&self) -> f64 {
-        f64::from(self.clipped_reads) / f64::from(max(self.total_depth(), 1))
-    }
-
-    /// Returns the rate of unpaired reads (unpaired_reads / total_depth).
-    fn unpaired_rate(&self) -> f64 {
-        f64::from(self.unpaired_reads) / f64::from(max(self.total_depth(), 1))
-    }
-
-    /// Does the read satisfies set constraints?
-    fn satisfies(&self, lim: &LimitingValues) -> bool {
-        let dp = self.total_depth_f64();
-        dp == 0.0 ||
-            (dp <= lim.depth
-            && f64::from(self.low_mapq_reads) / dp <= lim.low_mapq_rate
-            && f64::from(self.clipped_reads) / dp <= lim.clipped_rate
-            && f64::from(self.unpaired_reads) / dp <= lim.unpaired_rate)
     }
 }
 
 /// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.edge_padding`
 /// and ~ `interval.end() - params.edge_padding`.
 fn count_reads<'a>(
-        interval: &Interval,
-        records: impl Iterator<Item = &'a Record>,
-        params: &ReadDepthParams,
-        max_insert_size: i64,
+    records: impl Iterator<Item = &'a Record>,
+    interval: &Interval,
+    ref_seq: &[u8],
+    params: &ReadDepthParams,
+    err_prof: &ErrorProfile,
+    max_insert_size: i64,
+    min_aln_ln_prob: f64,
 ) -> Vec<WindowCounts> {
     assert!(interval.len() >= params.window_size + 2 * params.edge_padding, "Input interval is too short!");
     let n_windows = (f64::from(interval.len() - 2 * params.edge_padding) / f64::from(params.window_size))
         .floor() as u32;
     let sum_len = n_windows * params.window_size;
-    let shift = interval.start() + (interval.len() - sum_len) / 2;
-    let end = shift + sum_len;
+    let interval_start = interval.start();
+    let start = interval_start + (interval.len() - sum_len) / 2;
+    let end = start + sum_len;
     let mut windows: Vec<_> = (0..n_windows)
-        .map(|i| WindowCounts::new(shift + i * params.window_size, shift + (i + 1) * params.window_size))
+        .map(|i| WindowCounts::new(start + i * params.window_size, start + (i + 1) * params.window_size))
         .collect();
 
     for record in records {
-        if (record.flags() & 3844) == 0 {
-            let middle = (record.reference_start() + record.reference_end()) as u32 >> 1;
-            if shift <= middle && middle < end {
-                let ix = (middle - shift) / params.window_size;
-                windows[ix as usize].add_read(record, max_insert_size);
+        if super::read_unpaired_or_proper_pair(record, max_insert_size) {
+            let aln_start = record.reference_start();
+            let aln_end = record.reference_end();
+            let middle = (aln_start + aln_end) as u32 / 2;
+            if start <= middle && middle < end {
+                let cigar = Cigar::infer_ext_cigar(record, ref_seq, interval_start);
+                if err_prof.ln_prob(&cigar) >= min_aln_ln_prob {
+                    let ix = (middle - start) / params.window_size;
+                    windows[ix as usize].add_read(record);
+                }
             }
         }
     }
     windows
 }
 
-/// Filter windows that have too large read depth, too many low-mapq reads, etc.
-#[derive(Debug, Clone)]
-struct LimitingValues {
-    depth: f64,
-    low_mapq_rate: f64,
-    clipped_rate: f64,
-    unpaired_rate: f64,
-}
+/// Discard windows, where the region <left_padding><window><right padding> contains
+/// - unknown nucleotides (Ns),
+/// - frequent k-mers (average k-mer frequency > max_kmer_freq).
+///
+/// All windows must have the same length! (is not checked)
+///
+/// Modifies input `windows` variable, and returns GC-content for each window.
+fn filter_windows(
+    windows: &mut Vec<WindowCounts>,
+    seq_shift: u32,
+    ref_seq: &[u8],
+    kmer_counts_coll: &KmerCounts,
+    params: &ReadDepthParams,
+) -> Vec<f64> {
+    log::debug!("    Total windows:   {:7}", windows.len());
+    let mut have_ns = 0;
+    let mut have_common_kmers = 0;
 
-impl LimitingValues {
-    /// Set max_depth to 2.0 * <0.999 quant. of read depth>,
-    /// Max low_mapq_rate and others to `filt_quantile` of the corresponding rate across input windows.
-    fn new(windows: &[WindowCounts], filt_quantile: f64) -> Self {
-        const READ_DP_QUANTILE: f64 = 0.999;
-        const READ_DP_MULT: f64 = 2.0;
-        /// Maximum depth should be at least 100.
-        const DEF_MAX_DEPTH: f64 = 100.0;
+    let k = kmer_counts_coll.k();
+    let kmer_counts = kmer_counts_coll.get_first();
+    let window_padding = params.window_padding;
+    let neigh_len = (windows[0].len() + 2 * window_padding) as usize;
+    let neigh_kmers = neigh_len + 1 - k as usize;
+    let thresh_sum = params.max_kmer_freq * neigh_kmers as f64;
+    // log::info!("Threshold sum: {:6}", thresh_sum);
 
-        Self {
-            depth: (READ_DP_MULT * IterExt::quantile(
-                windows.iter().map(WindowCounts::total_depth_f64), READ_DP_QUANTILE)).max(DEF_MAX_DEPTH),
-            low_mapq_rate: IterExt::quantile(windows.iter().map(WindowCounts::low_mapq_rate), filt_quantile),
-            clipped_rate: IterExt::quantile(windows.iter().map(WindowCounts::clipped_rate), filt_quantile),
-            unpaired_rate: IterExt::quantile(windows.iter().map(WindowCounts::unpaired_rate), filt_quantile),
+    let mut gc_contents = Vec::with_capacity(windows.len());
+    windows.retain(|window| {
+        let start_ix = (window.start - window_padding - seq_shift) as usize;
+        let window_seq = &ref_seq[start_ix..start_ix + neigh_len];
+        if seq::has_n(window_seq) {
+            have_ns += 1;
+            return false;
         }
-    }
-
-    /// Discard windows with extreme values.
-    fn filter_windows(&self, windows: &mut Vec<WindowCounts>) {
-        log::debug!(
-            "        Filter by:  depth <= {:.0},  <= {:.1}% low mapq,  <= {:.1}% clipped,  <= {:.1}% unpaired reads",
-            self.depth, 100.0 * self.low_mapq_rate, 100.0 * self.clipped_rate, 100.0 * self.unpaired_rate);
-        windows.retain(|window| window.satisfies(self));
-    }
-}
-
-impl JsonSer for LimitingValues {
-    fn save(&self) -> json::JsonValue {
-        json::object!{
-            depth: self.depth,
-            low_mapq: self.low_mapq_rate,
-            clipped: self.clipped_rate,
-            unpaired: self.unpaired_rate,
+        let sum_kmer_freq = kmer_counts[start_ix..start_ix + neigh_kmers].iter().copied().map(f64::from).sum::<f64>();
+        // log::debug!("    Window {:7}-{:7}.  GC: {:2},  aver {:7.3},  sum {:6},  passes {}",
+        //     window.start, window.end, seq::gc_content(window_seq).round() as u32,
+        //     sum_kmer_freq / neigh_kmers as f64, sum_kmer_freq, sum_kmer_freq <= thresh_sum);
+        if sum_kmer_freq > thresh_sum {
+            have_common_kmers += 1;
+            false
+        } else {
+            gc_contents.push(seq::gc_content(window_seq));
+            true
         }
-    }
-
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
-        let depth = obj["depth"].as_f64().ok_or_else(|| LoadError(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'depth' field!", obj)))?;
-        let low_mapq_rate = obj["low_mapq"].as_f64().ok_or_else(|| LoadError(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'depth' field!", obj)))?;
-        let clipped_rate = obj["clipped"].as_f64().ok_or_else(|| LoadError(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'depth' field!", obj)))?;
-        let unpaired_rate = obj["unpaired"].as_f64().ok_or_else(|| LoadError(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'depth' field!", obj)))?;
-        Ok(Self { depth, low_mapq_rate, clipped_rate, unpaired_rate })
-    }
-}
-
-/// Removes windows with unknown nucleotides (N) in them.
-fn filter_ns(windows: &mut Vec<WindowCounts>, interval: &Interval, ref_seq: &[u8]) {
-    let shift = interval.start();
-    windows.retain(|window| !seq::has_n(&ref_seq[(window.start - shift) as usize..(window.end - shift) as usize]));
-}
-
-/// Return `f64` GC-content for each window in `WindowCounts`.
-/// Add `gc_padd` to the left and right of each window.
-fn get_window_gc_contents(windows: &[WindowCounts], interval: &Interval, ref_seq: &[u8], gc_padd: u32) -> Vec<f64> {
-    let shift = interval.start();
-    windows.iter().map(|window|
-        seq::gc_content(&ref_seq[(window.start - gc_padd - shift) as usize..(window.end + gc_padd - shift) as usize]))
-        .collect()
+    });
+    assert_eq!(gc_contents.len(), windows.len());
+    log::debug!("    Remove {} windows with Ns, {} windows with common k-mers", have_ns, have_common_kmers);
+    log::debug!("    After filtering: {:7}", windows.len());
+    gc_contents
 }
 
 /// In total, GC-content falls into 101 bins (0..=100).
@@ -304,7 +238,7 @@ fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, 
     // Index of the last GC-content value, such that there are at least `min_obs` windows to the right.
     let right_ix = n - gc_bins.iter().rev().position(|(start, _)| m - *start >= min_obs).unwrap_or(n);
     assert!(left_ix < right_ix, "Too few windows to calculate read depth!");
-    log::debug!("        Few windows (< {}) with GC-content < {} OR > {}, bluring distribution",
+    log::debug!("    Few windows (< {}) with GC-content < {} or > {}, bluring distributions",
         min_obs, left_ix, right_ix);
 
     for i in 0..left_ix {
@@ -327,17 +261,17 @@ pub struct ReadDepthParams {
     /// Default: 100.
     pub window_size: u32,
 
-    /// Calculate GC-content based on the window of size `window_size + 2 * gc_padding`.
+    /// Calculate GC-content and k-mer frequencies based on the window of size `window_size + 2 * window_padding`.
     /// Default: 100.
-    pub gc_padding: u32,
+    pub window_padding: u32,
 
-    /// Ignore left-most and right-most `edge_padding` base-pairs. Must not be smaller than `gc_padding`.
+    /// Ignore left-most and right-most `edge_padding` base-pairs. Must not be smaller than `window_padding`.
     /// Default: 1000.
     pub edge_padding: u32,
 
-    /// Filter windows with too many low-MAPQ reads, clipped reads or unpaired reads.
-    /// "too many" is defined on the `filter_quantile` across all analyzed windows. Default: 0.99.
-    pub filter_quantile: f64,
+    /// Filter windows with too many frequent k-mers (average frequency must be at most this value).
+    /// Default: 1.2.
+    pub max_kmer_freq: f64,
 
     /// When calculating read depth averages for various GC-content values, use `mean_loess_frac` fraction
     /// across all windows. For example, if mean_loess_frac is 0.1 (default),
@@ -365,9 +299,10 @@ impl Default for ReadDepthParams {
         Self {
             ploidy: 2,
             window_size: 100,
-            gc_padding: 100,
+            window_padding: 100,
             edge_padding: 1000,
-            filter_quantile: 0.99,
+            max_kmer_freq: 1.2,
+
             mean_loess_frac: 0.1,
             min_tail_obs: 100,
             tail_var_mult: 0.05,
@@ -378,7 +313,7 @@ impl Default for ReadDepthParams {
 impl ReadDepthParams {
     pub fn validate(&self) {
         assert!(self.ploidy > 0, "Ploidy cannot be zero!");
-        assert!(self.edge_padding >= self.gc_padding, "Edge padding must not be smaller than GC padding!");
+        assert!(self.edge_padding >= self.window_padding, "Edge padding must not be smaller than GC padding!");
     }
 }
 
@@ -388,43 +323,40 @@ pub struct ReadDepth {
     window_size: u32,
     /// Specie ploidy (2 in most cases).
     ploidy: u8,
-    /// For each window, add `gc_padding` to the left and right before calculating GC-content.
-    gc_padding: u32,
-    /// Limit read depth calculation to certain windows.
-    limits: LimitingValues,
+    /// For each window, add `window_padding` to the left and right before calculating GC-content.
+    window_padding: u32,
     // Read depth distribution for each GC-content in 0..=100.
     distributions: Vec<NBinom>,
 }
 
 impl ReadDepth {
     /// Estimates read depth from primary alignments, mapped to the `interval` with sequence `ref_seq`.
-    /// Treat reads with insert size over `max_insert_size` as unpaired.
+    /// Ignore reads with alignment probability < `min_aln_ln_prob` and with insert size > `max_insert_size`.
     pub fn estimate<'a>(
+        records: impl Iterator<Item = &'a Record>,
         interval: &Interval,
         ref_seq: &[u8],
-        records: impl Iterator<Item = &'a Record>,
+        kmer_counts: &KmerCounts,
+        err_prof: &ErrorProfile,
+        max_insert_size: i64,
         params: &ReadDepthParams,
-        max_insert_size: u32,
     ) -> Self {
-        log::info!("    Estimating read depth");
+        log::info!("Estimating read depth");
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
-        let mut windows = count_reads(interval, records, params, i64::from(max_insert_size));
-        log::debug!("        Count reads in  {:7} windows", windows.len());
-        filter_ns(&mut windows, interval, ref_seq);
-        let limits = LimitingValues::new(&windows, params.filter_quantile);
-        limits.filter_windows(&mut windows);
-        log::debug!("        After filtering {:7} windows", windows.len());
+
+        let min_aln_ln_prob = err_prof.min_aln_ln_prob();
+        let mut windows = count_reads(records, interval, ref_seq, params, err_prof, max_insert_size, min_aln_ln_prob);
+        let gc_contents = filter_windows(&mut windows, interval.start(), &ref_seq, &kmer_counts, params);
         assert!(windows.len() > 0, "ReadDepth: no applicable windows!");
 
-        let gc_contents = get_window_gc_contents(&windows, interval, ref_seq, params.gc_padding);
         let ixs = VecExt::argsort(&gc_contents);
         let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
         let depth1: Vec<u32> = ixs.iter().map(|&i| windows[i].depth1).collect();
 
         let (mut means, mut variances) = predict_mean_var(&gc_contents, &gc_bins, &depth1, params.mean_loess_frac);
-        log::info!("        Read depth:  mean = {:.2},  st.dev. = {:.2}   (GC-content 40, {} bp windows, ploidy {})",
+        log::info!("    Read depth:  mean = {:.2},  st.dev. = {:.2}   (GC-content 40, {} bp windows, ploidy {})",
             means[40], variances[40].sqrt(), params.window_size, params.ploidy);
         blur_boundary_values(&mut means, &mut variances, &gc_bins, params);
 
@@ -435,8 +367,7 @@ impl ReadDepth {
         Self {
             ploidy: params.ploidy,
             window_size: params.window_size,
-            gc_padding: params.gc_padding,
-            limits,
+            window_padding: params.window_padding,
             distributions,
         }
     }
@@ -446,8 +377,8 @@ impl ReadDepth {
         self.window_size
     }
 
-    pub fn gc_padding(&self) -> u32 {
-        self.gc_padding
+    pub fn window_padding(&self) -> u32 {
+        self.window_padding
     }
 
     /// Returns read depth distribution at GC-content `gc_content` (between 0 and 100).
@@ -468,8 +399,7 @@ impl JsonSer for ReadDepth {
         json::object!{
             ploidy: self.ploidy,
             window: self.window_size,
-            gc_padd: self.gc_padding,
-            limits: self.limits.save(),
+            window_padding: self.window_padding,
             n: &n_params as &[f64],
             p: &p_params as &[f64],
         }
@@ -480,12 +410,8 @@ impl JsonSer for ReadDepth {
             "ReadDepth: Failed to parse '{}': missing or incorrect 'ploidy' field!", obj)))?;
         let window_size = obj["window"].as_usize().ok_or_else(|| LoadError(format!(
             "ReadDepth: Failed to parse '{}': missing or incorrect 'window' field!", obj)))?;
-        let gc_padding = obj["gc_padd"].as_usize().ok_or_else(|| LoadError(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'gc_padd' field!", obj)))?;
-        if !obj.has_key("limits") {
-            return Err(LoadError(format!("BgDistr: Failed to parse '{}': missing 'limits' key!", obj)))
-        }
-        let limits = LimitingValues::load(&obj["limits"])?;
+        let window_padding = obj["window_padding"].as_usize().ok_or_else(|| LoadError(format!(
+            "ReadDepth: Failed to parse '{}': missing or incorrect 'window_padding' field!", obj)))?;
         let mut n_params = vec![0.0; window_size + 1];
         parse_f64_arr(obj, "n", &mut n_params)?;
         let mut p_params = vec![0.0; window_size + 1];
@@ -493,8 +419,7 @@ impl JsonSer for ReadDepth {
         Ok(Self {
             ploidy: u8::try_from(ploidy).unwrap(),
             window_size: u32::try_from(window_size).unwrap(),
-            gc_padding: u32::try_from(gc_padding).unwrap(),
-            limits,
+            window_padding: u32::try_from(window_padding).unwrap(),
             distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p)).collect(),
         })
     }

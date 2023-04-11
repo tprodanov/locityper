@@ -132,7 +132,7 @@ impl ErrorProfile {
     pub fn estimate<'a, I, F>(
         records: I,
         mut cigar_getter: F,
-        max_insert_size: u32,
+        max_insert_size: i64,
         params: &super::Params,
     ) -> ErrorProfile
     where I: Iterator<Item = &'a Record>,
@@ -143,10 +143,7 @@ impl ErrorProfile {
         let mut prof_builder = OpCounts::<u64>::default();
         let mut cigars = Vec::new();
         for record in records {
-            assert_eq!(record.flags() & 3844, 0,
-                "Read {} is unmapped or secondary", String::from_utf8_lossy(record.qname()));
-            if !record.is_paired() || ((record.flags() & 12) == 0 && record.tid() == record.mtid()
-                    && record.insert_size().abs() as u32 <= max_insert_size) {
+            if super::read_unpaired_or_proper_pair(record, max_insert_size) {
                 n_reads += 1;
                 let cigar = cigar_getter(record);
                 prof_builder += &OpCounts::<u32>::calculate(&cigar);
@@ -162,6 +159,11 @@ impl ErrorProfile {
         prof.min_ln_prob = min_ln_prob;
         log::info!("    Minimum alignment likelihood: 10^({:.2})", Ln::to_log10(min_ln_prob));
         prof
+    }
+
+    /// Returns minimum allowed alignment ln-probability.
+    pub fn min_aln_ln_prob(&self) -> f64 {
+        self.min_ln_prob
     }
 
     /// Returns alignment ln-probability.

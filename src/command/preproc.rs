@@ -28,6 +28,7 @@ use crate::{
         BgDistr, JsonSer, Params as BgParams,
         insertsz::{ReadMateGrouping, InsertDistr},
         err_prof::ErrorProfile,
+        depth::ReadDepth,
     },
 };
 use super::common;
@@ -291,20 +292,36 @@ fn run_strobealign_bg_region(args: &Args, fasta_filename: &Path, out_dir: &Path)
     Ok(out_bam)
 }
 
-fn process_first_bam(args: &Args, bam_filename: &Path) -> Result<(), Error> {
-    log::debug!("    Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
+fn process_first_bam(bam_filename: &Path, params: &BgParams) -> Result<(InsertDistr, ErrorProfile), Error> {
+    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
     let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
     let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
     let full_mappings: Vec<_> = records.iter()
-        .filter(|record| cigar::clipping_rate(record) <= args.params.max_clipping)
+        .filter(|record| cigar::clipping_rate(record) <= params.max_clipping)
         .collect();
     let pairings = ReadMateGrouping::from_unsorted_bam(full_mappings.iter().copied(), Some(full_mappings.len()));
-    let insert_distr = InsertDistr::estimate(&pairings, &args.params);
 
-    ErrorProfile::estimate(full_mappings.into_iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
-        insert_distr.max_size(), &args.params);
+    let insert_distr = InsertDistr::estimate(&pairings, params);
+    let err_prof = ErrorProfile::estimate(full_mappings.into_iter(),
+        |record| cigar::Cigar::from_raw(record.raw_cigar()),
+        i64::from(insert_distr.max_size()), params);
+    Ok((insert_distr, err_prof))
+}
 
-    Ok(())
+fn process_second_bam(
+    bam_filename: &Path,
+    interval: &Interval,
+    ref_seq: &[u8],
+    kmer_counts: &KmerCounts,
+    err_prof: &ErrorProfile,
+    insert_distr: &InsertDistr,
+    params: &BgParams,
+) -> Result<ReadDepth, Error> {
+    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
+    let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
+    let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
+    let max_insert_size = i64::from(insert_distr.max_size());
+    Ok(ReadDepth::estimate(records.iter(), interval, ref_seq, kmer_counts, err_prof, max_insert_size, &params.depth))
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -319,6 +336,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         return Err(Error::InvalidData(format!("File {:?} contains more than one region", fasta_filename)));
     }
     let ref_seq = ref_seqs.pop().unwrap();
+    let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
 
     let kmers_filename = super::create::kmers_filename(fasta_filename.parent().unwrap());
     let kmers_file = common::open(&kmers_filename)?;
@@ -327,7 +345,16 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bam_filename1 = run_strobealign_full_ref(&args, &out_dir)?;
     let bam_filename2 = run_strobealign_bg_region(&args, &fasta_filename, &out_dir)?;
 
-    process_first_bam(&args, &bam_filename1)?;
+    let (insert_distr, err_prof) = process_first_bam(&bam_filename1, &args.params)?;
+    process_second_bam(
+        &bam_filename2,
+        &interval,
+        &ref_seq,
+        &kmer_counts,
+        &err_prof,
+        &insert_distr,
+        &args.params,
+    )?;
 
     // let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
     // log::debug!("    Loading mapped reads into memory");

@@ -87,6 +87,14 @@ impl KmerCounts {
 
     /// Returns all k-mer counts for the first contig (must be the only contig).
     /// Length: contig len - k + 1.
+    pub fn get_first(&self) -> &[KmerCount] {
+        assert_eq!(self.counts.len(), 1,
+            "Cannot call KmerCounts.get_first when the number of contigs is different than one");
+        &self.counts[0]
+    }
+
+    /// Returns all k-mer counts for the first contig (must be the only contig).
+    /// Length: contig len - k + 1.
     pub fn take_first(mut self) -> Vec<KmerCount> {
         assert_eq!(self.counts.len(), 1,
             "Cannot call KmerCounts.take_first when the number of contigs is different than one");

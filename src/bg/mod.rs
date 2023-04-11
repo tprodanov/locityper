@@ -85,12 +85,16 @@ impl Params {
     }
 }
 
-/// Returns true if the alignment has no soft or hard clipping.
-fn is_full_aln(record: &Record) -> bool {
-    let raw_cigar = record.raw_cigar();
-    let n = raw_cigar.len();
-    CigarItem::from_u32(raw_cigar[0]).operation().consumes_ref() &&
-        CigarItem::from_u32(raw_cigar[n - 1]).operation().consumes_ref()
+/// Returns true for reads alignments that are
+/// - Primary and pass all checks,
+/// - Are unpaired, OR
+/// - Are paired and within an appropriate insert size.
+fn read_unpaired_or_proper_pair(record: &Record, max_insert_size: i64) -> bool {
+    (record.flags() & 3844) == 0
+        && (!record.is_paired()
+            || (!record.is_mate_unmapped()
+                && record.tid() == record.mtid()
+                && record.insert_size().abs() <= max_insert_size))
 }
 
 /// Various background distributions, including

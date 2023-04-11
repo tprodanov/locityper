@@ -183,7 +183,7 @@ fn identify_depth_distributions(
     let mut window_counts: (u16, u16, u16) = (0, 0, 0);
     let window_size = cached_distrs.bg_depth.window_size();
     assert_eq!(window_size, windows.window_size());
-    let gc_padding = cached_distrs.bg_depth.gc_padding();
+    let gc_padding = cached_distrs.bg_depth.window_padding();
     for (i, (contig_id, contig_cn)) in windows.contigs_cns().enumerate() {
         let curr_kmer_counts = &kmer_counts.get(contig_id);
         let n_windows = windows.get_n_windows(i);

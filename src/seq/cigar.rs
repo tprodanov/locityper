@@ -230,14 +230,57 @@ impl Cigar {
         self.tuples.shrink_to_fit()
     }
 
+    /// Infer extended CIGAR from a region with already known reference sequence
+    /// (`ref_seq`, shifted by `ref_seq_shift`).
+    pub fn infer_ext_cigar(rec: &record::Record, ref_seq: &[u8], ref_seq_shift: u32) -> Cigar {
+        let ref_seq_end = ref_seq_shift + ref_seq.len() as u32;
+        let ref_start = u32::try_from(rec.pos()).unwrap();
+        let query_seq = rec.seq();
+        let mut cigar = Cigar::new();
+
+        for &val in rec.raw_cigar() {
+            let item = CigarItem::from_u32(val);
+            if item.op != Operation::Match {
+                cigar.push(item);
+                continue;
+            }
+
+            if ref_start + cigar.rlen < ref_seq_shift || ref_start + cigar.rlen + item.len >= ref_seq_end {
+                // Read goes beyond the boundary of the reference sequence, try to infer extended CIGAR using MD tag.
+                return Self::infer_ext_cigar_md(rec, ());
+            }
+
+            let ref_shift = (ref_start + cigar.rlen - ref_seq_shift) as usize;
+            let query_shift = cigar.qlen as usize;
+            let mut curr_len = 0;
+            let mut curr_equal = true;
+            for i in 0..item.len as usize {
+                let now_equal = ref_seq[ref_shift + i] == query_seq.encoded_base(query_shift + i);
+                if now_equal != curr_equal && curr_len > 0 {
+                    cigar.push(CigarItem::new(if curr_equal { Operation::Equal } else { Operation::Diff }, curr_len));
+                    curr_len = 0;
+                }
+                curr_equal = now_equal;
+                curr_len += 1;
+            }
+            cigar.push(CigarItem::new(if curr_equal { Operation::Equal } else { Operation::Diff }, curr_len));
+        }
+        let in_query_len = query_seq.len() as u32;
+        // If the query sequence is missing, in_query_len will be 0.
+        if in_query_len > 0 {
+            assert_eq!(cigar.query_len(), in_query_len,
+                "Failed to convert CIGAR for read {:?}", String::from_utf8_lossy(rec.qname()));
+        }
+        cigar
+    }
+
     /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
     /// Second argument: either `()`, or `&mut Vec<u8>`.
     pub fn infer_ext_cigar_md<S: SeqOrNone>(rec: &record::Record, mut ref_seq: S) -> Cigar {
-        let md_str = if let Ok(record::Aux::String(s)) = rec.aux(b"MD") {
-            s
-        } else {
-            panic!("Cannot create extended CIGAR: record {} either has no MD tag, or MD tag has incorrect type",
-                String::from_utf8_lossy(rec.qname()))
+        let md_str = match rec.aux(b"MD") {
+            Ok(record::Aux::String(s)) => s,
+            _ => panic!("Cannot create extended CIGAR: record {} has no MD tag",
+                String::from_utf8_lossy(rec.qname())),
         };
         let raw_md = md_str.as_bytes();
         let mut data = ExtCigarData {
@@ -253,14 +296,14 @@ impl Cigar {
         for &val in rec.raw_cigar() {
             data.process_op(CigarItem::from_u32(val));
         }
-        debug_assert_eq!(data.md_ix, data.md_entries.len(), "Failed to parse MD tag \"{}\"", data.md_str);
+        debug_assert_eq!(data.md_ix, data.md_entries.len(), "Failed to parse MD tag {:?}", data.md_str);
         if let Some(ref_len) = data.ref_seq.try_len() {
-            assert_eq!(ref_len as u32, data.new_cigar.ref_len(), "Failed to parse MD tag \"{}\"", md_str);
+            assert_eq!(ref_len as u32, data.new_cigar.ref_len(), "Failed to parse MD tag {:?}", md_str);
         }
         let in_query_len = data.query_seq.len() as u32;
         // If the query sequence is missing, in_query_len will be 0.
         if in_query_len > 0 {
-            assert_eq!(data.new_cigar.query_len(), in_query_len, "Failed to parse MD tag \"{}\"", md_str);
+            assert_eq!(data.new_cigar.query_len(), in_query_len, "Failed to parse MD tag {:?}", md_str);
         }
         data.new_cigar.shrink_to_fit();
         data.new_cigar
@@ -458,7 +501,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
                     MdEntry::Match(length) => self.process_match_match(&mut op_len, *length),
                     MdEntry::Mismatch(start, end) => self.process_match_mismatch(&mut op_len, *start, *end),
                     MdEntry::Deletion(_, _) => unreachable!(
-                        "Failed to parse MD tag \"{}\": operation M coincides with deletion", self.md_str),
+                        "Failed to parse MD tag {:?}: operation M coincides with deletion", self.md_str),
                 }
             }
 
