@@ -29,7 +29,7 @@ pub struct Multinomial {
 impl Multinomial {
     /// Creates Multinomial distribution based on probabilities (may not sum up to one).
     pub fn new(p: &[f64]) -> Self {
-        let mut lnp: Vec<f64> = p.iter().cloned().map(f64::ln).collect();
+        let mut lnp: Vec<f64> = p.iter().copied().map(f64::ln).collect();
         let s = Ln::sum(&lnp);
         assert!(s.is_finite(), "Cannot create Multinomial distribution from probabilities ({:?})", p);
         lnp.iter_mut().for_each(|v| *v -= s);
@@ -57,7 +57,7 @@ impl Multinomial {
 
 impl fmt::Display for Multinomial {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Multinomial(p = {:?})", self.lnp.iter().cloned().map(f64::exp).collect::<Vec<_>>())
+        write!(f, "Multinomial(p = {:?})", self.lnp.iter().copied().map(f64::exp).collect::<Vec<_>>())
     }
 }
 

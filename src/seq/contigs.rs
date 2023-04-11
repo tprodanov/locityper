@@ -173,7 +173,7 @@ impl ContigNames {
 
     /// Returns sum length of all contigs.
     pub fn genome_size(&self) -> u64 {
-        self.lengths.iter().cloned().map(u64::from).sum()
+        self.lengths.iter().copied().map(u64::from).sum()
     }
 }
 

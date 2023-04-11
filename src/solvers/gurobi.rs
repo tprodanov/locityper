@@ -101,7 +101,7 @@ impl GurobiSolver {
 
     /// Query read assignments from the ILP solution, and set them in the `self.assignments`.
     fn set_assignments(&mut self) -> Result<(), Error> {
-        let vals = self.model.get_obj_attr_batch(attr::X, self.assignment_vars.iter().cloned())?;
+        let vals = self.model.get_obj_attr_batch(attr::X, self.assignment_vars.iter().copied())?;
         let mut i = 0;
         self.assignments.try_init_assignments::<_, Error>(|locs| {
             let j = i + locs.len();

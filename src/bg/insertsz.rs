@@ -13,7 +13,7 @@ use crate::{
 
 /// Group read in pairs.
 /// Only full pairs (both mates are present in some specific region) are stored.
-pub(super) struct ReadMateGrouping<'a> {
+pub struct ReadMateGrouping<'a> {
     pairs: Vec<(&'a Record, &'a Record)>,
 }
 
@@ -44,7 +44,7 @@ impl<'a> ReadMateGrouping<'a> {
     /// or one of the mates is missing (because it was discarded previously).
     ///
     /// Panics, if some of the reads are supplementary/secondary, or any of the mates are unmapped.
-    pub(super) fn from_unsorted_bam(mut records: impl Iterator<Item = &'a Record>, max_reads: Option<usize>) -> Self {
+    pub fn from_unsorted_bam(mut records: impl Iterator<Item = &'a Record>, max_reads: Option<usize>) -> Self {
         let mut rec1 = match records.next() {
             Some(rec) => rec,
             None => return Self {
@@ -99,15 +99,6 @@ impl Default for InsertSizeParams {
     }
 }
 
-/// Trait for insert size distribution.
-pub trait InsertDistr {
-    /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
-    fn ln_prob(&self, sz: u32, same_orient: bool) -> f64;
-
-    /// Maximum insert size. Over this size, all pairs are deemed unpaired.
-    fn max_size(&self) -> u32;
-}
-
 /// Get MAPQ of the mate record.
 fn mate_mapq(record: &Record) -> u8 {
     match record.aux(b"MQ") {
@@ -131,24 +122,28 @@ fn pair_orientation(record: &Record) -> bool {
 
 /// Negative Binomial insert size.
 #[derive(Debug, Clone)]
-pub struct InsertNegBinom {
+pub struct InsertDistr {
     max_size: u32,
     /// Log-probabilities of (FR/RF) orientation, and of (RR/FF) orientation.
     orient_probs: [f64; 2],
     distr: LinearCache<NBinom>,
 }
 
-impl InsertNegBinom {
+/// Counts reads with insert size over 1Mb as certainly unpaired.
+const MAX_REASONABLE_INSERT: f64 = 1e6;
+
+impl InsertDistr {
     /// Creates the Neg. Binom. insert size distribution from an iterator of insert sizes.
-    pub(super) fn estimate<'a>(read_pairs: &ReadMateGrouping<'a>, params: &InsertSizeParams) -> Self {
-        log::info!("    Estimating insert size distribution from {} read pairs", read_pairs.len());
+    pub fn estimate<'a>(read_pairs: &ReadMateGrouping<'a>, params: &InsertSizeParams) -> Self {
+        log::info!("    Estimating insert size distribution");
         let mut insert_sizes = Vec::<f64>::new();
         let mut orient_counts = [0_u64; 2];
         for (first, second) in read_pairs.pairs.iter() {
-            assert_eq!(first.tid(), second.tid(),
-                "Read pair {} appears on different contigs", String::from_utf8_lossy(first.qname()));
-            insert_sizes.push(first.insert_size().abs() as f64);
-            orient_counts[pair_orientation(first) as usize] += 1;
+            let insert_size = first.insert_size().abs() as f64;
+            if first.tid() == second.tid() && insert_size < MAX_REASONABLE_INSERT {
+                insert_sizes.push(insert_size);
+                orient_counts[pair_orientation(first) as usize] += 1;
+            }
         }
         let total = (orient_counts[0] + orient_counts[1]) as f64;
         log::info!("        Analyzed {} read pairs", total);
@@ -177,10 +172,9 @@ impl InsertNegBinom {
             distr: NBinom::estimate(mean, var).cached(max_size as usize + 1),
         }
     }
-}
 
-impl InsertDistr for InsertNegBinom {
-    fn ln_prob(&self, sz: u32, same_orient: bool) -> f64 {
+    /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
+    pub fn ln_prob(&self, sz: u32, same_orient: bool) -> f64 {
         if sz > self.max_size {
             f64::NEG_INFINITY
         } else {
@@ -188,12 +182,13 @@ impl InsertDistr for InsertNegBinom {
         }
     }
 
-    fn max_size(&self) -> u32 {
+    /// Maximum insert size. Over this size, all pairs are deemed unpaired.
+    pub fn max_size(&self) -> u32 {
         self.max_size
     }
 }
 
-impl JsonSer for InsertNegBinom {
+impl JsonSer for InsertDistr {
     fn save(&self) -> json::JsonValue {
         json::object!{
             max_size: self.max_size,
@@ -206,16 +201,16 @@ impl JsonSer for InsertNegBinom {
 
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
         let max_size = obj["max_size"].as_usize().ok_or_else(|| LoadError(format!(
-            "InsertNegBinom: Failed to parse '{}': missing or incorrect 'max_size' field!", obj)))?;
+            "InsertDistr: Failed to parse '{}': missing or incorrect 'max_size' field!", obj)))?;
         let n = obj["n"].as_f64().ok_or_else(|| LoadError(format!(
-            "InsertNegBinom: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
+            "InsertDistr: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
         let p = obj["p"].as_f64().ok_or_else(|| LoadError(format!(
-            "InsertNegBinom: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
+            "InsertDistr: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
         let orient_probs = [
             obj["fr_prob"].as_f64().ok_or_else(|| LoadError(format!(
-                "InsertNegBinom: Failed to parse '{}': missing or incorrect 'fr_prob' field!", obj)))?,
+                "InsertDistr: Failed to parse '{}': missing or incorrect 'fr_prob' field!", obj)))?,
             obj["ff_prob"].as_f64().ok_or_else(|| LoadError(format!(
-                "InsertNegBinom: Failed to parse '{}': missing or incorrect 'ff_prob' field!", obj)))?,
+                "InsertDistr: Failed to parse '{}': missing or incorrect 'ff_prob' field!", obj)))?,
         ];
         Ok(Self {
             max_size: u32::try_from(max_size).unwrap_or(u32::MAX / 2),

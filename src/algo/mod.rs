@@ -8,9 +8,8 @@ pub mod bisect;
 ///
 /// Allowed strings: `[0-9][0-9_,]*[GgMmKk]?`
 pub fn parse_int<T: std::convert::TryFrom<u64>>(s: &str) -> Result<T, String> {
-    log::info!("Parsing {}", s);
     let mut rev_bytes = s.as_bytes().iter().rev();
-    let (mut n, mut mult) = match rev_bytes.next().cloned() {
+    let (mut n, mut mult) = match rev_bytes.next().copied() {
         None => return Err("Cannot parse an empty string into int".to_string()),
         Some(b'G') | Some(b'g') => (0, 1_000_000_000),
         Some(b'M') | Some(b'm') => (0, 1_000_000),
@@ -35,6 +34,5 @@ pub fn parse_int<T: std::convert::TryFrom<u64>>(s: &str) -> Result<T, String> {
     if !was_digit {
         return Err(format!("Cannot parse string {:?} to int, unexpected first letter", s));
     }
-    log::info!("Result: {}", n);
     n.try_into().map_err(|_| format!("Cannot parse string {:?} to int, value is too large", s))
 }

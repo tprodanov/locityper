@@ -270,7 +270,7 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u3
     const VAR_MIN_WINDOWS: usize = 10;
     let n = depth.len();
     let m = gc_bins.len();
-    let depth_f: Vec<f64> = depth.iter().cloned().map(Into::into).collect();
+    let depth_f: Vec<f64> = depth.iter().copied().map(Into::into).collect();
     let xout: Vec<f64> = (0..u32::try_from(m).unwrap()).map(Into::into).collect();
     let means = Loess::new(mean_loess_frac, 1).set_xout(xout.clone()).calculate(&gc_contents, &depth_f);
 

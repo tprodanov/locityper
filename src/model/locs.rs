@@ -181,10 +181,12 @@ impl PrelimAlignments {
     /// Parameters:
     /// - unmapped_penalty for a single read mate (ln-space),
     /// - prob_diff: store alignment locations with ln-probability >= best_prob - prob_diff (ln-space).
-    pub fn identify_locations<D>(&mut self, insert_distr: &D, unmapped_penalty: f64, prob_diff: f64)
-        -> AllPairAlignments
-    where D: InsertDistr
-    {
+    pub fn identify_locations(
+        &mut self,
+        insert_distr: &InsertDistr,
+        unmapped_penalty: f64,
+        prob_diff: f64
+    ) -> AllPairAlignments {
         assert!(prob_diff >= 0.0, "Probability difference cannot be negative!");
         let n_reads = self.alns.len();
         let ln_ncontigs = (self.contigs.len() as f64).ln();
@@ -207,17 +209,15 @@ impl PrelimAlignments {
 const BISECT_RIGHT_STEP: usize = 4;
 
 /// For a single read-pair, find all paired-read alignments to the same contig.
-fn extend_pair_alignments<D>(
+fn extend_pair_alignments(
         new_alns: &mut Vec<PairAlignment>,
         buffer: &mut Vec<f64>,
         alns1: &[MateAln],
         alns2: &[MateAln],
-        insert_distr: &D,
+        insert_distr: &InsertDistr,
         unmapped_penalty: f64,
         prob_diff: f64,
-    )
-where D: InsertDistr,
-{
+) {
     let thresh_prob = 2.0 * unmapped_penalty - prob_diff;
     let alns1_empty = alns1.is_empty();
     if !alns1_empty {
@@ -254,16 +254,14 @@ where D: InsertDistr,
 }
 
 /// For a single read pair, combine all single-mate alignments across all contigs.
-fn identify_pair_alignments<D>(
+fn identify_pair_alignments(
     name_hash: u64,
     alns: &[MateAln],
-    insert_distr: &D,
+    insert_distr: &InsertDistr,
     unmapped_penalty: f64,
     prob_diff: f64,
     ln_ncontigs: f64,
-) -> ReadPairAlignments
-where D: InsertDistr
-{
+) -> ReadPairAlignments {
     let mut pair_alns = Vec::new();
     let mut buffer = Vec::with_capacity(16);
     let n = alns.len();

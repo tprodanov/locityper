@@ -206,7 +206,7 @@ where I: Iterator<Item = (u32, u32)>,
         let (i, opt_freq) = match pos_loc {
             PosLoc::Min => F64Ext::argmin(subvec),
             // Finds last argmin.
-            PosLoc::Max => IterExt::arg_optimal(subvec.iter().cloned(), |opt, e| opt <= e),
+            PosLoc::Max => IterExt::arg_optimal(subvec.iter().copied(), |opt, e| opt <= e),
         };
         if opt_freq <= 1.0 {
             // Best frequency is already achieved.

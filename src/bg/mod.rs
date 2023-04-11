@@ -12,7 +12,7 @@ use crate::seq::{
 };
 use {
     depth::{ReadDepth, ReadDepthParams},
-    insertsz::{InsertNegBinom, InsertDistr},
+    insertsz::InsertDistr,
     err_prof::ErrorProfile,
     ser::{LoadError},
 };
@@ -69,7 +69,7 @@ fn is_full_aln(record: &Record) -> bool {
 /// - error profile.
 pub struct BgDistr {
     depth: ReadDepth,
-    insert_sz: InsertNegBinom,
+    insert_sz: InsertDistr,
     err_prof: ErrorProfile,
 }
 
@@ -89,7 +89,7 @@ impl BgDistr {
             .filter(|record| is_full_aln(record)).collect();
         let rec_grouping = insertsz::ReadMateGrouping::from_unsorted_bam(
             full_alns.iter().map(|record| *record), Some(full_alns.len()));
-        let insert_sz = InsertNegBinom::estimate(&rec_grouping, &params.insert_size);
+        let insert_sz = InsertDistr::estimate(&rec_grouping, &params.insert_size);
         log::debug!("insert size: {:?}", insert_sz);
         let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);
         let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), &params.depth, insert_sz.max_size());
@@ -100,7 +100,7 @@ impl BgDistr {
         &self.depth
     }
 
-    pub fn insert_size(&self) -> &InsertNegBinom {
+    pub fn insert_size(&self) -> &InsertDistr {
         &self.insert_sz
     }
 
@@ -122,7 +122,7 @@ impl JsonSer for BgDistr {
         if obj.has_key("bg_depth") && obj.has_key("insert_size") && obj.has_key("error_profile") {
             Ok(Self {
                 depth: ReadDepth::load(&obj["bg_depth"])?,
-                insert_sz: InsertNegBinom::load(&obj["insert_size"])?,
+                insert_sz: InsertDistr::load(&obj["insert_size"])?,
                 err_prof: ErrorProfile::load(&obj["error_profile"])?,
             })
         } else {

@@ -518,3 +518,29 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
         *op_len -= pos_inc;
     }
 }
+
+/// Extract Soft/Hard clipping size from a raw CIGAR.
+/// This function only considers left-most and right-most operations, so 10H10S10M would produce 10, not 20.
+fn raw_clipping(raw_cigar: &[u32]) -> u32 {
+    let n = raw_cigar.len();
+    let first = CigarItem::from_u32(raw_cigar[0]);
+    let mut clipping = u32::from(!first.op.consumes_ref()) * first.len;
+    if n > 0 {
+        let last = CigarItem::from_u32(raw_cigar[raw_cigar.len() - 1]);
+        clipping += u32::from(!last.op.consumes_ref()) * last.len;
+    }
+    clipping
+}
+
+/// Returns Soft/Hard clipping size divided by the read length.
+/// This function only considers left-most and right-most CIGAR operations,
+/// and does not account for Hard clipping operations when calculating read length.
+/// Therefore `10H10S10M10S` would produce `20 / 30`, and not `30 / 40`.
+pub fn clipping_rate(record: &record::Record) -> f64 {
+    let clipping = raw_clipping(record.raw_cigar());
+    if clipping == 0 {
+        0.0
+    } else {
+        f64::from(clipping) / record.seq_len() as f64
+    }
+}

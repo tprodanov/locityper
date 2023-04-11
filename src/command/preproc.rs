@@ -19,10 +19,14 @@ use htslib::bam::{
 use crate::{
     Error,
     algo::parse_int,
-    bg::{Params as BgParams, BgDistr, JsonSer},
     seq::{
         ContigNames, ContigId, Interval,
         kmers::KmerCounts,
+        cigar,
+    },
+    bg::{
+        BgDistr, JsonSer, Params as BgParams,
+        insertsz::{ReadMateGrouping, InsertDistr},
     },
 };
 use super::common;
@@ -285,6 +289,18 @@ fn run_strobealign_bg_region(args: &Args, fasta_filename: &Path, out_dir: &Path)
     Ok(out_bam)
 }
 
+fn process_first_bam(args: &Args, bam_filename: &Path) -> Result<(), Error> {
+    log::debug!("    Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
+    let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
+    let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
+    let full_mappings: Vec<_> = records.iter()
+        .filter(|record| cigar::clipping_rate(record) <= args.bg_params.max_clipping)
+        .collect();
+    let pairings = ReadMateGrouping::from_unsorted_bam(full_mappings.iter().copied(), Some(full_mappings.len()));
+    InsertDistr::estimate(&pairings, &args.bg_params.insert_size);
+    Ok(())
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args: Args = process_args(parse_args(argv)?)?;
     let out_dir = create_out_dir(&args)?;
@@ -304,6 +320,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bam_filename1 = run_strobealign_full_ref(&args, &out_dir)?;
     let bam_filename2 = run_strobealign_bg_region(&args, &fasta_filename, &out_dir)?;
+
+    process_first_bam(&args, &bam_filename1)?;
+
     // let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
     // log::debug!("    Loading mapped reads into memory");
     // let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;

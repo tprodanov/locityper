@@ -125,7 +125,7 @@ impl ContigWindows {
     }
 
     pub fn ids(&self) -> impl Iterator<Item = ContigId> + '_ {
-        self.ids.iter().cloned()
+        self.ids.iter().copied()
     }
 
     /// Returns string with all contig names through a comma.
@@ -147,7 +147,7 @@ impl ContigWindows {
 
     /// Returns iterator over pairs `(contig_id, contig_cn)`.
     pub fn contigs_cns(&self) -> impl Iterator<Item = (ContigId, u8)> + '_ {
-        self.ids().zip(self.cns.iter().cloned())
+        self.ids().zip(self.cns.iter().copied())
     }
 
     /// Returns the number of windows corresponding to `i`-th contig.

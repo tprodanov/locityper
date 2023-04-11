@@ -39,7 +39,7 @@ impl VecExt {
             return Vec::new();
         }
         let mut sums = Vec::with_capacity(n - w + 1);
-        let mut acc = a[..w].iter().cloned().reduce(|acc, e| acc + e).unwrap();
+        let mut acc = a[..w].iter().copied().reduce(|acc, e| acc + e).unwrap();
         sums.push(acc);
 
         for i in w..n {
@@ -78,22 +78,22 @@ impl F64Ext {
 
     /// Returns minimal vector value.
     pub fn min(a: &[f64]) -> f64 {
-        a.iter().cloned().fold(f64::INFINITY, f64::min)
+        a.iter().copied().fold(f64::INFINITY, f64::min)
     }
 
     /// Returns maximal vector value.
     pub fn max(a: &[f64]) -> f64 {
-        a.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        a.iter().copied().fold(f64::NEG_INFINITY, f64::max)
     }
 
     /// Returns the index of the minimal value and the value itself.
     pub fn argmin(a: &[f64]) -> (usize, f64) {
-        IterExt::argmin(a.iter().cloned())
+        IterExt::argmin(a.iter().copied())
     }
 
     /// Returns the index of the maximal value and the value itself.
     pub fn argmax(a: &[f64]) -> (usize, f64) {
-        IterExt::argmax(a.iter().cloned())
+        IterExt::argmax(a.iter().copied())
     }
 
     /// Finds `q`-th quantile in a sorted array.
