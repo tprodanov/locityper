@@ -36,7 +36,7 @@ pub struct Params {
     pub err_quantile_mult: f64,
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
-    pub err_prob_mult: f64,
+    pub err_rate_mult: f64,
 }
 
 impl Default for Params {
@@ -51,8 +51,8 @@ impl Default for Params {
             ins_quantile_mult: 3.0,
 
             err_quantile: 0.01,
-            err_quantile_mult: 3.0,
-            err_prob_mult: 1.2,
+            err_quantile_mult: 2.0,
+            err_rate_mult: 1.2,
         }
     }
 }
@@ -60,8 +60,6 @@ impl Default for Params {
 impl Params {
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
-        // TODO: self.depth.validate();
-
         validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
 
@@ -74,9 +72,10 @@ impl Params {
             "Alignment likelihood quantile ({:.5}) must be within [0, 0.5]", self.err_quantile);
         validate_param!(self.err_quantile_mult >= 1.0,
             "Alignment likelihood quantile multiplier ({:.5}) must be at least 1", self.err_quantile_mult);
-        validate_param!(0.2 <= self.err_prob_mult,
-            "Error prob. multiplier ({:.5}) should not be too low", self.err_prob_mult);
-        Ok(())
+        validate_param!(0.2 <= self.err_rate_mult,
+            "Error rate multiplier ({:.5}) should not be too low", self.err_rate_mult);
+
+        self.depth.validate()
     }
 }
 

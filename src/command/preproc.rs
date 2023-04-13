@@ -72,8 +72,8 @@ impl Default for Args {
 }
 
 fn print_help() {
-    const KEY: usize = 17;
-    const VAL: usize = 4;
+    const KEY: usize = 18;
+    const VAL: usize = 5;
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
@@ -83,7 +83,7 @@ fn print_help() {
         "Usage:".bold(), env!("CARGO_PKG_NAME"));
 
     println!("\n{}", "Input/output arguments:".bold());
-    println!("    {:KEY$} {} Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
+    println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Database directory.",
@@ -95,14 +95,54 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
         "    --interleaved".green(), super::flag());
 
-    println!("\n{}", "Optional parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Estimate insert size and error profiles from the first {}\n\
-        {EMPTY}  alignments to the reference genome [{}].",
+    println!("\n{}", "Insert size and error profile estimation:".bold());
+    println!("    {:KEY$} {:VAL$}  Use first {} alignments to estimate profiles [{}].",
         "-n, --n-alns".green(), "INT".yellow(), "INT".yellow(), DEF_N_ALNS);
     println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
         "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
     println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
         "WARNING".red(), "--force".red(), "-n".green(), "-q".green(), width = KEY + VAL + 1);
+    println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
+        "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.max_clipping);
+    println!("    {:KEY$} {}\n\
+        {EMPTY}  Max allowed insert size is calculated as {} multiplied by\n\
+        {EMPTY}  the {}-th insert size quantile [{}, {}].",
+        "-I, --ins-quantile".green(), "FLOAT FLOAT".yellow(),
+        "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.ins_quantile_mult, defaults.params.ins_quantile);
+    println!("    {:KEY$} {}\n\
+        {EMPTY}  Min allowed alignment log-likelihood is calculated as {}\n\
+        {EMPTY}  multiplied by the {}-th log-likelihood quantile [{}, {}].",
+        "-E, --err-quantile".green(), "FLOAT FLOAT".yellow(),
+        "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.err_quantile_mult, defaults.params.err_quantile);
+    println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
+        {EMPTY}  read mappings missed due to higher error rate [{}].",
+        "-m, --err-mult".green(), "FLOAT".yellow(), defaults.params.err_rate_mult);
+
+    println!("\n{}", "Background read depth estimation:".bold());
+    println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
+        "-p, --ploidy".green(), "INT".yellow(), defaults.params.depth.ploidy);
+    println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
+        "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_size);
+    println!("    {:KEY$} {:VAL$}  Extend window by {} bp to both sides in order to calculate\n\
+        {EMPTY}  GC-content and average k-mer frequency [{}].",
+        "    --window-padd".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_padding);
+    println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region.\n\
+        {EMPTY}  Must not be smaller than {} [{}].",
+        "    --edge-padd".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
+        defaults.params.depth.edge_padding);
+    println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
+        "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.depth.max_kmer_freq);
+    println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
+        {EMPTY}  each GC-content [{}]. Smaller values lead to less robust estimates,\n\
+        {EMPTY}  larger values - to similar estimates across different GC-contents.",
+        "    --frac-windows".green(), "FLOAT".yellow(), defaults.params.depth.frac_windows);
+    println!("    {:KEY$} {}\n\
+        {EMPTY}  Read depth estimates are blured for windows with extreme GC-content\n\
+        {EMPTY}  (less than {} windows with smaller/larger GC). There, read depth\n\
+        {EMPTY}  is set to the last non-extreme depth, while variance is increased\n\
+        {EMPTY}  by a {} factor for each addition GC value [{} {}].",
+        "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
+        defaults.params.depth.min_tail_obs, defaults.params.depth.tail_var_mult);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -134,6 +174,30 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('n') | Long("n-alns") => args.n_alns = parser.value()?.parse_with(parse_int)?,
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
+            Short('c') | Long("max-clip") | Long("max-clipping") => args.params.max_clipping = parser.value()?.parse()?,
+            Short('I') | Long("ins-quant") | Long("ins-quantile") => {
+                args.params.ins_quantile_mult = parser.value()?.parse()?;
+                args.params.ins_quantile = parser.value()?.parse()?;
+            }
+            Short('E') | Long("err-quant") | Long("err-quantile") => {
+                args.params.err_quantile_mult = parser.value()?.parse()?;
+                args.params.err_quantile = parser.value()?.parse()?;
+            }
+            Short('m') | Long("err-mult") | Long("err-multiplier") =>
+                args.params.err_rate_mult = parser.value()?.parse()?,
+
+            Short('p') | Long("ploidy") => args.params.depth.ploidy = parser.value()?.parse()?,
+            Short('w') | Long("window") => args.params.depth.window_size = parser.value()?.parse()?,
+            Long("window-padd") | Long("window-padding") => args.params.depth.window_padding = parser.value()?.parse()?,
+            Long("edge-padd") | Long("edge-padding") => args.params.depth.edge_padding = parser.value()?.parse()?,
+            Long("kmer-freq") | Long("kmer-frequency") => args.params.depth.max_kmer_freq = parser.value()?.parse()?,
+            Long("frac-windows") | Long("fraction-windows") =>
+                args.params.depth.frac_windows = parser.value()?.parse()?,
+            Long("blur-extreme") => {
+                args.params.depth.min_tail_obs = parser.value()?.parse()?;
+                args.params.depth.tail_var_mult = parser.value()?.parse()?;
+            }
+
             Long("inter") | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,

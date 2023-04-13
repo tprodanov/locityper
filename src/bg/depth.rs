@@ -14,6 +14,7 @@ use crate::{
         bisect,
     },
     math::distr::NBinom,
+    err::{Error, validate_param},
 };
 use super::{
     err_prof::ErrorProfile,
@@ -168,12 +169,11 @@ fn find_gc_bins(gc_contents: &[f64]) -> Vec<(usize, usize)> {
 /// Predicts read depth means and variance for each GC-content from 0 to 100.
 /// GC-contents must be sorted. gc_contents and depth must have the same length and have the go in the same order.
 ///
-/// Mean values: use LOESS with all observations, without weights, and using `mean_loess_frac`.
+/// Mean values: use LOESS with all observations, without weights, and using `frac_windows`.
 ///
-/// Variance: Useuse LOESS, where observations are all GC-content values with at least 10 observations.
+/// Variance: use LOESS with frac = 1, where observations are all GC-content values with at least 10 observations.
 /// Y values are read depth variance in each particular GC-content bin.
-/// Use loess_frac = 1.
-fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u32], mean_loess_frac: f64)
+fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u32], frac_windows: f64)
     -> (Vec<f64>, Vec<f64>)
 {
     const VAR_MIN_WINDOWS: usize = 10;
@@ -181,7 +181,7 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u3
     let m = gc_bins.len();
     let depth_f: Vec<f64> = depth.iter().copied().map(Into::into).collect();
     let xout: Vec<f64> = (0..u32::try_from(m).unwrap()).map(Into::into).collect();
-    let means = Loess::new(mean_loess_frac, 1).set_xout(xout.clone()).calculate(&gc_contents, &depth_f);
+    let means = Loess::new(frac_windows, 1).set_xout(xout.clone()).calculate(&gc_contents, &depth_f);
 
     let mut x = Vec::with_capacity(m);
     let mut y = Vec::with_capacity(m);
@@ -230,7 +230,7 @@ fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, 
 #[derive(Clone, Debug)]
 pub struct ReadDepthParams {
     /// Specie ploidy (2 in most cases).
-    ploidy: u8,
+    pub ploidy: u8,
 
     /// Calculate background per windows of this size.
     /// Default: 100.
@@ -248,10 +248,10 @@ pub struct ReadDepthParams {
     /// Default: 1.2.
     pub max_kmer_freq: f64,
 
-    /// When calculating read depth averages for various GC-content values, use `mean_loess_frac` fraction
-    /// across all windows. For example, if mean_loess_frac is 0.1 (default),
+    /// When calculating read depth averages for various GC-content values, use `frac_windows` fraction
+    /// across all windows. For example, if frac_windows is 0.1 (default),
     /// use 10% of all observations with the most similar GC-content values.
-    pub mean_loess_frac: f64,
+    pub frac_windows: f64,
 
     /// Calculate read depth parameters differently for the highest and lowest GC-content values.
     /// First, select such GC-content values L & R such that there `< min_tail_obs` windows with GC-content `< L`
@@ -278,7 +278,7 @@ impl Default for ReadDepthParams {
             edge_padding: 1000,
             max_kmer_freq: 1.2,
 
-            mean_loess_frac: 0.1,
+            frac_windows: 0.1,
             min_tail_obs: 100,
             tail_var_mult: 0.05,
         }
@@ -286,9 +286,32 @@ impl Default for ReadDepthParams {
 }
 
 impl ReadDepthParams {
-    pub fn validate(&self) {
-        assert!(self.ploidy > 0, "Ploidy cannot be zero!");
-        assert!(self.edge_padding >= self.window_padding, "Edge padding must not be smaller than GC padding!");
+    /// Validate all parameter values.
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_param!(self.ploidy > 0, "Ploidy cannot be zero");
+        validate_param!(self.edge_padding >= self.window_padding,
+            "Edge padding ({}) must not be smaller than window padding ({})", self.edge_padding, self.window_padding);
+        if self.edge_padding < self.window_size {
+            log::warn!("Edge padding ({}) is smaller than the window size ({}), consider using a larger value",
+                self.edge_padding, self.window_size);
+        }
+
+        validate_param!(self.max_kmer_freq >= 1.0,
+            "Maximum k-mer frequency ({}) must be at least 1", self.max_kmer_freq);
+        validate_param!(0.0 < self.frac_windows && self.frac_windows <= 1.0,
+            "Fraction of windows ({}) must be within (0, 1]", self.frac_windows);
+
+        if self.min_tail_obs < 100 {
+            log::warn!("Number of windows with extreme GC-content ({}) is too small, consider using a larger value",
+                self.min_tail_obs);
+        }
+        validate_param!(self.tail_var_mult >= 0.0, "Extreme GC-content variance factor ({}) must be non-negative",
+            self.tail_var_mult);
+        if self.tail_var_mult >= 0.5 {
+            log::warn!("Extreme GC-content variance factor ({}) is too large, consider using a smaller value",
+                self.tail_var_mult);
+        }
+        Ok(())
     }
 }
 
@@ -330,7 +353,7 @@ impl ReadDepth {
         let gc_bins = find_gc_bins(&gc_contents);
         let depth1: Vec<u32> = ixs.iter().map(|&i| windows[i].depth1).collect();
 
-        let (mut means, mut variances) = predict_mean_var(&gc_contents, &gc_bins, &depth1, params.mean_loess_frac);
+        let (mut means, mut variances) = predict_mean_var(&gc_contents, &gc_bins, &depth1, params.frac_windows);
         log::info!("    Read depth:  mean = {:.2},  st.dev. = {:.2}   (GC-content 40, {} bp windows, ploidy {})",
             means[40], variances[40].sqrt(), params.window_size, params.ploidy);
         blur_boundary_values(&mut means, &mut variances, &gc_bins, params);
