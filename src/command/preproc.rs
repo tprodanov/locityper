@@ -35,6 +35,7 @@ use super::common;
 
 struct Args {
     input: Vec<PathBuf>,
+    alns: Option<PathBuf>,
     database: Option<PathBuf>,
     reference: Option<PathBuf>,
     output: Option<PathBuf>,
@@ -55,6 +56,7 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             input: Vec::with_capacity(2),
+            alns: None,
             database: None,
             reference: None,
             output: None,
@@ -71,7 +73,7 @@ impl Default for Args {
     }
 }
 
-fn print_help() {
+fn print_help(extended: bool) {
     const KEY: usize = 18;
     const VAL: usize = 5;
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
@@ -79,13 +81,16 @@ fn print_help() {
     let defaults = Args::default();
     println!("{}", "Preprocess WGS dataset.".yellow());
 
-    println!("\n{} {} preproc -i reads1 [reads2] -d db -r reference.fa -o out [arguments]",
+    println!("\n{} {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam) -d db -r reference.fa -o out [arguments]",
         "Usage:".bold(), env!("CARGO_PKG_NAME"));
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
+    println!("    {:KEY$} {:VAL$}  Reads in indexed BAM/CRAM format, already mapped to the whole genome.\n\
+        {EMPTY}  Mutually exclusive with {}.",
+        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green());
     println!("    {:KEY$} {:VAL$}  Database directory.",
         "-d, --db".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
@@ -95,67 +100,72 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
         "    --interleaved".green(), super::flag());
 
-    println!("\n{}", "Insert size and error profile estimation:".bold());
-    println!("    {:KEY$} {:VAL$}  Use first {} alignments to estimate profiles [{}].",
-        "-n, --n-alns".green(), "INT".yellow(), "INT".yellow(), DEF_N_ALNS);
-    println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
-        "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
-    println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
-        "WARNING".red(), "--force".red(), "-n".green(), "-q".green(), width = KEY + VAL + 1);
-    println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
-        "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.max_clipping);
-    println!("    {:KEY$} {}\n\
-        {EMPTY}  Max allowed insert size is calculated as {} multiplied by\n\
-        {EMPTY}  the {}-th insert size quantile [{}, {}].",
-        "-I, --ins-quantile".green(), "FLOAT FLOAT".yellow(),
-        "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.ins_quantile_mult, defaults.params.ins_quantile);
-    println!("    {:KEY$} {}\n\
-        {EMPTY}  Min allowed alignment log-likelihood is calculated as {}\n\
-        {EMPTY}  multiplied by the {}-th log-likelihood quantile [{}, {}].",
-        "-E, --err-quantile".green(), "FLOAT FLOAT".yellow(),
-        "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.err_quantile_mult, defaults.params.err_quantile);
-    println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
-        {EMPTY}  read mappings missed due to higher error rate [{}].",
-        "-m, --err-mult".green(), "FLOAT".yellow(), defaults.params.err_rate_mult);
+    if extended {
+        println!("\n{}", "Insert size and error profile estimation:".bold());
+        println!("    {:KEY$} {:VAL$}  Use first {} alignments to estimate profiles [{}].",
+            "-n, --n-alns".green(), "INT".yellow(), "INT".yellow(), DEF_N_ALNS);
+        println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
+            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
+        println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
+            "WARNING".red(), "--force".red(), "-n".green(), "-q".green(), width = KEY + VAL + 1);
+        println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
+            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.max_clipping);
+        println!("    {:KEY$} {}\n\
+            {EMPTY}  Max allowed insert size is calculated as {} multiplied by\n\
+            {EMPTY}  the {}-th insert size quantile [{}, {}].",
+            "-I, --ins-quantile".green(), "FLOAT FLOAT".yellow(),
+            "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.ins_quantile_mult, defaults.params.ins_quantile);
+        println!("    {:KEY$} {}\n\
+            {EMPTY}  Min allowed alignment log-likelihood is calculated as {}\n\
+            {EMPTY}  multiplied by the {}-th log-likelihood quantile [{}, {}].",
+            "-E, --err-quantile".green(), "FLOAT FLOAT".yellow(),
+            "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.err_quantile_mult, defaults.params.err_quantile);
+        println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
+            {EMPTY}  read mappings missed due to higher error rate [{}].",
+            "-m, --err-mult".green(), "FLOAT".yellow(), defaults.params.err_rate_mult);
 
-    println!("\n{}", "Background read depth estimation:".bold());
-    println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
-        "-p, --ploidy".green(), "INT".yellow(), defaults.params.depth.ploidy);
-    println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
-        "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_size);
-    println!("    {:KEY$} {:VAL$}  Extend window by {} bp to both sides in order to calculate\n\
-        {EMPTY}  GC-content and average k-mer frequency [{}].",
-        "    --window-padd".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_padding);
-    println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region.\n\
-        {EMPTY}  Must not be smaller than {} [{}].",
-        "    --edge-padd".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
-        defaults.params.depth.edge_padding);
-    println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
-        "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.depth.max_kmer_freq);
-    println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
-        {EMPTY}  each GC-content [{}]. Smaller values lead to less robust estimates,\n\
-        {EMPTY}  larger values - to similar estimates across different GC-contents.",
-        "    --frac-windows".green(), "FLOAT".yellow(), defaults.params.depth.frac_windows);
-    println!("    {:KEY$} {}\n\
-        {EMPTY}  Read depth estimates are blured for windows with extreme GC-content\n\
-        {EMPTY}  (less than {} windows with smaller/larger GC). There, read depth\n\
-        {EMPTY}  is set to the last non-extreme depth, while variance is increased\n\
-        {EMPTY}  by a {} factor for each addition GC value [{} {}].",
-        "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
-        defaults.params.depth.min_tail_obs, defaults.params.depth.tail_var_mult);
+        println!("\n{}", "Background read depth estimation:".bold());
+        println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
+            "-p, --ploidy".green(), "INT".yellow(), defaults.params.depth.ploidy);
+        println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
+            "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_size);
+        println!("    {:KEY$} {:VAL$}  Extend window by {} bp to both sides in order to calculate\n\
+            {EMPTY}  GC-content and average k-mer frequency [{}].",
+            "    --window-padd".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_padding);
+        println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region.\n\
+            {EMPTY}  Must not be smaller than {} [{}].",
+            "    --edge-padd".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
+            defaults.params.depth.edge_padding);
+        println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
+            "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.depth.max_kmer_freq);
+        println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
+            {EMPTY}  each GC-content [{}]. Smaller values lead to less robust estimates,\n\
+            {EMPTY}  larger values - to similar estimates across different GC-contents.",
+            "    --frac-windows".green(), "FLOAT".yellow(), defaults.params.depth.frac_windows);
+        println!("    {:KEY$} {}\n\
+            {EMPTY}  Read depth estimates are blured for windows with extreme GC-content\n\
+            {EMPTY}  (less than {} windows with smaller/larger GC). There, read depth\n\
+            {EMPTY}  is set to the last non-extreme depth, while variance is increased\n\
+            {EMPTY}  by a {} factor for each addition GC value [{} {}].",
+            "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
+            defaults.params.depth.min_tail_obs, defaults.params.depth.tail_var_mult);
+    }
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
-        "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
-    println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
-        "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
+    if extended {
+        println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
+            "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
+        println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
+            "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
+    }
 
     println!("\n{}", "Other parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
+    println!("    {:KEY$} {:VAL$}  Show short help message.", "-h, --help".green(), "");
+    println!("    {:KEY$} {:VAL$}  Show extended help message.", "-H, --full-help".green(), "");
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
@@ -167,7 +177,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     while let Some(arg) = parser.next()? {
         match arg {
             Short('i') | Long("input") => args.input
-                .extend(parser.values()?.map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?),
+                .extend(parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?),
+            Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
+                args.alns = Some(parser.value()?.parse()?),
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
@@ -209,7 +221,11 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 std::process::exit(0);
             }
             Short('h') | Long("help") => {
-                print_help();
+                print_help(false);
+                std::process::exit(0);
+            }
+            Short('H') | Long("full-help") | Long("hidden-help") => {
+                print_help(true);
                 std::process::exit(0);
             }
             _ => Err(arg.unexpected())?,
@@ -221,12 +237,17 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 fn process_args(mut args: Args) -> Result<Args, Error> {
     args.threads = max(args.threads, 1);
     let n_input = args.input.len();
-    if n_input == 0 {
-        Err(lexopt::Error::from("Read files are not provided (see -i/--input)"))?;
-    } else if args.interleaved && n_input != 1 {
+    if n_input == 0 && args.alns.is_none() {
+        Err(lexopt::Error::from("Neither read files, nor alignment files are not provided (see -i and -a)"))?;
+    } else if n_input > 0 && args.alns.is_some() {
+        Err(lexopt::Error::from("Read files (-i) and an alignment file (-a) cannot be provided together"))?;
+    }
+
+    // Ignore error if interleaved and n_input == 0.
+    if args.interleaved && n_input == 2 {
         Err(lexopt::Error::from("Two read files (-i/--input) are provided, however, --interleaved is specified"))?;
-    } else if n_input > 2 {
-        Err(lexopt::Error::from("Too many read files (see -i/--input). Expected 1 or 2 files"))?;
+    } else if n_input == 1 {
+        log::warn!("Running in single-end mode.");
     }
 
     if args.database.is_none() {
@@ -365,7 +386,7 @@ fn process_first_bam(bam_filename: &Path, params: &BgParams) -> Result<(InsertDi
         .collect::<Result<_, _>>()?;
     let pairings = ReadMateGrouping::from_unsorted_bam(records.iter(), Some(records.len()));
 
-    let insert_distr = InsertDistr::estimate(&pairings, params);
+    let insert_distr = InsertDistr::estimate(&pairings, params)?;
     let err_prof = ErrorProfile::estimate(records.iter(),
         |record| cigar::Cigar::from_raw(record.raw_cigar()),
         i64::from(insert_distr.max_size()), params);
@@ -400,7 +421,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     log::info!("Loading background non-duplicated region into memory");
     let db_path = args.database.as_ref().unwrap();
     let fasta_filename = super::create::bg_fasta_filename(db_path);
-    let (contigs, mut ref_seqs) = ContigNames::load_fasta(common::open(&fasta_filename)?, "bg".to_string())?;
+    let mut descriptions = Vec::with_capacity(1);
+    let (contigs, mut ref_seqs) = ContigNames::load_fasta(common::open(&fasta_filename)?, "bg".to_string(),
+        &mut descriptions)?;
     if contigs.len() != 1 {
         return Err(Error::InvalidData(format!("File {:?} contains more than one region", fasta_filename)));
     }

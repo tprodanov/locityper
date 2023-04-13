@@ -7,6 +7,7 @@ use std::{
     path::Path,
 };
 use bio::io::fasta::{self, FastaRead};
+use crate::algo::VecOrNone;
 
 /// Contig identificator - newtype over u16.
 /// Can be converted to `usize` using `id.ix()` method.
@@ -86,9 +87,15 @@ impl ContigNames {
     }
 
     /// Reads all entries from fasta and saves them into memory.
-    /// Returns pair (ContigNames, Vec<nt sequence>).
-    pub fn load_fasta<R>(stream: R, tag: String) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
+    ///
+    /// Descriptions are stored in either `&mut Vector<Option<String>>` or `()`, if they are not needed.
+    ///
+    /// Returns tuple
+    /// - ContigNames,
+    /// - Vector of contig sequences.
+    pub fn load_fasta<R, V>(stream: R, tag: String, mut descriptions: V) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
     where R: Read,
+          V: VecOrNone<Option<String>>,
     {
         let mut reader = fasta::Reader::new(stream);
         let mut names_lengths = Vec::new();
@@ -105,6 +112,7 @@ impl ContigNames {
             super::standardize(&mut ref_seq);
             names_lengths.push((record.id().to_string(), u32::try_from(ref_seq.len()).unwrap()));
             seqs.push(ref_seq.to_vec());
+            descriptions.push(record.desc().map(str::to_string));
         }
     }
 

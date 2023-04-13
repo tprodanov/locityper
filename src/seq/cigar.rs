@@ -1,10 +1,12 @@
 //! Various functions and structures related to sequence alignment.
 
-use std::fmt::{self, Write};
-use std::cmp::min;
-use std::ops::Index;
-
+use std::{
+    fmt::{self, Write},
+    cmp::min,
+    ops::Index,
+};
 use htslib::bam::record;
+use crate::algo::VecOrNone;
 
 /// Subset of CIGAR operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,7 +278,9 @@ impl Cigar {
 
     /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
     /// Second argument: either `()`, or `&mut Vec<u8>`.
-    pub fn infer_ext_cigar_md<S: SeqOrNone>(rec: &record::Record, mut ref_seq: S) -> Cigar {
+    pub fn infer_ext_cigar_md<V>(rec: &record::Record, mut ref_seq: V) -> Cigar
+    where V: VecOrNone<u8>
+    {
         let md_str = match rec.aux(b"MD") {
             Ok(record::Aux::String(s)) => s,
             _ => panic!("Cannot create extended CIGAR: record {} has no MD tag",
@@ -392,36 +396,6 @@ impl Index<usize> for Cigar {
     }
 }
 
-/// Trait that stores either `Vec<u8>`, or `()`.
-pub trait SeqOrNone : fmt::Debug {
-    /// Returns true if it is possible to push nucletides in the object (false for ()).
-    fn push_possible() -> bool;
-
-    /// Pushes a new nucleotide.
-    fn push(&mut self, nt: u8);
-
-    /// Returns length, if available.
-    fn try_len(&self) -> Option<usize>;
-}
-
-impl SeqOrNone for () {
-    fn push_possible() -> bool { false }
-    fn push(&mut self, _nt: u8) {}
-    fn try_len(&self) -> Option<usize> { None }
-}
-
-impl SeqOrNone for &mut Vec<u8> {
-    fn push_possible() -> bool { true }
-
-    fn push(&mut self, nt: u8) {
-        Vec::push(*self, nt);
-    }
-
-    fn try_len(&self) -> Option<usize> {
-        Some(self.len())
-    }
-}
-
 /// Entry in a MD tag.
 #[derive(Clone, Debug)]
 enum MdEntry {
@@ -481,10 +455,10 @@ fn parse_md(md: &[u8]) -> Vec<MdEntry> {
 }
 
 /// Temporary data structure, used to reduce the number of function parameters.
-struct ExtCigarData<'a, S: SeqOrNone> {
+struct ExtCigarData<'a, V: VecOrNone<u8>> {
     query_seq: record::Seq<'a>,
     new_cigar: Cigar,
-    ref_seq: &'a mut S,
+    ref_seq: &'a mut V,
     md_str: &'a str,
     raw_md: &'a [u8],
     md_entries: Vec<MdEntry>,
@@ -492,7 +466,7 @@ struct ExtCigarData<'a, S: SeqOrNone> {
     md_shift: u32,
 }
 
-impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
+impl<'a, V: VecOrNone<u8>> ExtCigarData<'a, V> {
     fn process_op(&mut self, tup: CigarItem) {
         if tup.op.consumes_both() {
             let mut op_len = tup.len;
@@ -512,7 +486,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
             if let MdEntry::Deletion(start, end) = self.md_entries[self.md_ix] {
                 debug_assert_eq!(self.md_shift, 0);
                 debug_assert_eq!(end - start, tup.len);
-                if S::push_possible() {
+                if !V::IS_SINK {
                     for i in start..end {
                         self.ref_seq.push(self.raw_md[i as usize]);
                     }
@@ -526,7 +500,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
     fn process_match_match(&mut self, op_len: &mut u32, md_len: u32) {
         let rem_md_len = md_len - self.md_shift;
         let pos_inc = min(*op_len, rem_md_len);
-        if S::push_possible() {
+        if !V::IS_SINK {
             for qpos in self.new_cigar.qlen..self.new_cigar.qlen + pos_inc {
                 self.ref_seq.push(self.query_seq[qpos as usize]);
             }
@@ -545,7 +519,7 @@ impl<'a, S: SeqOrNone> ExtCigarData<'a, S> {
     fn process_match_mismatch(&mut self, op_len: &mut u32, md_start: u32, md_end: u32) {
         let rem_md_len = md_end - md_start - self.md_shift;
         let pos_inc = min(*op_len, rem_md_len);
-        if S::push_possible() {
+        if !V::IS_SINK {
             for pos in md_start + self.md_shift..md_start + self.md_shift + pos_inc {
                 self.ref_seq.push(self.raw_md[pos as usize]);
             }

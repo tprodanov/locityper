@@ -2,6 +2,7 @@
 
 use htslib::bam::record::Record;
 use crate::{
+    Error,
     algo::{
         vec_ext::{VecExt, F64Ext},
         bisect,
@@ -78,6 +79,10 @@ impl<'a> ReadMateGrouping<'a> {
     pub fn len(&self) -> usize {
         self.pairs.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
 }
 
 /// Returns true if FF/RR orientation, false if FR/RF.
@@ -93,18 +98,32 @@ pub struct InsertDistr {
     max_size: u32,
     /// Log-probabilities of (FR/RF) orientation, and of (RR/FF) orientation.
     orient_probs: [f64; 2],
-    distr: LinearCache<NBinom>,
+    distr: Option<LinearCache<NBinom>>,
 }
 
 /// Counts reads with insert size over 1Mb as certainly unpaired.
 const MAX_REASONABLE_INSERT: f64 = 1e6;
 
 impl InsertDistr {
+    pub fn undefined() -> Self {
+        Self {
+            max_size: 0,
+            orient_probs: [f64::NAN, f64::NAN],
+            distr: None,
+        }
+    }
+
     /// Creates the Neg. Binom. insert size distribution from an iterator of insert sizes.
     ///
     // Calculate max insert size from input reads as `<quantile_mult> * <quantile>-th insert size quantile`.
     // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
-    pub fn estimate<'a>(read_pairs: &ReadMateGrouping<'a>, params: &super::Params) -> Self {
+    pub fn estimate<'a>(read_pairs: &ReadMateGrouping<'a>, params: &super::Params) -> Result<Self, Error> {
+        if read_pairs.is_empty() {
+            log::info!("No paired reads, skipping insert size distribution");
+            return Ok(Self::undefined());
+        } else if read_pairs.len() < 1000 {
+            return Err(Error::InvalidData("Not enough paired reads to calculate insert size distribution".to_owned()));
+        }
         log::info!("Estimating insert size distribution");
         let mut insert_sizes = Vec::<f64>::new();
         let mut orient_counts = [0_u64; 2];
@@ -137,10 +156,10 @@ impl InsertDistr {
         let var = F64Ext::variance(lim_insert_sizes, Some(mean)).max(1.000001 * mean);
         log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", mean, var.sqrt());
         log::info!("    Treat reads with insert size > {} as unpaired", max_size);
-        Self {
+        Ok(Self {
             max_size, orient_probs,
-            distr: NBinom::estimate(mean, var).cached(max_size as usize + 1),
-        }
+            distr: Some(NBinom::estimate(mean, var).cached(max_size as usize + 1)),
+        })
     }
 
     /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
@@ -148,7 +167,7 @@ impl InsertDistr {
         if sz > self.max_size {
             f64::NEG_INFINITY
         } else {
-            self.distr.ln_pmf(sz) + self.orient_probs[same_orient as usize]
+            self.distr.as_ref().unwrap().ln_pmf(sz) + self.orient_probs[same_orient as usize]
         }
     }
 
@@ -160,18 +179,27 @@ impl InsertDistr {
 
 impl JsonSer for InsertDistr {
     fn save(&self) -> json::JsonValue {
-        json::object!{
-            max_size: self.max_size,
-            fr_prob: self.orient_probs[0],
-            ff_prob: self.orient_probs[1],
-            n: self.distr.distr().n(),
-            p: self.distr.distr().p(),
+        if let Some(distr) = &self.distr {
+            json::object!{
+                max_size: self.max_size,
+                fr_prob: self.orient_probs[0],
+                ff_prob: self.orient_probs[1],
+                n: distr.distr().n(),
+                p: distr.distr().p(),
+            }
+        } else {
+            json::object!{
+                max_size: self.max_size,
+            }
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
         let max_size = obj["max_size"].as_usize().ok_or_else(|| LoadError(format!(
             "InsertDistr: Failed to parse '{}': missing or incorrect 'max_size' field!", obj)))?;
+        if max_size == 0 {
+            return Ok(Self::undefined());
+        }
         let n = obj["n"].as_f64().ok_or_else(|| LoadError(format!(
             "InsertDistr: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
         let p = obj["p"].as_f64().ok_or_else(|| LoadError(format!(
@@ -185,7 +213,7 @@ impl JsonSer for InsertDistr {
         Ok(Self {
             max_size: u32::try_from(max_size).unwrap_or(u32::MAX / 2),
             orient_probs,
-            distr: NBinom::new(n, p).cached(max_size),
+            distr: Some(NBinom::new(n, p).cached(max_size)),
         })
     }
 }
