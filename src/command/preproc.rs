@@ -400,9 +400,9 @@ fn estimate_bg_from_reads(
     let pairings = ReadMateGrouping::from_unsorted_bam(records1.iter(), Some(records1.len()));
 
     let insert_distr = InsertDistr::estimate(&pairings, params)?;
-    let err_prof = ErrorProfile::estimate(records1.iter(),
-        |record| cigar::Cigar::from_raw(record.raw_cigar()),
-        i64::from(insert_distr.max_size()), params);
+    let max_insert_size = i64::from(insert_distr.max_size());
+    let err_prof = ErrorProfile::estimate(records1.iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
+        max_insert_size, params);
 
     log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename2));
     let mut bam_reader2 = bam::Reader::from_path(&bam_filename2)?;
@@ -413,7 +413,7 @@ fn estimate_bg_from_reads(
         })
         .collect::<Result<_, _>>()?;
     let depth_distr = ReadDepth::estimate(records2.iter(), interval, ref_seq, kmer_counts, &err_prof,
-        i64::from(insert_distr.max_size()), &params.depth);
+        max_insert_size, &params.depth);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -424,8 +424,10 @@ fn estimate_bg_from_alns(
     bg_fasta_filename: &Path,
     bg_seq: &[u8],
     bg_interval_name: &str,
+    kmer_counts: &KmerCounts,
 ) -> Result<BgDistr, Error>
 {
+    log::debug!("Comparing reference sequence");
     let ref_fasta_filename = args.reference.as_ref().unwrap();
     let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta(ref_fasta_filename, "full_ref".to_owned())?;
     let bg_interval = Interval::parse(bg_interval_name, &ref_contigs)?;
@@ -436,6 +438,7 @@ fn estimate_bg_from_alns(
             super::fmt_path(ref_fasta_filename), bg_interval_name, super::fmt_path(bg_fasta_filename))));
     }
 
+    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename));
     let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
     bam_reader.set_reference(ref_fasta_filename)?;
     let params = &args.params;
@@ -447,9 +450,15 @@ fn estimate_bg_from_alns(
         })
         .collect::<Result<_, _>>()?;
     let pairings = ReadMateGrouping::from_mixed_bam(&records)?;
-    let insert_distr = InsertDistr::estimate(&pairings, params)?;
 
-    unimplemented!()
+    let insert_distr = InsertDistr::estimate(&pairings, params)?;
+    let seq_shift = bg_interval.start();
+    let max_insert_size = i64::from(insert_distr.max_size());
+    let err_prof = ErrorProfile::estimate(records.iter(),
+        |record| cigar::Cigar::infer_ext_cigar(record, &bg_seq, seq_shift), max_insert_size, params);
+    let depth_distr = ReadDepth::estimate(records.iter(), &bg_interval, &bg_seq, kmer_counts, &err_prof,
+        max_insert_size, &params.depth);
+    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -475,7 +484,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let kmer_counts = KmerCounts::load(kmers_file, contigs.lengths())?;
 
     let bg_distr = if let Some(alns_filename) = args.alns.as_ref() {
-        estimate_bg_from_alns(alns_filename, &args, &bg_fasta_filename, &ref_seq, bg_interval_name)?
+        estimate_bg_from_alns(alns_filename, &args, &bg_fasta_filename, &ref_seq, bg_interval_name, &kmer_counts)?
     } else {
         estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &interval, &ref_seq, &kmer_counts)?
     };

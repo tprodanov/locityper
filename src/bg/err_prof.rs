@@ -67,8 +67,6 @@ impl OpCounts<u64> {
         let del_prob = self.deletions as f64 / (read_lenf + self.deletions as f64);
         let corr_del_prob = del_prob * err_rate_mult;
         let corr_match_prob = 1.0 - corr_mism_prob - corr_ins_prob;
-        assert!(corr_match_prob >= 0.5, "Match probability ({:.5}) canont be less than 50%", corr_match_prob);
-        assert!(corr_del_prob < 0.5, "Deletion probability ({:.5}) cannot be over 50%", corr_del_prob);
 
         log::info!("    {:12} matches    ({:.6} -> {:.6})",
             self.matches, self.matches as f64 / read_lenf, corr_match_prob);
@@ -78,6 +76,8 @@ impl OpCounts<u64> {
             self.insertions, ins_prob, corr_ins_prob);
         log::info!("    {:12} deletions  ({:.6} -> {:.6})",
             self.deletions, del_prob, corr_del_prob);
+        assert!(corr_match_prob >= 0.5, "Match probability ({:.5}) cannot be less than 50%", corr_match_prob);
+        assert!(corr_del_prob < 0.5, "Deletion probability ({:.5}) cannot be over 50%", corr_del_prob);
 
         ErrorProfile {
             // Probabilities are normalized in Multinomial::new.
@@ -145,6 +145,7 @@ impl ErrorProfile {
         for record in records {
             if super::read_unpaired_or_proper_pair(record, max_insert_size) {
                 n_reads += 1;
+                // NOTE: Need to check if the record is completely within the region.
                 let cigar = cigar_getter(record);
                 prof_builder += &OpCounts::<u32>::calculate(&cigar);
                 cigars.push(cigar);

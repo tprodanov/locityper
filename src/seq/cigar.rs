@@ -257,7 +257,7 @@ impl Cigar {
             let mut curr_len = 0;
             let mut curr_equal = true;
             for i in 0..item.len as usize {
-                let now_equal = ref_seq[ref_shift + i] == query_seq.encoded_base(query_shift + i);
+                let now_equal = ref_seq[ref_shift + i] == query_seq[query_shift + i];
                 if now_equal != curr_equal && curr_len > 0 {
                     cigar.push(CigarItem::new(if curr_equal { Operation::Equal } else { Operation::Diff }, curr_len));
                     curr_len = 0;
@@ -270,7 +270,7 @@ impl Cigar {
         let in_query_len = query_seq.len() as u32;
         // If the query sequence is missing, in_query_len will be 0.
         if in_query_len > 0 {
-            assert_eq!(cigar.query_len(), in_query_len,
+            assert_eq!(cigar.qlen, in_query_len,
                 "Failed to convert CIGAR for read {:?}", String::from_utf8_lossy(rec.qname()));
         }
         cigar
