@@ -3,9 +3,9 @@ use std::{
     io::{self, Read},
     fs::File,
     rc::Rc,
-    collections::HashMap,
     path::Path,
 };
+use fnv::FnvHashMap;
 use bio::io::fasta::{self, FastaRead};
 use crate::algo::VecOrNone;
 
@@ -50,7 +50,7 @@ pub struct ContigNames {
     tag: String,
     names: Vec<String>,
     lengths: Vec<u32>,
-    name_to_id: HashMap<String, ContigId>,
+    name_to_id: FnvHashMap<String, ContigId>,
 }
 
 impl ContigNames {
@@ -60,7 +60,7 @@ impl ContigNames {
     pub fn new(tag: String, it: impl Iterator<Item = (String, u32)>) -> Self {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
-        let mut name_to_id = HashMap::new();
+        let mut name_to_id = FnvHashMap::default();
 
         for (name, length) in it {
             let contig_id = ContigId::new(names.len());

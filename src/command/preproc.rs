@@ -375,43 +375,81 @@ fn run_strobealign_bg_region(args: &Args, fasta_filename: &Path, out_dir: &Path)
     Ok(out_bam)
 }
 
-fn process_first_bam(bam_filename: &Path, params: &BgParams) -> Result<(InsertDistr, ErrorProfile), Error> {
-    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
-    let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
+/// Map reads to the genome and to the background genome to estimate background distributions based solely on WGS reads.
+fn estimate_bg_from_reads(
+    args: &Args,
+    bg_fasta_filename: &Path,
+    out_dir: &Path,
+    interval: &Interval,
+    ref_seq: &[u8],
+    kmer_counts: &KmerCounts,
+) -> Result<BgDistr, Error>
+{
+    let bam_filename1 = run_strobealign_full_ref(&args, &out_dir)?;
+    let bam_filename2 = run_strobealign_bg_region(&args, &bg_fasta_filename, &out_dir)?;
+
+    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename1));
+    let mut bam_reader1 = bam::Reader::from_path(&bam_filename1)?;
+    let params = &args.params;
+    let records1: Vec<BamRecord> = bam_reader1.records()
+        .filter(|res: &Result<BamRecord, _>| match res {
+            Ok(record) => record.mapq() >= params.min_mapq && cigar::clipping_rate(record) <= params.max_clipping,
+            Err(_) => true,
+        })
+        .collect::<Result<_, _>>()?;
+    let pairings = ReadMateGrouping::from_unsorted_bam(records1.iter(), Some(records1.len()));
+
+    let insert_distr = InsertDistr::estimate(&pairings, params)?;
+    let err_prof = ErrorProfile::estimate(records1.iter(),
+        |record| cigar::Cigar::from_raw(record.raw_cigar()),
+        i64::from(insert_distr.max_size()), params);
+
+    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename2));
+    let mut bam_reader2 = bam::Reader::from_path(&bam_filename2)?;
+    let records2: Vec<BamRecord> = bam_reader2.records()
+        .filter(|res: &Result<BamRecord, _>| match res {
+            Ok(record) => record.mapq() >= params.min_mapq,
+            Err(_) => true,
+        })
+        .collect::<Result<_, _>>()?;
+    let depth_distr = ReadDepth::estimate(records2.iter(), interval, ref_seq, kmer_counts, &err_prof,
+        i64::from(insert_distr.max_size()), &params.depth);
+    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+}
+
+/// Estimate background distributions based on WGS read mappings to the genome.
+fn estimate_bg_from_alns(
+    bam_filename: &Path,
+    args: &Args,
+    bg_fasta_filename: &Path,
+    bg_seq: &[u8],
+    bg_interval_name: &str,
+) -> Result<BgDistr, Error>
+{
+    let ref_fasta_filename = args.reference.as_ref().unwrap();
+    let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta(ref_fasta_filename, "full_ref".to_owned())?;
+    let bg_interval = Interval::parse(bg_interval_name, &ref_contigs)?;
+    let ref_seq = bg_interval.fetch_seq(&mut ref_fasta)?;
+    if ref_seq != bg_seq {
+        return Err(Error::InvalidInput(format!(
+            "Fasta file {} contains interval {}, but it has different sequence than the background fasta file {}",
+            super::fmt_path(ref_fasta_filename), bg_interval_name, super::fmt_path(bg_fasta_filename))));
+    }
+
+    let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
+    bam_reader.set_reference(ref_fasta_filename)?;
+    let params = &args.params;
+    bam_reader.fetch((bg_interval.contig_name(), i64::from(bg_interval.start()), i64::from(bg_interval.end())))?;
     let records: Vec<BamRecord> = bam_reader.records()
         .filter(|res: &Result<BamRecord, _>| match res {
             Ok(record) => record.mapq() >= params.min_mapq && cigar::clipping_rate(record) <= params.max_clipping,
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
-    let pairings = ReadMateGrouping::from_unsorted_bam(records.iter(), Some(records.len()));
-
+    let pairings = ReadMateGrouping::from_mixed_bam(&records)?;
     let insert_distr = InsertDistr::estimate(&pairings, params)?;
-    let err_prof = ErrorProfile::estimate(records.iter(),
-        |record| cigar::Cigar::from_raw(record.raw_cigar()),
-        i64::from(insert_distr.max_size()), params);
-    Ok((insert_distr, err_prof))
-}
 
-fn process_second_bam(
-    bam_filename: &Path,
-    interval: &Interval,
-    ref_seq: &[u8],
-    kmer_counts: &KmerCounts,
-    err_prof: &ErrorProfile,
-    insert_distr: &InsertDistr,
-    params: &BgParams,
-) -> Result<ReadDepth, Error> {
-    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
-    let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-    let records: Vec<BamRecord> = bam_reader.records()
-        .filter(|res: &Result<BamRecord, _>| match res {
-            Ok(record) => record.mapq() >= params.min_mapq,
-            Err(_) => true,
-        })
-        .collect::<Result<_, _>>()?;
-    let max_insert_size = i64::from(insert_distr.max_size());
-    Ok(ReadDepth::estimate(records.iter(), interval, ref_seq, kmer_counts, err_prof, max_insert_size, &params.depth))
+    unimplemented!()
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -420,29 +458,28 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     log::info!("Loading background non-duplicated region into memory");
     let db_path = args.database.as_ref().unwrap();
-    let fasta_filename = super::create::bg_fasta_filename(db_path);
+    let bg_fasta_filename = super::create::bg_fasta_filename(db_path);
     let mut descriptions = Vec::with_capacity(1);
-    let (contigs, mut ref_seqs) = ContigNames::load_fasta(common::open(&fasta_filename)?, "bg".to_string(),
+    let (contigs, mut ref_seqs) = ContigNames::load_fasta(common::open(&bg_fasta_filename)?, "bg".to_owned(),
         &mut descriptions)?;
     if contigs.len() != 1 {
-        return Err(Error::InvalidData(format!("File {:?} contains more than one region", fasta_filename)));
+        return Err(Error::InvalidData(format!("File {:?} contains more than one region", bg_fasta_filename)));
     }
+    let bg_interval_name = descriptions[0].as_ref().ok_or_else(|| Error::InvalidData(format!(
+        "First contig in {:?} does not have a valid description", bg_fasta_filename)))?;
     let ref_seq = ref_seqs.pop().unwrap();
     let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
 
-    let kmers_filename = super::create::kmers_filename(fasta_filename.parent().unwrap());
+    let kmers_filename = super::create::kmers_filename(bg_fasta_filename.parent().unwrap());
     let kmers_file = common::open(&kmers_filename)?;
     let kmer_counts = KmerCounts::load(kmers_file, contigs.lengths())?;
 
-    let bam_filename1 = run_strobealign_full_ref(&args, &out_dir)?;
-    let bam_filename2 = run_strobealign_bg_region(&args, &fasta_filename, &out_dir)?;
-    let (insert_distr, err_prof) = process_first_bam(&bam_filename1, &args.params)?;
-    let depth_distr = process_second_bam(&bam_filename2, &interval, &ref_seq, &kmer_counts, &err_prof, &insert_distr,
-        &args.params)?;
-
-    let bg_distr = BgDistr::new(insert_distr, err_prof, depth_distr);
-    let params_filename = out_dir.join("params.gz");
-    let mut bg_file = common::create_gzip(&params_filename)?;
+    let bg_distr = if let Some(alns_filename) = args.alns.as_ref() {
+        estimate_bg_from_alns(alns_filename, &args, &bg_fasta_filename, &ref_seq, bg_interval_name)?
+    } else {
+        estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &interval, &ref_seq, &kmer_counts)?
+    };
+    let mut bg_file = common::create_gzip(&out_dir.join("params.gz"))?;
     bg_distr.save().write_pretty(&mut bg_file, 4)?;
     log::info!("Success!");
     Ok(())

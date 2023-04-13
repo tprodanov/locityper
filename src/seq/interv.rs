@@ -93,14 +93,14 @@ impl Interval {
     where I: Iterator<Item = &'a str>,
     {
         let contig_name = split.next()
-            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_string()))?;
+            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?;
         let contig_id = contigs.try_get_id(contig_name)
             .ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}': unknown contig", contig_name)))?;
         let start = split.next()
-            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_string()))?
+            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?
             .parse::<u32>().map_err(|e| Error::ParsingError(format!("Cannot parse BED line: {}", e)))?;
         let end = split.next()
-            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_string()))?
+            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?
             .parse::<u32>().map_err(|e| Error::ParsingError(format!("Cannot parse BED line: {}", e)))?;
         Ok(Self::new(Rc::clone(contigs), contig_id, start, end))
     }

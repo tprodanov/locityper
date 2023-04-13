@@ -4,9 +4,9 @@ use std::{
     fs::{self, File},
     rc::Rc,
     process::Command,
-    collections::HashSet,
     path::{Path, PathBuf},
 };
+use fnv::FnvHashSet;
 use bio::io::fasta;
 use htslib::bcf::{
     self,
@@ -169,7 +169,7 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
 /// Loads named interval from a list of loci and a list of BED files. Names must not repeat.
 fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) -> Result<Vec<NamedInterval>, Error> {
     let mut intervals = Vec::new();
-    let mut names = HashSet::new();
+    let mut names = FnvHashSet::default();
     for locus in loci.iter() {
         let interval = NamedInterval::parse(locus, contigs)?;
         if !names.insert(interval.name().to_string()) {
@@ -399,7 +399,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let ref_filename = args.reference.as_ref().unwrap();
     let vcf_filename = args.variants.as_ref().unwrap();
 
-    let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
+    let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_owned())?;
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;

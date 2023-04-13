@@ -26,6 +26,7 @@ regex = { version = "1.7", default-features = false, features = ["std", "perf"] 
 lazy_static = { version = "1.4", default-features = false }
 const_format = { version = "0.2.30", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+fnv = { version = "1", default-features = false, features = ["std"] }
 
 [features]
 default = ["stochastic", "gurobi", "highs", "devel"]

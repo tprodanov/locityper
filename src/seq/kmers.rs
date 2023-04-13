@@ -24,7 +24,7 @@ impl KmerCounts {
     pub fn load<R: BufRead>(f: R, contig_lengths: &[u32]) -> Result<Self, Error> {
         assert!(!contig_lengths.is_empty(), "Cannot load k-mer counts for empty contigs set!");
         let mut lines = f.lines();
-        let first = lines.next().ok_or_else(|| Error::InvalidData("Empty file with k-mer counts!".to_string()))??;
+        let first = lines.next().ok_or_else(|| Error::InvalidData("Empty file with k-mer counts!".to_owned()))??;
         let k = match first.split_once('=') {
             Some(("k", v)) => v.parse().map_err(|_| Error::ParsingError(format!("Cannot parse line {}", first)))?,
             _ => return Err(Error::InvalidData(
@@ -35,14 +35,14 @@ impl KmerCounts {
         for &contig_len in contig_lengths.iter() {
             let curr_counts = lines.next()
                 .ok_or_else(|| Error::InvalidData(
-                    "File with k-mer counts does not contain enough contigs".to_string()))??
+                    "File with k-mer counts does not contain enough contigs".to_owned()))??
                 .split(' ')
                 .map(str::parse)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| Error::ParsingError(format!("Cannot parse k-mer counts: {}", e)))?;
 
             if curr_counts.len() as u32 != contig_len - k + 1 {
-                return Err(Error::InvalidData("Incorrect number of k-mers counts".to_string()));
+                return Err(Error::InvalidData("Incorrect number of k-mers counts".to_owned()));
             }
             counts.push(curr_counts);
         }
@@ -50,7 +50,7 @@ impl KmerCounts {
             Some(Err(e)) => Err(e)?,
             Some(Ok(s)) if s.is_empty() => Ok(Self { k, counts }),
             None => Ok(Self { k, counts }),
-            _ => Err(Error::InvalidData("Too many k-mer counts!".to_string())),
+            _ => Err(Error::InvalidData("Too many k-mer counts!".to_owned())),
         }
     }
 
@@ -208,7 +208,7 @@ impl JfKmerGetter {
             let mut curr_counts = Vec::with_capacity(n as usize);
             for _ in 0..n {
                 let line = jf_lines.next()
-                    .ok_or_else(|| Error::ParsingError("Not enough k-mer counts!".to_string()))?;
+                    .ok_or_else(|| Error::ParsingError("Not enough k-mer counts!".to_owned()))?;
                 let count = line.split_once(' ')
                     .map(|tup| tup.1)
                     .and_then(|s| s.parse().ok())
@@ -225,7 +225,7 @@ impl JfKmerGetter {
                 counts,
                 k: self.k,
             }),
-            _ => Err(Error::InvalidData("Too many k-mer counts!".to_string())),
+            _ => Err(Error::InvalidData("Too many k-mer counts!".to_owned())),
         }
     }
 

@@ -1,9 +1,7 @@
 //! Functions related to the pangenome VCF file.
 
-use std::{
-    str::from_utf8,
-    collections::HashSet,
-};
+use std::str::from_utf8;
+use fnv::FnvHashSet;
 use htslib::bcf::{
     header::HeaderView,
     record::{Record, GenotypeAllele},
@@ -30,7 +28,7 @@ pub fn reconstruct_sequences(
     const PLOIDY: usize = 2;
     let ref_end = ref_start + ref_seq.len() as u32;
     let n_samples = header.sample_count() as usize;
-    let mut haplotype_names = HashSet::with_capacity(1 + n_samples * PLOIDY);
+    let mut haplotype_names = FnvHashSet::with_capacity_and_hasher(1 + n_samples * PLOIDY, Default::default());
     let mut res = Vec::new();
     if let Some(name) = ref_name.as_ref() {
         haplotype_names.insert(name.clone());

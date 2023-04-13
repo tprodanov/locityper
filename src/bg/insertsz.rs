@@ -1,6 +1,7 @@
 //! Traits and structures related to insert size (distance between read mates).
 
 use htslib::bam::record::Record;
+use fnv::FnvHashMap;
 use crate::{
     Error,
     algo::{
@@ -74,6 +75,30 @@ impl<'a> ReadMateGrouping<'a> {
             }
         }
         Self { pairs }
+    }
+
+    /// Groups read mates into mates.
+    /// Input: vector of reads, where read mates do not necessarily go together.
+    pub fn from_mixed_bam(records: &'a [Record]) -> Result<Self, Error> {
+        let mut pairs: FnvHashMap<&'a [u8], [Option<&'a Record>; 2]> = FnvHashMap::with_capacity_and_hasher(
+            records.len() / 2, Default::default());
+        for record in records {
+            // Record must be primary, paired, both mates are mapped.
+            // 1 on RHS: record is paired.
+            if (record.flags() & 3853) == 1 {
+                let ix = usize::from(record.is_last_in_template());
+                // Insert record and return Error, if there already was a record there.
+                if let Some(old_rec) = pairs.entry(record.qname()).or_default()[ix].replace(record) {
+                    return Err(Error::InvalidData(format!("Read {} has several {} mates",
+                        String::from_utf8_lossy(old_rec.qname()), if ix == 0 { "first" } else { "second" })));
+                }
+            }
+        }
+        Ok(Self {
+            pairs: pairs.into_values()
+                .filter_map(|[rec1, rec2]| rec1.zip(rec2))
+                .collect()
+        })
     }
 
     pub fn len(&self) -> usize {

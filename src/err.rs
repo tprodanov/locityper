@@ -50,7 +50,7 @@ impl From<htslib::errors::Error> for Error {
 
 impl From<std::str::Utf8Error> for Error {
     fn from(_: std::str::Utf8Error) -> Self {
-        Self::ParsingError("Failed to parse a string: not a valid UTF-8".to_string())
+        Self::ParsingError("Failed to parse a string: not a valid UTF-8".to_owned())
     }
 }
 

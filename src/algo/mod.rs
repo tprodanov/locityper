@@ -1,9 +1,11 @@
 pub mod loess;
 pub mod vec_ext;
-pub mod hash;
 pub mod bisect;
 
-use std::fmt::Debug;
+use std::{
+    fmt::Debug,
+    hash::Hasher,
+};
 
 /// Parses a string value ending with suffixes G, M or K.
 /// Additionally, removes all underscores and commas from the string.
@@ -12,7 +14,7 @@ use std::fmt::Debug;
 pub fn parse_int<T: std::convert::TryFrom<u64>>(s: &str) -> Result<T, String> {
     let mut rev_bytes = s.as_bytes().iter().rev();
     let (mut n, mut mult) = match rev_bytes.next().copied() {
-        None => return Err("Cannot parse an empty string into int".to_string()),
+        None => return Err("Cannot parse an empty string into int".to_owned()),
         Some(b'G') | Some(b'g') => (0, 1_000_000_000),
         Some(b'M') | Some(b'm') => (0, 1_000_000),
         Some(b'K') | Some(b'k') => (0, 1000),
@@ -71,4 +73,11 @@ where T: Debug
     fn try_len(&self) -> Option<usize> {
         Some(self.len())
     }
+}
+
+/// Calculates FNV1a function for given bytes.
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hasher = fnv::FnvHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
 }

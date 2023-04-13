@@ -238,7 +238,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     // unwrap as args.reference was previously checked to be Some.
     let ref_filename = args.reference.as_ref().unwrap();
-    let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_string())?;
+    let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_owned())?;
     let jf_path = run_jellyfish(&db_path, &ref_filename, &args, contigs.genome_size())?;
     let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_path)?;
 

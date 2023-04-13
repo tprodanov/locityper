@@ -14,10 +14,7 @@ use crate::{
         err_prof::ErrorProfile,
         insertsz::InsertDistr,
     },
-    algo::{
-        hash::fnv1a,
-        bisect,
-    },
+    algo::{fnv1a, bisect},
     math::Ln,
 };
 
