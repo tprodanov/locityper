@@ -3,16 +3,8 @@ pub mod insertsz;
 pub mod depth;
 pub mod ser;
 
-use std::io;
 use htslib::bam::Record;
-use crate::{
-    seq::{
-        Interval,
-        kmers::KmerCounts,
-        cigar::CigarItem,
-    },
-    err::{Error, validate_param},
-};
+use crate::err::{Error, validate_param};
 use {
     depth::{ReadDepth, ReadDepthParams},
     insertsz::InsertDistr,
@@ -27,6 +19,8 @@ pub struct Params {
     /// Background read depth parameters.
     pub depth: ReadDepthParams,
 
+    /// Minimal mapping quality.
+    pub min_mapq: u8,
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
     pub max_clipping: f64,
@@ -50,6 +44,7 @@ impl Default for Params {
         Self {
             depth: Default::default(),
 
+            min_mapq: 20,
             max_clipping: 0.02,
 
             ins_quantile: 0.99,
@@ -102,41 +97,22 @@ fn read_unpaired_or_proper_pair(record: &Record, max_insert_size: i64) -> bool {
 /// - insert size distribution,
 /// - error profile.
 pub struct BgDistr {
-    depth: ReadDepth,
-    insert_sz: InsertDistr,
+    insert_distr: InsertDistr,
     err_prof: ErrorProfile,
+    depth: ReadDepth,
 }
 
 impl BgDistr {
-    // /// Estimates read depth, insert size and error profile given a slice of BAM records.
-    // pub fn estimate(
-    //     records: &[Record],
-    //     interval: &Interval,
-    //     ref_seq: &[u8],
-    //     kmer_counts: &KmerCounts,
-    //     params: &Params,
-    // ) -> io::Result<Self> {
-    //     unimplemented!()
-    //     // log::info!("Estimating background parameters");
-    //     // log::debug!("    Use {} reads on {} bp interval", records.len(), interval.len());
-
-    //     // let full_alns: Vec<&Record> = records.iter()
-    //     //     .filter(|record| is_full_aln(record)).collect();
-    //     // let rec_grouping = insertsz::ReadMateGrouping::from_unsorted_bam(
-    //     //     full_alns.iter().map(|record| *record), Some(full_alns.len()));
-    //     // let insert_sz = InsertDistr::estimate(&rec_grouping, &params.insert_size);
-    //     // log::debug!("insert size: {:?}", insert_sz);
-    //     // let err_prof = ErrorProfile::estimate(records.iter(), params.max_clipping, params.err_prob_mult);
-    //     // let depth = ReadDepth::estimate(interval, &ref_seq, records.iter(), &params.depth, insert_sz.max_size());
-    //     // Ok(Self { depth, insert_sz, err_prof })
-    // }
+    pub fn new(insert_distr: InsertDistr, err_prof: ErrorProfile, depth: ReadDepth) -> Self {
+        Self { insert_distr, err_prof, depth }
+    }
 
     pub fn depth(&self) -> &ReadDepth {
         &self.depth
     }
 
-    pub fn insert_size(&self) -> &InsertDistr {
-        &self.insert_sz
+    pub fn insert_distr(&self) -> &InsertDistr {
+        &self.insert_distr
     }
 
     pub fn error_profile(&self) -> &ErrorProfile {
@@ -147,22 +123,22 @@ impl BgDistr {
 impl JsonSer for BgDistr {
     fn save(&self) -> json::JsonValue {
         json::object!{
-            bg_depth: self.depth.save(),
-            insert_size: self.insert_sz.save(),
+            insert_distr: self.insert_distr.save(),
             error_profile: self.err_prof.save(),
+            bg_depth: self.depth.save(),
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
-        if obj.has_key("bg_depth") && obj.has_key("insert_size") && obj.has_key("error_profile") {
+        if obj.has_key("bg_depth") && obj.has_key("insert_distr") && obj.has_key("error_profile") {
             Ok(Self {
-                depth: ReadDepth::load(&obj["bg_depth"])?,
-                insert_sz: InsertDistr::load(&obj["insert_size"])?,
+                insert_distr: InsertDistr::load(&obj["insert_distr"])?,
                 err_prof: ErrorProfile::load(&obj["error_profile"])?,
+                depth: ReadDepth::load(&obj["bg_depth"])?,
             })
         } else {
             Err(LoadError(format!(
-                "BgDistr: Failed to parse '{}': missing 'bg_depth', 'insert_size' or 'error_profile' keys!", obj)))
+                "BgDistr: Failed to parse '{}': missing 'bg_depth', 'insert_distr' or 'error_profile' keys!", obj)))
         }
     }
 }

@@ -1,4 +1,3 @@
-use std::cmp::max;
 use htslib::bam::{
     Record,
     ext::BamRecordExtensions,
@@ -6,11 +5,11 @@ use htslib::bam::{
 use crate::{
     seq::{
         self, Interval,
-        cigar::{Operation, CigarItem, Cigar},
+        cigar::Cigar,
         kmers::KmerCounts,
     },
     algo::{
-        vec_ext::{VecExt, F64Ext, IterExt},
+        vec_ext::{VecExt, F64Ext},
         loess::Loess,
         bisect,
     },
@@ -25,26 +24,6 @@ pub trait DepthDistr {
     fn window_size(&self) -> u32;
 
     fn ln_prob(&self, gc_content: u8, depth: u32) -> f64;
-}
-
-/// Returns maximal of the left and right clipping.
-fn soft_clipping(record: &Record) -> u32 {
-    let raw_cigar = record.raw_cigar();
-    let first_item = CigarItem::from_u32(raw_cigar[0]);
-    let left = match first_item.operation() {
-        Operation::Soft => first_item.len(),
-        _ => 0,
-    };
-
-    let n = raw_cigar.len();
-    if n == 1 {
-        return left;
-    }
-    let last_item = CigarItem::from_u32(raw_cigar[n - 1]);
-    match last_item.operation() {
-        Operation::Soft => max(left, last_item.len()),
-        _ => left,
-    }
 }
 
 /// Number of various read types per window.
@@ -141,7 +120,6 @@ fn filter_windows(
     let neigh_len = (windows[0].len() + 2 * window_padding) as usize;
     let neigh_kmers = neigh_len + 1 - k as usize;
     let thresh_sum = params.max_kmer_freq * neigh_kmers as f64;
-    // log::info!("Threshold sum: {:6}", thresh_sum);
 
     let mut gc_contents = Vec::with_capacity(windows.len());
     windows.retain(|window| {
@@ -152,9 +130,6 @@ fn filter_windows(
             return false;
         }
         let sum_kmer_freq = kmer_counts[start_ix..start_ix + neigh_kmers].iter().copied().map(f64::from).sum::<f64>();
-        // log::debug!("    Window {:7}-{:7}.  GC: {:2},  aver {:7.3},  sum {:6},  passes {}",
-        //     window.start, window.end, seq::gc_content(window_seq).round() as u32,
-        //     sum_kmer_freq / neigh_kmers as f64, sum_kmer_freq, sum_kmer_freq <= thresh_sum);
         if sum_kmer_freq > thresh_sum {
             have_common_kmers += 1;
             false

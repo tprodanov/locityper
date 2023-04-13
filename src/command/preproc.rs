@@ -46,7 +46,6 @@ struct Args {
     samtools: PathBuf,
 
     n_alns: u64,
-    min_mapq: u8,
     params: BgParams,
 }
 
@@ -67,7 +66,6 @@ impl Default for Args {
             samtools: PathBuf::from("samtools"),
 
             n_alns: parse_int(DEF_N_ALNS).unwrap(),
-            min_mapq: 20,
             params: BgParams::default(),
         }
     }
@@ -102,7 +100,7 @@ fn print_help() {
         {EMPTY}  alignments to the reference genome [{}].",
         "-n, --n-alns".green(), "INT".yellow(), "INT".yellow(), DEF_N_ALNS);
     println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
-        "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.min_mapq);
+        "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
     println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
         "WARNING".red(), "--force".red(), "-n".green(), "-q".green(), width = KEY + VAL + 1);
 
@@ -135,7 +133,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
 
             Short('n') | Long("n-alns") => args.n_alns = parser.value()?.parse_with(parse_int)?,
-            Short('q') | Long("min-mapq") | Long("min-mq") => args.min_mapq = parser.value()?.parse()?,
+            Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Long("inter") | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
@@ -246,7 +244,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
             // Ignore reads where any of the mates is unmapped,
             // + ignore secondary & supplementary alignments + ignore failed checks.
             "--excl-flags", "3852",
-            "--min-MQ", &args.min_mapq.to_string()
+            "--min-MQ", &args.params.min_mapq.to_string()
             ])
         .arg("-o").arg(&tmp_bam)
         .stdin(Stdio::from(latest_stdout));
@@ -295,14 +293,16 @@ fn run_strobealign_bg_region(args: &Args, fasta_filename: &Path, out_dir: &Path)
 fn process_first_bam(bam_filename: &Path, params: &BgParams) -> Result<(InsertDistr, ErrorProfile), Error> {
     log::debug!("Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
     let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-    let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
-    let full_mappings: Vec<_> = records.iter()
-        .filter(|record| cigar::clipping_rate(record) <= params.max_clipping)
-        .collect();
-    let pairings = ReadMateGrouping::from_unsorted_bam(full_mappings.iter().copied(), Some(full_mappings.len()));
+    let records: Vec<BamRecord> = bam_reader.records()
+        .filter(|res: &Result<BamRecord, _>| match res {
+            Ok(record) => record.mapq() >= params.min_mapq && cigar::clipping_rate(record) <= params.max_clipping,
+            Err(_) => true,
+        })
+        .collect::<Result<_, _>>()?;
+    let pairings = ReadMateGrouping::from_unsorted_bam(records.iter(), Some(records.len()));
 
     let insert_distr = InsertDistr::estimate(&pairings, params);
-    let err_prof = ErrorProfile::estimate(full_mappings.into_iter(),
+    let err_prof = ErrorProfile::estimate(records.iter(),
         |record| cigar::Cigar::from_raw(record.raw_cigar()),
         i64::from(insert_distr.max_size()), params);
     Ok((insert_distr, err_prof))
@@ -319,7 +319,12 @@ fn process_second_bam(
 ) -> Result<ReadDepth, Error> {
     log::debug!("Loading mapped reads into memory ({})", super::fmt_path(bam_filename));
     let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-    let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
+    let records: Vec<BamRecord> = bam_reader.records()
+        .filter(|res: &Result<BamRecord, _>| match res {
+            Ok(record) => record.mapq() >= params.min_mapq,
+            Err(_) => true,
+        })
+        .collect::<Result<_, _>>()?;
     let max_insert_size = i64::from(insert_distr.max_size());
     Ok(ReadDepth::estimate(records.iter(), interval, ref_seq, kmer_counts, err_prof, max_insert_size, &params.depth))
 }
@@ -344,27 +349,14 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bam_filename1 = run_strobealign_full_ref(&args, &out_dir)?;
     let bam_filename2 = run_strobealign_bg_region(&args, &fasta_filename, &out_dir)?;
-
     let (insert_distr, err_prof) = process_first_bam(&bam_filename1, &args.params)?;
-    process_second_bam(
-        &bam_filename2,
-        &interval,
-        &ref_seq,
-        &kmer_counts,
-        &err_prof,
-        &insert_distr,
-        &args.params,
-    )?;
+    let depth_distr = process_second_bam(&bam_filename2, &interval, &ref_seq, &kmer_counts, &err_prof, &insert_distr,
+        &args.params)?;
 
-    // let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-    // log::debug!("    Loading mapped reads into memory");
-    // let records: Vec<BamRecord> = bam_reader.records().collect::<Result<_, _>>()?;
-
-    // let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
-    // let bg = BgDistr::estimate(&records, &interval, &ref_seq, &kmer_counts, &args.params)?;
-
-    // let params_filename = out_dir.join("params.gz");
-    // let mut bg_file = common::create_gzip(&params_filename)?;
-    // bg.save().write_pretty(&mut bg_file, 4)?;
+    let bg_distr = BgDistr::new(insert_distr, err_prof, depth_distr);
+    let params_filename = out_dir.join("params.gz");
+    let mut bg_file = common::create_gzip(&params_filename)?;
+    bg_distr.save().write_pretty(&mut bg_file, 4)?;
+    log::info!("Success!");
     Ok(())
 }

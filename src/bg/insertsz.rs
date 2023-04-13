@@ -1,6 +1,6 @@
 //! Traits and structures related to insert size (distance between read mates).
 
-use htslib::bam::record::{Record, Aux};
+use htslib::bam::record::Record;
 use crate::{
     algo::{
         vec_ext::{VecExt, F64Ext},
@@ -77,20 +77,6 @@ impl<'a> ReadMateGrouping<'a> {
 
     pub fn len(&self) -> usize {
         self.pairs.len()
-    }
-}
-
-/// Get MAPQ of the mate record.
-fn mate_mapq(record: &Record) -> u8 {
-    match record.aux(b"MQ") {
-        Ok(Aux::U8(val)) => val,
-        Ok(Aux::I8(val)) => val as u8,
-        Ok(Aux::I16(val)) => val as u8,
-        Ok(Aux::U16(val)) => val as u8,
-        Ok(Aux::I32(val)) => val as u8,
-        Ok(Aux::U32(val)) => val as u8,
-        Ok(_) => panic!("BAM record tag MQ has non-integer value!"),
-        Err(_) => panic!("BAM record does not have a MQ tag!"),
     }
 }
 

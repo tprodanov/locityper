@@ -131,7 +131,7 @@ impl ErrorProfile {
     /// Create error profile from the iterator over records.
     pub fn estimate<'a, I, F>(
         records: I,
-        mut cigar_getter: F,
+        cigar_getter: F,
         max_insert_size: i64,
         params: &super::Params,
     ) -> ErrorProfile
