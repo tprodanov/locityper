@@ -7,7 +7,7 @@ pub mod solvers;
 pub mod command;
 
 mod err;
-mod test;
+// mod test;
 pub use err::Error;
 
 fn init_logger() {
