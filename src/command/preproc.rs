@@ -83,6 +83,10 @@ fn print_help(extended: bool) {
 
     println!("\n{} {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam) -d db -r reference.fa -o out [arguments]",
         "Usage:".bold(), env!("CARGO_PKG_NAME"));
+    if !extended {
+        println!("\nThis is a short help message. Please use {} to see the full help.",
+            "-H/--full-help".green());
+    }
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\

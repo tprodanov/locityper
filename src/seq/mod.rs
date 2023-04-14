@@ -7,9 +7,11 @@ pub mod kmers;
 pub mod panvcf;
 #[cfg(feature = "devel")]
 pub mod dist;
+pub mod fastx;
 
 pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames};
+pub use fastx::write_fasta;
 
 use std::{
     cmp::min,
@@ -45,25 +47,6 @@ pub fn gc_count(seq: &[u8]) -> u32 {
 /// Calculate GC-content (between 0 and 100).
 pub fn gc_content(seq: &[u8]) -> f64 {
     100.0 * f64::from(gc_count(seq)) / seq.len() as f64
-}
-
-/// Write a single sequence to the FASTA file.
-/// Use this function instead of `bio::fasta::Writer` as the latter
-/// writes the sequence into a single line, without splitting.
-pub fn write_fasta<W: Write>(mut f: W, name: &str, descr: Option<&str>, seq: &[u8]) -> io::Result<()> {
-    const WIDTH: usize = 120;
-    write!(f, ">{}", name)?;
-    if let Some(descr) = descr {
-        write!(f, " {}", descr)?;
-    }
-    f.write_all(b"\n")?;
-
-    let n = seq.len();
-    for i in (0..n).step_by(WIDTH) {
-        f.write_all(&seq[i..min(i + WIDTH, n)])?;
-        f.write_all(b"\n")?;
-    }
-    Ok(())
 }
 
 /// Finds runs of Ns in the sequence and returns pairs (start, end).

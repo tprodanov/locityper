@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    io::{self, Read},
+    io::{self, Read, BufRead},
     fs::File,
     rc::Rc,
     path::Path,
@@ -94,10 +94,10 @@ impl ContigNames {
     /// - ContigNames,
     /// - Vector of contig sequences.
     pub fn load_fasta<R, V>(stream: R, tag: String, mut descriptions: V) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
-    where R: Read,
+    where R: BufRead,
           V: VecOrNone<Option<String>>,
     {
-        let mut reader = fasta::Reader::new(stream);
+        let mut reader = fasta::Reader::from_bufread(stream);
         let mut names_lengths = Vec::new();
         let mut seqs = Vec::new();
         let mut record = fasta::Record::new();
