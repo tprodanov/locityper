@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    io::{self, Read, BufRead},
+    io::{self, BufRead},
     fs::File,
     rc::Rc,
     path::Path,

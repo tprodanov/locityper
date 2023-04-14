@@ -14,7 +14,6 @@ pub use contigs::{ContigId, ContigNames};
 pub use fastx::write_fasta;
 
 use std::{
-    cmp::min,
     io::{self, Write},
 };
 

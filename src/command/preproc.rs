@@ -17,7 +17,7 @@ use htslib::bam::{
     record::Record as BamRecord,
 };
 use crate::{
-    Error,
+    err::{Error, validate_param},
     algo::parse_int,
     seq::{
         ContigNames, ContigId, Interval,
@@ -47,6 +47,8 @@ struct Args {
     samtools: PathBuf,
 
     n_alns: u64,
+    subsample_rate: f64,
+    subsample_seed: Option<u64>,
     params: BgParams,
 }
 
@@ -68,8 +70,40 @@ impl Default for Args {
             samtools: PathBuf::from("samtools"),
 
             n_alns: parse_int(DEF_N_ALNS).unwrap(),
+            subsample_rate: 0.25,
+            subsample_seed: None,
             params: BgParams::default(),
         }
+    }
+}
+
+impl Args {
+    /// Validate arguments, modifying some, if needed.
+    fn validate(mut self) -> Result<Self, Error> {
+        self.threads = max(self.threads, 1);
+        let n_input = self.input.len();
+        validate_param!(n_input > 0 || self.alns.is_some(),
+            "Neither read files, nor alignment files are not provided (see -i and -a)");
+        validate_param!(n_input == 0 || self.alns.is_none(),
+            "Read files (-i) and an alignment file (-a) cannot be provided together");
+
+        // Ignore error if interleaved and n_input == 0.
+        if self.interleaved && n_input == 2 {
+            Err(lexopt::Error::from("Two read files (-i/--input) are provided, however, --interleaved is specified"))?;
+        } else if n_input == 1 {
+            log::warn!("Running in single-end mode.");
+        }
+
+        validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
+        validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
+        validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
+        validate_param!(0.0 < self.subsample_rate && self.subsample_rate <= 1.0,
+            "Subsample rate ({}) must be within (0, 1]", self.subsample_rate);
+
+        self.params.validate()?;
+        self.strobealign = super::find_exe(self.strobealign)?;
+        self.samtools = super::find_exe(self.samtools)?;
+        Ok(self)
     }
 }
 
@@ -131,6 +165,12 @@ fn print_help(extended: bool) {
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
             "-p, --ploidy".green(), "INT".yellow(), defaults.params.depth.ploidy);
+        println!("    {:KEY$} {:VAL$}\n\
+            {EMPTY}  Subsample input reads by a factor of {} [{}]\n\
+            {EMPTY}  Use all reads for {} or if alignment file ({}) is provided.\n\
+            {EMPTY}  Second value sets the subsampling seed (optional).",
+            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(), defaults.subsample_rate,
+            "-s 1".green(), "-a".green());
         println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
             "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_size);
         println!("    {:KEY$} {:VAL$}  Extend window by {} bp to both sides in order to calculate\n\
@@ -235,37 +275,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             _ => Err(arg.unexpected())?,
         }
     }
-    Ok(args)
-}
-
-fn process_args(mut args: Args) -> Result<Args, Error> {
-    args.threads = max(args.threads, 1);
-    let n_input = args.input.len();
-    if n_input == 0 && args.alns.is_none() {
-        Err(lexopt::Error::from("Neither read files, nor alignment files are not provided (see -i and -a)"))?;
-    } else if n_input > 0 && args.alns.is_some() {
-        Err(lexopt::Error::from("Read files (-i) and an alignment file (-a) cannot be provided together"))?;
-    }
-
-    // Ignore error if interleaved and n_input == 0.
-    if args.interleaved && n_input == 2 {
-        Err(lexopt::Error::from("Two read files (-i/--input) are provided, however, --interleaved is specified"))?;
-    } else if n_input == 1 {
-        log::warn!("Running in single-end mode.");
-    }
-
-    if args.database.is_none() {
-        Err(lexopt::Error::from("Database directory is not provided (see -d/--database)"))?;
-    }
-    if args.reference.is_none() {
-        Err(lexopt::Error::from("Reference fasta file is not provided (see -r/--reference)"))?;
-    }
-    if args.output.is_none() {
-        Err(lexopt::Error::from("Output directory is not provided (see -o/--output)"))?;
-    }
-    args.params.validate()?;
-    args.strobealign = super::find_exe(args.strobealign)?;
-    args.samtools = super::find_exe(args.samtools)?;
     Ok(args)
 }
 
@@ -466,7 +475,7 @@ fn estimate_bg_from_alns(
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let args: Args = process_args(parse_args(argv)?)?;
+    let args = parse_args(argv)?.validate()?;
     let out_dir = create_out_dir(&args)?;
 
     log::info!("Loading background non-duplicated region into memory");

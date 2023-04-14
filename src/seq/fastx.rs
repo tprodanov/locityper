@@ -4,7 +4,7 @@ use std::{
 };
 use bio::io::{fasta, fastq};
 use rand::{
-    Rng, SeedableRng,
+    SeedableRng,
     rngs::SmallRng,
     distributions::{Bernoulli, Distribution, DistIter},
 };
@@ -158,86 +158,6 @@ impl<R: io::BufRead> FastxReader for fastq::Reader<R> {
     }
 }
 
-pub struct OneFileReader<R: FastxReader> {
-    reader: R,
-    buffer: R::Record,
-}
-
-// impl<R: FastxReader> OneFileReader<R> {
-//     pub fn new(reader: R) -> Self {
-//         Self {
-//             reader,
-//             buffer: R::Record::new(),
-//         }
-//     }
-
-//     pub fn read_next(&mut self) -> io::Result<&R::Record> {
-//         self.reader.read_next(&mut self.buffer)?;
-//         Ok(&self.buffer)
-//     }
-
-//     /// Subsample single-end FASTA/Q file, by taking `rate` of all reads (with optional seed).
-//     fn subsample_single_end(mut self, mut writer: impl io::Write, rate: f64, rng: impl Rng) -> io::Result<()> {
-//         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
-//         let mut successes = Bernoulli::new(rate).unwrap().sample_iter(rng);
-//         loop {
-//             let read = self.read_next()?;
-//             if read.is_empty() {
-//                 return writer.flush();
-//             }
-//             if successes.next().unwrap() {
-//                 read.write_simple(&mut writer)?;
-//             }
-//         }
-//     }
-
-//     //     let rng = match seed {
-//     //         Some(val) => SmallRng::seed_from_u64(val),
-//     //         None => SmallRng::from_entropy(),
-//     //     };
-
-//     /// Subsample paired-end FASTA/Q file, by taking `rate` of all reads (with optional seed).
-//     /// Reads are then written in a single interleaved output file.
-//     fn subsample_paired_end(mut self, mut writer: impl io::Write, rate: f64, rng: impl Rng) -> io::Result<()> {
-//         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
-//         let mut successes = Bernoulli::new(rate).unwrap().sample_iter(rng);
-//         loop {
-
-//             let read = self.read_next()?;
-//             if read.is_empty() {
-//                 return writer.flush();
-//             }
-//             if successes.next().unwrap() {
-//                 read.write_simple(&mut writer)?;
-//             }
-//         }
-//     }
-// }
-
-// /// Wrapper over two Fasta/q files, that reads records simultaniously.
-// pub struct TwoFileReader<R: FastxReader, S: FastxReader> {
-//     reader1: R,
-//     reader2: S,
-//     buffer1: R::Record,
-//     buffer2: S::Record,
-// }
-
-// impl<R: FastxReader, S: FastxReader> TwoFileReader<R, S> {
-//     pub fn new(reader1: R, reader2: S) -> Self {
-//         Self {
-//             reader1, reader2,
-//             buffer1: R::Record::new(),
-//             buffer2: S::Record::new(),
-//         }
-//     }
-
-//     pub fn read_next(&mut self) -> io::Result<(&R::Record, &S::Record)> {
-//         self.reader1.read_next(&mut self.buffer1)?;
-//         self.reader2.read_next(&mut self.buffer2)?;
-//         Ok((&self.buffer1, &self.buffer2))
-//     }
-// }
-
 /// Structure, that subsamples single- and paired-end reads.
 pub struct Subsample {
     successes: DistIter<Bernoulli, SmallRng, bool>,
@@ -247,9 +167,13 @@ impl Subsample {
     /// Creates a new subsampling structure with a given rate and optional seed.
     pub fn new(rate: f64, seed: Option<u64>) -> Self {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
-        let rng = match seed {
-            Some(val) => SmallRng::seed_from_u64(val),
-            None => SmallRng::from_entropy(),
+        let rng = if let Some(seed) = seed {
+            if seed.count_ones() < 5 {
+                log::warn!("Seed ({}) is too simple, consider using a more random number.", seed);
+            }
+            SmallRng::seed_from_u64(seed)
+        } else {
+            SmallRng::from_entropy()
         };
         Self {
             successes: Bernoulli::new(rate).unwrap().sample_iter(rng),
@@ -279,7 +203,7 @@ impl Subsample {
     {
         let mut record1 = R::Record::new();
         let mut record2 = R::Record::new();
-        let mut no_warnings = true;
+        let mut had_warning = false;
         loop {
             reader.read_next(&mut record1)?;
             if record1.is_empty() {
@@ -290,9 +214,41 @@ impl Subsample {
                 return Err(io::Error::new(io::ErrorKind::InvalidData,
                     "Odd number of records in an interleaved input file."))
             }
-            if no_warnings && record1.name() != record2.name() {
-                no_warnings = false;
+            if !had_warning && record1.name() != record2.name() {
+                had_warning = true;
                 log::warn!("Interleaved input file contains consecutive records with different names: {} and {}",
+                    record1.name(), record2.name());
+            }
+            if self.successes.next().unwrap() {
+                record1.write_simple(&mut writer)?;
+                record2.write_simple(&mut writer)?;
+            }
+        }
+    }
+
+    /// Subsamples two paired-end FASTA/Q file into a single interleaved file.
+    pub fn paired_end<R: FastxReader, S: FastxReader>(
+        mut self,
+        mut reader1: R,
+        mut reader2: S,
+        mut writer: impl io::Write,
+    ) -> io::Result<()>
+    {
+        let mut record1 = R::Record::new();
+        let mut record2 = S::Record::new();
+        let mut had_warning = false;
+        loop {
+            reader1.read_next(&mut record1)?;
+            reader2.read_next(&mut record2)?;
+            match (record1.is_empty(), record2.is_empty()) {
+                (true, true) => return writer.flush(),
+                (false, false) => {}
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                    "Different number of records in two input files."))
+            }
+            if !had_warning && record1.name() != record2.name() {
+                had_warning = true;
+                log::warn!("Paired-end records have different names: {} and {}",
                     record1.name(), record2.name());
             }
             if self.successes.next().unwrap() {
