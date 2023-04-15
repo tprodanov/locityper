@@ -1,85 +1,22 @@
 use std::{
-    io,
+    io::{self, BufRead},
     cmp::min,
 };
-use bio::io::{fasta, fastq};
 use rand::{
     SeedableRng,
     rngs::SmallRng,
     distributions::{Bernoulli, Distribution},
 };
 
-/// Trait, summarizing `fasta::Record` and `fastq::Record`.
-pub trait FastxRecord: Sized {
-    /// Creates a new, empty record.
-    fn new() -> Self;
-
-    /// Checks if the record is empty.
-    fn is_empty(&self) -> bool;
-
-    /// Returns the name of the record.
-    fn name(&self) -> &str;
-
-    /// Returns the record sequence.
-    fn seq(&self) -> &[u8];
-
-    /// Writes one record to the output stream.
-    /// For FASTA files, this function splits sequence into multiple lines.
-    fn write<W: io::Write>(&self, writer: W) -> io::Result<()>;
-
-    /// Writes one record to the output stream.
-    /// Do not output any description, and for FASTA files, write sequence into one line.
-    fn write_simple<W: io::Write>(&self, writer: W) -> io::Result<()>;
-}
-
-/// Trait, summarizing `fasta::Reader` and `fastq::Reader`.
-pub trait FastxReader {
-    type Record: FastxRecord;
-
-    /// Reads the next record.
-    /// If there is no record left, `record` will be empty.
-    fn read_next(&mut self, record: &mut Self::Record) -> io::Result<()>;
-}
-
-/// Implement `FastxRecord` for FASTA record.
-impl FastxRecord for fasta::Record {
-    fn new() -> Self {
-        Self::new()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
-
-    /// Returns the name of the record.
-    fn name(&self) -> &str {
-        self.id()
-    }
-
-    /// Returns the record sequence.
-    fn seq(&self) -> &[u8] {
-        self.seq()
-    }
-
-    fn write<W: io::Write>(&self, writer: W) -> io::Result<()> {
-        write_fasta(writer, self.id(), self.desc(), self.seq())
-    }
-
-    fn write_simple<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
-        write!(writer, ">{}\n", self.id())?;
-        writer.write_all(self.seq())?;
-        writer.write_all(b"\n")
-    }
-}
-
-
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
 /// writes the sequence into a single line, without splitting.
-pub fn write_fasta<W: io::Write>(mut writer: W, name: &str, desc: Option<&str>, seq: &[u8]) -> io::Result<()> {
-    write!(writer, ">{}", name)?;
-    if let Some(desc) = desc {
-        write!(writer, " {}", desc)?;
+pub fn write_fasta<W: io::Write>(mut writer: W, name: &[u8], descr: Option<&[u8]>, seq: &[u8]) -> io::Result<()> {
+    writer.write_all(b">")?;
+    writer.write_all(name)?;
+    if let Some(descr) = descr {
+        writer.write_all(b" ")?;
+        writer.write_all(descr)?;
     }
     writer.write_all(b"\n")?;
 
@@ -92,74 +29,202 @@ pub fn write_fasta<W: io::Write>(mut writer: W, name: &str, desc: Option<&str>, 
     Ok(())
 }
 
-/// Implement `FastxReader` for FASTA reader.
-impl<R: io::BufRead> FastxReader for fasta::Reader<R> {
-    type Record = fasta::Record;
+/// Write a single sequence to the FASTA file.
+/// Use this function instead of `bio::fasta::Writer` as the latter
+/// writes the sequence into a single line, without splitting.
+pub fn write_fastq<W: io::Write>(
+    mut writer: W,
+    name: &[u8],
+    descr: Option<&[u8]>,
+    seq: &[u8],
+    qual: &[u8],
+) -> io::Result<()> {
+    writer.write_all(b"@")?;
+    writer.write_all(name)?;
+    if let Some(descr) = descr {
+        writer.write_all(b" ")?;
+        writer.write_all(descr)?;
+    }
+    writer.write_all(b"\n")?;
+    writer.write_all(seq)?;
+    writer.write_all(b"+\n")?;
+    writer.write_all(qual)?;
+    writer.write_all(b"\n")
+}
 
-    fn read_next(&mut self, record: &mut Self::Record) -> io::Result<()> {
-        fasta::FastaRead::read(self, record)
+/// Reads the next line from a buffered reader, but removes endline characters from the end.
+/// If there were no errors, returns the number of written characters.
+fn read_line(stream: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<usize> {
+    match stream.read_until(b'\n', buffer) {
+        Ok(0) => Ok(0),
+        Ok(n) => {
+            let l = buffer.len();
+            if n >= 1 && buffer[l - 1] == b'\n' {
+                buffer.pop();
+                if n >= 2 && buffer[l - 2] == b'\r' {
+                    buffer.pop();
+                    Ok(n - 2)
+                } else {
+                    Ok(n - 1)
+                }
+            } else {
+                Ok(n)
+            }
+        }
+        e => e,
     }
 }
 
-/// Implement `FastxRecord` for FASTQ record.
-impl FastxRecord for fastq::Record {
-    fn new() -> Self {
-        Self::new()
-    }
+/// FASTA/Q record.
+#[derive(Default, Clone)]
+pub struct Record {
+    name: Vec<u8>,
+    descr: Vec<u8>,
+    seq: Vec<u8>,
+    qual: Vec<u8>,
+}
 
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
+impl Record {
+    // /// Returns true if the record is empty.
+    // pub fn is_empty(&self) -> bool {
+    //     self.name.is_empty()
+    // }
 
     /// Returns the name of the record.
-    fn name(&self) -> &str {
-        self.id()
+    pub fn name(&self) -> &[u8] {
+        &self.name
     }
 
-    /// Returns the record sequence.
-    fn seq(&self) -> &[u8] {
-        self.seq()
+    pub fn name_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.name)
     }
 
-    fn write<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
-        write!(writer, "@{}", self.id())?;
-        if let Some(desc) = self.desc() {
-            write!(writer, " {}", desc)?;
+    /// Returns record description, if available.
+    pub fn descr(&self) -> Option<&[u8]> {
+        if self.descr.is_empty() {
+            None
+        } else {
+            Some(&self.descr)
         }
-        writer.write_all(b"\n")?;
-        writer.write_all(self.seq())?;
-        writer.write_all(b"\n+\n")?;
-        writer.write_all(self.qual())?;
-        writer.write_all(b"\n")?;
-        Ok(())
     }
 
-    fn write_simple<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
-        write!(writer, "@{}", self.id())?;
-        writer.write_all(b"\n")?;
-        writer.write_all(self.seq())?;
-        writer.write_all(b"\n+\n")?;
-        writer.write_all(self.qual())?;
-        writer.write_all(b"\n")?;
-        Ok(())
+    /// Returns record sequence.
+    pub fn seq(&self) -> &[u8] {
+        &self.seq
+    }
+
+    /// Returns record qualities, if available.
+    pub fn qual(&self) -> Option<&[u8]> {
+        if self.qual.is_empty() {
+            None
+        } else {
+            Some(&self.qual)
+        }
+    }
+
+    pub fn write_to(&self, writer: impl io::Write) -> io::Result<()> {
+        if self.qual.is_empty() {
+            write_fasta(writer, &self.name, self.descr(), &self.seq)
+        } else {
+            write_fastq(writer, &self.name, self.descr(), &self.seq, &self.qual)
+        }
     }
 }
 
-/// Implement `FastxReader` for FASTQ reader.
-impl<R: io::BufRead> FastxReader for fastq::Reader<R> {
-    type Record = fastq::Record;
+/// Dynamic FASTA/Q reader.
+pub struct Reader<R: BufRead> {
+    stream: R,
+    buffer: Vec<u8>,
+}
 
-    fn read_next(&mut self, record: &mut Self::Record) -> io::Result<()> {
-        fastq::FastqRead::read(self, record).map_err(|e| match e {
-            fastq::Error::FileOpen { source, .. } => source,
-            fastq::Error::ReadError(err) => err,
-            _ => io::Error::new(io::ErrorKind::InvalidData, "Failed to process FASTQ file"),
-        })
+impl<R: BufRead> Reader<R> {
+    pub fn new(mut stream: R) -> io::Result<Self> {
+        let mut buffer = Vec::new();
+        read_line(&mut stream, &mut buffer)?;
+        Ok(Self { stream, buffer })
+    }
+
+    /// Reads the next record, and returns true if the read was successful (false if no more reads available).
+    pub fn read_next(&mut self, record: &mut Record) -> io::Result<bool> {
+        record.name.clear();
+        record.descr.clear();
+        record.seq.clear();
+        record.qual.clear();
+
+        // Buffer already contains the first line of the next record.
+        // If it is empty, the file has ended.
+        if self.buffer.is_empty() {
+            return Ok(false);
+        }
+
+        match self.buffer[1..].iter().position(|&c| c == b' ') {
+            Some(i) => {
+                record.name.extend(&self.buffer[1..i]);
+                record.descr.extend(&self.buffer[i + 1..]);
+            }
+            None => record.name.extend(&self.buffer[1..]),
+        }
+
+        if self.buffer[0] == b'>' {
+            self.fill_fasta_record(record)
+        } else {
+            self.fill_fastq_record(record)
+        }
+    }
+
+    fn fill_fasta_record(&mut self, record: &mut Record) -> io::Result<bool> {
+        self.buffer.clear();
+        let mut seq_len = 0;
+        loop {
+            let n = read_line(&mut self.stream, &mut record.seq)?;
+            if n == 0 {
+                // File ended.
+                if seq_len == 0 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData,
+                        format!("Fasta record {} has an empty sequence.", record.name_str())));
+                }
+                return Ok(true);
+            } else if record.seq[seq_len] == b'@' || record.seq[seq_len] == b'>' {
+                self.buffer.extend(&record.seq[seq_len..]);
+                record.seq.truncate(seq_len);
+                return Ok(true);
+            } else {
+                seq_len += n;
+            }
+        }
+    }
+
+    fn fill_fastq_record(&mut self, record: &mut Record) -> io::Result<bool> {
+        // Sequence
+        let seq_len = read_line(&mut self.stream, &mut record.seq)?;
+        let prev_buf_len = self.buffer.len();
+
+        // +
+        let n = read_line(&mut self.stream, &mut self.buffer)?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("Fastq record {} is incomplete.", record.name_str())));
+        } else if self.buffer[prev_buf_len] != b'+' {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("Fastq record {} has incorrect format.", record.name_str())));
+        }
+
+        // Qualities
+        let qual_len = read_line(&mut self.stream, &mut record.qual)?;
+        if seq_len != qual_len {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("Fastq record {} has non-matching sequence and qualities.", record.name_str())));
+        }
+
+        // Next record name.
+        self.buffer.clear();
+        read_line(&mut self.stream, &mut self.buffer)?;
+        Ok(true)
     }
 }
 
 /// Trait for reading and writing FASTA/Q single-end and paired-end records.
-pub trait ReaderWriter: Sized {
+pub trait ReaderWriter {
     type Record;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
@@ -184,7 +249,7 @@ pub trait ReaderWriter: Sized {
     }
 
     /// Subsamples the reader with the `rate` and optional `seed`.
-    fn subsample(mut self, rate: f64, seed: Option<u64>) -> io::Result<()> {
+    fn subsample(&mut self, rate: f64, seed: Option<u64>) -> io::Result<()> {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
         let rng = if let Some(seed) = seed {
             if seed.count_ones() < 5 {
@@ -206,28 +271,27 @@ pub trait ReaderWriter: Sized {
 }
 
 /// Single-end FASTA/Q reader, that stores one buffer record to reduce memory allocations.
-pub struct SingleEndReader<R: FastxReader, W> {
-    reader: R,
+pub struct SingleEndReader<R: BufRead, W> {
+    reader: Reader<R>,
     writer: W,
-    record: R::Record,
+    record: Record,
 }
 
-impl<R: FastxReader, W> SingleEndReader<R, W> {
-    pub fn new(reader: R, writer: W) -> Self {
+impl<R: BufRead, W> SingleEndReader<R, W> {
+    pub fn new(reader: Reader<R>, writer: W) -> Self {
         Self {
             reader, writer,
-            record: R::Record::new(),
+            record: Record::default(),
         }
     }
 }
 
-impl<R: FastxReader, W: io::Write> ReaderWriter for SingleEndReader<R, W> {
-    type Record = R::Record;
+impl<R: BufRead, W: io::Write> ReaderWriter for SingleEndReader<R, W> {
+    type Record = Record;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
-        self.reader.read_next(&mut self.record)?;
-        Ok(!self.record.is_empty())
+        self.reader.read_next(&mut self.record)
     }
 
     /// Returns the current record.
@@ -237,46 +301,44 @@ impl<R: FastxReader, W: io::Write> ReaderWriter for SingleEndReader<R, W> {
 
     /// Writes the current record to the output stream.
     fn write_current(&mut self) -> io::Result<()> {
-        self.record.write_simple(&mut self.writer)
+        self.record.write_to(&mut self.writer)
     }
 }
 
 /// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
-pub struct PairedEndInterleaved<R: FastxReader, W> {
-    reader: R,
+pub struct PairedEndInterleaved<R: BufRead, W> {
+    reader: Reader<R>,
     writer: W,
-    records: [R::Record; 2],
+    records: [Record; 2],
     had_warning: bool,
 }
 
-impl<R: FastxReader, W> PairedEndInterleaved<R, W> {
-    pub fn new(reader: R, writer: W) -> Self {
+impl<R: BufRead, W> PairedEndInterleaved<R, W> {
+    pub fn new(reader: Reader<R>, writer: W) -> Self {
         Self {
             reader, writer,
-            records: [R::Record::new(), R::Record::new()],
+            records: Default::default(),
             had_warning: false,
         }
     }
 }
 
-impl<R: FastxReader, W: io::Write> ReaderWriter for PairedEndInterleaved<R, W> {
-    type Record = [R::Record; 2];
+impl<R: BufRead, W: io::Write> ReaderWriter for PairedEndInterleaved<R, W> {
+    type Record = [Record; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
-        self.reader.read_next(&mut self.records[0])?;
-        if self.records[0].is_empty() {
+        if !self.reader.read_next(&mut self.records[0])? {
             return Ok(false);
         }
-        self.reader.read_next(&mut self.records[1])?;
-        if self.records[1].is_empty() {
+        if !self.reader.read_next(&mut self.records[1])? {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Odd number of records in an interleaved input file."))
         }
         if !self.had_warning && self.records[0].name() != self.records[1].name() {
             self.had_warning = true;
             log::warn!("Interleaved input file contains consecutive records with different names: {} and {}",
-                self.records[0].name(), self.records[1].name());
+                self.records[0].name_str(), self.records[1].name_str());
         }
         Ok(true)
     }
@@ -288,38 +350,38 @@ impl<R: FastxReader, W: io::Write> ReaderWriter for PairedEndInterleaved<R, W> {
 
     /// Writes the current record to the output stream.
     fn write_current(&mut self) -> io::Result<()> {
-        self.records[0].write_simple(&mut self.writer)?;
-        self.records[1].write_simple(&mut self.writer)
+        self.records[0].write_to(&mut self.writer)?;
+        self.records[1].write_to(&mut self.writer)
     }
 }
 
 /// Two paired-end FASTA/Q readers, that stores two buffer records to reduce memory allocations.
-pub struct PairedEndReaders<R: FastxReader, W> {
-    readers: [R; 2],
+pub struct PairedEndReaders<R: BufRead, S: BufRead, W> {
+    reader1: Reader<R>,
+    reader2: Reader<S>,
     writer: W,
-    records: [R::Record; 2],
+    records: [Record; 2],
     had_warning: bool,
 }
 
-impl<R: FastxReader, W> PairedEndReaders<R, W> {
-    pub fn new(reader1: R, reader2: R, writer: W) -> Self {
+impl<R: BufRead, S: BufRead, W> PairedEndReaders<R, S, W> {
+    pub fn new(reader1: Reader<R>, reader2: Reader<S>, writer: W) -> Self {
         Self {
-            readers: [reader1, reader2],
-            writer,
-            records: [R::Record::new(), R::Record::new()],
+            reader1, reader2, writer,
+            records: Default::default(),
             had_warning: false,
         }
     }
 }
 
-impl<R: FastxReader, W: io::Write> ReaderWriter for PairedEndReaders<R, W> {
-    type Record = [R::Record; 2];
+impl<R: BufRead, S: BufRead, W: io::Write> ReaderWriter for PairedEndReaders<R, S, W> {
+    type Record = [Record; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
-        self.readers[0].read_next(&mut self.records[0])?;
-        self.readers[1].read_next(&mut self.records[1])?;
-        match (self.records[0].is_empty(), self.records[1].is_empty()) {
+        let could_read1 = self.reader1.read_next(&mut self.records[0])?;
+        let could_read2 = self.reader2.read_next(&mut self.records[1])?;
+        match (could_read1, could_read2) {
             (true, true) => return Ok(false),
             (false, false) => {}
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData,
@@ -328,7 +390,7 @@ impl<R: FastxReader, W: io::Write> ReaderWriter for PairedEndReaders<R, W> {
         if !self.had_warning && self.records[0].name() != self.records[1].name() {
             self.had_warning = true;
             log::warn!("Paired-end records have different names: {} and {}",
-            self.records[0].name(), self.records[1].name());
+                self.records[0].name_str(), self.records[1].name_str());
         }
         Ok(true)
     }
@@ -340,7 +402,7 @@ impl<R: FastxReader, W: io::Write> ReaderWriter for PairedEndReaders<R, W> {
 
     /// Writes the current record to the output stream.
     fn write_current(&mut self) -> io::Result<()> {
-        self.records[0].write_simple(&mut self.writer)?;
-        self.records[1].write_simple(&mut self.writer)
+        self.records[0].write_to(&mut self.writer)?;
+        self.records[1].write_to(&mut self.writer)
     }
 }

@@ -189,7 +189,7 @@ impl JfKmerGetter {
         let mut child_stdin = child.stdin.take().unwrap();
         let handler = std::thread::spawn(move || -> Result<(), Error> {
             for seq in seqs.iter() {
-                seq::write_fasta(&mut child_stdin, "", None, seq)?;
+                seq::write_fasta(&mut child_stdin, b"", None, seq)?;
             }
             Ok(())
         });

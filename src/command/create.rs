@@ -186,7 +186,7 @@ fn extract_bg_region<R: Read + Seek>(
     super::mkdir(&bg_dir)?;
     log::info!("Writing background region {} to {}", region, super::fmt_path(&bg_path));
     let mut fasta_writer = super::common::create_gzip(&bg_path)?;
-    crate::seq::write_fasta(&mut fasta_writer, "bg", Some(&region.to_string()), &seq)?;
+    crate::seq::write_fasta(&mut fasta_writer, b"bg", Some(region.to_string().as_bytes()), &seq)?;
 
     log::info!("Calculating k-mer counts on the background region.");
     let kmer_counts = kmer_getter.fetch_one(seq)?;

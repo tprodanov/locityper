@@ -298,7 +298,7 @@ fn write_locus(
             Some(ref_name) if ref_name == name => Some(locus.interval().to_string()),
             _ => None,
         };
-        seq::write_fasta(&mut fasta_out, name, descr.as_ref().map(|s| s as &str), seq)?;
+        seq::write_fasta(&mut fasta_out, name.as_bytes(), descr.as_ref().map(|s| s.as_bytes()), seq)?;
     }
     fasta_out.flush()?;
     std::mem::drop(fasta_out);
