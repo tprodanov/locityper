@@ -6,7 +6,7 @@ use bio::io::{fasta, fastq};
 use rand::{
     SeedableRng,
     rngs::SmallRng,
-    distributions::{Bernoulli, Distribution, DistIter},
+    distributions::{Bernoulli, Distribution},
 };
 
 /// Trait, summarizing `fasta::Record` and `fastq::Record`.
@@ -158,14 +158,33 @@ impl<R: io::BufRead> FastxReader for fastq::Reader<R> {
     }
 }
 
-/// Structure, that subsamples single- and paired-end reads.
-pub struct Subsample {
-    successes: DistIter<Bernoulli, SmallRng, bool>,
-}
+/// Trait for reading and writing FASTA/Q single-end and paired-end records.
+pub trait ReaderWriter: Sized {
+    type Record;
 
-impl Subsample {
-    /// Creates a new subsampling structure with a given rate and optional seed.
-    pub fn new(rate: f64, seed: Option<u64>) -> Self {
+    /// Read next one/two records, and return true if the read was filled (is not empty).
+    fn read_next(&mut self) -> io::Result<bool>;
+
+    /// Returns the current record.
+    fn current(&self) -> &Self::Record;
+
+    /// Writes the current record to the output stream.
+    fn write_current(&mut self) -> io::Result<()>;
+
+    /// Writes the next `count` records to the output stream.
+    /// Returns the number of records that were written.
+    fn write_next_n(&mut self, count: usize) -> io::Result<usize> {
+        for i in 0..count {
+            match self.read_next()? {
+                true => self.write_current()?,
+                false => return Ok(i),
+            }
+        }
+        Ok(count)
+    }
+
+    /// Subsamples the reader with the `rate` and optional `seed`.
+    fn subsample(mut self, rate: f64, seed: Option<u64>) -> io::Result<()> {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
         let rng = if let Some(seed) = seed {
             if seed.count_ones() < 5 {
@@ -175,86 +194,153 @@ impl Subsample {
         } else {
             SmallRng::from_entropy()
         };
+        let mut successes = Bernoulli::new(rate).unwrap().sample_iter(rng);
+
+        while self.read_next()? {
+            if successes.next().unwrap() {
+                self.write_current()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Single-end FASTA/Q reader, that stores one buffer record to reduce memory allocations.
+pub struct SingleEndReader<R: FastxReader, W> {
+    reader: R,
+    writer: W,
+    record: R::Record,
+}
+
+impl<R: FastxReader, W> SingleEndReader<R, W> {
+    pub fn new(reader: R, writer: W) -> Self {
         Self {
-            successes: Bernoulli::new(rate).unwrap().sample_iter(rng),
+            reader, writer,
+            record: R::Record::new(),
         }
     }
+}
 
-    /// Subsamples one single-end FASTA/Q file.
-    pub fn single_end<R: FastxReader>(mut self, mut reader: R, mut writer: impl io::Write) -> io::Result<()> {
-        let mut record = R::Record::new();
-        loop {
-            reader.read_next(&mut record)?;
-            if record.is_empty() {
-                return writer.flush();
-            }
-            if self.successes.next().unwrap() {
-                record.write_simple(&mut writer)?;
-            }
-        }
+impl<R: FastxReader, W: io::Write> ReaderWriter for SingleEndReader<R, W> {
+    type Record = R::Record;
+
+    /// Read next one/two records, and return true if the read was filled (is not empty).
+    fn read_next(&mut self) -> io::Result<bool> {
+        self.reader.read_next(&mut self.record)?;
+        Ok(!self.record.is_empty())
     }
 
-    /// Subsamples an interleaved paired-end FASTA/Q file.
-    pub fn interleaved_paired_end<R: FastxReader>(
-        mut self,
-        mut reader: R,
-        mut writer: impl io::Write,
-    ) -> io::Result<()>
-    {
-        let mut record1 = R::Record::new();
-        let mut record2 = R::Record::new();
-        let mut had_warning = false;
-        loop {
-            reader.read_next(&mut record1)?;
-            if record1.is_empty() {
-                return writer.flush();
-            }
-            reader.read_next(&mut record2)?;
-            if record2.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    "Odd number of records in an interleaved input file."))
-            }
-            if !had_warning && record1.name() != record2.name() {
-                had_warning = true;
-                log::warn!("Interleaved input file contains consecutive records with different names: {} and {}",
-                    record1.name(), record2.name());
-            }
-            if self.successes.next().unwrap() {
-                record1.write_simple(&mut writer)?;
-                record2.write_simple(&mut writer)?;
-            }
-        }
+    /// Returns the current record.
+    fn current(&self) -> &Self::Record {
+        &self.record
     }
 
-    /// Subsamples two paired-end FASTA/Q file into a single interleaved file.
-    pub fn paired_end<R: FastxReader, S: FastxReader>(
-        mut self,
-        mut reader1: R,
-        mut reader2: S,
-        mut writer: impl io::Write,
-    ) -> io::Result<()>
-    {
-        let mut record1 = R::Record::new();
-        let mut record2 = S::Record::new();
-        let mut had_warning = false;
-        loop {
-            reader1.read_next(&mut record1)?;
-            reader2.read_next(&mut record2)?;
-            match (record1.is_empty(), record2.is_empty()) {
-                (true, true) => return writer.flush(),
-                (false, false) => {}
-                _ => return Err(io::Error::new(io::ErrorKind::InvalidData,
-                    "Different number of records in two input files."))
-            }
-            if !had_warning && record1.name() != record2.name() {
-                had_warning = true;
-                log::warn!("Paired-end records have different names: {} and {}",
-                    record1.name(), record2.name());
-            }
-            if self.successes.next().unwrap() {
-                record1.write_simple(&mut writer)?;
-                record2.write_simple(&mut writer)?;
-            }
+    /// Writes the current record to the output stream.
+    fn write_current(&mut self) -> io::Result<()> {
+        self.record.write_simple(&mut self.writer)
+    }
+}
+
+/// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
+pub struct PairedEndInterleaved<R: FastxReader, W> {
+    reader: R,
+    writer: W,
+    records: [R::Record; 2],
+    had_warning: bool,
+}
+
+impl<R: FastxReader, W> PairedEndInterleaved<R, W> {
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader, writer,
+            records: [R::Record::new(), R::Record::new()],
+            had_warning: false,
         }
+    }
+}
+
+impl<R: FastxReader, W: io::Write> ReaderWriter for PairedEndInterleaved<R, W> {
+    type Record = [R::Record; 2];
+
+    /// Read next one/two records, and return true if the read was filled (is not empty).
+    fn read_next(&mut self) -> io::Result<bool> {
+        self.reader.read_next(&mut self.records[0])?;
+        if self.records[0].is_empty() {
+            return Ok(false);
+        }
+        self.reader.read_next(&mut self.records[1])?;
+        if self.records[1].is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                "Odd number of records in an interleaved input file."))
+        }
+        if !self.had_warning && self.records[0].name() != self.records[1].name() {
+            self.had_warning = true;
+            log::warn!("Interleaved input file contains consecutive records with different names: {} and {}",
+                self.records[0].name(), self.records[1].name());
+        }
+        Ok(true)
+    }
+
+    /// Returns the current record.
+    fn current(&self) -> &Self::Record {
+        &self.records
+    }
+
+    /// Writes the current record to the output stream.
+    fn write_current(&mut self) -> io::Result<()> {
+        self.records[0].write_simple(&mut self.writer)?;
+        self.records[1].write_simple(&mut self.writer)
+    }
+}
+
+/// Two paired-end FASTA/Q readers, that stores two buffer records to reduce memory allocations.
+pub struct PairedEndReaders<R: FastxReader, W> {
+    readers: [R; 2],
+    writer: W,
+    records: [R::Record; 2],
+    had_warning: bool,
+}
+
+impl<R: FastxReader, W> PairedEndReaders<R, W> {
+    pub fn new(reader1: R, reader2: R, writer: W) -> Self {
+        Self {
+            readers: [reader1, reader2],
+            writer,
+            records: [R::Record::new(), R::Record::new()],
+            had_warning: false,
+        }
+    }
+}
+
+impl<R: FastxReader, W: io::Write> ReaderWriter for PairedEndReaders<R, W> {
+    type Record = [R::Record; 2];
+
+    /// Read next one/two records, and return true if the read was filled (is not empty).
+    fn read_next(&mut self) -> io::Result<bool> {
+        self.readers[0].read_next(&mut self.records[0])?;
+        self.readers[1].read_next(&mut self.records[1])?;
+        match (self.records[0].is_empty(), self.records[1].is_empty()) {
+            (true, true) => return Ok(false),
+            (false, false) => {}
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                "Different number of records in two input files."))
+        }
+        if !self.had_warning && self.records[0].name() != self.records[1].name() {
+            self.had_warning = true;
+            log::warn!("Paired-end records have different names: {} and {}",
+            self.records[0].name(), self.records[1].name());
+        }
+        Ok(true)
+    }
+
+    /// Returns the current record.
+    fn current(&self) -> &Self::Record {
+        &self.records
+    }
+
+    /// Writes the current record to the output stream.
+    fn write_current(&mut self) -> io::Result<()> {
+        self.records[0].write_simple(&mut self.writer)?;
+        self.records[1].write_simple(&mut self.writer)
     }
 }

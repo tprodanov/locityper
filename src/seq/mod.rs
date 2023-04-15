@@ -13,10 +13,6 @@ pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames};
 pub use fastx::write_fasta;
 
-use std::{
-    io::{self, Write},
-};
-
 /// Make nucleotide sequence standard: only letters A,C,G,T,N.
 pub fn standardize(seq: &mut [u8]) {
     for nt in seq.iter_mut() {

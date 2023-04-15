@@ -46,13 +46,13 @@ struct Args {
     strobealign: PathBuf,
     samtools: PathBuf,
 
-    n_alns: u64,
+    n_reads: u64,
     subsample_rate: f64,
     subsample_seed: Option<u64>,
     params: BgParams,
 }
 
-const DEF_N_ALNS: &'static str = "1M";
+const DEF_N_READS: &'static str = "1M";
 
 impl Default for Args {
     fn default() -> Self {
@@ -69,7 +69,7 @@ impl Default for Args {
             strobealign: PathBuf::from("strobealign"),
             samtools: PathBuf::from("samtools"),
 
-            n_alns: parse_int(DEF_N_ALNS).unwrap(),
+            n_reads: parse_int(DEF_N_READS).unwrap(),
             subsample_rate: 0.25,
             subsample_seed: None,
             params: BgParams::default(),
@@ -99,6 +99,9 @@ impl Args {
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         validate_param!(0.0 < self.subsample_rate && self.subsample_rate <= 1.0,
             "Subsample rate ({}) must be within (0, 1]", self.subsample_rate);
+        if self.subsample_rate > 0.99 {
+            self.subsample_rate = 1.0;
+        }
 
         self.params.validate()?;
         self.strobealign = super::find_exe(self.strobealign)?;
@@ -140,8 +143,8 @@ fn print_help(extended: bool) {
 
     if extended {
         println!("\n{}", "Insert size and error profile estimation:".bold());
-        println!("    {:KEY$} {:VAL$}  Use first {} alignments to estimate profiles [{}].",
-            "-n, --n-alns".green(), "INT".yellow(), "INT".yellow(), DEF_N_ALNS);
+        println!("    {:KEY$} {:VAL$}  Use first {} reads to estimate profiles [{}].",
+            "-n, --n-reads".green(), "INT".yellow(), "INT".yellow(), DEF_N_READS);
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
             "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
         println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
@@ -228,7 +231,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
 
-            Short('n') | Long("n-alns") => args.n_alns = parser.value()?.parse_with(parse_int)?,
+            Short('n') | Long("n-reads") => args.n_reads = parser.value()?.parse_with(parse_int)?,
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.params.max_clipping = parser.value()?.parse()?,
             Short('I') | Long("ins-quant") | Long("ins-quantile") => {
@@ -291,9 +294,39 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     Ok(bg_dir)
 }
 
-/// Run strobealign.
-/// If `head_lines` is `Some`, run `head -n INT` before running `samtools view`.
-/// In such case, pass additional parameters `-f 0.001 -R 0` to `strobalign`.
+// fn set_strobealign_input(args: &Args, strobealign: &mut Command, to_bg: bool) -> Result<(), Error> {
+//     if to_bg && args.subsample_rate == 1.0 {
+//         // Just provide input files as they are.
+//         if args.interleaved {
+//             strobealign.arg("--interleaved");
+//         }
+//         strobealign.arg(&ref_filename).args(&args.input);
+//         return Ok(())
+//     }
+//     // if args.input.
+//     Ok(())
+// }
+
+fn create_samtools_command(args: &Args, stdin: Stdio, out_file: &Path) -> Command {
+    let mut cmd = Command::new(&args.samtools);
+    // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
+    cmd.args(&["view",
+            "--bam", // Output BAM.
+            // Ignore reads where any of the mates is unmapped,
+            // + ignore secondary & supplementary alignments + ignore failed checks.
+            "--excl-flags", "3852",
+            "--min-MQ", &args.params.min_mapq.to_string()
+            ])
+        .arg("-o").arg(out_file)
+        .stdin(stdin);
+    cmd
+}
+
+/// Run strobealign for the input WGS reads.
+/// If `to_bg` is true, reads are mapped to a single background region. If needed, subsampling is performed.
+/// If `to_bg` is false, first `args.n_reads` reads are mapped to the whole genome.
+/// In the first case, pass additional parameter `-f 0.001` to `strobalign`.
+// fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
 fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines: Option<u64>) -> Result<(), Error> {
     let tmp_bam = out_bam.with_extension("tmp.bam");
     if tmp_bam.exists() {
@@ -306,10 +339,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
 
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
-        "-N0", // Retain 0 additional alignments.
-        "-R0", // Do not rescue reads,
-        "-U", // Do not output unmapped reads.
-        // "--no-progress",
+        "-N0", "-R0", "-U", // Retain 0 additional alignments, do not rescue reads, do not output unmapped reads.
         "-t", &args.threads.to_string()]); // Specify the number of threads.
     if head_lines.is_some() {
         strobealign.args(&[
@@ -320,34 +350,10 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
     }
     strobealign.arg(&ref_filename).args(&args.input);
     strobealign.stdout(Stdio::piped());
-    let mut pipeline_str = super::fmt_cmd(&strobealign);
     let strobealign_child = strobealign.spawn()?;
 
-    let latest_stdout = if let Some(n) = head_lines {
-        let mut head = Command::new("head");
-        head.args(&["-n", &n.to_string()])
-            .stdin(Stdio::from(strobealign_child.stdout.unwrap()))
-            .stdout(Stdio::piped());
-        write!(pipeline_str, " | {}", super::fmt_cmd(&head)).unwrap();
-        let head_child = head.spawn()?;
-        head_child.stdout.unwrap()
-    } else {
-        strobealign_child.stdout.unwrap()
-    };
-
-    let mut samtools = Command::new(&args.samtools);
-    // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
-    samtools.args(&["view",
-            "--bam", // Output BAM.
-            // Ignore reads where any of the mates is unmapped,
-            // + ignore secondary & supplementary alignments + ignore failed checks.
-            "--excl-flags", "3852",
-            "--min-MQ", &args.params.min_mapq.to_string()
-            ])
-        .arg("-o").arg(&tmp_bam)
-        .stdin(Stdio::from(latest_stdout));
-    write!(pipeline_str, " | {}", super::fmt_cmd(&samtools)).unwrap();
-    log::debug!("    {}", pipeline_str);
+    let mut samtools = create_samtools_command(args, strobealign_child.stdout.unwrap().into(), &tmp_bam);
+    log::debug!("    {} | {}", super::fmt_cmd(&strobealign), super::fmt_cmd(&samtools));
 
     let start = Instant::now();
     let output = samtools.output()?;
@@ -373,8 +379,8 @@ fn run_strobealign_full_ref(args: &Args, out_dir: &Path) -> Result<PathBuf, Erro
     let fai_file = File::open(&fai_filename).map(BufReader::new)?;
     let n_contigs = common::count_lines(fai_file)?;
 
-    // Save the header + n_alns + 10 lines just in case.
-    let head_lines = n_contigs + args.n_alns + 10;
+    // Save the header + n_reads + 10 lines just in case.
+    let head_lines = n_contigs + args.n_reads + 10;
     run_strobealign(args, &ref_filename, &out_bam, Some(head_lines))?;
     Ok(out_bam)
 }
