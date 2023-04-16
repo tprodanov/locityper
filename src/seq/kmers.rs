@@ -187,7 +187,7 @@ impl JfKmerGetter {
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn()?;
         let mut child_stdin = child.stdin.take().unwrap();
-        let handler = std::thread::spawn(move || -> Result<(), Error> {
+        let handle = std::thread::spawn(move || -> Result<(), Error> {
             for seq in seqs.iter() {
                 seq::write_fasta(&mut child_stdin, b"", None, seq)?;
             }
@@ -198,9 +198,9 @@ impl JfKmerGetter {
         if !output.status.success() {
             return Err(Error::SubprocessFail(output));
         }
-        // Handler.join() returns Result<Result<(), crate::Error>, Any>.
+        // handle.join() returns Result<Result<(), crate::Error>, Any>.
         // expect unwraps the outer Err, then ? returns the inner Err, if any.
-        handler.join().expect("Process failed for unknown reason")?;
+        handle.join().expect("Process failed for unknown reason")?;
 
         let mut jf_lines = std::str::from_utf8(&output.stdout)?.split('\n');
         let mut counts = Vec::with_capacity(n_kmers.len());

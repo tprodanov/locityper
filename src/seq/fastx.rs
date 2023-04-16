@@ -224,7 +224,7 @@ impl<R: BufRead> Reader<R> {
 }
 
 /// Trait for reading and writing FASTA/Q single-end and paired-end records.
-pub trait ReaderWriter {
+pub trait FastxRead: Send {
     type Record;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
@@ -234,14 +234,14 @@ pub trait ReaderWriter {
     fn current(&self) -> &Self::Record;
 
     /// Writes the current record to the output stream.
-    fn write_current(&mut self) -> io::Result<()>;
+    fn write_current(&mut self, writer: impl io::Write) -> io::Result<()>;
 
     /// Writes the next `count` records to the output stream.
     /// Returns the number of records that were written.
-    fn write_next_n(&mut self, count: usize) -> io::Result<usize> {
+    fn write_next_n(&mut self, mut writer: impl io::Write, count: usize) -> io::Result<usize> {
         for i in 0..count {
             match self.read_next()? {
-                true => self.write_current()?,
+                true => self.write_current(&mut writer)?,
                 false => return Ok(i),
             }
         }
@@ -249,7 +249,7 @@ pub trait ReaderWriter {
     }
 
     /// Subsamples the reader with the `rate` and optional `seed`.
-    fn subsample(&mut self, rate: f64, seed: Option<u64>) -> io::Result<()> {
+    fn subsample(&mut self, mut writer: impl io::Write, rate: f64, seed: Option<u64>) -> io::Result<()> {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
         let rng = if let Some(seed) = seed {
             if seed.count_ones() < 5 {
@@ -263,7 +263,7 @@ pub trait ReaderWriter {
 
         while self.read_next()? {
             if successes.next().unwrap() {
-                self.write_current()?;
+                self.write_current(&mut writer)?;
             }
         }
         Ok(())
@@ -271,22 +271,21 @@ pub trait ReaderWriter {
 }
 
 /// Single-end FASTA/Q reader, that stores one buffer record to reduce memory allocations.
-pub struct SingleEndReader<R: BufRead, W> {
+pub struct SingleEndReader<R: BufRead> {
     reader: Reader<R>,
-    writer: W,
     record: Record,
 }
 
-impl<R: BufRead, W> SingleEndReader<R, W> {
-    pub fn new(reader: Reader<R>, writer: W) -> Self {
+impl<R: BufRead> SingleEndReader<R> {
+    pub fn new(reader: Reader<R>) -> Self {
         Self {
-            reader, writer,
+            reader,
             record: Record::default(),
         }
     }
 }
 
-impl<R: BufRead, W: io::Write> ReaderWriter for SingleEndReader<R, W> {
+impl<R: BufRead + Send> FastxRead for SingleEndReader<R> {
     type Record = Record;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
@@ -300,30 +299,29 @@ impl<R: BufRead, W: io::Write> ReaderWriter for SingleEndReader<R, W> {
     }
 
     /// Writes the current record to the output stream.
-    fn write_current(&mut self) -> io::Result<()> {
-        self.record.write_to(&mut self.writer)
+    fn write_current(&mut self, writer: impl io::Write) -> io::Result<()> {
+        self.record.write_to(writer)
     }
 }
 
 /// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
-pub struct PairedEndInterleaved<R: BufRead, W> {
+pub struct PairedEndInterleaved<R: BufRead> {
     reader: Reader<R>,
-    writer: W,
     records: [Record; 2],
     had_warning: bool,
 }
 
-impl<R: BufRead, W> PairedEndInterleaved<R, W> {
-    pub fn new(reader: Reader<R>, writer: W) -> Self {
+impl<R: BufRead> PairedEndInterleaved<R> {
+    pub fn new(reader: Reader<R>) -> Self {
         Self {
-            reader, writer,
+            reader,
             records: Default::default(),
             had_warning: false,
         }
     }
 }
 
-impl<R: BufRead, W: io::Write> ReaderWriter for PairedEndInterleaved<R, W> {
+impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
     type Record = [Record; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
@@ -349,32 +347,31 @@ impl<R: BufRead, W: io::Write> ReaderWriter for PairedEndInterleaved<R, W> {
     }
 
     /// Writes the current record to the output stream.
-    fn write_current(&mut self) -> io::Result<()> {
-        self.records[0].write_to(&mut self.writer)?;
-        self.records[1].write_to(&mut self.writer)
+    fn write_current(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        self.records[0].write_to(&mut writer)?;
+        self.records[1].write_to(&mut writer)
     }
 }
 
 /// Two paired-end FASTA/Q readers, that stores two buffer records to reduce memory allocations.
-pub struct PairedEndReaders<R: BufRead, S: BufRead, W> {
+pub struct PairedEndReaders<R: BufRead, S: BufRead> {
     reader1: Reader<R>,
     reader2: Reader<S>,
-    writer: W,
     records: [Record; 2],
     had_warning: bool,
 }
 
-impl<R: BufRead, S: BufRead, W> PairedEndReaders<R, S, W> {
-    pub fn new(reader1: Reader<R>, reader2: Reader<S>, writer: W) -> Self {
+impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
+    pub fn new(reader1: Reader<R>, reader2: Reader<S>) -> Self {
         Self {
-            reader1, reader2, writer,
+            reader1, reader2,
             records: Default::default(),
             had_warning: false,
         }
     }
 }
 
-impl<R: BufRead, S: BufRead, W: io::Write> ReaderWriter for PairedEndReaders<R, S, W> {
+impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> {
     type Record = [Record; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
@@ -401,8 +398,8 @@ impl<R: BufRead, S: BufRead, W: io::Write> ReaderWriter for PairedEndReaders<R, 
     }
 
     /// Writes the current record to the output stream.
-    fn write_current(&mut self) -> io::Result<()> {
-        self.records[0].write_to(&mut self.writer)?;
-        self.records[1].write_to(&mut self.writer)
+    fn write_current(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        self.records[0].write_to(&mut writer)?;
+        self.records[1].write_to(&mut writer)
     }
 }

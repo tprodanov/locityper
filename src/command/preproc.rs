@@ -2,13 +2,14 @@
 
 use std::{
     fs::{self, File},
-    io::BufReader,
+    io::{self, BufReader},
     fmt::Write as FmtWrite,
     cmp::max,
     path::{Path, PathBuf},
-    process::{Stdio, Command},
+    process::{Stdio, Command, Child, ChildStdin},
     time::Instant,
     rc::Rc,
+    thread,
 };
 use colored::Colorize;
 use htslib::bam::{
@@ -20,9 +21,9 @@ use crate::{
     err::{Error, validate_param},
     algo::parse_int,
     seq::{
-        ContigNames, ContigId, Interval,
+        cigar, ContigNames, ContigId, Interval,
+        fastx::{self, FastxRead},
         kmers::KmerCounts,
-        cigar,
     },
     bg::{
         BgDistr, JsonSer, Params as BgParams,
@@ -46,7 +47,7 @@ struct Args {
     strobealign: PathBuf,
     samtools: PathBuf,
 
-    n_reads: u64,
+    n_reads: usize,
     subsample_rate: f64,
     subsample_seed: Option<u64>,
     params: BgParams,
@@ -294,18 +295,39 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     Ok(bg_dir)
 }
 
-// fn set_strobealign_input(args: &Args, strobealign: &mut Command, to_bg: bool) -> Result<(), Error> {
-//     if to_bg && args.subsample_rate == 1.0 {
-//         // Just provide input files as they are.
-//         if args.interleaved {
-//             strobealign.arg("--interleaved");
-//         }
-//         strobealign.arg(&ref_filename).args(&args.input);
-//         return Ok(())
-//     }
-//     // if args.input.
-//     Ok(())
-// }
+fn set_strobealign_stdin(
+    args: &Args,
+    to_bg: bool,
+    child_stdin: ChildStdin,
+) -> Result<thread::JoinHandle<Result<(), io::Error>>, Error>
+{
+    fn create_job(args: &Args, to_bg: bool, child_stdin: ChildStdin, mut reader: impl FastxRead + 'static,
+    ) -> impl FnOnce() -> Result<(), io::Error> + 'static {
+        let n_reads = args.n_reads;
+        let subsample_rate = args.subsample_rate;
+        let subsample_seed = args.subsample_seed.clone();
+        move || {
+            if to_bg {
+                reader.write_next_n(child_stdin, n_reads).map(|_| ())
+            } else {
+                reader.subsample(child_stdin, subsample_rate, subsample_seed)
+            }
+        }
+    }
+
+    if args.input.len() == 1 && !args.interleaved {
+        let reader = fastx::SingleEndReader::new(fastx::Reader::new(common::open(&args.input[0])?)?);
+        Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
+    } else if args.interleaved {
+        let mut reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(common::open(&args.input[0])?)?);
+        Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
+    } else {
+        let mut reader = fastx::PairedEndReaders::new(
+            fastx::Reader::new(common::open(&args.input[0])?)?,
+            fastx::Reader::new(common::open(&args.input[1])?)?);
+        Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
+    }
+}
 
 fn create_samtools_command(args: &Args, stdin: Stdio, out_file: &Path) -> Command {
     let mut cmd = Command::new(&args.samtools);
@@ -325,9 +347,9 @@ fn create_samtools_command(args: &Args, stdin: Stdio, out_file: &Path) -> Comman
 /// Run strobealign for the input WGS reads.
 /// If `to_bg` is true, reads are mapped to a single background region. If needed, subsampling is performed.
 /// If `to_bg` is false, first `args.n_reads` reads are mapped to the whole genome.
-/// In the first case, pass additional parameter `-f 0.001` to `strobalign`.
+/// In the first case, pass additional parameter `-f 0.001` to `strobealign`.
 // fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
-fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines: Option<u64>) -> Result<(), Error> {
+fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
     let tmp_bam = out_bam.with_extension("tmp.bam");
     if tmp_bam.exists() {
         fs::remove_file(&tmp_bam)?;
@@ -340,17 +362,26 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
         "-N0", "-R0", "-U", // Retain 0 additional alignments, do not rescue reads, do not output unmapped reads.
-        "-t", &args.threads.to_string()]); // Specify the number of threads.
-    if head_lines.is_some() {
-        strobealign.args(&[
-            "-f", "0.001"]); // Discard more minimizers to speed up alignment
+        "-t", &args.threads.to_string()]) // Specify the number of threads.
+        .stdout(Stdio::piped());
+    if to_bg && args.subsample_rate == 1.0 {
+        // Provide input files as they are.
+        if args.interleaved {
+            strobealign.arg("--interleaved");
+        }
+        strobealign.arg(&ref_filename).args(&args.input);
+    } else {
+        if !to_bg {
+            strobealign.args(&["-f", "0.001"]); // Discard more minimizers to speed up alignment
+        }
+        // Subsample or take first N records from the input files, and pass them through stdin.
+        strobealign.arg("--interleaved").arg(&ref_filename).arg("-").stdin(Stdio::piped());
     }
-    if args.interleaved {
-        strobealign.arg("--interleaved");
+    let mut strobealign_child = strobealign.spawn()?;
+    if let Some(child_stdin) = strobealign_child.stdin.take() {
+        // Need to provide stdin.
+        set_strobealign_stdin(args, to_bg, child_stdin)?;
     }
-    strobealign.arg(&ref_filename).args(&args.input);
-    strobealign.stdout(Stdio::piped());
-    let strobealign_child = strobealign.spawn()?;
 
     let mut samtools = create_samtools_command(args, strobealign_child.stdout.unwrap().into(), &tmp_bam);
     log::debug!("    {} | {}", super::fmt_cmd(&strobealign), super::fmt_cmd(&samtools));
@@ -372,16 +403,8 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, head_lines:
 fn run_strobealign_full_ref(args: &Args, out_dir: &Path) -> Result<PathBuf, Error> {
     let out_bam = out_dir.join("to_ref.bam");
     log::info!("Mapping reads to the whole reference");
-
     let ref_filename = args.reference.as_ref().unwrap();
-    // Need to know the number of contigs in order to
-    let fai_filename = common::append_path(ref_filename, ".fai");
-    let fai_file = File::open(&fai_filename).map(BufReader::new)?;
-    let n_contigs = common::count_lines(fai_file)?;
-
-    // Save the header + n_reads + 10 lines just in case.
-    let head_lines = n_contigs + args.n_reads + 10;
-    run_strobealign(args, &ref_filename, &out_bam, Some(head_lines))?;
+    run_strobealign(args, &ref_filename, &out_bam, false)?;
     Ok(out_bam)
 }
 
@@ -390,7 +413,7 @@ fn run_strobealign_full_ref(args: &Args, out_dir: &Path) -> Result<PathBuf, Erro
 fn run_strobealign_bg_region(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result<PathBuf, Error> {
     let out_bam = out_dir.join("to_bg.bam");
     log::info!("Mapping reads to a single non-duplicated region");
-    run_strobealign(args, fasta_filename, &out_bam, None)?;
+    run_strobealign(args, fasta_filename, &out_bam, true)?;
     Ok(out_bam)
 }
 

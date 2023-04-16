@@ -44,8 +44,8 @@ pub(super) fn print_version() {
 /// - stdin if filename is `-`,
 /// - gzip reader if filename ends with `.gz`,
 /// - regular text file otherwise.
-pub(super) fn open(filename: &Path) -> Result<Box<dyn BufRead>, Error> {
-    if filename == OsStr::new("-") {
+pub(super) fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
+    if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         Ok(Box::new(BufReader::new(stdin())))
     } else {
         let file = File::open(filename)?;
