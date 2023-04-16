@@ -13,7 +13,7 @@ use crate::{
         loess::Loess,
         bisect,
     },
-    math::distr::NBinom,
+    math::distr::{NBinom, WithMoments},
     err::{Error, validate_param},
 };
 use super::{
@@ -338,8 +338,9 @@ impl ReadDepth {
         err_prof: &ErrorProfile,
         max_insert_size: i64,
         params: &ReadDepthParams,
+        subsampling_rate: f64,
     ) -> Self {
-        log::info!("Estimating read depth");
+        log::info!("Estimating read depth (ploidy {}, subsampling rate {})", params.ploidy, subsampling_rate);
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
 
@@ -354,14 +355,16 @@ impl ReadDepth {
         let depth1: Vec<u32> = ixs.iter().map(|&i| windows[i].depth1).collect();
 
         let (mut means, mut variances) = predict_mean_var(&gc_contents, &gc_bins, &depth1, params.frac_windows);
-        log::info!("    Read depth:  mean = {:.2},  st.dev. = {:.2}   (GC-content 40, {} bp windows, ploidy {})",
-            means[40], variances[40].sqrt(), params.window_size, params.ploidy);
         blur_boundary_values(&mut means, &mut variances, &gc_bins, params);
 
-        let inv_ploidy = 1.0 / f64::from(params.ploidy);
-        let distributions = means.into_iter().zip(variances)
-            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)).mul(inv_ploidy))
+        let nbinom_mul = 1.0 / (subsampling_rate * f64::from(params.ploidy));
+        let distributions: Vec<_> = means.into_iter().zip(variances)
+            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)).mul(nbinom_mul))
             .collect();
+        const GC_VAL: usize = 40;
+        log::info!("    Read depth:  mean = {:.2},  st.dev. = {:.2}   \
+            (Ploidy 1, first mates, GC-content {}, {} bp windows)",
+            distributions[GC_VAL].mean(), distributions[GC_VAL].variance().sqrt(), GC_VAL, params.window_size);
         Self {
             ploidy: params.ploidy,
             window_size: params.window_size,

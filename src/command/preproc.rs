@@ -1,12 +1,11 @@
 //! Preprocess WGS dataset.
 
 use std::{
-    fs::{self, File},
-    io::{self, BufReader},
+    fs, io,
     fmt::Write as FmtWrite,
     cmp::max,
     path::{Path, PathBuf},
-    process::{Stdio, Command, Child, ChildStdin},
+    process::{Stdio, Command, ChildStdin},
     time::Instant,
     rc::Rc,
     thread,
@@ -48,12 +47,12 @@ struct Args {
     samtools: PathBuf,
 
     n_reads: usize,
-    subsample_rate: f64,
-    subsample_seed: Option<u64>,
+    subsampling_rate: f64,
+    subsampling_seed: Option<u64>,
     params: BgParams,
 }
 
-const DEF_N_READS: &'static str = "1M";
+const DEF_N_READS: &'static str = "500k";
 
 impl Default for Args {
     fn default() -> Self {
@@ -71,8 +70,8 @@ impl Default for Args {
             samtools: PathBuf::from("samtools"),
 
             n_reads: parse_int(DEF_N_READS).unwrap(),
-            subsample_rate: 0.25,
-            subsample_seed: None,
+            subsampling_rate: 0.25,
+            subsampling_seed: None,
             params: BgParams::default(),
         }
     }
@@ -91,17 +90,17 @@ impl Args {
         // Ignore error if interleaved and n_input == 0.
         if self.interleaved && n_input == 2 {
             Err(lexopt::Error::from("Two read files (-i/--input) are provided, however, --interleaved is specified"))?;
-        } else if n_input == 1 {
+        } else if !self.interleaved && n_input == 1 {
             log::warn!("Running in single-end mode.");
         }
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
-        validate_param!(0.0 < self.subsample_rate && self.subsample_rate <= 1.0,
-            "Subsample rate ({}) must be within (0, 1]", self.subsample_rate);
-        if self.subsample_rate > 0.99 {
-            self.subsample_rate = 1.0;
+        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
+            "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
+        if self.subsampling_rate > 0.99 {
+            self.subsampling_rate = 1.0;
         }
 
         self.params.validate()?;
@@ -144,7 +143,8 @@ fn print_help(extended: bool) {
 
     if extended {
         println!("\n{}", "Insert size and error profile estimation:".bold());
-        println!("    {:KEY$} {:VAL$}  Use first {} reads to estimate profiles [{}].",
+        println!("    {:KEY$} {:VAL$}  Use first {} reads (or read pairs)\n\
+            {EMPTY} to estimate profiles [{}].",
             "-n, --n-reads".green(), "INT".yellow(), "INT".yellow(), DEF_N_READS);
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
             "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
@@ -173,7 +173,7 @@ fn print_help(extended: bool) {
             {EMPTY}  Subsample input reads by a factor of {} [{}]\n\
             {EMPTY}  Use all reads for {} or if alignment file ({}) is provided.\n\
             {EMPTY}  Second value sets the subsampling seed (optional).",
-            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(), defaults.subsample_rate,
+            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(), defaults.subsampling_rate,
             "-s 1".green(), "-a".green());
         println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
             "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_size);
@@ -247,6 +247,13 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.params.err_rate_mult = parser.value()?.parse()?,
 
             Short('p') | Long("ploidy") => args.params.depth.ploidy = parser.value()?.parse()?,
+            Short('s') | Long("subsample") => {
+                let mut values = parser.values()?;
+                args.subsampling_rate = values.next()
+                    .ok_or_else(|| lexopt::Error::MissingValue { option: Some("subsample".to_owned()) })?
+                    .parse()?;
+                args.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
+            }
             Short('w') | Long("window") => args.params.depth.window_size = parser.value()?.parse()?,
             Long("window-padd") | Long("window-padding") => args.params.depth.window_padding = parser.value()?.parse()?,
             Long("edge-padd") | Long("edge-padding") => args.params.depth.edge_padding = parser.value()?.parse()?,
@@ -304,25 +311,26 @@ fn set_strobealign_stdin(
     fn create_job(args: &Args, to_bg: bool, child_stdin: ChildStdin, mut reader: impl FastxRead + 'static,
     ) -> impl FnOnce() -> Result<(), io::Error> + 'static {
         let n_reads = args.n_reads;
-        let subsample_rate = args.subsample_rate;
-        let subsample_seed = args.subsample_seed.clone();
+        let subsampling_rate = args.subsampling_rate;
+        let subsampling_seed = args.subsampling_seed.clone();
         move || {
             if to_bg {
-                reader.write_next_n(child_stdin, n_reads).map(|_| ())
+                reader.subsample(child_stdin, subsampling_rate, subsampling_seed)
             } else {
-                reader.subsample(child_stdin, subsample_rate, subsample_seed)
+                reader.write_next_n(child_stdin, n_reads).map(|_| ())
             }
         }
     }
 
+    // Cannot put reader into a box, because `FastxReader` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::SingleEndReader::new(fastx::Reader::new(common::open(&args.input[0])?)?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     } else if args.interleaved {
-        let mut reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(common::open(&args.input[0])?)?);
+        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(common::open(&args.input[0])?)?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     } else {
-        let mut reader = fastx::PairedEndReaders::new(
+        let reader = fastx::PairedEndReaders::new(
             fastx::Reader::new(common::open(&args.input[0])?)?,
             fastx::Reader::new(common::open(&args.input[1])?)?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
@@ -344,10 +352,31 @@ fn create_samtools_command(args: &Args, stdin: Stdio, out_file: &Path) -> Comman
     cmd
 }
 
+fn first_step_str(args: &Args, to_bg: bool) -> String {
+    let mut s = String::new();
+    if to_bg && args.subsampling_rate == 1.0 {
+        return s;
+    }
+
+    if to_bg {
+        write!(s, "_subsample_ --rate {}", args.subsampling_rate).unwrap();
+        if let Some(seed) = args.subsampling_seed {
+            write!(s, " --seed {}", seed).unwrap();
+        }
+    } else {
+        write!(s, "_head_ --n-reads {}", args.n_reads).unwrap();
+    }
+    write!(s, " -i {}", super::fmt_path(&args.input[0])).unwrap();
+    if args.input.len() > 1 {
+        write!(s, " {}", super::fmt_path(&args.input[1])).unwrap();
+    }
+    write!(s, " | ").unwrap();
+    s
+}
+
 /// Run strobealign for the input WGS reads.
 /// If `to_bg` is true, reads are mapped to a single background region. If needed, subsampling is performed.
 /// If `to_bg` is false, first `args.n_reads` reads are mapped to the whole genome.
-/// In the first case, pass additional parameter `-f 0.001` to `strobealign`.
 // fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
 fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
     let tmp_bam = out_bam.with_extension("tmp.bam");
@@ -362,29 +391,25 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
         "-N0", "-R0", "-U", // Retain 0 additional alignments, do not rescue reads, do not output unmapped reads.
+        "-f", "0.001", // Discard more minimizers to speed up alignment
         "-t", &args.threads.to_string()]) // Specify the number of threads.
         .stdout(Stdio::piped());
-    if to_bg && args.subsample_rate == 1.0 {
+    if to_bg && args.subsampling_rate == 1.0 {
         // Provide input files as they are.
         if args.interleaved {
             strobealign.arg("--interleaved");
         }
         strobealign.arg(&ref_filename).args(&args.input);
     } else {
-        if !to_bg {
-            strobealign.args(&["-f", "0.001"]); // Discard more minimizers to speed up alignment
-        }
         // Subsample or take first N records from the input files, and pass them through stdin.
         strobealign.arg("--interleaved").arg(&ref_filename).arg("-").stdin(Stdio::piped());
     }
     let mut strobealign_child = strobealign.spawn()?;
-    if let Some(child_stdin) = strobealign_child.stdin.take() {
-        // Need to provide stdin.
-        set_strobealign_stdin(args, to_bg, child_stdin)?;
-    }
+    let handle = strobealign_child.stdin.take().map(
+        |stdin| set_strobealign_stdin(args, to_bg, stdin)).transpose()?;
 
     let mut samtools = create_samtools_command(args, strobealign_child.stdout.unwrap().into(), &tmp_bam);
-    log::debug!("    {} | {}", super::fmt_cmd(&strobealign), super::fmt_cmd(&samtools));
+    log::debug!("    {}{} | {}", first_step_str(&args, to_bg), super::fmt_cmd(&strobealign), super::fmt_cmd(&samtools));
 
     let start = Instant::now();
     let output = samtools.output()?;
@@ -393,28 +418,13 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
     if !output.status.success() {
         return Err(Error::SubprocessFail(output));
     }
+    if let Some(handle) = handle {
+        // handle.join() returns Result<Result<(), crate::Error>, Any>.
+        // expect unwraps the outer Err, then ? returns the inner Err, if any.
+        handle.join().expect("Process failed for unknown reason")?;
+    }
     fs::rename(&tmp_bam, out_bam)?;
     Ok(())
-}
-
-/// Run strobealign to map some reads to the full reference.
-/// Keep approximately the first `n` alignments.
-/// Returns the path to the output BAM file.
-fn run_strobealign_full_ref(args: &Args, out_dir: &Path) -> Result<PathBuf, Error> {
-    let out_bam = out_dir.join("to_ref.bam");
-    log::info!("Mapping reads to the whole reference");
-    let ref_filename = args.reference.as_ref().unwrap();
-    run_strobealign(args, &ref_filename, &out_bam, false)?;
-    Ok(out_bam)
-}
-
-/// Run strobealign to map all reads to a single background region.
-/// Returns the path to the output BAM file.
-fn run_strobealign_bg_region(args: &Args, fasta_filename: &Path, out_dir: &Path) -> Result<PathBuf, Error> {
-    let out_bam = out_dir.join("to_bg.bam");
-    log::info!("Mapping reads to a single non-duplicated region");
-    run_strobealign(args, fasta_filename, &out_bam, true)?;
-    Ok(out_bam)
 }
 
 /// Map reads to the genome and to the background genome to estimate background distributions based solely on WGS reads.
@@ -427,8 +437,13 @@ fn estimate_bg_from_reads(
     kmer_counts: &KmerCounts,
 ) -> Result<BgDistr, Error>
 {
-    let bam_filename1 = run_strobealign_full_ref(&args, &out_dir)?;
-    let bam_filename2 = run_strobealign_bg_region(&args, &bg_fasta_filename, &out_dir)?;
+    let bam_filename1 = out_dir.join("to_ref.bam");
+    log::info!("Mapping reads to the whole reference");
+    run_strobealign(args, args.reference.as_ref().unwrap(), &bam_filename1, false)?;
+
+    let bam_filename2 = out_dir.join("to_bg.bam");
+    log::info!("Mapping reads to non-duplicated region {}", interval);
+    run_strobealign(args, &bg_fasta_filename, &bam_filename2, true)?;
 
     log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename1));
     let mut bam_reader1 = bam::Reader::from_path(&bam_filename1)?;
@@ -455,7 +470,7 @@ fn estimate_bg_from_reads(
         })
         .collect::<Result<_, _>>()?;
     let depth_distr = ReadDepth::estimate(records2.iter(), interval, ref_seq, kmer_counts, &err_prof,
-        max_insert_size, &params.depth);
+        max_insert_size, &params.depth, args.subsampling_rate);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -499,7 +514,7 @@ fn estimate_bg_from_alns(
     let err_prof = ErrorProfile::estimate(records.iter(),
         |record| cigar::Cigar::infer_ext_cigar(record, &bg_seq, seq_shift), max_insert_size, params);
     let depth_distr = ReadDepth::estimate(records.iter(), &bg_interval, &bg_seq, kmer_counts, &err_prof,
-        max_insert_size, &params.depth);
+        max_insert_size, &params.depth, 1.0);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 

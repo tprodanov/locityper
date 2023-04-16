@@ -1,5 +1,6 @@
 use std::{
     io::{self, BufRead},
+    fmt,
     cmp::min,
 };
 use rand::{
@@ -47,7 +48,7 @@ pub fn write_fastq<W: io::Write>(
     }
     writer.write_all(b"\n")?;
     writer.write_all(seq)?;
-    writer.write_all(b"+\n")?;
+    writer.write_all(b"\n+\n")?;
     writer.write_all(qual)?;
     writer.write_all(b"\n")
 }
@@ -128,6 +129,14 @@ impl Record {
         } else {
             write_fastq(writer, &self.name, self.descr(), &self.seq, &self.qual)
         }
+    }
+}
+
+impl fmt::Debug for Record {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut v: Vec<u8> = Vec::new();
+        self.write_to(&mut v).unwrap();
+        f.write_str(&String::from_utf8_lossy(&v))
     }
 }
 
@@ -379,8 +388,8 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
         let could_read1 = self.reader1.read_next(&mut self.records[0])?;
         let could_read2 = self.reader2.read_next(&mut self.records[1])?;
         match (could_read1, could_read2) {
-            (true, true) => return Ok(false),
-            (false, false) => {}
+            (false, false) => return Ok(false),
+            (true, true) => {}
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Different number of records in two input files."))
         }
