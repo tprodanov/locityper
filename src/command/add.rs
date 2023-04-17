@@ -14,6 +14,7 @@ use htslib::bcf::{
     record::Record as VcfRecord,
 };
 use colored::Colorize;
+use const_format::{str_repeat, concatcp};
 use crate::{
     Error,
     algo::bisect,
@@ -64,17 +65,17 @@ impl Default for Args {
 fn print_help() {
     const KEY: usize = 15;
     const VAL: usize = 4;
-    const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
+    const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
     println!("{}", "Adds complex locus/loci to the database.".yellow());
 
     println!("\n{} {} add -d db -r reference.fa -v vars.vcf.gz -l/-L loci [arguments]",
-        "Usage:".bold(), env!("CARGO_PKG_NAME"));
+        "Usage:".bold(), super::PKG_NAME);
 
     println!("\n{}", "Input arguments:".bold());
-    println!("    {:KEY$} {:VAL$}  Input database directory.",
-        "-d, --db".green(), "DIR".yellow());
+    println!("    {:KEY$} {:VAL$}  Input database directory (initialized with {}).",
+        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " create").underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  PanGenie input VCF file. Encodes variation across pangenome samples.\n\

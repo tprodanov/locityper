@@ -1,5 +1,5 @@
 use std::{
-    fmt::Write,
+    fmt::{self, Display, Debug},
     path::{Path, PathBuf},
     process::Command,
     ffi::OsStr,
@@ -32,16 +32,24 @@ pub fn command(cmd: &Command) -> String {
 }
 
 /// Formats duration as `HH:MM:SS.SSS`.
-pub fn duration(duration: std::time::Duration) -> String {
-    const IN_HOUR: u64 = 3600;
-    const IN_MINUTE: u64 = 60;
-    let mut seconds = duration.as_secs();
+pub struct Duration(pub std::time::Duration);
 
-    let mut res = String::new();
-    write!(res, "{}:", seconds / IN_HOUR).unwrap();
-    seconds %= IN_HOUR;
-    write!(res, "{:02}:", seconds / IN_MINUTE).unwrap();
-    seconds %= IN_MINUTE;
-    write!(res, "{:02}.{:03}", seconds, duration.subsec_millis()).unwrap();
-    res
+impl Display for Duration {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        const IN_HOUR: u64 = 3600;
+        const IN_MINUTE: u64 = 60;
+        let mut seconds = self.0.as_secs();
+        write!(f, "{}:", seconds / IN_HOUR)?;
+        seconds %= IN_HOUR;
+        write!(f, "{:02}:", seconds / IN_MINUTE)?;
+        seconds %= IN_MINUTE;
+        write!(f, "{:02}.{:03}", seconds, self.0.subsec_millis())?;
+        Ok(())
+    }
+}
+
+impl Debug for Duration {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt(f)
+    }
 }

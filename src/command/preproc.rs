@@ -11,6 +11,7 @@ use std::{
     thread,
 };
 use colored::Colorize;
+use const_format::{str_repeat, concatcp};
 use htslib::bam::{
     self,
     Read as BamRead,
@@ -86,11 +87,9 @@ impl Args {
             "Neither read files, nor alignment files are not provided (see -i and -a)");
         validate_param!(n_input == 0 || self.alns.is_none(),
             "Read files (-i) and an alignment file (-a) cannot be provided together");
-
-        // Ignore error if interleaved and n_input == 0.
-        if self.interleaved && n_input == 2 {
-            Err(lexopt::Error::from("Two read files (-i/--input) are provided, however, --interleaved is specified"))?;
-        } else if !self.interleaved && n_input == 1 {
+        validate_param!(n_input != 2 || !self.interleaved,
+            "Two read files (-i/--input) are provided, however, --interleaved is specified");
+        if !self.interleaved && n_input == 1 {
             log::warn!("Running in single-end mode.");
         }
 
@@ -113,13 +112,13 @@ impl Args {
 fn print_help(extended: bool) {
     const KEY: usize = 18;
     const VAL: usize = 5;
-    const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
+    const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
     println!("{}", "Preprocess WGS dataset.".yellow());
 
     println!("\n{} {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam) -d db -r reference.fa -o out [arguments]",
-        "Usage:".bold(), env!("CARGO_PKG_NAME"));
+        "Usage:".bold(), super::PKG_NAME);
     if !extended {
         println!("\nThis is a short help message. Please use {} to see the full help.",
             "-H/--full-help".green());
@@ -132,11 +131,11 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Reads in indexed BAM/CRAM format, already mapped to the whole genome.\n\
         {EMPTY}  Mutually exclusive with {}.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green());
-    println!("    {:KEY$} {:VAL$}  Database directory.",
-        "-d, --db".green(), "DIR".yellow());
+    println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
+        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " create").underline(), "add".underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
         "-r, --reference".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Output directory for the sample.",
+    println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
         "    --interleaved".green(), super::flag());
@@ -265,7 +264,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.params.depth.tail_var_mult = parser.value()?.parse()?;
             }
 
-            Long("inter") | Long("interleaved") => args.interleaved = true,
+            Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
@@ -416,7 +415,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
     let start = Instant::now();
     let output = samtools.output()?;
     log::debug!("");
-    log::debug!("    Finished in {}", fmt_ext::duration(start.elapsed()));
+    log::debug!("    Finished in {}", fmt_ext::Duration(start.elapsed()));
     if !output.status.success() {
         return Err(Error::SubprocessFail(output));
     }

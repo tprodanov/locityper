@@ -1,13 +1,16 @@
 mod create;
 mod add;
 mod preproc;
+mod analyze;
 
 use colored::Colorize;
 
 use crate::Error;
 
+const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
+
 fn print_version() {
-    println!("{} {}", env!("CARGO_PKG_NAME").underline(), format!("v{}", env!("CARGO_PKG_VERSION")).green());
+    println!("{} {}", PKG_NAME.underline(), format!("v{}", env!("CARGO_PKG_VERSION")).green());
     let authors: Vec<_> = env!("CARGO_PKG_AUTHORS").split(':').collect();
     let n = authors.len();
     if n == 0 {
@@ -37,7 +40,7 @@ fn print_help() {
     const WIDTH: usize = 8;
     print_version();
     println!("\n{} {} command [arguments]",
-        "Usage:".bold(), env!("CARGO_PKG_NAME"));
+        "Usage:".bold(), PKG_NAME);
 
     println!("\n{}", "[ Creating database ]".bold());
     println!("    {:WIDTH$}  Create an empty database.", "create".red());
@@ -45,6 +48,7 @@ fn print_help() {
 
     println!("\n{}", "[ Analysing WGS data ]".bold());
     println!("    {:WIDTH$}  Preprocess WGS dataset.", "preproc".red());
+    println!("    {:WIDTH$}  Analyze WGS dataset.",    "analyze".red());
 
     println!("\n{}", "[ General help ]".bold());
     println!("    {:WIDTH$}  Show this help message.", "help".red());
@@ -62,9 +66,10 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
         std::process::exit(1);
     }
     match &argv[1] as &str {
-        "create" | "c" => create::run(&argv[2..])?,
-        "add" | "a" => add::run(&argv[2..])?,
-        "preproc" | "preprocess" | "p" => preproc::run(&argv[2..])?,
+        "create" => create::run(&argv[2..])?,
+        "add" => add::run(&argv[2..])?,
+        "preproc" | "preprocess" => preproc::run(&argv[2..])?,
+        "analyze" | "analyse" => analyze::run(&argv[2..])?,
 
         "help" | "h" | "--help" | "-h" => print_help(),
         "version" | "V" | "--version" | "-V" => print_version(),

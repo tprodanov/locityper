@@ -53,7 +53,7 @@ fn print_help() {
     println!("{}", format!("Create an {} database of complex loci.", "empty".bold()).yellow());
 
     println!("\n{} {} create -d db -r reference.fa [arguments]",
-        "Usage:".bold(), env!("CARGO_PKG_NAME"));
+        "Usage:".bold(), super::PKG_NAME);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Output database directory.",

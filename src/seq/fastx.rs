@@ -313,10 +313,12 @@ impl<R: BufRead + Send> FastxRead for SingleEndReader<R> {
     }
 }
 
+pub type PairedRecord = [Record; 2];
+
 /// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
 pub struct PairedEndInterleaved<R: BufRead> {
     reader: Reader<R>,
-    records: [Record; 2],
+    records: PairedRecord,
     had_warning: bool,
 }
 
@@ -331,7 +333,7 @@ impl<R: BufRead> PairedEndInterleaved<R> {
 }
 
 impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
-    type Record = [Record; 2];
+    type Record = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
@@ -366,7 +368,7 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
 pub struct PairedEndReaders<R: BufRead, S: BufRead> {
     reader1: Reader<R>,
     reader2: Reader<S>,
-    records: [Record; 2],
+    records: PairedRecord,
     had_warning: bool,
 }
 
@@ -381,7 +383,7 @@ impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
 }
 
 impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> {
-    type Record = [Record; 2];
+    type Record = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
