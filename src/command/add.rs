@@ -16,16 +16,16 @@ use htslib::bcf::{
 use colored::Colorize;
 use crate::{
     Error,
-    algo::{
-        bisect,
-        vec_ext::{VecExt, F64Ext, IterExt},
+    algo::bisect,
+    ext::{
+        vec::{VecExt, F64Ext, IterExt},
+        sys as sys_ext, fmt as fmt_ext,
     },
     seq::{
         self, NamedInterval, ContigNames,
         kmers::JfKmerGetter,
     },
 };
-use super::common;
 
 struct Args {
     database: Option<PathBuf>,
@@ -159,8 +159,8 @@ fn process_args(mut args: Args) -> Result<Args, Error> {
     if args.loci.is_empty() && args.bed_files.is_empty() {
         Err(lexopt::Error::from("Complex loci are not provided (see -l/--locus and -L/--loci-bed)"))?;
     }
-    args.jellyfish = super::find_exe(args.jellyfish)?;
-    args.bwa = super::find_exe(args.bwa)?;
+    args.jellyfish = sys_ext::find_exe(args.jellyfish)?;
+    args.bwa = sys_ext::find_exe(args.bwa)?;
     // Make window size odd.
     args.moving_window += 1 - args.moving_window % 2;
     Ok(args)
@@ -179,7 +179,7 @@ fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) 
     }
 
     for filename in bed_files.iter() {
-        for line in common::open(filename)?.lines() {
+        for line in sys_ext::open(filename)?.lines() {
             let interval = NamedInterval::parse_bed(&mut line?.split('\t'), contigs)?;
             if !names.insert(interval.name().to_string()) {
                 return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
@@ -285,14 +285,14 @@ fn write_locus(
     bwa: &Path,
 ) -> Result<(), Error>
 {
-    log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), super::fmt_path(locus_dir));
+    log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), fmt_ext::path(locus_dir));
     let mut bed_out = File::create(locus_dir.join("ref.bed"))?;
     bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
     bed_out.sync_all()?;
     std::mem::drop(bed_out);
 
     let fasta_filename = locus_dir.join("haplotypes.fa.gz");
-    let mut fasta_out = common::create_gzip(&fasta_filename)?;
+    let mut fasta_out = sys_ext::create_gzip(&fasta_filename)?;
     for (name, seq) in seqs.iter() {
         let descr = match &ref_name {
             Some(ref_name) if ref_name == name => Some(locus.interval().to_string()),
@@ -306,7 +306,7 @@ fn write_locus(
     log::debug!("    [{}] Counting k-mers", locus.name());
     let seqs = seqs.into_iter().map(|(_name, seq)| seq).collect();
     let kmer_counts = kmer_getter.fetch(seqs)?;
-    let mut kmers_out = common::create_gzip(&super::create::kmers_filename(&locus_dir))?;
+    let mut kmers_out = sys_ext::create_gzip(&super::create::kmers_filename(&locus_dir))?;
     kmer_counts.save(&mut kmers_out)?;
 
     log::debug!("    [{}] Indexing haplotypes", locus.name());
@@ -379,10 +379,10 @@ where R: Read + Seek,
 
     let dir = loci_dir.join(new_locus.name());
     if dir.exists() {
-        log::warn!("    Clearing directory {}", super::fmt_path(&dir));
+        log::warn!("    Clearing directory {}", fmt_ext::path(&dir));
         fs::remove_dir_all(&dir)?;
     }
-    super::mkdir(&dir)?;
+    sys_ext::mkdir(&dir)?;
     log::debug!("    [{}] Reconstructing haplotypes", new_locus.name());
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
@@ -403,7 +403,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
-    let mut jf_filenames = common::find_filenames(&db_path.join("jf"), "jf".as_ref())?;
+    let mut jf_filenames = sys_ext::find_filenames(&db_path.join("jf"), "jf".as_ref())?;
     if jf_filenames.len() != 1 {
         return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
             db_path.display(), jf_filenames.len())));
@@ -413,7 +413,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
     let loci_dir = db_path.join("loci");
-    super::mkdir(&loci_dir)?;
+    sys_ext::mkdir(&loci_dir)?;
     for locus in loci.iter() {
         add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?;
     }

@@ -6,6 +6,7 @@ use crate::{
         windows::UNMAPPED_WINDOW,
         assgn::ReadAssignment,
     },
+    ext::vec::F64Ext,
 };
 use super::Solver;
 
@@ -102,7 +103,7 @@ impl HighsSolver {
             let j = i + locs.len();
             // Take argmax because HiGHS does not always output reasonable solutions,
             // this way we always have a read assignment.
-            let new_assgn = crate::algo::vec_ext::F64Ext::argmax(&vals[i..j]).0;
+            let new_assgn = F64Ext::argmax(&vals[i..j]).0;
             i = j;
             new_assgn
         });

@@ -1,4 +1,3 @@
-mod common;
 mod create;
 mod add;
 mod preproc;
@@ -6,7 +5,26 @@ mod preproc;
 use colored::Colorize;
 
 use crate::Error;
-use common::{find_exe, print_version, fmt_path, fmt_cmd, mkdir};
+
+fn print_version() {
+    println!("{} {}", env!("CARGO_PKG_NAME").underline(), format!("v{}", env!("CARGO_PKG_VERSION")).green());
+    let authors: Vec<_> = env!("CARGO_PKG_AUTHORS").split(':').collect();
+    let n = authors.len();
+    if n == 0 {
+        return;
+    }
+    print!("Created by ");
+    for (i, author) in authors.iter().enumerate() {
+        if i == 0 {
+            print!("{}", author.bright_blue());
+        } else if i < n - 1 {
+            print!(", {}", author.bright_blue());
+        } else {
+            print!(" and {}", author.bright_blue());
+        }
+    }
+    println!();
+}
 
 fn print_citation() {
     print_version();

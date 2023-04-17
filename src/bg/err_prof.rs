@@ -4,7 +4,7 @@ use std::{
 };
 use htslib::bam::Record;
 use crate::{
-    algo::vec_ext::{VecExt, F64Ext},
+    ext::vec::{VecExt, F64Ext},
     seq::cigar::{Operation, Cigar, RAW_OPERATIONS},
     math::{
         Ln,

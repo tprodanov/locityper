@@ -18,7 +18,8 @@ use htslib::bam::{
 };
 use crate::{
     err::{Error, validate_param},
-    algo::{sys_ext, parse_int},
+    algo::parse_int,
+    ext::{sys as sys_ext, fmt as fmt_ext},
     seq::{
         cigar, ContigNames, ContigId, Interval,
         fastx::{self, FastxRead},
@@ -31,7 +32,6 @@ use crate::{
         depth::ReadDepth,
     },
 };
-use super::common;
 
 struct Args {
     input: Vec<PathBuf>,
@@ -104,8 +104,8 @@ impl Args {
         }
 
         self.params.validate()?;
-        self.strobealign = super::find_exe(self.strobealign)?;
-        self.samtools = super::find_exe(self.samtools)?;
+        self.strobealign = sys_ext::find_exe(self.strobealign)?;
+        self.samtools = sys_ext::find_exe(self.samtools)?;
         Ok(self)
     }
 }
@@ -291,14 +291,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
 fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     let out_dir = args.output.as_ref().unwrap();
-    super::mkdir(out_dir)?;
+    sys_ext::mkdir(out_dir)?;
 
     let bg_dir = out_dir.join("bg");
     if bg_dir.exists() && args.force {
-        log::warn!("Clearing output directory {}", super::fmt_path(&bg_dir));
+        log::warn!("Clearing output directory {}", fmt_ext::path(&bg_dir));
         fs::remove_dir_all(&bg_dir)?;
     }
-    super::mkdir(&bg_dir)?;
+    sys_ext::mkdir(&bg_dir)?;
     Ok(bg_dir)
 }
 
@@ -313,26 +313,26 @@ fn set_strobealign_stdin(
         let n_reads = args.n_reads;
         let subsampling_rate = args.subsampling_rate;
         let subsampling_seed = args.subsampling_seed.clone();
+        let writer = io::BufWriter::new(child_stdin);
         move || {
-            if to_bg {
-                reader.subsample(io::BufWriter::new(child_stdin), subsampling_rate, subsampling_seed)
-            } else {
-                reader.write_next_n(io::BufWriter::new(child_stdin), n_reads).map(|_| ())
+            match to_bg {
+                true => reader.subsample(writer, subsampling_rate, subsampling_seed),
+                false => reader.write_next_n(writer, n_reads).map(|_| ()),
             }
         }
     }
 
     // Cannot put reader into a box, because `FastxReader` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
-        let reader = fastx::SingleEndReader::new(fastx::Reader::new(common::open(&args.input[0])?)?);
+        let reader = fastx::SingleEndReader::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     } else if args.interleaved {
-        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(common::open(&args.input[0])?)?);
+        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     } else {
         let reader = fastx::PairedEndReaders::new(
-            fastx::Reader::new(common::open(&args.input[0])?)?,
-            fastx::Reader::new(common::open(&args.input[1])?)?);
+            fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
+            fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     }
 }
@@ -366,9 +366,9 @@ fn first_step_str(args: &Args, to_bg: bool) -> String {
     } else {
         write!(s, "_head_ --n-reads {}", args.n_reads).unwrap();
     }
-    write!(s, " -i {}", super::fmt_path(&args.input[0])).unwrap();
+    write!(s, " -i {}", fmt_ext::path(&args.input[0])).unwrap();
     if args.input.len() > 1 {
-        write!(s, " {}", super::fmt_path(&args.input[1])).unwrap();
+        write!(s, " {}", fmt_ext::path(&args.input[1])).unwrap();
     }
     write!(s, " | ").unwrap();
     s
@@ -384,7 +384,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
         fs::remove_file(&tmp_bam)?;
     }
     if out_bam.exists() {
-        log::warn!("    BAM file {} exists, skipping read mapping", super::fmt_path(out_bam));
+        log::warn!("    BAM file {} exists, skipping read mapping", fmt_ext::path(out_bam));
         return Ok(());
     }
 
@@ -411,12 +411,12 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
 
     let handle = strobealign_stdin.map(|stdin| set_strobealign_stdin(args, to_bg, stdin)).transpose()?;
     let mut samtools = create_samtools_command(args, Stdio::from(strobealign_stdout.unwrap()), &tmp_bam);
-    log::debug!("    {}{} | {}", first_step_str(&args, to_bg), super::fmt_cmd(&strobealign), super::fmt_cmd(&samtools));
+    log::debug!("    {}{} | {}", first_step_str(&args, to_bg), fmt_ext::command(&strobealign), fmt_ext::command(&samtools));
 
     let start = Instant::now();
     let output = samtools.output()?;
     log::debug!("");
-    log::debug!("    Finished in {}", common::fmt_duration(start.elapsed()));
+    log::debug!("    Finished in {}", fmt_ext::duration(start.elapsed()));
     if !output.status.success() {
         return Err(Error::SubprocessFail(output));
     }
@@ -448,7 +448,7 @@ fn estimate_bg_from_reads(
     log::info!("Mapping reads to non-duplicated region {}", interval);
     run_strobealign(args, &bg_fasta_filename, &bam_filename2, true)?;
 
-    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename1));
+    log::debug!("Loading mapped reads into memory ({})", fmt_ext::path(&bam_filename1));
     let mut bam_reader1 = bam::Reader::from_path(&bam_filename1)?;
     let params = &args.params;
     let records1: Vec<BamRecord> = bam_reader1.records()
@@ -464,7 +464,7 @@ fn estimate_bg_from_reads(
     let err_prof = ErrorProfile::estimate(records1.iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
         max_insert_size, params);
 
-    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename2));
+    log::debug!("Loading mapped reads into memory ({})", fmt_ext::path(&bam_filename2));
     let mut bam_reader2 = bam::Reader::from_path(&bam_filename2)?;
     let records2: Vec<BamRecord> = bam_reader2.records()
         .filter(|res: &Result<BamRecord, _>| match res {
@@ -495,10 +495,10 @@ fn estimate_bg_from_alns(
     if ref_seq != bg_seq {
         return Err(Error::InvalidInput(format!(
             "Fasta file {} contains interval {}, but it has different sequence than the background fasta file {}",
-            super::fmt_path(ref_fasta_filename), bg_interval_name, super::fmt_path(bg_fasta_filename))));
+            fmt_ext::path(ref_fasta_filename), bg_interval_name, fmt_ext::path(bg_fasta_filename))));
     }
 
-    log::debug!("Loading mapped reads into memory ({})", super::fmt_path(&bam_filename));
+    log::debug!("Loading mapped reads into memory ({})", fmt_ext::path(&bam_filename));
     let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
     bam_reader.set_reference(ref_fasta_filename)?;
     let params = &args.params;
@@ -529,7 +529,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_path = args.database.as_ref().unwrap();
     let bg_fasta_filename = super::create::bg_fasta_filename(db_path);
     let mut descriptions = Vec::with_capacity(1);
-    let (contigs, mut ref_seqs) = ContigNames::load_fasta(common::open(&bg_fasta_filename)?, "bg".to_owned(),
+    let (contigs, mut ref_seqs) = ContigNames::load_fasta(sys_ext::open(&bg_fasta_filename)?, "bg".to_owned(),
         &mut descriptions)?;
     if contigs.len() != 1 {
         return Err(Error::InvalidData(format!("File {:?} contains more than one region", bg_fasta_filename)));
@@ -540,7 +540,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
 
     let kmers_filename = super::create::kmers_filename(bg_fasta_filename.parent().unwrap());
-    let kmers_file = common::open(&kmers_filename)?;
+    let kmers_file = sys_ext::open(&kmers_filename)?;
     let kmer_counts = KmerCounts::load(kmers_file, contigs.lengths())?;
 
     let bg_distr = if let Some(alns_filename) = args.alns.as_ref() {
@@ -548,7 +548,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     } else {
         estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &interval, &ref_seq, &kmer_counts)?
     };
-    let mut bg_file = common::create_gzip(&out_dir.join("params.gz"))?;
+    let mut bg_file = sys_ext::create_gzip(&out_dir.join("params.gz"))?;
     bg_distr.save().write_pretty(&mut bg_file, 4)?;
     log::info!("Success!");
     Ok(())

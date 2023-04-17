@@ -7,7 +7,7 @@ use once_cell::unsync::OnceCell;
 #[cfg(feature = "stochastic")]
 use rand::Rng;
 use crate::{
-    algo::vec_ext::F64Ext,
+    ext::vec::F64Ext,
     seq::{
         self,
         kmers::KmerCounts,

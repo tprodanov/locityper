@@ -7,7 +7,7 @@ use std::{
 };
 use fnv::FnvHashMap;
 use bio::io::fasta::{self, FastaRead};
-use crate::algo::VecOrNone;
+use crate::ext::vec::VecOrNone;
 
 /// Contig identificator - newtype over u16.
 /// Can be converted to `usize` using `id.ix()` method.

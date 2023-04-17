@@ -6,7 +6,7 @@ use std::{
     ops::Index,
 };
 use htslib::bam::record;
-use crate::algo::VecOrNone;
+use crate::ext::vec::VecOrNone;
 
 /// Subset of CIGAR operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

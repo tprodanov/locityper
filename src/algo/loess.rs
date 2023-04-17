@@ -2,10 +2,8 @@
 
 use std::cmp::min;
 use nalgebra::{DVector, DMatrix, SVD};
-use crate::algo::{
-    vec_ext::VecExt,
-    bisect,
-};
+use super::bisect;
+use crate::ext::vec::VecExt;
 
 /// Calculates local regression (LOESS / LOWESS).
 /// Given input arrays `x`, `y` and, optionally weights `w`, finds best `y_out` values for each `xout` value.

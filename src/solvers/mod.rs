@@ -5,7 +5,7 @@ use std::{
     fmt::Display,
 };
 use crate::{
-    algo::vec_ext::IterExt,
+    ext::vec::IterExt,
     model::{
         windows::ReadWindows,
         assgn::ReadAssignment,

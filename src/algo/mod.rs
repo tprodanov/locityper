@@ -1,10 +1,7 @@
 pub mod loess;
-pub mod vec_ext;
 pub mod bisect;
-pub mod sys_ext;
 
 use std::{
-    fmt::Debug,
     hash::Hasher,
 };
 
@@ -40,40 +37,6 @@ pub fn parse_int<T: std::convert::TryFrom<u64>>(s: &str) -> Result<T, String> {
         return Err(format!("Cannot parse string {:?} to int, unexpected first letter", s));
     }
     n.try_into().map_err(|_| format!("Cannot parse string {:?} to int, value is too large", s))
-}
-
-/// Trait that encodes either `&mut Vec<T>` or `()`, depending on if the information needs to be saved or not.
-pub trait VecOrNone<T> : Debug {
-    /// True for `()` - meaning that the object does not actually do any work.
-    const IS_SINK: bool;
-
-    /// Push a new element.
-    fn push(&mut self, val: T);
-
-    /// Returns length, if available.
-    fn try_len(&self) -> Option<usize>;
-}
-
-impl<T> VecOrNone<T> for () {
-    const IS_SINK: bool = true;
-
-    fn push(&mut self, _val: T) {}
-
-    fn try_len(&self) -> Option<usize> { None }
-}
-
-impl<T> VecOrNone<T> for &mut Vec<T>
-where T: Debug
-{
-    const IS_SINK: bool = false;
-
-    fn push(&mut self, val: T) {
-        Vec::push(*self, val);
-    }
-
-    fn try_len(&self) -> Option<usize> {
-        Some(self.len())
-    }
 }
 
 /// Calculates FNV1a function for given bytes.

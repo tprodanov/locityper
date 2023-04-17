@@ -8,11 +8,8 @@ use crate::{
         cigar::Cigar,
         kmers::KmerCounts,
     },
-    algo::{
-        vec_ext::{VecExt, F64Ext},
-        loess::Loess,
-        bisect,
-    },
+    algo::{bisect, loess::Loess},
+    ext::vec::{VecExt, F64Ext},
     math::distr::{NBinom, WithMoments},
     err::{Error, validate_param},
 };

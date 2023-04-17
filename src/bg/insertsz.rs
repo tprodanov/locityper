@@ -4,10 +4,8 @@ use htslib::bam::record::Record;
 use fnv::FnvHashMap;
 use crate::{
     Error,
-    algo::{
-        vec_ext::{VecExt, F64Ext},
-        bisect,
-    },
+    algo::bisect,
+    ext::vec::{VecExt, F64Ext},
     bg::ser::{JsonSer, LoadError},
     math::distr::{DiscretePmf, NBinom, LinearCache},
 };

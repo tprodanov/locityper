@@ -7,7 +7,7 @@ use rand::{
 };
 use crate::{
     Error,
-    algo::vec_ext::F64Ext,
+    ext::vec::F64Ext,
     model::assgn::ReadAssignment,
 };
 use super::Solver;

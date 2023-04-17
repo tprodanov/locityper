@@ -4,6 +4,7 @@ pub mod math;
 pub mod bg;
 pub mod model;
 pub mod solvers;
+pub mod ext;
 pub mod command;
 
 mod err;
