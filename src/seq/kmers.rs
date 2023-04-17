@@ -186,7 +186,7 @@ impl JfKmerGetter {
             .args(&["query", "-s", "/dev/stdin"]).arg(&self.jf_db)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn()?;
-        let mut child_stdin = child.stdin.take().unwrap();
+        let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
         let handle = std::thread::spawn(move || -> Result<(), Error> {
             for seq in seqs.iter() {
                 seq::write_fasta(&mut child_stdin, b"", None, seq)?;

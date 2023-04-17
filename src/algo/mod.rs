@@ -1,6 +1,7 @@
 pub mod loess;
 pub mod vec_ext;
 pub mod bisect;
+pub mod sys_ext;
 
 use std::{
     fmt::Debug,

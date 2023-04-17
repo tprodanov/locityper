@@ -18,7 +18,7 @@ use htslib::bam::{
 };
 use crate::{
     err::{Error, validate_param},
-    algo::parse_int,
+    algo::{sys_ext, parse_int},
     seq::{
         cigar, ContigNames, ContigId, Interval,
         fastx::{self, FastxRead},
@@ -315,9 +315,9 @@ fn set_strobealign_stdin(
         let subsampling_seed = args.subsampling_seed.clone();
         move || {
             if to_bg {
-                reader.subsample(child_stdin, subsampling_rate, subsampling_seed)
+                reader.subsample(io::BufWriter::new(child_stdin), subsampling_rate, subsampling_seed)
             } else {
-                reader.write_next_n(child_stdin, n_reads).map(|_| ())
+                reader.write_next_n(io::BufWriter::new(child_stdin), n_reads).map(|_| ())
             }
         }
     }
@@ -405,10 +405,12 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
         strobealign.arg("--interleaved").arg(&ref_filename).arg("-").stdin(Stdio::piped());
     }
     let mut strobealign_child = strobealign.spawn()?;
-    let handle = strobealign_child.stdin.take().map(
-        |stdin| set_strobealign_stdin(args, to_bg, stdin)).transpose()?;
+    let strobealign_stdin = strobealign_child.stdin.take();
+    let strobealign_stdout = strobealign_child.stdout.take();
+    let mut guard = sys_ext::ChildGuard::new(strobealign_child);
 
-    let mut samtools = create_samtools_command(args, strobealign_child.stdout.unwrap().into(), &tmp_bam);
+    let handle = strobealign_stdin.map(|stdin| set_strobealign_stdin(args, to_bg, stdin)).transpose()?;
+    let mut samtools = create_samtools_command(args, Stdio::from(strobealign_stdout.unwrap()), &tmp_bam);
     log::debug!("    {}{} | {}", first_step_str(&args, to_bg), super::fmt_cmd(&strobealign), super::fmt_cmd(&samtools));
 
     let start = Instant::now();
@@ -424,6 +426,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
         handle.join().expect("Process failed for unknown reason")?;
     }
     fs::rename(&tmp_bam, out_bam)?;
+    guard.disarm();
     Ok(())
 }
 
