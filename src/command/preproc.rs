@@ -32,6 +32,7 @@ use crate::{
         depth::ReadDepth,
     },
 };
+use super::paths;
 
 struct Args {
     input: Vec<PathBuf>,
@@ -137,7 +138,7 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
-        "    --interleaved".green(), super::flag());
+        "-^, --interleaved".green(), super::flag());
 
     if extended {
         println!("\n{}", "Insert size and error profile estimation:".bold());
@@ -263,7 +264,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.params.depth.tail_var_mult = parser.value()?.parse()?;
             }
 
-            Long("interleaved") => args.interleaved = true,
+            Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
@@ -291,7 +292,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     let out_dir = args.output.as_ref().unwrap();
     sys_ext::mkdir(out_dir)?;
 
-    let bg_dir = out_dir.join("bg");
+    let bg_dir = out_dir.join(paths::BG_DIR);
     if bg_dir.exists() && args.force {
         log::warn!("Clearing output directory {}", fmt_ext::path(&bg_dir));
         fs::remove_dir_all(&bg_dir)?;
@@ -525,8 +526,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     log::info!("Loading background non-duplicated region into memory");
     let db_path = args.database.as_ref().unwrap();
-    let bg_fasta_filename = super::create::bg_fasta_filename(db_path);
-    let kmers_filename = super::create::kmers_filename(bg_fasta_filename.parent().unwrap());
+    let db_bg_dir = db_path.join(paths::BG_DIR);
+    let bg_fasta_filename = db_bg_dir.join(paths::BG_FASTA);
+    let kmers_filename = db_bg_dir.join(paths::KMERS);
     let mut descriptions = Vec::with_capacity(1);
     let contig_set = ContigSet::load("bg", &bg_fasta_filename, &kmers_filename, &mut descriptions)?;
     if contig_set.len() != 1 {
@@ -540,7 +542,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     } else {
         estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &contig_set)?
     };
-    let mut bg_file = sys_ext::create_gzip(&out_dir.join("params.gz"))?;
+    let mut bg_file = sys_ext::create_gzip(&out_dir.join(paths::SAMPLE_PARAMS))?;
     bg_distr.save().write_pretty(&mut bg_file, 4)?;
     log::info!("Success!");
     Ok(())

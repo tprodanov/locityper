@@ -244,15 +244,15 @@ impl<R: BufRead> Reader<R> {
 
 /// Trait for reading and writing FASTA/Q single-end and paired-end records.
 pub trait FastxRead: Send {
-    type Rec: RecordExt;
+    type Record: RecordExt;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, record: &mut Self::Rec) -> io::Result<bool>;
+    fn read_next(&mut self, record: &mut Self::Record) -> io::Result<bool>;
 
     /// Writes the next `count` records to the output stream.
     /// Returns the number of records that were written.
     fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> io::Result<usize> {
-        let mut record = Self::Rec::default();
+        let mut record = Self::Record::default();
         for i in 0..count {
             match self.read_next(&mut record)? {
                 true => record.write_to(writer)?,
@@ -275,7 +275,7 @@ pub trait FastxRead: Send {
         };
         let mut successes = Bernoulli::new(rate).unwrap().sample_iter(rng);
 
-        let mut record = Self::Rec::default();
+        let mut record = Self::Record::default();
         while self.read_next(&mut record)? {
             if successes.next().unwrap() {
                 record.write_to(writer)?;
@@ -286,7 +286,7 @@ pub trait FastxRead: Send {
 }
 
 impl<R: BufRead + Send> FastxRead for Reader<R> {
-    type Rec = Record;
+    type Record = Record;
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
     fn read_next(&mut self, record: &mut Record) -> io::Result<bool> {
@@ -333,7 +333,7 @@ impl<R: BufRead> PairedEndInterleaved<R> {
 }
 
 impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
-    type Rec = PairedRecord;
+    type Record = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self, paired_record: &mut PairedRecord) -> io::Result<bool> {
@@ -370,7 +370,7 @@ impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
 }
 
 impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> {
-    type Rec = PairedRecord;
+    type Record = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self, paired_record: &mut PairedRecord) -> io::Result<bool> {

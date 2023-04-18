@@ -27,6 +27,7 @@ use crate::{
         kmers::JfKmerGetter,
     },
 };
+use super::paths;
 
 struct Args {
     database: Option<PathBuf>,
@@ -287,12 +288,12 @@ fn write_locus(
 ) -> Result<(), Error>
 {
     log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), fmt_ext::path(locus_dir));
-    let mut bed_out = File::create(locus_dir.join("ref.bed"))?;
+    let mut bed_out = File::create(locus_dir.join(paths::LOCUS_BED))?;
     bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
     bed_out.sync_all()?;
     std::mem::drop(bed_out);
 
-    let fasta_filename = locus_dir.join("haplotypes.fa.gz");
+    let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
     let mut fasta_out = sys_ext::create_gzip(&fasta_filename)?;
     for (name, seq) in seqs.iter() {
         let descr = match &ref_name {
@@ -307,7 +308,7 @@ fn write_locus(
     log::debug!("    [{}] Counting k-mers", locus.name());
     let seqs = seqs.into_iter().map(|(_name, seq)| seq).collect();
     let kmer_counts = kmer_getter.fetch(seqs)?;
-    let mut kmers_out = sys_ext::create_gzip(&super::create::kmers_filename(&locus_dir))?;
+    let mut kmers_out = sys_ext::create_gzip(&locus_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_out)?;
 
     log::debug!("    [{}] Indexing haplotypes", locus.name());
@@ -404,7 +405,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
-    let mut jf_filenames = sys_ext::find_filenames(&db_path.join("jf"), "jf".as_ref())?;
+    let mut jf_filenames = sys_ext::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
     if jf_filenames.len() != 1 {
         return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
             db_path.display(), jf_filenames.len())));
@@ -413,7 +414,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_filenames.pop().unwrap())?;
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
-    let loci_dir = db_path.join("loci");
+    let loci_dir = db_path.join(paths::LOCI_DIR);
     sys_ext::mkdir(&loci_dir)?;
     for locus in loci.iter() {
         add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?;

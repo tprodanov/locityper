@@ -21,7 +21,7 @@ pub fn find_exe(p: PathBuf) -> Result<PathBuf, Error> {
 /// - stdin if filename is `-`,
 /// - gzip reader if filename ends with `.gz`,
 /// - regular text file otherwise.
-pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
+pub fn open(filename: &Path) -> io::Result<Box<dyn BufRead + Send>> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         Ok(Box::new(BufReader::new(stdin())))
     } else {
@@ -35,7 +35,7 @@ pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
 }
 
 /// Creates a buffered file OR stdout if filename is `-`.
-pub fn create_uncompressed(filename: &Path) -> Result<Box<dyn Write>, Error> {
+pub fn create_uncompressed(filename: &Path) -> io::Result<Box<dyn Write>> {
     if filename == OsStr::new("-") {
         Ok(Box::new(BufWriter::new(stdout())))
     } else {
@@ -44,18 +44,18 @@ pub fn create_uncompressed(filename: &Path) -> Result<Box<dyn Write>, Error> {
 }
 
 /// Creates a gzip file.
-pub fn create_gzip(filename: &Path) -> Result<BufWriter<GzEncoder<File>>, Error> {
+pub fn create_gzip(filename: &Path) -> io::Result<BufWriter<GzEncoder<File>>> {
     let file = File::create(filename)?;
     Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
 }
 
 /// Finds all filenames with appropriate extension in the directory.
-pub fn find_filenames(dir: &Path, ext: &OsStr) -> io::Result<Vec<PathBuf>> {
+pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> io::Result<Vec<PathBuf>> {
     let mut res = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if entry.file_type()?.is_file() && path.extension() == Some(ext) {
+        if entry.file_type()?.is_file() && path.extension() == Some(ext.as_ref()) {
             res.push(path);
         }
     }

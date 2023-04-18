@@ -1,17 +1,31 @@
 use std::{
+    io, fs,
     cmp::max,
     path::{Path, PathBuf},
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
+use fnv::FnvHashSet;
 use crate::{
     err::{Error, validate_param},
+    seq::{
+        ContigSet,
+        kmers::KmerCount,
+    },
+    ext::{fmt as fmt_ext},
 };
+use super::paths;
 
 struct Args {
     input: Vec<PathBuf>,
     database: Option<PathBuf>,
     output: Option<PathBuf>,
+    subset_loci: FnvHashSet<String>,
+
+    /// Filter out k-mers with frequency over `max_kmer_freq` across the reference genome.
+    max_kmer_freq: KmerCount,
+    /// How many k-mers need to be found per read for it to be recruited.
+    min_kmer_matches: u16,
 
     interleaved: bool,
     threads: u16,
@@ -24,6 +38,10 @@ impl Default for Args {
             input: Vec::with_capacity(2),
             database: None,
             output: None,
+            subset_loci: FnvHashSet::default(),
+
+            max_kmer_freq: 10,
+            min_kmer_matches: 10,
 
             interleaved: false,
             threads: 4,
@@ -70,7 +88,15 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Output directory   (initialized with {}).",
         "-o, --output".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " preproc").underline());
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
-        "    --interleaved".green(), super::flag());
+        "-^, --interleaved".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
+        "    --subset-loci".green(), "STR+".yellow());
+
+    println!("\n{}", "Read recruitment:".bold());
+    println!("    {:KEY$} {:VAL$}  Discard k-mers appearing over {} times in the reference genome [{}].",
+        "    --max-freq".green(), "INT".yellow(), "INT".yellow(), defaults.max_kmer_freq);
+    println!("    {:KEY$} {:VAL$}  Recruit single-/paired-reads with at least {} k-mers matches [{}].",
+        "    --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.min_kmer_matches);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -94,8 +120,17 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 .extend(parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?),
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
+            Long("subset-loci") => {
+                args.subset_loci.extend(parser.values()?.map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?);
+                if args.subset_loci.is_empty() {
+                    return Err(lexopt::Error::MissingValue { option: Some("subset-loci".to_owned()) });
+                }
+            }
 
-            Long("interleaved") => args.interleaved = true,
+            Long("max-freq") | Long("max-frequency") => args.max_kmer_freq = parser.value()?.parse()?,
+            Long("min-matches") => args.min_kmer_matches = parser.value()?.parse()?,
+
+            Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
 
@@ -112,6 +147,61 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     }
     Ok(args)
 }
+
+fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> Option<&'a str> {
+    match path.file_name().unwrap().to_str() {
+        None => {
+            log::error!("Skipping directory {:?} - filename is not a valid UTF-8", path);
+            None
+        }
+        Some(name) => {
+            if !subset_loci.is_empty() && !subset_loci.contains(name) {
+                log::trace!("Skipping locus {} (not in the subset loci)", name);
+                None
+            } else if name.starts_with(".") {
+                log::trace!("Skipping hidden directory {}", name);
+                None
+            } else {
+                Some(name)
+            }
+        }
+    }
+}
+
+fn load_loci(db_path: &Path, subset_loci: &FnvHashSet<String>) -> io::Result<Vec<ContigSet>> {
+    log::info!("Loading database.");
+    let loci_dir = db_path.join(paths::LOCI_DIR);
+    let mut contig_sets = Vec::new();
+    let mut total_entries = 0;
+    for entry in fs::read_dir(&loci_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        total_entries += 1;
+        let path = entry.path();
+        if let Some(name) = locus_name_matches(&path, subset_loci) {
+            let fasta_filename = path.join(paths::LOCUS_FASTA);
+            let kmers_filename = path.join(paths::KMERS);
+            match ContigSet::load(name, &fasta_filename, &kmers_filename, ()) {
+                Ok(set) => contig_sets.push(set),
+                Err(e) => log::error!("Could not load locus information from {}: {:?}", fmt_ext::path(&path), e),
+            }
+        }
+    }
+    let n = contig_sets.len();
+    if n < total_entries {
+        log::info!("Loaded {} loci, skipped {} directories", n, total_entries - n);
+    } else {
+        log::info!("Loaded {} loci", n);
+    }
+    Ok(contig_sets)
+}
+
+// fn recruit_reads(args: &Args) -> Result<(), Error> {
+
+// }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;

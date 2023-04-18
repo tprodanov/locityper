@@ -19,6 +19,7 @@ use crate::{
     },
     ext::{sys as sys_ext, fmt as fmt_ext},
 };
+use super::paths;
 
 struct Args {
     reference: Option<PathBuf>,
@@ -162,16 +163,6 @@ fn select_bg_interval(
         Consider setting region via --region or use a different reference file.", fmt_ext::path(ref_filename))))
 }
 
-/// Given database file, return where the FASTA file with background region is located.
-pub(super) fn bg_fasta_filename(db_path: &Path) -> PathBuf {
-    db_path.join("bg").join("bg.fa.gz")
-}
-
-/// Returns filename of the k-mer counts file in the directory.
-pub(super) fn kmers_filename(dir: &Path) -> PathBuf {
-    dir.join("kmers.gz")
-}
-
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
 /// The sequence is then written to the `$bg_path/bg.fa.gz`.
 fn extract_bg_region<R: Read + Seek>(
@@ -182,22 +173,22 @@ fn extract_bg_region<R: Read + Seek>(
 ) -> Result<(), Error>
 {
     let seq = region.fetch_seq(fasta)?;
-    let bg_path = bg_fasta_filename(db_path);
-    let bg_dir = bg_path.parent().unwrap();
+    let bg_dir = db_path.join(paths::BG_DIR);
     sys_ext::mkdir(&bg_dir)?;
-    log::info!("Writing background region {} to {}", region, fmt_ext::path(&bg_path));
-    let mut fasta_writer = sys_ext::create_gzip(&bg_path)?;
+    let bg_fasta_filename = bg_dir.join(paths::BG_FASTA);
+    log::info!("Writing background region {} to {}", region, fmt_ext::path(&bg_fasta_filename));
+    let mut fasta_writer = sys_ext::create_gzip(&bg_fasta_filename)?;
     crate::seq::write_fasta(&mut fasta_writer, b"bg", Some(region.to_string().as_bytes()), &seq)?;
 
     log::info!("Calculating k-mer counts on the background region.");
     let kmer_counts = kmer_getter.fetch_one(seq)?;
-    let mut kmers_out = sys_ext::create_gzip(&kmers_filename(&bg_dir))?;
+    let mut kmers_out = sys_ext::create_gzip(&bg_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_out)?;
     Ok(())
 }
 
 fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: u64) -> Result<PathBuf, Error> {
-    let mut jf_path = db_path.join("jf");
+    let mut jf_path = db_path.join(paths::JF_DIR);
     sys_ext::mkdir(&jf_path)?;
     jf_path.push(&format!("{}.jf", args.kmer_size));
     if jf_path.exists() {
@@ -246,7 +237,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
     extract_bg_region(&region, &mut fasta, &db_path, &kmer_getter)?;
 
-    sys_ext::mkdir(&db_path.join("loci"))?;
+    sys_ext::mkdir(&db_path.join(paths::LOCI_DIR))?;
     log::info!("Success!");
     Ok(())
 }
