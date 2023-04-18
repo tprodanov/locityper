@@ -11,8 +11,10 @@ use crate::{
     seq::{
         ContigSet,
         kmers::KmerCount,
+        recruit::Targets,
+        fastx,
     },
-    ext::{fmt as fmt_ext},
+    ext::{fmt as fmt_ext, sys as sys_ext},
 };
 use super::paths;
 
@@ -199,11 +201,54 @@ fn load_loci(db_path: &Path, subset_loci: &FnvHashSet<String>) -> io::Result<Vec
     Ok(contig_sets)
 }
 
-// fn recruit_reads(args: &Args) -> Result<(), Error> {
+/// Returns a vector of tuples (reads_filename, alns_filename) for each locus.
+/// Additionally, this function creates missing directories on the path to the files.
+fn get_read_aln_filenames(out_dir: &Path, contig_sets: &[ContigSet]) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    let loci_dir = out_dir.join(paths::LOCI_DIR);
+    sys_ext::mkdir(&loci_dir)?;
+    let mut filenames = Vec::with_capacity(contig_sets.len());
+    for set in contig_sets.iter() {
+        let locus_dir = loci_dir.join(set.contigs().tag());
+        sys_ext::mkdir(&locus_dir)?;
+        filenames.push((locus_dir.join("reads.fq.gz"), locus_dir.join("alns.bam")));
+    }
+    Ok(filenames)
+}
 
-// }
+fn recruit_reads(contig_sets: &[ContigSet], filenames: &[(PathBuf, PathBuf)], args: &Args) -> io::Result<()> {
+    assert_eq!(contig_sets.len(), filenames.len());
+    let n_loci = contig_sets.len();
+    let (contig_sets, filenames): (Vec<_>, Vec<_>) = contig_sets.iter().zip(filenames)
+        .filter_map(|(set, (f1, f2))| if f1.exists() || f2.exists() { None } else { Some((set, f1)) })
+        .unzip();
+    if contig_sets.is_empty() {
+        log::info!("Skipping read recruitment");
+        return Ok(());
+    }
+    if contig_sets.len() < n_loci {
+        log::info!("Skipping read recruitment to {} loci", n_loci - contig_sets.len());
+    }
+    let targets = Targets::new(contig_sets.into_iter(), args.max_kmer_freq, args.min_kmer_matches)?;
+
+    // Cannot put reader into a box, because `FastxRead` has a type parameter.
+    if args.input.len() == 1 && !args.interleaved {
+        let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
+        targets.recruit(reader, filenames.into_iter(), args.threads)
+    } else if args.interleaved {
+        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
+        targets.recruit(reader, filenames.into_iter(), args.threads)
+    } else {
+        let reader = fastx::PairedEndReaders::new(
+            fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
+            fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
+        targets.recruit(reader, filenames.into_iter(), args.threads)
+    }
+}
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
+    let contig_sets = load_loci(args.database.as_ref().unwrap(), &args.subset_loci)?;
+    let read_aln_filenames = get_read_aln_filenames(args.output.as_ref().unwrap(), &contig_sets)?;
+    recruit_reads(&contig_sets, &read_aln_filenames, &args)?;
     Ok(())
 }

@@ -33,23 +33,25 @@ pub struct Targets {
     /// IntMap k-mer -> indices of contig sets, where the k-mer appears.
     kmers_to_loci: KmersToLoci,
     /// Number of contig sets.
-    n_sets: u16,
+    n_loci: u16,
     /// Minimal number of k-mer matches per read/read-pair, needed to recruit the read to the corresponding locus.
     min_matches: u16,
 }
 
 impl Targets {
-    pub fn new(sets: &[ContigSet], max_kmer_freq: KmerCount, min_matches: u16) -> Result<Self, Error> {
+    pub fn new<'a>(
+        sets: impl Iterator<Item = &'a ContigSet>,
+        max_kmer_freq: KmerCount,
+        min_matches: u16
+    ) -> io::Result<Self> {
         log::info!("Generating recruitment targets");
         let mut kmers_to_loci = KmersToLoci::default();
         let mut curr_kmers = Vec::new();
         let mut k = 0_u8;
-        let n_sets = u16::try_from(sets.len())
-            .expect(formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
 
         let mut discarded = 0;
-        for (set_ix, contig_set) in sets.iter().enumerate() {
-            let set_ix = set_ix as u16;
+        let mut set_ix: u16 = 0;
+        for contig_set in sets {
             let kmer_counts = contig_set.kmer_counts();
             if set_ix == 0 {
                 k = kmer_counts.k().try_into().unwrap();
@@ -78,18 +80,26 @@ impl Targets {
                     }
                 }
             }
+            set_ix = set_ix.checked_add(1)
+                .expect(formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
         }
-        log::info!("Collected {} k-mers, discarded {} k-mers", kmers_to_loci.len(), discarded);
-        Ok(Self { k, kmers_to_loci, n_sets, min_matches })
+        let n_loci = set_ix;
+        log::info!("Collected {} k-mers across {} loci, discarded {} k-mers", kmers_to_loci.len(), n_loci, discarded);
+        Ok(Self { k, kmers_to_loci, n_loci, min_matches })
     }
 
     /// Opens output fastq file for each locus.
-    fn create_out_files(&self, out_filenames: &[PathBuf]) -> io::Result<Vec<impl io::Write>> {
-        assert_eq!(out_filenames.len(), usize::from(self.n_sets),
+    fn create_out_files(
+        &self,
+        out_filenames: impl Iterator<Item = impl AsRef<Path>>
+    ) -> io::Result<Vec<impl io::Write>>
+    {
+        let out_files: Vec<_> = out_filenames
+            .map(|path| sys_ext::create_gzip(path.as_ref()))
+            .collect::<Result<_, io::Error>>()?;
+        assert_eq!(out_files.len(), usize::from(self.n_loci),
             "The number of output files does not match the number of loci");
-        out_filenames.iter()
-            .map(|path| sys_ext::create_gzip(path))
-            .collect::<Result<_, io::Error>>()
+        Ok(out_files)
     }
 
     /// Record a specific single- or paired-read to one or more loci.
@@ -97,13 +107,14 @@ impl Targets {
     ///
     /// The read is written to all loci (to the corresponding `out_files[locus_ix]`),
     /// for which the number of loci_matches will be at least `min_matches`.
+    /// Returns true if the read was recruited anywhere.
     fn recruit_record<T: RecordExt, W: io::Write>(
         &self,
         record: &T,
         out_files: &mut [W],
         rec_kmers: &mut Vec<u64>,
         loci_matches: &mut IntMap<u16, u16>,
-    ) -> io::Result<()>
+    ) -> io::Result<bool>
     {
         record.canonical_kmers(self.k, rec_kmers);
         loci_matches.clear();
@@ -114,27 +125,35 @@ impl Targets {
                 }
             }
         }
+        let mut recruited = false;
         for (&locus_ix, &count) in loci_matches.iter() {
             if count >= self.min_matches {
+                recruited = true;
                 record.write_to(&mut out_files[usize::from(locus_ix)])?;
             }
         }
-        Ok(())
+        Ok(recruited)
     }
 
     fn recruit_single_thread<T: RecordExt>(
         &self,
-        reader: &mut impl FastxRead<Record = T>,
-        out_dirs: &[PathBuf],
+        mut reader: impl FastxRead<Record = T>,
+        out_filenames: impl Iterator<Item = impl AsRef<Path>>,
     ) -> io::Result<()>
     {
-        let mut out_files = self.create_out_files(out_dirs)?;
+        let mut out_files = self.create_out_files(out_filenames)?;
         let mut record = T::default();
         let mut rec_kmers = Vec::new();
         let mut loci_matches = IntMap::default();
 
+        let mut processed = 0_u64;
+        let mut recruited = 0_u64;
         while reader.read_next(&mut record)? {
-            self.recruit_record(&record, &mut out_files, &mut rec_kmers, &mut loci_matches)?;
+            recruited += u64::from(self.recruit_record(&record, &mut out_files, &mut rec_kmers, &mut loci_matches)?);
+            processed += 1;
+            if processed % 100_000 == 0 {
+                log::debug!("    Recruited {:11} /{:11} reads", recruited, processed);
+            }
         }
         Ok(())
     }
@@ -142,13 +161,13 @@ impl Targets {
     /// Recruit reads to the targets, possibly in multiple threads.
     pub fn recruit<T: RecordExt>(
         &self,
-        reader: &mut impl FastxRead<Record = T>,
-        out_dirs: &[PathBuf],
+        reader: impl FastxRead<Record = T>,
+        out_filenames: impl Iterator<Item = impl AsRef<Path>>,
         threads: u16,
     ) -> io::Result<()>
     {
         if threads <= 1 {
-            self.recruit_single_thread(reader, out_dirs)
+            self.recruit_single_thread(reader, out_filenames)
         } else {
             unimplemented!("Multi-thread recruitment is not implemented yet.")
         }
