@@ -12,10 +12,10 @@ use std::{
 use bio::io::fasta::IndexedReader;
 use colored::Colorize;
 use crate::{
-    Error,
+    err::{Error, validate_param},
     seq::{
         Interval, ContigNames,
-        kmers::JfKmerGetter,
+        kmers::{MAX_KMER, JfKmerGetter},
     },
     ext::{sys as sys_ext, fmt as fmt_ext},
 };
@@ -41,6 +41,18 @@ impl Default for Args {
             force: false,
             jellyfish: PathBuf::from("jellyfish"),
         }
+    }
+}
+
+impl Args {
+    fn validate(mut self) -> Result<Self, Error> {
+        self.threads = max(self.threads, 1);
+        validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
+        validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
+        self.jellyfish = sys_ext::find_exe(self.jellyfish)?;
+        validate_param!(self.kmer_size % 2 == 1 && self.kmer_size <= MAX_KMER,
+            "k-mer size ({}) must be odd, and at most {}", self.kmer_size, MAX_KMER);
+        Ok(self)
     }
 }
 
@@ -109,18 +121,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             _ => Err(arg.unexpected())?,
         }
     }
-    Ok(args)
-}
-
-fn process_args(mut args: Args) -> Result<Args, Error> {
-    args.threads = max(args.threads, 1);
-    if args.database.is_none() {
-        Err(lexopt::Error::from("Database directory is not provided (see -d/--database)"))?;
-    }
-    if args.reference.is_none() {
-        Err(lexopt::Error::from("Reference fasta file is not provided (see -r/--reference)"))?;
-    }
-    args.jellyfish = sys_ext::find_exe(args.jellyfish)?;
     Ok(args)
 }
 
@@ -226,7 +226,7 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let args: Args = process_args(parse_args(argv)?)?;
+    let args = parse_args(argv)?.validate()?;
     // unwrap as args.database was previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
     if db_path.exists() {
@@ -239,7 +239,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     // unwrap as args.reference was previously checked to be Some.
     let ref_filename = args.reference.as_ref().unwrap();
-    let (contigs, mut fasta) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_owned())?;
+    let (contigs, mut fasta) = ContigNames::load_indexed_fasta("reference", &ref_filename)?;
     let jf_path = run_jellyfish(&db_path, &ref_filename, &args, contigs.genome_size())?;
     let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_path)?;
 

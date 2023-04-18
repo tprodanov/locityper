@@ -400,7 +400,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let ref_filename = args.reference.as_ref().unwrap();
     let vcf_filename = args.variants.as_ref().unwrap();
 
-    let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta(&ref_filename, "reference".to_owned())?;
+    let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta("reference", &ref_filename)?;
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;

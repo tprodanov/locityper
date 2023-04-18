@@ -27,7 +27,8 @@ impl<'a> ContigKmers<'a> {
     fn new(contig_id: ContigId, seq: &'a [u8], kmer_counts: &'a KmerCounts, threshold: KmerCount) -> Self {
         let ref_occurances = kmer_counts.get(contig_id);
         let k: u8 = kmer_counts.k().try_into().unwrap();
-        let canon_kmers = canonical_kmers(seq, k);
+        let mut canon_kmers = Vec::with_capacity(seq.len() + 1 - k as usize);
+        canonical_kmers(seq, k, &mut canon_kmers);
         assert_eq!(canon_kmers.len(), ref_occurances.len());
 
         let mut kmer_positions = IntMap::default();

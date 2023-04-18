@@ -105,13 +105,16 @@ impl KmerCounts {
 /// k-mer that contains Ns.
 pub const N_KMER: u64 = u64::MAX;
 
+/// Maximal allowed k-mer size.
+pub const MAX_KMER: u8 = 31;
+
 /// Iterates over canonical k-mers in the sequence.
 /// Returns N_KMER for k-mers containing N.
-/// K-mer size `k` must be at most 32.
+/// K-mer size `k` must be at most 31.
 ///
 /// Canonical k-mer is calculated as minimal between the k-mer and its rev.complement.
-pub fn canonical_kmers(seq: &[u8], k: u8) -> Vec<u64> {
-    assert!(0 < k && k <= 32, "k-mer size must be within [1, 32].");
+pub fn canonical_kmers(seq: &[u8], k: u8, buffer: &mut Vec<u64>) {
+    assert!(0 < k && k <= MAX_KMER, "k-mer size must be within [1, {}].", MAX_KMER);
     let k_usize = usize::from(k);
     assert!(seq.len() >= k_usize, "Sequence is too short!");
     let mask: u64 = if k == 32 { -1_i64 as u64 } else { (1_u64 << 2 * k) - 1 };
@@ -119,7 +122,6 @@ pub fn canonical_kmers(seq: &[u8], k: u8) -> Vec<u64> {
     let mut fw_kmer: u64 = 0;
     let mut rv_kmer: u64 = 0;
     let mut reset = k_usize - 1;
-    let mut kmers = Vec::with_capacity(seq.len() + 1 - k_usize);
 
     for (i, &nt) in seq.iter().enumerate() {
         let fw_enc: u64 = match nt {
@@ -130,7 +132,7 @@ pub fn canonical_kmers(seq: &[u8], k: u8) -> Vec<u64> {
             _ => {
                 reset = i + k_usize;
                 if i + 1 >= k_usize {
-                    kmers.push(N_KMER);
+                    buffer.push(N_KMER);
                 }
                 continue;
             },
@@ -140,13 +142,11 @@ pub fn canonical_kmers(seq: &[u8], k: u8) -> Vec<u64> {
         rv_kmer = (rv_enc << rv_shift) | (rv_kmer >> 2);
 
         if i >= reset {
-            kmers.push(min(fw_kmer & mask, rv_kmer));
+            buffer.push(min(fw_kmer & mask, rv_kmer));
         } else if i + 1 >= k_usize {
-            kmers.push(N_KMER);
+            buffer.push(N_KMER);
         }
     }
-    debug_assert_eq!(kmers.len(), seq.len() + 1 - k_usize);
-    kmers
 }
 
 /// Structure, that runs `jellyfish` and queries k-mers per sequence or from the reference file.

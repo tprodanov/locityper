@@ -7,7 +7,11 @@ use std::{
 };
 use fnv::FnvHashMap;
 use bio::io::fasta::{self, FastaRead};
-use crate::ext::vec::VecOrNone;
+use crate::{
+    Error,
+    ext::{vec::VecOrNone, sys as sys_ext},
+    seq::kmers::KmerCounts,
+};
 
 /// Contig identificator - newtype over u16.
 /// Can be converted to `usize` using `id.ix()` method.
@@ -57,7 +61,7 @@ impl ContigNames {
     /// Create contig names from an iterator over pairs (name, length).
     /// Names must not repeat.
     /// First argument: overall name of the contig set.
-    pub fn new(tag: String, it: impl Iterator<Item = (String, u32)>) -> Self {
+    pub fn new(tag: impl Into<String>, it: impl Iterator<Item = (String, u32)>) -> Self {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
         let mut name_to_id = FnvHashMap::default();
@@ -77,12 +81,15 @@ impl ContigNames {
         names.shrink_to_fit();
         lengths.shrink_to_fit();
         name_to_id.shrink_to_fit();
-        Self { tag, names, lengths, name_to_id }
+        Self {
+            tag: tag.into(),
+            names, lengths, name_to_id,
+        }
     }
 
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
-    pub fn from_index(tag: String, index: &fasta::Index) -> Self {
+    pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> Self {
         Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
     }
 
@@ -93,9 +100,11 @@ impl ContigNames {
     /// Returns tuple
     /// - ContigNames,
     /// - Vector of contig sequences.
-    pub fn load_fasta<R, V>(stream: R, tag: String, mut descriptions: V) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
-    where R: BufRead,
-          V: VecOrNone<Option<String>>,
+    pub fn load_fasta(
+        tag: impl Into<String>,
+        stream: impl BufRead,
+        mut descriptions: impl VecOrNone<Option<String>>,
+    ) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
     {
         let mut reader = fasta::Reader::from_bufread(stream);
         let mut names_lengths = Vec::new();
@@ -117,8 +126,10 @@ impl ContigNames {
     }
 
     /// Loads indexed fasta and stored contig names and lengths.
-    pub fn load_indexed_fasta<P>(filename: &P, tag: String) -> io::Result<(Rc<Self>, fasta::IndexedReader<File>)>
-    where P: AsRef<Path> + fmt::Debug
+    pub fn load_indexed_fasta(
+        tag: impl Into<String>,
+        filename: &(impl AsRef<Path> + fmt::Debug),
+    ) -> io::Result<(Rc<Self>, fasta::IndexedReader<File>)>
     {
         let fasta = fasta::IndexedReader::from_file(&filename)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -188,5 +199,58 @@ impl ContigNames {
 impl fmt::Debug for ContigNames {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ContigNames({}, {} entries)", self.tag, self.names.len())
+    }
+}
+
+/// Contigs, their complete sequences, and k-mer counts.
+pub struct ContigSet {
+    contigs: Rc<ContigNames>,
+    seqs: Vec<Vec<u8>>,
+    kmer_counts: KmerCounts,
+}
+
+impl ContigSet {
+    /// Loads contigs, their sequences and k-mer counts from two files.
+    /// `descriptions` can either be `&mut Vec<String>`, or `()`.
+    pub fn load(
+        tag: impl Into<String>,
+        fasta_filename: &Path,
+        kmers_filename: &Path,
+        descriptions: impl VecOrNone<Option<String>>,
+    ) -> Result<Self, Error>
+    {
+        let (contigs, seqs) = ContigNames::load_fasta(tag, sys_ext::open(fasta_filename)?, descriptions)?;
+        let kmer_counts = KmerCounts::load(sys_ext::open(kmers_filename)?, contigs.lengths())?;
+        Ok(Self { contigs, seqs, kmer_counts })
+    }
+
+    /// Returns the number of contigs in the set.
+    pub fn len(&self) -> usize {
+        self.seqs.len()
+    }
+
+    /// Returns true if there are no contigs in the set.
+    pub fn is_empty(&self) -> bool {
+        self.seqs.is_empty()
+    }
+
+    /// Returns inner Contig names.
+    pub fn contigs(&self) -> &Rc<ContigNames> {
+        &self.contigs
+    }
+
+    /// Returns all sequences.
+    pub fn seqs(&self) -> &[Vec<u8>] {
+        &self.seqs
+    }
+
+    /// Returns the sequence of the corresponding contig.
+    pub fn get_seq(&self, contig_id: ContigId) -> &[u8] {
+        &self.seqs[contig_id.ix()]
+    }
+
+    /// Returns k-mer counts.
+    pub fn kmer_counts(&self) -> &KmerCounts {
+        &self.kmer_counts
     }
 }

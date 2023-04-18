@@ -22,9 +22,8 @@ use crate::{
     algo::parse_int,
     ext::{sys as sys_ext, fmt as fmt_ext},
     seq::{
-        cigar, ContigNames, ContigId, Interval,
+        cigar, ContigNames, ContigSet, ContigId, Interval,
         fastx::{self, FastxRead},
-        kmers::KmerCounts,
     },
     bg::{
         BgDistr, JsonSer, Params as BgParams,
@@ -312,11 +311,11 @@ fn set_strobealign_stdin(
         let n_reads = args.n_reads;
         let subsampling_rate = args.subsampling_rate;
         let subsampling_seed = args.subsampling_seed.clone();
-        let writer = io::BufWriter::new(child_stdin);
+        let mut writer = io::BufWriter::new(child_stdin);
         move || {
             match to_bg {
-                true => reader.subsample(writer, subsampling_rate, subsampling_seed),
-                false => reader.write_next_n(writer, n_reads).map(|_| ()),
+                true => reader.subsample(&mut writer, subsampling_rate, subsampling_seed),
+                false => reader.write_next_n(&mut writer, n_reads).map(|_| ()),
             }
         }
     }
@@ -434,9 +433,7 @@ fn estimate_bg_from_reads(
     args: &Args,
     bg_fasta_filename: &Path,
     out_dir: &Path,
-    interval: &Interval,
-    ref_seq: &[u8],
-    kmer_counts: &KmerCounts,
+    contig_set: &ContigSet,
 ) -> Result<BgDistr, Error>
 {
     let bam_filename1 = out_dir.join("to_ref.bam");
@@ -444,6 +441,8 @@ fn estimate_bg_from_reads(
     run_strobealign(args, args.reference.as_ref().unwrap(), &bam_filename1, false)?;
 
     let bam_filename2 = out_dir.join("to_bg.bam");
+    let contig0 = ContigId::new(0);
+    let interval = Interval::full_contig(Rc::clone(contig_set.contigs()), contig0);
     log::info!("Mapping reads to non-duplicated region {}", interval);
     run_strobealign(args, &bg_fasta_filename, &bam_filename2, true)?;
 
@@ -471,8 +470,8 @@ fn estimate_bg_from_reads(
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
-    let depth_distr = ReadDepth::estimate(records2.iter(), interval, ref_seq, kmer_counts, &err_prof,
-        max_insert_size, &params.depth, args.subsampling_rate);
+    let depth_distr = ReadDepth::estimate(records2.iter(), &interval, contig_set.get_seq(contig0),
+        contig_set.kmer_counts(), &err_prof, max_insert_size, &params.depth, args.subsampling_rate);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -481,16 +480,16 @@ fn estimate_bg_from_alns(
     bam_filename: &Path,
     args: &Args,
     bg_fasta_filename: &Path,
-    bg_seq: &[u8],
+    bg_contig_set: &ContigSet,
     bg_interval_name: &str,
-    kmer_counts: &KmerCounts,
 ) -> Result<BgDistr, Error>
 {
     log::debug!("Comparing reference sequence");
     let ref_fasta_filename = args.reference.as_ref().unwrap();
-    let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta(ref_fasta_filename, "full_ref".to_owned())?;
+    let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("reference", ref_fasta_filename)?;
     let bg_interval = Interval::parse(bg_interval_name, &ref_contigs)?;
     let ref_seq = bg_interval.fetch_seq(&mut ref_fasta)?;
+    let bg_seq = bg_contig_set.get_seq(ContigId::new(0));
     if ref_seq != bg_seq {
         return Err(Error::InvalidInput(format!(
             "Fasta file {} contains interval {}, but it has different sequence than the background fasta file {}",
@@ -515,7 +514,7 @@ fn estimate_bg_from_alns(
     let max_insert_size = i64::from(insert_distr.max_size());
     let err_prof = ErrorProfile::estimate(records.iter(),
         |record| cigar::Cigar::infer_ext_cigar(record, &bg_seq, seq_shift), max_insert_size, params);
-    let depth_distr = ReadDepth::estimate(records.iter(), &bg_interval, &bg_seq, kmer_counts, &err_prof,
+    let depth_distr = ReadDepth::estimate(records.iter(), &bg_interval, &bg_seq, bg_contig_set.kmer_counts(), &err_prof,
         max_insert_size, &params.depth, 1.0);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
@@ -527,25 +526,19 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     log::info!("Loading background non-duplicated region into memory");
     let db_path = args.database.as_ref().unwrap();
     let bg_fasta_filename = super::create::bg_fasta_filename(db_path);
+    let kmers_filename = super::create::kmers_filename(bg_fasta_filename.parent().unwrap());
     let mut descriptions = Vec::with_capacity(1);
-    let (contigs, mut ref_seqs) = ContigNames::load_fasta(sys_ext::open(&bg_fasta_filename)?, "bg".to_owned(),
-        &mut descriptions)?;
-    if contigs.len() != 1 {
+    let contig_set = ContigSet::load("bg", &bg_fasta_filename, &kmers_filename, &mut descriptions)?;
+    if contig_set.len() != 1 {
         return Err(Error::InvalidData(format!("File {:?} contains more than one region", bg_fasta_filename)));
     }
     let bg_interval_name = descriptions[0].as_ref().ok_or_else(|| Error::InvalidData(format!(
         "First contig in {:?} does not have a valid description", bg_fasta_filename)))?;
-    let ref_seq = ref_seqs.pop().unwrap();
-    let interval = Interval::full_contig(Rc::clone(&contigs), ContigId::new(0));
-
-    let kmers_filename = super::create::kmers_filename(bg_fasta_filename.parent().unwrap());
-    let kmers_file = sys_ext::open(&kmers_filename)?;
-    let kmer_counts = KmerCounts::load(kmers_file, contigs.lengths())?;
 
     let bg_distr = if let Some(alns_filename) = args.alns.as_ref() {
-        estimate_bg_from_alns(alns_filename, &args, &bg_fasta_filename, &ref_seq, bg_interval_name, &kmer_counts)?
+        estimate_bg_from_alns(alns_filename, &args, &bg_fasta_filename, &contig_set, bg_interval_name)?
     } else {
-        estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &interval, &ref_seq, &kmer_counts)?
+        estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &contig_set)?
     };
     let mut bg_file = sys_ext::create_gzip(&out_dir.join("params.gz"))?;
     bg_distr.save().write_pretty(&mut bg_file, 4)?;

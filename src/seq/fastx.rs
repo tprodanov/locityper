@@ -8,11 +8,17 @@ use rand::{
     rngs::SmallRng,
     distributions::{Bernoulli, Distribution},
 };
+use crate::seq::kmers;
 
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
 /// writes the sequence into a single line, without splitting.
-pub fn write_fasta<W: io::Write>(mut writer: W, name: &[u8], descr: Option<&[u8]>, seq: &[u8]) -> io::Result<()> {
+pub fn write_fasta(
+    writer: &mut impl io::Write,
+    name: &[u8],
+    descr: Option<&[u8]>,
+    seq: &[u8]
+) -> io::Result<()> {
     writer.write_all(b">")?;
     writer.write_all(name)?;
     if let Some(descr) = descr {
@@ -33,8 +39,8 @@ pub fn write_fasta<W: io::Write>(mut writer: W, name: &[u8], descr: Option<&[u8]
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
 /// writes the sequence into a single line, without splitting.
-pub fn write_fastq<W: io::Write>(
-    mut writer: W,
+pub fn write_fastq(
+    writer: &mut impl io::Write,
     name: &[u8],
     descr: Option<&[u8]>,
     seq: &[u8],
@@ -122,14 +128,6 @@ impl Record {
             Some(&self.qual)
         }
     }
-
-    pub fn write_to(&self, writer: impl io::Write) -> io::Result<()> {
-        if self.qual.is_empty() {
-            write_fasta(writer, &self.name, self.descr(), &self.seq)
-        } else {
-            write_fastq(writer, &self.name, self.descr(), &self.seq, &self.qual)
-        }
-    }
 }
 
 impl fmt::Debug for Record {
@@ -137,6 +135,46 @@ impl fmt::Debug for Record {
         let mut v: Vec<u8> = Vec::new();
         self.write_to(&mut v).unwrap();
         f.write_str(&String::from_utf8_lossy(&v))
+    }
+}
+
+/// Extension over a single- or paired-records.
+pub trait RecordExt {
+    /// Writes the single- or paired-read to the stream.
+    fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()>;
+
+    /// Extract all canonical k-mers from the single- or paired-read sequence.
+    /// The buffer is cleared before adding k-mers.
+    fn canonical_kmers(&self, k: u8, buffer: &mut Vec<u64>);
+}
+
+impl RecordExt for Record {
+    fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
+        if self.qual.is_empty() {
+            write_fasta(writer, &self.name, self.descr(), &self.seq)
+        } else {
+            write_fastq(writer, &self.name, self.descr(), &self.seq, &self.qual)
+        }
+    }
+
+    fn canonical_kmers(&self, k: u8, buffer: &mut Vec<u64>) {
+        buffer.clear();
+        kmers::canonical_kmers(&self.seq, k, buffer);
+    }
+}
+
+pub type PairedRecord = [Record; 2];
+
+impl RecordExt for PairedRecord {
+    fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
+        self[0].write_to(writer)?;
+        self[1].write_to(writer)
+    }
+
+    fn canonical_kmers(&self, k: u8, buffer: &mut Vec<u64>) {
+        buffer.clear();
+        kmers::canonical_kmers(&self[0].seq, k, buffer);
+        kmers::canonical_kmers(&self[1].seq, k, buffer);
     }
 }
 
@@ -234,23 +272,20 @@ impl<R: BufRead> Reader<R> {
 
 /// Trait for reading and writing FASTA/Q single-end and paired-end records.
 pub trait FastxRead: Send {
-    type Record;
+    type Rec: RecordExt;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool>;
 
     /// Returns the current record.
-    fn current(&self) -> &Self::Record;
-
-    /// Writes the current record to the output stream.
-    fn write_current(&mut self, writer: impl io::Write) -> io::Result<()>;
+    fn current(&self) -> &Self::Rec;
 
     /// Writes the next `count` records to the output stream.
     /// Returns the number of records that were written.
-    fn write_next_n(&mut self, mut writer: impl io::Write, count: usize) -> io::Result<usize> {
+    fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> io::Result<usize> {
         for i in 0..count {
             match self.read_next()? {
-                true => self.write_current(&mut writer)?,
+                true => self.current().write_to(writer)?,
                 false => return Ok(i),
             }
         }
@@ -258,7 +293,7 @@ pub trait FastxRead: Send {
     }
 
     /// Subsamples the reader with the `rate` and optional `seed`.
-    fn subsample(&mut self, mut writer: impl io::Write, rate: f64, seed: Option<u64>) -> io::Result<()> {
+    fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, seed: Option<u64>) -> io::Result<()> {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
         let rng = if let Some(seed) = seed {
             if seed.count_ones() < 5 {
@@ -272,7 +307,7 @@ pub trait FastxRead: Send {
 
         while self.read_next()? {
             if successes.next().unwrap() {
-                self.write_current(&mut writer)?;
+                self.current().write_to(writer)?;
             }
         }
         Ok(())
@@ -295,7 +330,7 @@ impl<R: BufRead> SingleEndReader<R> {
 }
 
 impl<R: BufRead + Send> FastxRead for SingleEndReader<R> {
-    type Record = Record;
+    type Rec = Record;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
@@ -303,17 +338,10 @@ impl<R: BufRead + Send> FastxRead for SingleEndReader<R> {
     }
 
     /// Returns the current record.
-    fn current(&self) -> &Self::Record {
+    fn current(&self) -> &Self::Rec {
         &self.record
     }
-
-    /// Writes the current record to the output stream.
-    fn write_current(&mut self, writer: impl io::Write) -> io::Result<()> {
-        self.record.write_to(writer)
-    }
 }
-
-pub type PairedRecord = [Record; 2];
 
 /// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
 pub struct PairedEndInterleaved<R: BufRead> {
@@ -333,7 +361,7 @@ impl<R: BufRead> PairedEndInterleaved<R> {
 }
 
 impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
-    type Record = PairedRecord;
+    type Rec = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
@@ -353,14 +381,8 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
     }
 
     /// Returns the current record.
-    fn current(&self) -> &Self::Record {
+    fn current(&self) -> &Self::Rec {
         &self.records
-    }
-
-    /// Writes the current record to the output stream.
-    fn write_current(&mut self, mut writer: impl io::Write) -> io::Result<()> {
-        self.records[0].write_to(&mut writer)?;
-        self.records[1].write_to(&mut writer)
     }
 }
 
@@ -383,7 +405,7 @@ impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
 }
 
 impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> {
-    type Record = PairedRecord;
+    type Rec = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self) -> io::Result<bool> {
@@ -404,13 +426,7 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
     }
 
     /// Returns the current record.
-    fn current(&self) -> &Self::Record {
+    fn current(&self) -> &Self::Rec {
         &self.records
-    }
-
-    /// Writes the current record to the output stream.
-    fn write_current(&mut self, mut writer: impl io::Write) -> io::Result<()> {
-        self.records[0].write_to(&mut writer)?;
-        self.records[1].write_to(&mut writer)
     }
 }

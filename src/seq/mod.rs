@@ -8,9 +8,10 @@ pub mod panvcf;
 #[cfg(feature = "devel")]
 pub mod dist;
 pub mod fastx;
+pub mod recruit;
 
 pub use interv::{Interval, NamedInterval};
-pub use contigs::{ContigId, ContigNames};
+pub use contigs::{ContigId, ContigNames, ContigSet};
 pub use fastx::write_fasta;
 
 /// Make nucleotide sequence standard: only letters A,C,G,T,N.
