@@ -5,6 +5,7 @@ use std::{
     path::Path,
     fs::File,
     io::{self, BufWriter},
+    sync::mpsc::{self, Sender, Receiver},
 };
 use nohash::IntMap;
 use flate2::write::GzEncoder;
@@ -15,16 +16,20 @@ use crate::{
     seq::{
         ContigSet,
         kmers::{KmerCount, canonical_kmers, N_KMER},
+        fastx::RecordExt,
     },
 };
 
 const CAPACITY: usize = 2;
 
+/// Each k-mer is associated with a vector of loci indices.
+type KmersToLoci = IntMap<u64, SmallVec<[u16; CAPACITY]>>;
+
 /// Recruitement targets: sequences and output FASTQ files.
 pub struct Targets {
     k: u8,
     out_files: Vec<BufWriter<GzEncoder<File>>>,
-    kmers: IntMap<u64, SmallVec<[u16; CAPACITY]>>,
+    kmers: KmersToLoci,
 }
 
 impl Targets {
@@ -35,7 +40,7 @@ impl Targets {
     {
         log::info!("Generating recruitment targets");
         let mut out_files = Vec::new();
-        let mut kmers: IntMap<u64, SmallVec<[u16; CAPACITY]>> = IntMap::default();
+        let mut kmers = KmersToLoci::default();
         let mut curr_kmers = Vec::new();
         let mut k = 0_u8;
 
@@ -57,9 +62,9 @@ impl Targets {
                     if count <= max_kmer_freq && kmer != N_KMER {
                         match kmers.entry(kmer) {
                             Entry::Occupied(entry) => {
-                                let mut indices = entry.into_mut();
-                                if *indices.last().unwrap() != set_ix_u16 {
-                                    indices.push(set_ix_u16);
+                                let mut loci_ixs = entry.into_mut();
+                                if *loci_ixs.last().unwrap() != set_ix_u16 {
+                                    loci_ixs.push(set_ix_u16);
                                 }
                             }
                             Entry::Vacant(entry) => {
@@ -76,3 +81,44 @@ impl Targets {
         Ok(Self { k, kmers, out_files })
     }
 }
+
+// struct Worker {
+//     worker_id: u16,
+//     out_files: Vec<BufWriter<File>>,
+//     kmers: IntMap<u64, SmallVec<[u16; CAPACITY]>>,
+//     receiver
+// }
+
+/// Record a specific single- or paired-read to one or more loci.
+/// `rec_kmers` and `occurances` are buffers, filled anew for each record in order to reduce the number of allocs.
+///
+/// The read is written to all loci (to the corresponding `out_files[locus_ix]`),
+/// for which the number of occurances will be at least `threshold`.
+fn recruit<W: io::Write>(
+    record: &impl RecordExt,
+    out_files: &mut [W],
+    k: u8,
+    kmers_to_loci: &KmersToLoci,
+    rec_kmers: &mut Vec<u64>,
+    occurances: &mut IntMap<u16, u16>,
+    threshold: u16,
+) -> io::Result<()>
+{
+    record.canonical_kmers(k, rec_kmers);
+    occurances.clear();
+    for kmer in rec_kmers.iter() {
+        if let Some(loci_ixs) = kmers_to_loci.get(kmer) {
+            for &locus_ix in loci_ixs.iter() {
+                occurances.entry(locus_ix).and_modify(|counter| *counter += 1).or_insert(1);
+            }
+        }
+    }
+    for (&locus_ix, &count) in occurances.iter() {
+        if count >= threshold {
+            record.write_to(&mut out_files[usize::from(locus_ix)])?;
+        }
+    }
+    Ok(())
+}
+
+// fn recruit_single_thread()

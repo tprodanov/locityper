@@ -139,7 +139,7 @@ impl fmt::Debug for Record {
 }
 
 /// Extension over a single- or paired-records.
-pub trait RecordExt {
+pub trait RecordExt : Default {
     /// Writes the single- or paired-read to the stream.
     fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()>;
 
@@ -189,34 +189,6 @@ impl<R: BufRead> Reader<R> {
         let mut buffer = Vec::new();
         read_line(&mut stream, &mut buffer)?;
         Ok(Self { stream, buffer })
-    }
-
-    /// Reads the next record, and returns true if the read was successful (false if no more reads available).
-    pub fn read_next(&mut self, record: &mut Record) -> io::Result<bool> {
-        record.name.clear();
-        record.descr.clear();
-        record.seq.clear();
-        record.qual.clear();
-
-        // Buffer already contains the first line of the next record.
-        // If it is empty, the file has ended.
-        if self.buffer.is_empty() {
-            return Ok(false);
-        }
-
-        match self.buffer[1..].iter().position(|&c| c == b' ') {
-            Some(i) => {
-                record.name.extend(&self.buffer[1..i]);
-                record.descr.extend(&self.buffer[i + 1..]);
-            }
-            None => record.name.extend(&self.buffer[1..]),
-        }
-
-        if self.buffer[0] == b'>' {
-            self.fill_fasta_record(record)
-        } else {
-            self.fill_fastq_record(record)
-        }
     }
 
     fn fill_fasta_record(&mut self, record: &mut Record) -> io::Result<bool> {
@@ -275,17 +247,15 @@ pub trait FastxRead: Send {
     type Rec: RecordExt;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self) -> io::Result<bool>;
-
-    /// Returns the current record.
-    fn current(&self) -> &Self::Rec;
+    fn read_next(&mut self, record: &mut Self::Rec) -> io::Result<bool>;
 
     /// Writes the next `count` records to the output stream.
     /// Returns the number of records that were written.
     fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> io::Result<usize> {
+        let mut record = Self::Rec::default();
         for i in 0..count {
-            match self.read_next()? {
-                true => self.current().write_to(writer)?,
+            match self.read_next(&mut record)? {
+                true => record.write_to(writer)?,
                 false => return Ok(i),
             }
         }
@@ -305,48 +275,51 @@ pub trait FastxRead: Send {
         };
         let mut successes = Bernoulli::new(rate).unwrap().sample_iter(rng);
 
-        while self.read_next()? {
+        let mut record = Self::Rec::default();
+        while self.read_next(&mut record)? {
             if successes.next().unwrap() {
-                self.current().write_to(writer)?;
+                record.write_to(writer)?;
             }
         }
         Ok(())
     }
 }
 
-/// Single-end FASTA/Q reader, that stores one buffer record to reduce memory allocations.
-pub struct SingleEndReader<R: BufRead> {
-    reader: Reader<R>,
-    record: Record,
-}
-
-impl<R: BufRead> SingleEndReader<R> {
-    pub fn new(reader: Reader<R>) -> Self {
-        Self {
-            reader,
-            record: Record::default(),
-        }
-    }
-}
-
-impl<R: BufRead + Send> FastxRead for SingleEndReader<R> {
+impl<R: BufRead + Send> FastxRead for Reader<R> {
     type Rec = Record;
 
-    /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self) -> io::Result<bool> {
-        self.reader.read_next(&mut self.record)
-    }
+    /// Reads the next record, and returns true if the read was successful (false if no more reads available).
+    fn read_next(&mut self, record: &mut Record) -> io::Result<bool> {
+        record.name.clear();
+        record.descr.clear();
+        record.seq.clear();
+        record.qual.clear();
 
-    /// Returns the current record.
-    fn current(&self) -> &Self::Rec {
-        &self.record
+        // Buffer already contains the first line of the next record.
+        // If it is empty, the file has ended.
+        if self.buffer.is_empty() {
+            return Ok(false);
+        }
+
+        match self.buffer[1..].iter().position(|&c| c == b' ') {
+            Some(i) => {
+                record.name.extend(&self.buffer[1..i]);
+                record.descr.extend(&self.buffer[i + 1..]);
+            }
+            None => record.name.extend(&self.buffer[1..]),
+        }
+
+        if self.buffer[0] == b'>' {
+            self.fill_fasta_record(record)
+        } else {
+            self.fill_fastq_record(record)
+        }
     }
 }
 
 /// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
 pub struct PairedEndInterleaved<R: BufRead> {
     reader: Reader<R>,
-    records: PairedRecord,
     had_warning: bool,
 }
 
@@ -354,7 +327,6 @@ impl<R: BufRead> PairedEndInterleaved<R> {
     pub fn new(reader: Reader<R>) -> Self {
         Self {
             reader,
-            records: Default::default(),
             had_warning: false,
         }
     }
@@ -364,25 +336,20 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
     type Rec = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self) -> io::Result<bool> {
-        if !self.reader.read_next(&mut self.records[0])? {
+    fn read_next(&mut self, paired_record: &mut PairedRecord) -> io::Result<bool> {
+        if !self.reader.read_next(&mut paired_record[0])? {
             return Ok(false);
         }
-        if !self.reader.read_next(&mut self.records[1])? {
+        if !self.reader.read_next(&mut paired_record[1])? {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Odd number of records in an interleaved input file."))
         }
-        if !self.had_warning && self.records[0].name() != self.records[1].name() {
+        if !self.had_warning && paired_record[0].name() != paired_record[1].name() {
             self.had_warning = true;
             log::warn!("Interleaved input file contains consecutive records with different names: {} and {}",
-                self.records[0].name_str(), self.records[1].name_str());
+            paired_record[0].name_str(), paired_record[1].name_str());
         }
         Ok(true)
-    }
-
-    /// Returns the current record.
-    fn current(&self) -> &Self::Rec {
-        &self.records
     }
 }
 
@@ -390,7 +357,6 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
 pub struct PairedEndReaders<R: BufRead, S: BufRead> {
     reader1: Reader<R>,
     reader2: Reader<S>,
-    records: PairedRecord,
     had_warning: bool,
 }
 
@@ -398,7 +364,6 @@ impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
     pub fn new(reader1: Reader<R>, reader2: Reader<S>) -> Self {
         Self {
             reader1, reader2,
-            records: Default::default(),
             had_warning: false,
         }
     }
@@ -408,25 +373,20 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
     type Rec = PairedRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self) -> io::Result<bool> {
-        let could_read1 = self.reader1.read_next(&mut self.records[0])?;
-        let could_read2 = self.reader2.read_next(&mut self.records[1])?;
+    fn read_next(&mut self, paired_record: &mut PairedRecord) -> io::Result<bool> {
+        let could_read1 = self.reader1.read_next(&mut paired_record[0])?;
+        let could_read2 = self.reader2.read_next(&mut paired_record[1])?;
         match (could_read1, could_read2) {
             (false, false) => return Ok(false),
             (true, true) => {}
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Different number of records in two input files."))
         }
-        if !self.had_warning && self.records[0].name() != self.records[1].name() {
+        if !self.had_warning && paired_record[0].name() != paired_record[1].name() {
             self.had_warning = true;
             log::warn!("Paired-end records have different names: {} and {}",
-                self.records[0].name_str(), self.records[1].name_str());
+            paired_record[0].name_str(), paired_record[1].name_str());
         }
         Ok(true)
-    }
-
-    /// Returns the current record.
-    fn current(&self) -> &Self::Rec {
-        &self.records
     }
 }
