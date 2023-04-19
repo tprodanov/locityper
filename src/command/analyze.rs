@@ -230,18 +230,19 @@ fn recruit_reads(contig_sets: &[ContigSet], filenames: &[(PathBuf, PathBuf)], ar
     }
     let targets = Targets::new(contig_sets.into_iter(), args.max_kmer_freq, args.min_kmer_matches)?;
 
+    let out_filename = args.output.as_ref().unwrap().join("tmp.fq");
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
-        targets.recruit(reader, filenames.into_iter(), args.threads)
+        targets.recruit(reader, out_filename, args.threads)
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
-        targets.recruit(reader, filenames.into_iter(), args.threads)
+        targets.recruit(reader, out_filename, args.threads)
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
             fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
-        targets.recruit(reader, filenames.into_iter(), args.threads)
+        targets.recruit(reader, out_filename, args.threads)
     }
 }
 
