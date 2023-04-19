@@ -38,7 +38,6 @@ fn init_logger() {
 
 fn main() {
     init_logger();
-    // test::test();
     let args: Vec<_> = std::env::args().collect();
     command::run(&args).unwrap();
 }

@@ -144,8 +144,12 @@ pub trait RecordExt : Default {
     fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()>;
 
     /// Extract all canonical k-mers from the single- or paired-read sequence.
-    /// The buffer is cleared before adding k-mers.
+    /// The function does not clear the buffer in advance.
     fn canonical_kmers(&self, k: u8, buffer: &mut Vec<u64>);
+
+    /// Extracts all minimizers from the record (see `kmers::minimizers`).
+    /// The function does not clear the buffer in advance.
+    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<u32>);
 }
 
 impl RecordExt for Record {
@@ -158,8 +162,11 @@ impl RecordExt for Record {
     }
 
     fn canonical_kmers(&self, k: u8, buffer: &mut Vec<u64>) {
-        buffer.clear();
         kmers::canonical_kmers(&self.seq, k, buffer);
+    }
+
+    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<u32>) {
+        kmers::minimizers(&self.seq, k, n, buffer);
     }
 }
 
@@ -172,9 +179,13 @@ impl RecordExt for PairedRecord {
     }
 
     fn canonical_kmers(&self, k: u8, buffer: &mut Vec<u64>) {
-        buffer.clear();
         kmers::canonical_kmers(&self[0].seq, k, buffer);
         kmers::canonical_kmers(&self[1].seq, k, buffer);
+    }
+
+    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<u32>) {
+        kmers::minimizers(&self[0].seq, k, n, buffer);
+        kmers::minimizers(&self[1].seq, k, n, buffer);
     }
 }
 

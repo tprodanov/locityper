@@ -15,74 +15,42 @@ use crate::{
     ext::{sys as sys_ext},
     seq::{
         ContigSet,
-        kmers::{KmerCount, canonical_kmers, N_KMER},
+        kmers,
         fastx::{RecordExt, FastxRead},
     },
 };
 
-// fn murmur3_hash(mut key: u64) -> u64 {
-//     key ^= key >> 33;
-//     key *= 0xff51afd7ed558ccd;
-//     key ^= key >> 33;
-//     key *= 0xc4ceb9fe1a85ec53;
-//     key ^= key >> 33
-//     key
-// }
-
-// fn get_minimizers(&kmers: &[u64], ) ->
-
 /// Recruitement targets.
 #[derive(Clone)]
 pub struct Targets {
-    /// k-mer size.
-    k: u8,
-    /// k-mers appearing across the targets.
-    kmers_set: IntSet<u64>,
-    /// Number of contig sets.
-    n_loci: u16,
+    minimizer_k: u8,
+    minimizer_n: u8,
+    /// Minimizers appearing across the targets.
+    minimizers: IntSet<u32>,
     /// Minimal number of k-mer matches per read/read-pair, needed to recruit the read to the corresponding locus.
     min_matches: u16,
 }
 
 impl Targets {
     pub fn new<'a>(
-        sets: impl Iterator<Item = &'a ContigSet>,
-        max_kmer_freq: KmerCount,
+        seqs: impl Iterator<Item = &'a [u8]>,
+        minimizer_k: u8,
+        minimizer_n: u8,
         min_matches: u16
     ) -> io::Result<Self> {
         log::info!("Generating recruitment targets");
-        let mut kmers_set = IntSet::default();
-        let mut discarded_kmers = IntSet::default();
-        let mut curr_kmers = Vec::new();
-        let mut k = 0_u8;
+        let mut minimizers = IntSet::default();
+        let mut buffer = Vec::new();
 
-        let mut set_ix: u16 = 0;
-        for contig_set in sets {
-            let kmer_counts = contig_set.kmer_counts();
-            if set_ix == 0 {
-                k = kmer_counts.k().try_into().unwrap();
-            } else {
-                assert_eq!(kmer_counts.k() as u8, k, "Different loci have different k-mer sizes!");
-            }
-
-            for contig_id in contig_set.contigs().ids() {
-                curr_kmers.clear();
-                canonical_kmers(contig_set.get_seq(contig_id), k, &mut curr_kmers);
-                for (&kmer, &count) in curr_kmers.iter().zip(kmer_counts.get(contig_id)) {
-                    if count <= max_kmer_freq && kmer != N_KMER {
-                        kmers_set.insert(kmer);
-                    } else {
-                        discarded_kmers.insert(kmer);
-                    }
-                }
-            }
-            set_ix = set_ix.checked_add(1)
-                .expect(formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
+        let mut n_seqs = 0;
+        for seq in seqs {
+            n_seqs += 1;
+            buffer.clear();
+            kmers::minimizers(seq, minimizer_k, minimizer_n, &mut buffer);
+            minimizers.extend(buffer.iter().copied());
         }
-        let n_loci = set_ix;
-        log::info!("Collected {} k-mers across {} loci, discarded {} k-mers",
-            kmers_set.len(), n_loci, discarded_kmers.len());
-        Ok(Self { k, kmers_set, n_loci, min_matches })
+        log::info!("Collected {} minimizers across {} sequences", minimizers.len(), n_seqs);
+        Ok(Self { minimizer_k, minimizer_n, minimizers, min_matches })
     }
 
     // /// Opens output fastq file for each locus.
@@ -100,7 +68,6 @@ impl Targets {
     // }
 
     /// Record a specific single- or paired-read to one or more loci.
-    /// `rec_kmers` and `loci_matches` are buffers, filled anew for each record in order to reduce the number of allocs.
     ///
     /// The read is written to all loci (to the corresponding `out_files[locus_ix]`),
     /// for which the number of loci_matches will be at least `min_matches`.
@@ -108,13 +75,14 @@ impl Targets {
     fn recruit_record<T: RecordExt>(
         &self,
         record: &T,
-        rec_kmers: &mut Vec<u64>,
+        buffer: &mut Vec<u32>,
     ) -> bool
     {
-        record.canonical_kmers(self.k, rec_kmers);
+        buffer.clear();
+        record.minimizers(self.minimizer_k, self.minimizer_n, buffer);
         let mut matches = 0;
-        for kmer in rec_kmers.iter() {
-            if self.kmers_set.contains(kmer) {
+        for val in buffer.iter() {
+            if self.minimizers.contains(val) {
                 matches += 1;
                 if matches >= self.min_matches {
                     return true;
@@ -132,13 +100,13 @@ impl Targets {
     {
         let mut writer = io::BufWriter::new(std::fs::File::create(out_filename)?);
         let mut record = T::default();
-        let mut rec_kmers = Vec::new();
+        let mut buffer = Vec::new();
 
         let timer = Instant::now();
         let mut processed = 0_u64;
         let mut recruited = 0_u64;
         while reader.read_next(&mut record)? {
-            if self.recruit_record(&record, &mut rec_kmers) {
+            if self.recruit_record(&record, &mut buffer) {
                 record.write_to(&mut writer)?;
                 recruited += 1;
             }

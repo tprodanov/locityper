@@ -228,7 +228,11 @@ fn recruit_reads(contig_sets: &[ContigSet], filenames: &[(PathBuf, PathBuf)], ar
     if contig_sets.len() < n_loci {
         log::info!("Skipping read recruitment to {} loci", n_loci - contig_sets.len());
     }
-    let targets = Targets::new(contig_sets.into_iter(), args.max_kmer_freq, args.min_kmer_matches)?;
+    // let targets = Targets::new(contig_sets.into_iter(), args.max_kmer_freq, args.min_kmer_matches)?;
+    // TODO: Use actual parameters.
+    let targets = Targets::new(
+        contig_sets.into_iter().flat_map(|set| set.seqs()).map(|seq| seq as &[u8]),
+        15, 10, 2)?;
 
     let out_filename = args.output.as_ref().unwrap().join("tmp.fq");
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
