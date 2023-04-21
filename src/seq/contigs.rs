@@ -146,6 +146,7 @@ impl ContigNames {
         self.names.len()
     }
 
+    /// Returns the tag of the contig set.
     pub fn tag(&self) -> &str {
         &self.tag
     }
@@ -237,6 +238,11 @@ impl ContigSet {
     /// Returns inner Contig names.
     pub fn contigs(&self) -> &Rc<ContigNames> {
         &self.contigs
+    }
+
+    /// Returns the tag of the contig set.
+    pub fn tag(&self) -> &str {
+        self.contigs.tag()
     }
 
     /// Returns all sequences.

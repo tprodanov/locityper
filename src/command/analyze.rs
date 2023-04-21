@@ -1,5 +1,6 @@
 use std::{
-    io, fs,
+    io::{self, BufWriter},
+    fs::{self, File},
     cmp::max,
     path::{Path, PathBuf},
 };
@@ -10,7 +11,6 @@ use crate::{
     err::{Error, validate_param},
     seq::{
         ContigSet,
-        kmers::KmerCount,
         recruit::Targets,
         fastx,
     },
@@ -24,10 +24,12 @@ struct Args {
     output: Option<PathBuf>,
     subset_loci: FnvHashSet<String>,
 
-    /// Filter out k-mers with frequency over `max_kmer_freq` across the reference genome.
-    max_kmer_freq: KmerCount,
-    /// How many k-mers need to be found per read for it to be recruited.
-    min_kmer_matches: u16,
+    /// Recruit reads using k-mers of size `minimizer_k` that have the minimial hash across `minimizer_n`
+    /// consecutive k-mers.
+    minimizer_k: u8,
+    minimizer_n: u8,
+    /// Recruit reads that have at least this number of matching minimizers with one of the targets.
+    min_matches: u8,
 
     interleaved: bool,
     threads: u16,
@@ -42,8 +44,9 @@ impl Default for Args {
             output: None,
             subset_loci: FnvHashSet::default(),
 
-            max_kmer_freq: 10,
-            min_kmer_matches: 10,
+            minimizer_k: 15,
+            minimizer_n: 10,
+            min_matches: 2,
 
             interleaved: false,
             threads: 4,
@@ -95,10 +98,12 @@ fn print_help() {
         "    --subset-loci".green(), "STR+".yellow());
 
     println!("\n{}", "Read recruitment:".bold());
-    println!("    {:KEY$} {:VAL$}  Discard k-mers appearing over {} times in the reference genome [{}].",
-        "    --max-freq".green(), "INT".yellow(), "INT".yellow(), defaults.max_kmer_freq);
+    println!("    {:KEY$} {:VAL$}  k-mer size (no larger than 16) [{}].",
+        "-k, --recr-kmer".green(), "INT".yellow(), defaults.minimizer_k);
+    println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
+        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.minimizer_n);
     println!("    {:KEY$} {:VAL$}  Recruit single-/paired-reads with at least {} k-mers matches [{}].",
-        "    --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.min_kmer_matches);
+        "-m, --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.min_matches);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -129,8 +134,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
 
-            Long("max-freq") | Long("max-frequency") => args.max_kmer_freq = parser.value()?.parse()?,
-            Long("min-matches") => args.min_kmer_matches = parser.value()?.parse()?,
+            Short('k') | Long("recr-kmer") => args.minimizer_k = parser.value()?.parse()?,
+            Short('w') | Long("recr-window") => args.minimizer_n = parser.value()?.parse()?,
+            Short('m') | Long("min-matches") => args.min_matches = parser.value()?.parse()?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -201,60 +207,55 @@ fn load_loci(db_path: &Path, subset_loci: &FnvHashSet<String>) -> io::Result<Vec
     Ok(contig_sets)
 }
 
-/// Returns a vector of tuples (reads_filename, alns_filename) for each locus.
-/// Additionally, this function creates missing directories on the path to the files.
-fn get_read_aln_filenames(out_dir: &Path, contig_sets: &[ContigSet]) -> io::Result<Vec<(PathBuf, PathBuf)>> {
-    let loci_dir = out_dir.join(paths::LOCI_DIR);
-    sys_ext::mkdir(&loci_dir)?;
-    let mut filenames = Vec::with_capacity(contig_sets.len());
-    for set in contig_sets.iter() {
-        let locus_dir = loci_dir.join(set.contigs().tag());
-        sys_ext::mkdir(&locus_dir)?;
-        filenames.push((locus_dir.join("reads.fq.gz"), locus_dir.join("alns.bam")));
-    }
-    Ok(filenames)
-}
+/// Recruited reads are stored in `<out>/<locus>/reads.fq.gz`.
+const READS_FILENAME: &'static str = "reads.fq";
+/// Read alignments to all contigs are stored in `<out>/<locus>/alns.bam`.
+const ALN_FILENAME: &'static str = "alns.bam";
 
-fn recruit_reads(contig_sets: &[ContigSet], filenames: &[(PathBuf, PathBuf)], args: &Args) -> io::Result<()> {
-    assert_eq!(contig_sets.len(), filenames.len());
-    let n_loci = contig_sets.len();
-    let (contig_sets, filenames): (Vec<_>, Vec<_>) = contig_sets.iter().zip(filenames)
-        // .filter_map(|(set, (f1, f2))| if f1.exists() || f2.exists() { None } else { Some((set, f1)) })
-        .filter_map(|(set, (f1, f2))| if false { None } else { Some((set, f1)) })
-        .unzip();
-    if contig_sets.is_empty() {
+fn recruit_reads(contig_sets: &[ContigSet], loci_dir: &Path, args: &Args) -> io::Result<()> {
+    let filt_contig_sets: Vec<&ContigSet> = contig_sets.iter()
+        .filter(|set| !loci_dir.join(set.tag()).join(ALN_FILENAME).exists())
+        .collect();
+    if filt_contig_sets.is_empty() {
         log::info!("Skipping read recruitment");
         return Ok(());
     }
-    if contig_sets.len() < n_loci {
-        log::info!("Skipping read recruitment to {} loci", n_loci - contig_sets.len());
+    if filt_contig_sets.len() < contig_sets.len() {
+        log::info!("Skipping read recruitment to {} loci", contig_sets.len() - filt_contig_sets.len());
     }
-    // let targets = Targets::new(contig_sets.into_iter(), args.max_kmer_freq, args.min_kmer_matches)?;
-    // TODO: Use actual parameters.
-    let targets = Targets::new(
-        contig_sets.into_iter(),
-        15, 10, 2)?;
 
-    // let out_filename = args.output.as_ref().unwrap().join("tmp.fq");
+    let targets = Targets::new(filt_contig_sets.iter().copied(), args.minimizer_k, args.minimizer_n, args.min_matches);
+    let mut writers: Vec<_> = filt_contig_sets.iter()
+        .map(|set| {
+            let filename = loci_dir.join(set.tag()).join(READS_FILENAME);
+            File::create(&filename).map(BufWriter::new)
+        })
+        .collect::<Result<_, _>>()?;
+
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
-        targets.recruit(reader, filenames.into_iter(), args.threads)
+        targets.recruit(reader, &mut writers, args.threads)
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
-        targets.recruit(reader, filenames.into_iter(), args.threads)
+        targets.recruit(reader, &mut writers, args.threads)
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
             fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
-        targets.recruit(reader, filenames.into_iter(), args.threads)
+        targets.recruit(reader, &mut writers, args.threads)
     }
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     let contig_sets = load_loci(args.database.as_ref().unwrap(), &args.subset_loci)?;
-    let read_aln_filenames = get_read_aln_filenames(args.output.as_ref().unwrap(), &contig_sets)?;
-    recruit_reads(&contig_sets, &read_aln_filenames, &args)?;
+
+    let out_dir = args.output.as_ref().unwrap();
+    let loci_dir = out_dir.join(paths::LOCI_DIR);
+    for set in contig_sets.iter() {
+        sys_ext::mkdir(&loci_dir.join(set.tag()))?;
+    }
+    recruit_reads(&contig_sets, &loci_dir, &args)?;
     Ok(())
 }
