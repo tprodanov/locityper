@@ -202,7 +202,7 @@ pub fn minimizers(seq: &[u8], k: u8, n: u8, buffer: &mut Vec<u32>) {
 
     // Hashes in a window, stored in a cycling array.
     let mut hashes = [UNDEF; MAXN];
-    /// At what index will the first k-mer be available.
+    // At what index will the first k-mer be available.
     let mut reset = k - 1;
     // Start of the window with consecutive k-mers.
     let mut start = reset;
@@ -235,8 +235,10 @@ pub fn minimizers(seq: &[u8], k: u8, n: u8, buffer: &mut Vec<u32>) {
             b'T' => (3, 0),
             _ => {
                 reset = i + k;
-                if i > start && reset >= start + n {
-                    select_minimizer(buffer, &mut hashes, start, i);
+                if reset >= start + n {
+                    if i > start {
+                        select_minimizer(buffer, &mut hashes, start, i);
+                    }
                     start = reset;
                 }
                 hashes[(i & MOD_MAXN) as usize] = UNDEF;

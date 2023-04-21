@@ -219,7 +219,8 @@ fn recruit_reads(contig_sets: &[ContigSet], filenames: &[(PathBuf, PathBuf)], ar
     assert_eq!(contig_sets.len(), filenames.len());
     let n_loci = contig_sets.len();
     let (contig_sets, filenames): (Vec<_>, Vec<_>) = contig_sets.iter().zip(filenames)
-        .filter_map(|(set, (f1, f2))| if f1.exists() || f2.exists() { None } else { Some((set, f1)) })
+        // .filter_map(|(set, (f1, f2))| if f1.exists() || f2.exists() { None } else { Some((set, f1)) })
+        .filter_map(|(set, (f1, f2))| if false { None } else { Some((set, f1)) })
         .unzip();
     if contig_sets.is_empty() {
         log::info!("Skipping read recruitment");
@@ -231,22 +232,22 @@ fn recruit_reads(contig_sets: &[ContigSet], filenames: &[(PathBuf, PathBuf)], ar
     // let targets = Targets::new(contig_sets.into_iter(), args.max_kmer_freq, args.min_kmer_matches)?;
     // TODO: Use actual parameters.
     let targets = Targets::new(
-        contig_sets.into_iter().flat_map(|set| set.seqs()).map(|seq| seq as &[u8]),
+        contig_sets.into_iter(),
         15, 10, 2)?;
 
-    let out_filename = args.output.as_ref().unwrap().join("tmp.fq");
+    // let out_filename = args.output.as_ref().unwrap().join("tmp.fq");
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
-        targets.recruit(reader, out_filename, args.threads)
+        targets.recruit(reader, filenames.into_iter(), args.threads)
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
-        targets.recruit(reader, out_filename, args.threads)
+        targets.recruit(reader, filenames.into_iter(), args.threads)
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
             fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
-        targets.recruit(reader, out_filename, args.threads)
+        targets.recruit(reader, filenames.into_iter(), args.threads)
     }
 }
 
