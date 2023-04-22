@@ -11,8 +11,7 @@ use crate::{
     err::{Error, validate_param},
     seq::{
         ContigSet,
-        recruit::Targets,
-        fastx,
+        recruit, fastx,
     },
     ext::{fmt as fmt_ext, sys as sys_ext},
 };
@@ -24,16 +23,11 @@ struct Args {
     output: Option<PathBuf>,
     subset_loci: FnvHashSet<String>,
 
-    /// Recruit reads using k-mers of size `minimizer_k` that have the minimial hash across `minimizer_n`
-    /// consecutive k-mers.
-    minimizer_k: u8,
-    minimizer_n: u8,
-    /// Recruit reads that have at least this number of matching minimizers with one of the targets.
-    min_matches: u8,
-
     interleaved: bool,
     threads: u16,
     force: bool,
+
+    params: recruit::Params,
 }
 
 impl Default for Args {
@@ -44,13 +38,11 @@ impl Default for Args {
             output: None,
             subset_loci: FnvHashSet::default(),
 
-            minimizer_k: 15,
-            minimizer_n: 10,
-            min_matches: 2,
-
             interleaved: false,
             threads: 4,
             force: false,
+
+            params: Default::default(),
         }
     }
 }
@@ -99,11 +91,13 @@ fn print_help() {
 
     println!("\n{}", "Read recruitment:".bold());
     println!("    {:KEY$} {:VAL$}  k-mer size (no larger than 16) [{}].",
-        "-k, --recr-kmer".green(), "INT".yellow(), defaults.minimizer_k);
+        "-k, --recr-kmer".green(), "INT".yellow(), defaults.params.minimizer_k);
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
-        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.minimizer_n);
+        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.params.minimizer_w);
     println!("    {:KEY$} {:VAL$}  Recruit single-/paired-reads with at least {} k-mers matches [{}].",
-        "-m, --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.min_matches);
+        "-m, --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_matches);
+    println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].",
+        "-c, --chunk-size".green(), "INT".yellow(), defaults.params.chunk_size);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -134,9 +128,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
 
-            Short('k') | Long("recr-kmer") => args.minimizer_k = parser.value()?.parse()?,
-            Short('w') | Long("recr-window") => args.minimizer_n = parser.value()?.parse()?,
-            Short('m') | Long("min-matches") => args.min_matches = parser.value()?.parse()?,
+            Short('k') | Long("recr-kmer") => args.params.minimizer_k = parser.value()?.parse()?,
+            Short('w') | Long("recr-window") => args.params.minimizer_w = parser.value()?.parse()?,
+            Short('m') | Long("min-matches") => args.params.min_matches = parser.value()?.parse()?,
+            Short('c') | Long("chunk") | Long("chunk-size") => args.params.chunk_size = parser.value()?.parse()?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -224,8 +219,8 @@ fn recruit_reads(contig_sets: &[ContigSet], loci_dir: &Path, args: &Args) -> io:
         log::info!("Skipping read recruitment to {} loci", contig_sets.len() - filt_contig_sets.len());
     }
 
-    let targets = Targets::new(filt_contig_sets.iter().copied(), args.minimizer_k, args.minimizer_n, args.min_matches);
-    let mut writers: Vec<_> = filt_contig_sets.iter()
+    let targets = recruit::Targets::new(filt_contig_sets.iter().copied(), &args.params);
+    let writers: Vec<_> = filt_contig_sets.iter()
         .map(|set| {
             let filename = loci_dir.join(set.tag()).join(READS_FILENAME);
             File::create(&filename).map(BufWriter::new)
@@ -235,15 +230,15 @@ fn recruit_reads(contig_sets: &[ContigSet], loci_dir: &Path, args: &Args) -> io:
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
-        targets.recruit(reader, &mut writers, args.threads)
+        targets.recruit(reader, writers, args.threads, args.params.chunk_size)
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
-        targets.recruit(reader, &mut writers, args.threads)
+        targets.recruit(reader, writers, args.threads, args.params.chunk_size)
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
             fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
-        targets.recruit(reader, &mut writers, args.threads)
+        targets.recruit(reader, writers, args.threads, args.params.chunk_size)
     }
 }
 

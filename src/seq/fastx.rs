@@ -139,7 +139,7 @@ impl fmt::Debug for Record {
 }
 
 /// Extension over a single- or paired-records.
-pub trait RecordExt : Default {
+pub trait RecordExt : Default + Clone + Send + 'static {
     /// Writes the single- or paired-read to the stream.
     fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()>;
 
