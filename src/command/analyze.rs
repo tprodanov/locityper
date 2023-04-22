@@ -248,6 +248,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let out_dir = args.output.as_ref().unwrap();
     let loci_dir = out_dir.join(paths::LOCI_DIR);
+    sys_ext::mkdir(&loci_dir)?;
     for set in contig_sets.iter() {
         sys_ext::mkdir(&loci_dir.join(set.tag()))?;
     }

@@ -225,7 +225,10 @@ impl Targets {
     ) -> io::Result<()>
     {
         assert_eq!(writers.len(), self.n_loci as usize, "Unexpected number of writers");
-        if threads <= 1 {
+        if threads <= 2 {
+            if threads == 2 {
+                log::warn!("2-thread recruitment is slower, running in single-thread mode!");
+            }
             self.recruit_single_thread(reader, &mut writers)
         } else {
             self.recruit_multi_thread(reader, writers, threads, chunk_size)
@@ -350,9 +353,9 @@ where T: RecordExt,
     }
 
     fn finish(mut self) -> io::Result<()> {
-        assert!(self.to_send.is_empty());
-        for shipment in self.to_write.iter() {
-            write_shipment(&mut self.writers, shipment, &mut self.stats)?;
+        assert!(self.reader.is_none() && self.to_send.is_empty());
+        for shipment in self.to_write.into_iter() {
+            write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
         }
         for (&in_progress, receiver) in self.in_progress.iter().zip(&self.receivers) {
             if in_progress {
@@ -362,6 +365,7 @@ where T: RecordExt,
                 write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
             }
         }
+        std::mem::drop(self.senders);
         for handle in self.handles.into_iter() {
             handle.join().expect("Process failed for unknown reason");
         }
@@ -387,6 +391,9 @@ where T: RecordExt,
     }
 
     fn write_read_iteration(&mut self) -> io::Result<()> {
+        if self.reader.is_none() {
+            return Ok(())
+        }
         while let Some(mut shipment) = self.to_write.pop() {
             write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
             fill_shipment(&mut self.reader, &mut shipment)?;
@@ -424,11 +431,11 @@ where T: RecordExt,
 
     fn run(&mut self) -> io::Result<()> {
         self.start()?;
-        while self.reader.is_some() && !self.to_send.is_empty() {
+        while self.reader.is_some() || !self.to_send.is_empty() {
             self.try_recv_iteration()?;
             self.write_read_iteration()?;
             self.send_iteration()?;
-            self.stats.print_log_diff(1);
+            self.stats.print_log_diff(1_000_000);
         }
         Ok(())
     }
