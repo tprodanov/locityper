@@ -49,6 +49,8 @@ struct Stats {
     last_processed: u64,
 }
 
+const UPDATE_FREQ: u64 = 1_000_000;
+
 impl Stats {
     fn new() -> Self {
         Self {
@@ -59,24 +61,24 @@ impl Stats {
         }
     }
 
-    /// Prints log message if the number of processed reads divides `modulo`.
-    fn print_log_mod(&mut self, modulo: u64) {
-        if self.processed % modulo == 0 {
+    /// Prints log message in a single-thread function.
+    fn print_log_consec(&mut self) {
+        if self.processed % UPDATE_FREQ == 0 {
             self.print_log();
         }
     }
 
-    /// Prints log message if there are more than `n_new` processed reads.
-    fn print_log_diff(&mut self, n_new: u64) {
-        if self.processed - self.last_processed >= n_new {
+    /// Prints log message in a parallel function.
+    fn print_log_parallel(&mut self) {
+        if self.processed - self.last_processed >= UPDATE_FREQ {
             self.print_log();
         }
     }
 
     fn print_log(&mut self) {
-        let per_read = self.timer.elapsed().as_secs_f64() / self.processed as f64;
-        log::debug!("    Recruited {:11} /{:11} reads,  {:.2} us/read", self.recruited, self.processed,
-            per_read * 1e6);
+        let mln_processed = self.processed as f64 * 1e-6;
+        let per_read = self.timer.elapsed().as_secs_f64() / mln_processed;
+        log::debug!("    Recruited {:11} /{:7.1}M reads,  {:.2} us/read", self.recruited, mln_processed, per_read);
         self.last_processed = self.processed;
     }
 
@@ -195,7 +197,7 @@ impl Targets {
             }
             stats.recruited += u64::from(!answer.is_empty());
             stats.processed += 1;
-            stats.print_log_mod(100_000);
+            stats.print_log_consec();
         }
         stats.finish();
         Ok(())
@@ -435,7 +437,7 @@ where T: RecordExt,
             self.try_recv_iteration()?;
             self.write_read_iteration()?;
             self.send_iteration()?;
-            self.stats.print_log_diff(1_000_000);
+            self.stats.print_log_parallel();
         }
         Ok(())
     }

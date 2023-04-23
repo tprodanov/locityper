@@ -242,6 +242,25 @@ fn recruit_reads(contig_sets: &[ContigSet], loci_dir: &Path, args: &Args) -> io:
     }
 }
 
+// fn straight_read_writer(args: &Args) -> io::Result<()> {
+//     use crate::seq::fastx::FastxRead;
+//     let mut reader = fastx::PairedEndReaders::new(
+//         fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
+//         fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
+//     let mut record = fastx::PairedRecord::default();
+//     // let mut writer = BufWriter::new(File::create("tmp.fq")?);
+//     let mut processed = 0;
+//     let timer = std::time::Instant::now();
+//     while reader.read_next(&mut record)? {
+//         processed += 1;
+//         if processed % 1_000_000 == 0 {
+//             let per_read = timer.elapsed().as_secs_f64() / processed as f64;
+//             log::debug!("    Processed {:11} reads,  {:.2} us/read", processed, per_read * 1e6);
+//         }
+//     }
+//     Ok(())
+// }
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     let contig_sets = load_loci(args.database.as_ref().unwrap(), &args.subset_loci)?;
@@ -253,5 +272,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         sys_ext::mkdir(&loci_dir.join(set.tag()))?;
     }
     recruit_reads(&contig_sets, &loci_dir, &args)?;
+    // straight_read_writer(&args)?;
     Ok(())
 }

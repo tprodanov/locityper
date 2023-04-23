@@ -296,11 +296,11 @@ fn write_locus(
     let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
     let mut fasta_out = sys_ext::create_gzip(&fasta_filename)?;
     for (name, seq) in seqs.iter() {
-        let descr = match &ref_name {
-            Some(ref_name) if ref_name == name => Some(locus.interval().to_string()),
-            _ => None,
-        };
-        seq::write_fasta(&mut fasta_out, name.as_bytes(), descr.as_ref().map(|s| s.as_bytes()), seq)?;
+        if Some(name) == ref_name.as_ref() {
+            seq::write_fasta(&mut fasta_out, format!("{} {}", name, locus.interval()).as_bytes(), seq)?;
+        } else {
+            seq::write_fasta(&mut fasta_out, name.as_bytes(), seq)?;
+        }
     }
     fasta_out.flush()?;
     std::mem::drop(fasta_out);

@@ -13,18 +13,15 @@ use crate::seq::kmers;
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
 /// writes the sequence into a single line, without splitting.
+///
+/// `name` may include description after a space, if needed.
 pub fn write_fasta(
     writer: &mut impl io::Write,
-    name: &[u8],
-    descr: Option<&[u8]>,
+    full_name: &[u8],
     seq: &[u8]
 ) -> io::Result<()> {
     writer.write_all(b">")?;
-    writer.write_all(name)?;
-    if let Some(descr) = descr {
-        writer.write_all(b" ")?;
-        writer.write_all(descr)?;
-    }
+    writer.write_all(full_name)?;
     writer.write_all(b"\n")?;
 
     const WIDTH: usize = 120;
@@ -39,19 +36,16 @@ pub fn write_fasta(
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
 /// writes the sequence into a single line, without splitting.
+///
+/// `name` may include description after a space, if needed.
 pub fn write_fastq(
     writer: &mut impl io::Write,
-    name: &[u8],
-    descr: Option<&[u8]>,
+    full_name: &[u8],
     seq: &[u8],
     qual: &[u8],
 ) -> io::Result<()> {
     writer.write_all(b"@")?;
-    writer.write_all(name)?;
-    if let Some(descr) = descr {
-        writer.write_all(b" ")?;
-        writer.write_all(descr)?;
-    }
+    writer.write_all(full_name)?;
     writer.write_all(b"\n")?;
     writer.write_all(seq)?;
     writer.write_all(b"\n+\n")?;
@@ -85,33 +79,32 @@ fn read_line(stream: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<usiz
 /// FASTA/Q record.
 #[derive(Default, Clone)]
 pub struct Record {
-    name: Vec<u8>,
-    descr: Vec<u8>,
+    /// Name, including description after the space.
+    full_name: Vec<u8>,
     seq: Vec<u8>,
     qual: Vec<u8>,
 }
 
 impl Record {
-    // /// Returns true if the record is empty.
-    // pub fn is_empty(&self) -> bool {
-    //     self.name.is_empty()
-    // }
-
-    /// Returns the name of the record.
-    pub fn name(&self) -> &[u8] {
-        &self.name
+    /// Returns true if the record is empty.
+    pub fn is_empty(&self) -> bool {
+        self.full_name.is_empty()
     }
 
-    pub fn name_str(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.name)
+    /// Returns the name of the record, including description after space.
+    pub fn full_name(&self) -> &[u8] {
+        &self.full_name
     }
 
-    /// Returns record description, if available.
-    pub fn descr(&self) -> Option<&[u8]> {
-        if self.descr.is_empty() {
-            None
-        } else {
-            Some(&self.descr)
+    pub fn full_name_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.full_name)
+    }
+
+    /// Returns only the name of the record, without the optional description.
+    pub fn name_only(&self) -> std::borrow::Cow<'_, str> {
+        match self.full_name.iter().position(|&c| c == b' ') {
+            Some(i) => String::from_utf8_lossy(&self.full_name[..i]),
+            None => String::from_utf8_lossy(&self.full_name),
         }
     }
 
@@ -155,9 +148,9 @@ pub trait RecordExt : Default + Clone + Send + 'static {
 impl RecordExt for Record {
     fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
         if self.qual.is_empty() {
-            write_fasta(writer, &self.name, self.descr(), &self.seq)
+            write_fasta(writer, &self.full_name, &self.seq)
         } else {
-            write_fastq(writer, &self.name, self.descr(), &self.seq, &self.qual)
+            write_fastq(writer, &self.full_name, &self.seq, &self.qual)
         }
     }
 
@@ -211,11 +204,11 @@ impl<R: BufRead> Reader<R> {
                 // File ended.
                 if seq_len == 0 {
                     return Err(io::Error::new(io::ErrorKind::InvalidData,
-                        format!("Fasta record {} has an empty sequence.", record.name_str())));
+                        format!("Fasta record {} has an empty sequence.", record.name_only())));
                 }
                 return Ok(true);
             } else if record.seq[seq_len] == b'@' || record.seq[seq_len] == b'>' {
-                self.buffer.extend(&record.seq[seq_len..]);
+                self.buffer.extend_from_slice(&record.seq[seq_len..]);
                 record.seq.truncate(seq_len);
                 return Ok(true);
             } else {
@@ -233,17 +226,17 @@ impl<R: BufRead> Reader<R> {
         let n = read_line(&mut self.stream, &mut self.buffer)?;
         if n == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("Fastq record {} is incomplete.", record.name_str())));
+                format!("Fastq record {} is incomplete.", record.name_only())));
         } else if self.buffer[prev_buf_len] != b'+' {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("Fastq record {} has incorrect format.", record.name_str())));
+                format!("Fastq record {} has incorrect format.", record.name_only())));
         }
 
         // Qualities
         let qual_len = read_line(&mut self.stream, &mut record.qual)?;
         if seq_len != qual_len {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("Fastq record {} has non-matching sequence and qualities.", record.name_str())));
+                format!("Fastq record {} has non-matching sequence and qualities.", record.name_only())));
         }
 
         // Next record name.
@@ -301,8 +294,7 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
     fn read_next(&mut self, record: &mut Record) -> io::Result<bool> {
-        record.name.clear();
-        record.descr.clear();
+        record.full_name.clear();
         record.seq.clear();
         record.qual.clear();
 
@@ -312,14 +304,7 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
             return Ok(false);
         }
 
-        match self.buffer[1..].iter().position(|&c| c == b' ') {
-            Some(i) => {
-                record.name.extend(&self.buffer[1..i]);
-                record.descr.extend(&self.buffer[i + 1..]);
-            }
-            None => record.name.extend(&self.buffer[1..]),
-        }
-
+        record.full_name.extend_from_slice(&self.buffer[1..]);
         if self.buffer[0] == b'>' {
             self.fill_fasta_record(record)
         } else {
@@ -331,15 +316,11 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
 /// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
 pub struct PairedEndInterleaved<R: BufRead> {
     reader: Reader<R>,
-    had_warning: bool,
 }
 
 impl<R: BufRead> PairedEndInterleaved<R> {
     pub fn new(reader: Reader<R>) -> Self {
-        Self {
-            reader,
-            had_warning: false,
-        }
+        Self { reader }
     }
 }
 
@@ -349,18 +330,13 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self, paired_record: &mut PairedRecord) -> io::Result<bool> {
         if !self.reader.read_next(&mut paired_record[0])? {
-            return Ok(false);
-        }
-        if !self.reader.read_next(&mut paired_record[1])? {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
+            Ok(false)
+        } else if !self.reader.read_next(&mut paired_record[1])? {
+            Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Odd number of records in an interleaved input file."))
+        } else {
+            Ok(true)
         }
-        if !self.had_warning && paired_record[0].name() != paired_record[1].name() {
-            self.had_warning = true;
-            log::warn!("Interleaved input file contains consecutive records with different names: {} and {}",
-            paired_record[0].name_str(), paired_record[1].name_str());
-        }
-        Ok(true)
     }
 }
 
@@ -368,15 +344,11 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
 pub struct PairedEndReaders<R: BufRead, S: BufRead> {
     reader1: Reader<R>,
     reader2: Reader<S>,
-    had_warning: bool,
 }
 
 impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
     pub fn new(reader1: Reader<R>, reader2: Reader<S>) -> Self {
-        Self {
-            reader1, reader2,
-            had_warning: false,
-        }
+        Self { reader1, reader2 }
     }
 }
 
@@ -388,16 +360,10 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
         let could_read1 = self.reader1.read_next(&mut paired_record[0])?;
         let could_read2 = self.reader2.read_next(&mut paired_record[1])?;
         match (could_read1, could_read2) {
-            (false, false) => return Ok(false),
-            (true, true) => {}
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData,
-                "Different number of records in two input files."))
+            (false, false) => Ok(false),
+            (true, true) => Ok(true),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData,
+                "Different number of records in two input files.")),
         }
-        if !self.had_warning && paired_record[0].name() != paired_record[1].name() {
-            self.had_warning = true;
-            log::warn!("Paired-end records have different names: {} and {}",
-            paired_record[0].name_str(), paired_record[1].name_str());
-        }
-        Ok(true)
     }
 }

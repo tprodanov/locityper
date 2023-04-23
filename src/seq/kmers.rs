@@ -302,7 +302,7 @@ impl JfKmerGetter {
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
         let handle = std::thread::spawn(move || -> Result<(), Error> {
             for seq in seqs.iter() {
-                seq::write_fasta(&mut child_stdin, b"", None, seq)?;
+                seq::write_fasta(&mut child_stdin, b"", seq)?;
             }
             Ok(())
         });

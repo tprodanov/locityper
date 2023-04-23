@@ -27,7 +27,7 @@ pub fn open(filename: &Path) -> io::Result<Box<dyn BufRead + Send>> {
     } else {
         let file = File::open(filename)?;
         if filename.extension() == Some("gz".as_ref()) {
-            Ok(Box::new(BufReader::new(GzDecoder::new(file))))
+            Ok(Box::new(BufReader::new(GzDecoder::new(BufReader::new(file)))))
         } else {
             Ok(Box::new(BufReader::new(file)))
         }

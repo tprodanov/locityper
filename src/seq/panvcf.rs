@@ -85,10 +85,10 @@ pub fn reconstruct_sequences(
             }
             for haplotype in 0..PLOIDY {
                 let curr_pair = &mut res[shift + PLOIDY * sample_id + haplotype];
-                curr_pair.1.extend(seq_between_vars);
+                curr_pair.1.extend_from_slice(seq_between_vars);
                 match gt[haplotype] {
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) =>
-                        curr_pair.1.extend(alleles[allele_ix as usize]),
+                        curr_pair.1.extend_from_slice(alleles[allele_ix as usize]),
                     _ => return Err(Error::InvalidData(format!(
                         "Variant {} is missing genotype for sample {}", format_var(var, header),
                         from_utf8(&sample_names[sample_id]).unwrap()))),
@@ -99,7 +99,7 @@ pub fn reconstruct_sequences(
     }
     let suffix_seq = &ref_seq[(ref_pos - ref_start) as usize..];
     for i in shift..res.len() {
-        res[i].1.extend(suffix_seq);
+        res[i].1.extend_from_slice(suffix_seq);
     }
     Ok(res)
 }
