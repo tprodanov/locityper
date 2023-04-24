@@ -316,6 +316,11 @@ impl NamedInterval {
         &self.name
     }
 
+    /// Formats this named interval as `chrom  start  end  [name]`, where name is written only if it is explicitely set.
+    pub fn bed_fmt(&self) -> NamedBedFormat<'_> {
+        NamedBedFormat(self)
+    }
+
     /// Creates a new interval with updated start and end.
     /// Name remains the same if it was set explicitely, otherwise it is created from the new interval positions.
     pub fn with_new_range(&self, new_start: u32, new_end: u32) -> Self {
@@ -342,6 +347,19 @@ impl fmt::Display for NamedInterval {
         } else {
             fmt::Display::fmt(&self.interval, f)
         }
+    }
+}
+
+#[doc(hidden)]
+pub struct NamedBedFormat<'a>(&'a NamedInterval);
+
+impl<'a> fmt::Display for NamedBedFormat<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.interval.bed_fmt().fmt(f)?;
+        if self.0.explicit_name {
+            write!(f, "\t{}", self.0.name)?;
+        }
+        Ok(())
     }
 }
 

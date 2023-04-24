@@ -13,8 +13,8 @@ use flate2::{
 use crate::Error;
 
 /// Finds an executable, and returns Error, if executable is not available.
-pub fn find_exe(p: PathBuf) -> Result<PathBuf, Error> {
-    which::which(&p).map_err(|_| Error::NoExec(p))
+pub fn find_exe(p: impl AsRef<Path>) -> Result<PathBuf, Error> {
+    which::which(p.as_ref()).map_err(|_| Error::NoExec(p.as_ref().to_owned()))
 }
 
 /// Returns

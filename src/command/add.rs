@@ -16,7 +16,7 @@ use htslib::bcf::{
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use crate::{
-    Error,
+    err::{Error, validate_param},
     algo::bisect,
     ext::{
         vec::{VecExt, F64Ext, IterExt},
@@ -41,7 +41,7 @@ struct Args {
     max_expansion: u32,
     moving_window: u32,
     jellyfish: PathBuf,
-    bwa: PathBuf,
+    bwa: Vec<PathBuf>,
 }
 
 impl Default for Args {
@@ -58,8 +58,25 @@ impl Default for Args {
             max_expansion: 2000,
             moving_window: 200,
             jellyfish: PathBuf::from("jellyfish"),
-            bwa: PathBuf::from("bwa"),
+            bwa: vec![PathBuf::from("bwa"), PathBuf::from("bwa-mem2")],
         }
+    }
+}
+
+impl Args {
+    fn validate(mut self) -> Result<Self, Error> {
+        validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
+        validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
+        validate_param!(self.variants.is_some(), "Variants VCF file is not provided (see -v/--vcf)");
+        validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
+            "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
+
+            self.jellyfish = sys_ext::find_exe(self.jellyfish)?;
+        self.bwa = self.bwa.into_iter().filter_map(|path| sys_ext::find_exe(path).ok()).collect();
+        validate_param!(!self.bwa.is_empty(), "No BWA executables found");
+        // Make window size odd.
+        self.moving_window += 1 - self.moving_window % 2;
+        Ok(self)
     }
 }
 
@@ -105,8 +122,10 @@ fn print_help() {
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
-    println!("    {:KEY$} {:VAL$}  BWA executable [{}].",
-        "   --bwa".green(), "EXE".yellow(), defaults.bwa.display());
+    println!("    {:KEY$} {:VAL$}  One or more BWA executable, each used for haplotypes indexing.\n\
+        {EMPTY}  Default: try both {} and {}.",
+        "    --bwa".green(), "EXE+".yellow(),
+        defaults.bwa[0].display().to_string().underline(), defaults.bwa[1].display().to_string().underline());
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -125,14 +144,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('v') | Long("vcf") => args.variants = Some(parser.value()?.parse()?),
 
             Short('l') | Long("locus") =>
-                args.loci.extend(parser.values()?.map(ValueExt::string).collect::<Result<Vec<_>, _>>()?),
+                args.loci = parser.values()?.map(ValueExt::string).collect::<Result<Vec<_>, _>>()?,
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
 
             Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
-            Long("bwa") => args.bwa = parser.value()?.parse()?,
+            Long("bwa") => args.bwa = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -145,26 +164,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             _ => Err(arg.unexpected())?,
         }
     }
-    Ok(args)
-}
-
-fn process_args(mut args: Args) -> Result<Args, Error> {
-    if args.database.is_none() {
-        Err(lexopt::Error::from("Database directory is not provided (see -d/--database)"))?;
-    }
-    if args.reference.is_none() {
-        Err(lexopt::Error::from("Reference fasta file is not provided (see -r/--reference)"))?;
-    }
-    if args.variants.is_none() {
-        Err(lexopt::Error::from("Variants VCF file is not provided (see -v/--vcf)"))?;
-    }
-    if args.loci.is_empty() && args.bed_files.is_empty() {
-        Err(lexopt::Error::from("Complex loci are not provided (see -l/--locus and -L/--loci-bed)"))?;
-    }
-    args.jellyfish = sys_ext::find_exe(args.jellyfish)?;
-    args.bwa = sys_ext::find_exe(args.bwa)?;
-    // Make window size odd.
-    args.moving_window += 1 - args.moving_window % 2;
     Ok(args)
 }
 
@@ -284,13 +283,12 @@ fn write_locus(
     ref_name: &Option<String>,
     seqs: Vec<(String, Vec<u8>)>,
     kmer_getter: &JfKmerGetter,
-    bwa: &Path,
+    bwa_executables: &[PathBuf],
 ) -> Result<(), Error>
 {
     log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), fmt_ext::path(locus_dir));
     let mut bed_out = File::create(locus_dir.join(paths::LOCUS_BED))?;
-    bed_out.write_all(format!("{}\n", locus.interval().bed_fmt()).as_bytes())?;
-    bed_out.sync_all()?;
+    writeln!(bed_out, "{}", locus.bed_fmt())?;
     std::mem::drop(bed_out);
 
     let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
@@ -312,9 +310,14 @@ fn write_locus(
     kmer_counts.save(&mut kmers_out)?;
 
     log::debug!("    [{}] Indexing haplotypes", locus.name());
-    let bwa_output = Command::new(bwa).arg("index").arg(&fasta_filename).output()?;
-    if !bwa_output.status.success() {
-        return Err(Error::SubprocessFail(bwa_output));
+    for bwa in bwa_executables.iter() {
+        let mut bwa_command = Command::new(bwa);
+        bwa_command.arg("index").arg(&fasta_filename);
+        log::debug!("        {}", fmt_ext::command(&bwa_command));
+        let bwa_output = bwa_command.output()?;
+        if !bwa_output.status.success() {
+            return Err(Error::SubprocessFail(bwa_output));
+        }
     }
     Ok(())
 }
@@ -395,7 +398,7 @@ where R: Read + Seek,
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let mut args = process_args(parse_args(argv)?)?;
+    let mut args = parse_args(argv)?.validate()?;
     // unwrap as argsuments were previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
     let ref_filename = args.reference.as_ref().unwrap();

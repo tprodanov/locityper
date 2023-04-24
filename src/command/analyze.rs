@@ -1,7 +1,9 @@
 use std::{
     io, fs,
+    process::{Command, Stdio},
     cmp::max,
     path::{Path, PathBuf},
+    time::Instant,
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
@@ -25,6 +27,8 @@ struct Args {
     interleaved: bool,
     threads: u16,
     force: bool,
+    bwa: PathBuf,
+    samtools: PathBuf,
 
     params: recruit::Params,
 }
@@ -32,7 +36,7 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            input: Vec::with_capacity(2),
+            input: Vec::new(),
             database: None,
             output: None,
             subset_loci: FnvHashSet::default(),
@@ -40,6 +44,8 @@ impl Default for Args {
             interleaved: false,
             threads: 4,
             force: false,
+            bwa: PathBuf::new(),
+            samtools: PathBuf::from("samtools"),
 
             params: Default::default(),
         }
@@ -60,9 +66,19 @@ impl Args {
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
+
+        if self.bwa.as_os_str().is_empty() {
+            self.bwa = sys_ext::find_exe(BWA2).or_else(|_| sys_ext::find_exe(BWA1))?;
+        } else {
+            self.bwa = sys_ext::find_exe(self.bwa)?;
+        }
+        self.samtools = sys_ext::find_exe(self.samtools)?;
         Ok(self)
     }
 }
+
+const BWA2: &'static str = "bwa-mem2";
+const BWA1: &'static str = "bwa";
 
 fn print_help() {
     const KEY: usize = 18;
@@ -103,6 +119,10 @@ fn print_help() {
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  BWA executable. Default: {} or {}.",
+        "   --bwa".green(), "EXE".yellow(), BWA2.underline(), BWA1.underline());
+    println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
+        "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -116,8 +136,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('i') | Long("input") => args.input
-                .extend(parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?),
+            Short('i') | Long("input") =>
+                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Long("subset-loci") => {
@@ -135,6 +155,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
+            Long("bwa") => args.bwa = parser.value()?.parse()?,
+            Long("samtools") => args.samtools = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -172,8 +194,9 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> O
 
 struct LocusData {
     set: ContigSet,
+    db_locus_dir: PathBuf,
     /// Output directory with locus data.
-    locus_dir: PathBuf,
+    out_locus_dir: PathBuf,
     /// Temporary file with recruited reads.
     tmp_reads_filename: PathBuf,
     /// Final file with recruited reads.
@@ -185,18 +208,19 @@ struct LocusData {
 }
 
 impl LocusData {
-    fn new(set: ContigSet, loci_dir: &Path, force: bool) -> io::Result<Self> {
-        let locus_dir = loci_dir.join(set.tag());
-        if locus_dir.exists() && force {
-            fs::remove_dir_all(&locus_dir)?;
+    fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path, force: bool) -> io::Result<Self> {
+        let out_locus_dir = out_loci_dir.join(set.tag());
+        if out_locus_dir.exists() && force {
+            fs::remove_dir_all(&out_locus_dir)?;
         }
-        sys_ext::mkdir(&locus_dir)?;
+        sys_ext::mkdir(&out_locus_dir)?;
         Ok(Self {
-            tmp_reads_filename: locus_dir.join("reads.tmp.fq.gz"),
-            reads_filename: locus_dir.join("reads.fq.gz"),
-            tmp_aln_filename: locus_dir.join("aln.tmp.bam"),
-            aln_filename: locus_dir.join("aln.bam"),
-            locus_dir, set,
+            tmp_reads_filename: out_locus_dir.join("reads.tmp.fq.gz"),
+            reads_filename: out_locus_dir.join("reads.fq.gz"),
+            tmp_aln_filename: out_locus_dir.join("aln.tmp.bam"),
+            aln_filename: out_locus_dir.join("aln.bam"),
+            db_locus_dir: db_locus_dir.to_owned(),
+            out_locus_dir, set,
         })
     }
 }
@@ -232,7 +256,7 @@ fn load_loci(
             let fasta_filename = path.join(paths::LOCUS_FASTA);
             let kmers_filename = path.join(paths::KMERS);
             match ContigSet::load(name, &fasta_filename, &kmers_filename, ()) {
-                Ok(set) => loci.push(LocusData::new(set, &out_loci_dir, force)?),
+                Ok(set) => loci.push(LocusData::new(set, &path, &out_loci_dir, force)?),
                 Err(e) => log::error!("Could not load locus information from {}: {:?}", fmt_ext::path(&path), e),
             }
         }
@@ -283,11 +307,53 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
     Ok(())
 }
 
+fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
+    if locus.aln_filename.exists() {
+        log::info!("    Skipping read mapping");
+        return Ok(());
+    }
+
+    let start = Instant::now();
+    let mut bwa_cmd = Command::new(&args.bwa);
+    bwa_cmd.args(&["mem",
+        "-aYPp", // Output all alignments, use soft clipping, skip pairing, interleaved input.
+        "-c", "65535", // No filtering on common minimizers.
+        "-t", &args.threads.to_string()])
+        .arg(locus.db_locus_dir.join(paths::LOCUS_FASTA)) // Input fasta.
+        .arg(&locus.reads_filename) // Input FASTQ.
+        .stdout(Stdio::piped());
+    let mut bwa_child = bwa_cmd.spawn()?;
+    let bwa_stdout = bwa_child.stdout.take().unwrap();
+    let mut guard = sys_ext::ChildGuard::new(bwa_child);
+
+    let mut samtools_cmd = Command::new(&args.samtools);
+    samtools_cmd.args(&["view",
+        // Output BAM, exclude unmapped reads.
+        "--bam", "--excl-flags", "4"])
+        .arg("-o").arg(&locus.tmp_aln_filename)
+        .stdin(Stdio::from(bwa_stdout));
+
+    log::debug!("    {} | {}", fmt_ext::command(&bwa_cmd), fmt_ext::command(&samtools_cmd));
+    let output = samtools_cmd.output()?;
+    log::debug!("    Finished in {}", fmt_ext::Duration(start.elapsed()));
+    if !output.status.success() {
+        return Err(Error::SubprocessFail(output));
+    }
+    fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)?;
+    guard.disarm();
+    Ok(())
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
     recruit_reads(&loci, &args)?;
+
+    for locus in loci.iter() {
+        log::info!("Analyzing {}", locus.set.tag());
+        map_reads(locus, &args)?;
+    }
     Ok(())
 }

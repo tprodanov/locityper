@@ -58,7 +58,7 @@ const DEF_N_READS: &'static str = "500k";
 impl Default for Args {
     fn default() -> Self {
         Self {
-            input: Vec::with_capacity(2),
+            input: Vec::new(),
             alns: None,
             database: None,
             reference: None,
@@ -223,8 +223,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('i') | Long("input") => args.input
-                .extend(parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?),
+            Short('i') | Long("input") =>
+                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
                 args.alns = Some(parser.value()?.parse()?),
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
@@ -387,6 +387,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
         return Ok(());
     }
 
+    let start = Instant::now();
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
         "-N0", "-R0", "-U", // Retain 0 additional alignments, do not rescue reads, do not output unmapped reads.
@@ -410,9 +411,9 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
 
     let handle = strobealign_stdin.map(|stdin| set_strobealign_stdin(args, to_bg, stdin)).transpose()?;
     let mut samtools = create_samtools_command(args, Stdio::from(strobealign_stdout.unwrap()), &tmp_bam);
-    log::debug!("    {}{} | {}", first_step_str(&args, to_bg), fmt_ext::command(&strobealign), fmt_ext::command(&samtools));
+    log::debug!("    {}{} | {}", first_step_str(&args, to_bg), fmt_ext::command(&strobealign),
+        fmt_ext::command(&samtools));
 
-    let start = Instant::now();
     let output = samtools.output()?;
     log::debug!("");
     log::debug!("    Finished in {}", fmt_ext::Duration(start.elapsed()));
