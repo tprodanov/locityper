@@ -170,12 +170,57 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> O
     }
 }
 
-fn load_loci(db_path: &Path, subset_loci: &FnvHashSet<String>) -> io::Result<Vec<ContigSet>> {
+struct LocusData {
+    set: ContigSet,
+    /// Output directory with locus data.
+    locus_dir: PathBuf,
+    /// Temporary file with recruited reads.
+    tmp_reads_filename: PathBuf,
+    /// Final file with recruited reads.
+    reads_filename: PathBuf,
+    /// Temporary file with read alignments to the haplotypes.
+    tmp_aln_filename: PathBuf,
+    /// Final file with read alignments to the haplotypes.
+    aln_filename: PathBuf,
+}
+
+impl LocusData {
+    fn new(set: ContigSet, loci_dir: &Path, force: bool) -> io::Result<Self> {
+        let locus_dir = loci_dir.join(set.tag());
+        if locus_dir.exists() && force {
+            fs::remove_dir_all(&locus_dir)?;
+        }
+        sys_ext::mkdir(&locus_dir)?;
+        Ok(Self {
+            tmp_reads_filename: locus_dir.join("reads.tmp.fq.gz"),
+            reads_filename: locus_dir.join("reads.fq.gz"),
+            tmp_aln_filename: locus_dir.join("aln.tmp.bam"),
+            aln_filename: locus_dir.join("aln.bam"),
+            locus_dir, set,
+        })
+    }
+}
+
+/// Loads all loci from the database. If `subset_loci` is not empty, only loads loci that are contained in it.
+/// If `force`, delete old data in the corresponding output directories.
+fn load_loci(
+    db_path: &Path,
+    out_path: &Path,
+    subset_loci: &FnvHashSet<String>,
+    force: bool
+) -> io::Result<Vec<LocusData>>
+{
     log::info!("Loading database.");
-    let loci_dir = db_path.join(paths::LOCI_DIR);
-    let mut contig_sets = Vec::new();
+    let db_loci_dir = db_path.join(paths::LOCI_DIR);
+    let out_loci_dir = out_path.join(paths::LOCI_DIR);
+    sys_ext::mkdir(&out_loci_dir)?;
+    if force {
+        log::warn!("Force flag is set: overwriting output directories {}/*", fmt_ext::path(&out_loci_dir));
+    }
+
+    let mut loci = Vec::new();
     let mut total_entries = 0;
-    for entry in fs::read_dir(&loci_dir)? {
+    for entry in fs::read_dir(&db_loci_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -187,91 +232,62 @@ fn load_loci(db_path: &Path, subset_loci: &FnvHashSet<String>) -> io::Result<Vec
             let fasta_filename = path.join(paths::LOCUS_FASTA);
             let kmers_filename = path.join(paths::KMERS);
             match ContigSet::load(name, &fasta_filename, &kmers_filename, ()) {
-                Ok(set) => contig_sets.push(set),
+                Ok(set) => loci.push(LocusData::new(set, &out_loci_dir, force)?),
                 Err(e) => log::error!("Could not load locus information from {}: {:?}", fmt_ext::path(&path), e),
             }
         }
     }
-    let n = contig_sets.len();
+    let n = loci.len();
     if n < total_entries {
         log::info!("Loaded {} loci, skipped {} directories", n, total_entries - n);
     } else {
         log::info!("Loaded {} loci", n);
     }
-    Ok(contig_sets)
+    Ok(loci)
 }
 
-/// Recruited reads are stored in `<out>/<locus>/reads.fq.gz`.
-const READS_FILENAME: &'static str = "reads.fq.gz";
-/// Read alignments to all contigs are stored in `<out>/<locus>/alns.bam`.
-const ALN_FILENAME: &'static str = "alns.bam";
-
-fn recruit_reads(contig_sets: &[ContigSet], loci_dir: &Path, args: &Args) -> io::Result<()> {
-    let filt_contig_sets: Vec<&ContigSet> = contig_sets.iter()
-        .filter(|set| !loci_dir.join(set.tag()).join(ALN_FILENAME).exists())
+/// Recruits reads to all loci, where neither reads nor alignments are available.
+fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
+    let filt_loci: Vec<&LocusData> = loci.iter()
+        .filter(|locus| !locus.reads_filename.exists() && !locus.aln_filename.exists())
         .collect();
-    if filt_contig_sets.is_empty() {
+    if filt_loci.is_empty() {
         log::info!("Skipping read recruitment");
         return Ok(());
     }
-    if filt_contig_sets.len() < contig_sets.len() {
-        log::info!("Skipping read recruitment to {} loci", contig_sets.len() - filt_contig_sets.len());
+    if filt_loci.len() < loci.len() {
+        log::info!("Skipping read recruitment to {} loci", loci.len() - filt_loci.len());
     }
 
-    let targets = recruit::Targets::new(filt_contig_sets.iter().copied(), &args.params);
-    let writers: Vec<_> = filt_contig_sets.iter()
-        .map(|set| {
-            let filename = loci_dir.join(set.tag()).join(READS_FILENAME);
-            // File::create(&filename).map(BufWriter::new)
-            sys_ext::create_gzip(&filename)
-        })
+    let targets = recruit::Targets::new(filt_loci.iter().map(|locus| &locus.set), &args.params);
+    let writers: Vec<_> = filt_loci.iter()
+        .map(|locus| sys_ext::create_gzip(&locus.tmp_reads_filename))
         .collect::<Result<_, _>>()?;
 
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
-        targets.recruit(reader, writers, args.threads, args.params.chunk_size)
+        targets.recruit(reader, writers, args.threads, args.params.chunk_size)?;
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
-        targets.recruit(reader, writers, args.threads, args.params.chunk_size)
+        targets.recruit(reader, writers, args.threads, args.params.chunk_size)?;
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
             fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
-        targets.recruit(reader, writers, args.threads, args.params.chunk_size)
+        targets.recruit(reader, writers, args.threads, args.params.chunk_size)?;
     }
+    for locus in filt_loci.iter() {
+        fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)?;
+    }
+    Ok(())
 }
-
-// fn straight_read_writer(args: &Args) -> io::Result<()> {
-//     use crate::seq::fastx::FastxRead;
-//     let mut reader = fastx::PairedEndReaders::new(
-//         fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
-//         fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
-//     let mut record = fastx::PairedRecord::default();
-//     // let mut writer = BufWriter::new(File::create("tmp.fq")?);
-//     let mut processed = 0;
-//     let timer = std::time::Instant::now();
-//     while reader.read_next(&mut record)? {
-//         processed += 1;
-//         if processed % 1_000_000 == 0 {
-//             let per_read = timer.elapsed().as_secs_f64() / processed as f64;
-//             log::debug!("    Processed {:11} reads,  {:.2} us/read", processed, per_read * 1e6);
-//         }
-//     }
-//     Ok(())
-// }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
-    let contig_sets = load_loci(args.database.as_ref().unwrap(), &args.subset_loci)?;
-
+    let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
-    let loci_dir = out_dir.join(paths::LOCI_DIR);
-    sys_ext::mkdir(&loci_dir)?;
-    for set in contig_sets.iter() {
-        sys_ext::mkdir(&loci_dir.join(set.tag()))?;
-    }
-    recruit_reads(&contig_sets, &loci_dir, &args)?;
-    // straight_read_writer(&args)?;
+    let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
+    recruit_reads(&loci, &args)?;
     Ok(())
 }
