@@ -1,6 +1,5 @@
 use std::{
-    io::{self, BufWriter},
-    fs::{self, File},
+    io, fs,
     cmp::max,
     path::{Path, PathBuf},
 };
@@ -203,7 +202,7 @@ fn load_loci(db_path: &Path, subset_loci: &FnvHashSet<String>) -> io::Result<Vec
 }
 
 /// Recruited reads are stored in `<out>/<locus>/reads.fq.gz`.
-const READS_FILENAME: &'static str = "reads.fq";
+const READS_FILENAME: &'static str = "reads.fq.gz";
 /// Read alignments to all contigs are stored in `<out>/<locus>/alns.bam`.
 const ALN_FILENAME: &'static str = "alns.bam";
 
@@ -223,7 +222,8 @@ fn recruit_reads(contig_sets: &[ContigSet], loci_dir: &Path, args: &Args) -> io:
     let writers: Vec<_> = filt_contig_sets.iter()
         .map(|set| {
             let filename = loci_dir.join(set.tag()).join(READS_FILENAME);
-            File::create(&filename).map(BufWriter::new)
+            // File::create(&filename).map(BufWriter::new)
+            sys_ext::create_gzip(&filename)
         })
         .collect::<Result<_, _>>()?;
 

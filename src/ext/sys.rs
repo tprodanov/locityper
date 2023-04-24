@@ -1,12 +1,12 @@
 use std::{
-    io::{self, BufWriter, Write, BufReader, BufRead, stdin, stdout},
+    io::{self, Read, BufRead, BufReader, Write, BufWriter, stdin, stdout},
     fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
     process::Child,
 };
 use flate2::{
-    read::GzDecoder,
+    bufread::MultiGzDecoder,
     write::GzEncoder,
     Compression,
 };
@@ -25,11 +25,15 @@ pub fn open(filename: &Path) -> io::Result<Box<dyn BufRead + Send>> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         Ok(Box::new(BufReader::new(stdin())))
     } else {
-        let file = File::open(filename)?;
-        if filename.extension() == Some("gz".as_ref()) {
-            Ok(Box::new(BufReader::new(GzDecoder::new(BufReader::new(file)))))
+        let mut stream = BufReader::new(File::open(filename)?);
+        let mut two_bytes = [0_u8; 2];
+        let bytes_read = stream.read(&mut two_bytes)?;
+        stream.seek_relative(-(bytes_read as i64))?;
+        // Check gzip magic number.
+        if two_bytes[0] == 0x1f && two_bytes[1] == 0x8b {
+            Ok(Box::new(BufReader::new(MultiGzDecoder::new(stream))))
         } else {
-            Ok(Box::new(BufReader::new(file)))
+            Ok(Box::new(stream))
         }
     }
 }

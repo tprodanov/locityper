@@ -3,7 +3,7 @@
 use std::{
     io, thread,
     collections::hash_map::Entry,
-    time::Instant,
+    time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
 };
 use const_format::formatcp;
@@ -227,10 +227,10 @@ impl Targets {
     ) -> io::Result<()>
     {
         assert_eq!(writers.len(), self.n_loci as usize, "Unexpected number of writers");
-        if threads <= 2 {
-            if threads == 2 {
-                log::warn!("2-thread recruitment is slower, running in single-thread mode!");
-            }
+        if threads <= 1 {
+            // if threads == 2 {
+            //     log::warn!("2-thread recruitment is slower, running in single-thread mode!");
+            // }
             self.recruit_single_thread(reader, &mut writers)
         } else {
             self.recruit_multi_thread(reader, writers, threads, chunk_size)
@@ -376,17 +376,26 @@ where T: RecordExt,
     }
 
     fn try_recv_iteration(&mut self) -> io::Result<()> {
-        for (in_progress, receiver) in self.in_progress.iter_mut().zip(&self.receivers) {
+        for ((receiver, sender), in_progress) in self.receivers.iter().zip(&self.senders).zip(self.in_progress.iter_mut()) {
             if *in_progress {
                 match receiver.try_recv() {
-                    Ok(shipment) => {
-                        *in_progress = false;
-                        self.to_write.push(shipment);
+                    Ok(recv_shipment) => {
+                        self.to_write.push(recv_shipment);
+                        if let Some(send_shipment) = self.to_send.pop() {
+                            sender.send(send_shipment).map_err(|_| io::Error::new(
+                                io::ErrorKind::Other, "Recruitment worker has failed!"))?;
+                        } else {
+                            *in_progress = false;
+                        }
                     }
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => return Err(io::Error::new(
                         io::ErrorKind::Other, "Recruitment worker has failed!")),
                 }
+            } else if let Some(send_shipment) = self.to_send.pop() {
+                sender.send(send_shipment).map_err(|_| io::Error::new(
+                    io::ErrorKind::Other, "Recruitment worker has failed!"))?;
+                *in_progress = true;
             }
         }
         Ok(())
@@ -416,11 +425,13 @@ where T: RecordExt,
         Ok(())
     }
 
-    fn send_iteration(&mut self) -> io::Result<()> {
+    fn send_iteration(&mut self) -> io::Result<bool> {
+        let mut sent_anywhere = false;
         for (in_progress, sender) in self.in_progress.iter_mut().zip(&self.senders) {
             if !*in_progress {
                 if let Some(shipment) = self.to_send.pop() {
                     *in_progress = true;
+                    sent_anywhere = true;
                     sender.send(shipment).map_err(|_| io::Error::new(
                         io::ErrorKind::Other, "Recruitment worker has failed!"))?;
                 } else {
@@ -428,15 +439,24 @@ where T: RecordExt,
                 }
             }
         }
-        Ok(())
+        Ok(sent_anywhere)
     }
 
     fn run(&mut self) -> io::Result<()> {
         self.start()?;
         while self.reader.is_some() || !self.to_send.is_empty() {
+            // log::debug!("A   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
             self.try_recv_iteration()?;
+            // log::debug!("B   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
             self.write_read_iteration()?;
-            self.send_iteration()?;
+            // log::debug!("C   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
+            // if self.send_iteration()? {
+            //     // log::debug!("D   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
+            // } else {
+            //     const SLEEP_DURATION: Duration = Duration::from_millis(1);
+            //     // log::debug!("E   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
+            //     thread::sleep(SLEEP_DURATION);
+            // }
             self.stats.print_log_parallel();
         }
         Ok(())
