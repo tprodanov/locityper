@@ -94,14 +94,12 @@ pub struct CachedDepthDistrs<'a> {
 impl<'a> CachedDepthDistrs<'a> {
     /// Create a set of cached depth distributions.
     /// Assume that there are `mul_coef` as much reads, as in the background distribution.
-    ///
-    /// As background distribution counts only first read mates,
-    /// we assume that `mul_coef` should be either `1.0` for unpaired reads, or `2.0` for paired reads.
-    pub fn new(bg_depth: &'a bg::depth::ReadDepth, mul_coef: f64) -> Self {
+    pub fn new(bg_depth: &'a bg::depth::ReadDepth, is_paired_end: bool) -> Self {
         const NBINOM_CELL: OnceCell<Rc<LinearCache<NBinom>>> = OnceCell::new();
         const U32_CELL: OnceCell<u32> = OnceCell::new();
         Self {
-            bg_depth, mul_coef,
+            bg_depth,
+            mul_coef: if is_paired_end { 2.0 } else { 1.0 },
             cached: [NBINOM_CELL; GC_BINS],
             unif_size: [U32_CELL; GC_BINS],
         }

@@ -28,8 +28,8 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 fnv = { version = "1", default-features = false, features = ["std"] }
 smallvec = { version = "1", default-features = false }
 
-[profile.release]
-debug = 1  # Remove later
+# [profile.release]
+# debug = 1  # Remove later
 
 [features]
 default = ["stochastic", "gurobi", "highs", "devel"]

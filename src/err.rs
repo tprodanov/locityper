@@ -55,6 +55,12 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
+impl From<json::JsonError> for Error {
+    fn from(e: json::JsonError) -> Self {
+        Self::JsonLoad(e.to_string())
+    }
+}
+
 impl Error {
     /// Converts an error, produced by a solver.
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {

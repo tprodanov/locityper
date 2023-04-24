@@ -14,6 +14,7 @@ use crate::{
         ContigSet,
         recruit, fastx,
     },
+    bg::{BgDistr, JsonSer},
     ext::{fmt as fmt_ext, sys as sys_ext},
 };
 use super::paths;
@@ -348,6 +349,11 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
+
+    let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::SAMPLE_PARAMS))?);
+    let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
+    let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
+
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
     recruit_reads(&loci, &args)?;
 

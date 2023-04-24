@@ -198,6 +198,11 @@ impl InsertDistr {
     pub fn max_size(&self) -> u32 {
         self.max_size
     }
+
+    /// Returns true if the reads are paired-end, false if single-end.
+    pub fn is_paired_end(&self) -> bool {
+        self.distr.is_some()
+    }
 }
 
 impl JsonSer for InsertDistr {
