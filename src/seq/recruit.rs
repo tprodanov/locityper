@@ -344,8 +344,7 @@ where T: RecordExt,
             fill_shipment(&mut self.reader, &mut shipment)?;
             if !shipment.is_empty() {
                 *in_progress = true;
-                sender.send(shipment).map_err(|_| io::Error::new(
-                    io::ErrorKind::Other, "Recruitment worker has failed!"))?;
+                sender.send(shipment).expect("Recruitment worker has failed!");
             }
             if self.reader.is_none() {
                 break;
@@ -354,51 +353,31 @@ where T: RecordExt,
         Ok(())
     }
 
-    fn finish(mut self) -> io::Result<()> {
-        assert!(self.reader.is_none() && self.to_send.is_empty());
-        for shipment in self.to_write.into_iter() {
-            write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
-        }
-        for (&in_progress, receiver) in self.in_progress.iter().zip(&self.receivers) {
-            if in_progress {
-                // Block thread and wait for the task completion.
-                let shipment = receiver.recv().map_err(|_| io::Error::new(
-                    io::ErrorKind::Other, "Recruitment worker has failed!"))?;
-                write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
-            }
-        }
-        std::mem::drop(self.senders);
-        for handle in self.handles.into_iter() {
-            handle.join().expect("Process failed for unknown reason");
-        }
-        self.stats.finish();
-        Ok(())
-    }
-
-    fn try_recv_iteration(&mut self) -> io::Result<()> {
-        for ((receiver, sender), in_progress) in self.receivers.iter().zip(&self.senders).zip(self.in_progress.iter_mut()) {
+    fn recv_send_iteration(&mut self) -> bool {
+        let mut any_action = false;
+        for ((receiver, sender), in_progress) in self.receivers.iter().zip(&self.senders)
+                .zip(self.in_progress.iter_mut()) {
             if *in_progress {
                 match receiver.try_recv() {
                     Ok(recv_shipment) => {
+                        any_action = true;
                         self.to_write.push(recv_shipment);
                         if let Some(send_shipment) = self.to_send.pop() {
-                            sender.send(send_shipment).map_err(|_| io::Error::new(
-                                io::ErrorKind::Other, "Recruitment worker has failed!"))?;
+                            sender.send(send_shipment).expect("Recruitment worker has failed!");
                         } else {
                             *in_progress = false;
                         }
                     }
                     Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => return Err(io::Error::new(
-                        io::ErrorKind::Other, "Recruitment worker has failed!")),
+                    Err(TryRecvError::Disconnected) => panic!("Recruitment worker has failed!"),
                 }
             } else if let Some(send_shipment) = self.to_send.pop() {
-                sender.send(send_shipment).map_err(|_| io::Error::new(
-                    io::ErrorKind::Other, "Recruitment worker has failed!"))?;
+                any_action = true;
+                sender.send(send_shipment).expect("Recruitment worker has failed!");
                 *in_progress = true;
             }
         }
-        Ok(())
+        any_action
     }
 
     fn write_read_iteration(&mut self) -> io::Result<()> {
@@ -425,40 +404,40 @@ where T: RecordExt,
         Ok(())
     }
 
-    fn send_iteration(&mut self) -> io::Result<bool> {
-        let mut sent_anywhere = false;
-        for (in_progress, sender) in self.in_progress.iter_mut().zip(&self.senders) {
-            if !*in_progress {
-                if let Some(shipment) = self.to_send.pop() {
-                    *in_progress = true;
-                    sent_anywhere = true;
-                    sender.send(shipment).map_err(|_| io::Error::new(
-                        io::ErrorKind::Other, "Recruitment worker has failed!"))?;
-                } else {
-                    break;
-                }
-            }
-        }
-        Ok(sent_anywhere)
-    }
-
+    /// Main part of the multi-thread recruitment.
+    /// Iterates until there are any shipments left to read from the input files.
     fn run(&mut self) -> io::Result<()> {
         self.start()?;
         while self.reader.is_some() || !self.to_send.is_empty() {
-            // log::debug!("A   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
-            self.try_recv_iteration()?;
-            // log::debug!("B   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
             self.write_read_iteration()?;
-            // log::debug!("C   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
-            // if self.send_iteration()? {
-            //     // log::debug!("D   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
-            // } else {
-            //     const SLEEP_DURATION: Duration = Duration::from_millis(1);
-            //     // log::debug!("E   to send: {},  to write: {},  in progress: {:?}", self.to_send.len(), self.to_write.len(), self.in_progress);
-            //     thread::sleep(SLEEP_DURATION);
-            // }
+            // There were no updates, and there are shipments ready to be sent.
+            if !self.recv_send_iteration() && !self.to_send.is_empty() {
+                const SLEEP: Duration = Duration::from_micros(100);
+                thread::sleep(SLEEP);
+            }
             self.stats.print_log_parallel();
         }
+        Ok(())
+    }
+
+    /// Finish the main thread: write all remaining shipments to the output files, and stop worker threads.
+    fn finish(mut self) -> io::Result<()> {
+        assert!(self.reader.is_none() && self.to_send.is_empty());
+        for shipment in self.to_write.into_iter() {
+            write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
+        }
+        for (&in_progress, receiver) in self.in_progress.iter().zip(&self.receivers) {
+            if in_progress {
+                // Block thread and wait for the task completion.
+                let shipment = receiver.recv().expect("Recruitment worker has failed!");
+                write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
+            }
+        }
+        std::mem::drop(self.senders);
+        for handle in self.handles.into_iter() {
+            handle.join().expect("Process failed for unknown reason");
+        }
+        self.stats.finish();
         Ok(())
     }
 }
