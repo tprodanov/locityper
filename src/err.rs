@@ -21,6 +21,7 @@ pub enum Error {
     InvalidData(String),
     ParsingError(String),
     RuntimeError(String),
+    JsonLoad(String),
 }
 
 impl From<io::Error> for Error {

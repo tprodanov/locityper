@@ -1,7 +1,9 @@
 use std::fmt::{self, Debug, Display, Formatter};
 use once_cell::unsync::OnceCell;
-use crate::bg::ser::{JsonSer, LoadError};
-
+use crate::{
+    Error,
+    bg::ser::JsonSer,
+};
 use super::{DiscretePmf, DiscreteCdf, WithMoments};
 
 /// Distribution with a fixed number of cached `ln_pmf` values.
@@ -84,12 +86,12 @@ impl<D: JsonSer> JsonSer for LinearCache<D> {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
         if !obj.has_key("distr") {
-            return Err(LoadError(format!("LinearCache: Failed to parse '{}': missing 'distr' field!", obj)));
+            return Err(Error::JsonLoad(format!("LinearCache: Failed to parse '{}': missing 'distr' field!", obj)));
         }
         let distr = D::load(&obj["distr"])?;
-        let size = obj["size"].as_usize().ok_or_else(|| LoadError(format!(
+        let size = obj["size"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
             "LinearCache: Failed to parse '{}': missing or incorrect 'size' field!", obj)))?;
         Ok(Self::new(distr, size))
     }

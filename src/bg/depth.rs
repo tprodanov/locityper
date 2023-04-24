@@ -15,7 +15,7 @@ use crate::{
 };
 use super::{
     err_prof::ErrorProfile,
-    ser::{JsonSer, LoadError, parse_f64_arr},
+    ser::{JsonSer, parse_f64_arr},
 };
 
 pub trait DepthDistr {
@@ -403,12 +403,12 @@ impl JsonSer for ReadDepth {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
-        let ploidy = obj["ploidy"].as_usize().ok_or_else(|| LoadError(format!(
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        let ploidy = obj["ploidy"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
             "ReadDepth: Failed to parse '{}': missing or incorrect 'ploidy' field!", obj)))?;
-        let window_size = obj["window"].as_usize().ok_or_else(|| LoadError(format!(
+        let window_size = obj["window"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
             "ReadDepth: Failed to parse '{}': missing or incorrect 'window' field!", obj)))?;
-        let window_padding = obj["window_padding"].as_usize().ok_or_else(|| LoadError(format!(
+        let window_padding = obj["window_padding"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
             "ReadDepth: Failed to parse '{}': missing or incorrect 'window_padding' field!", obj)))?;
         let mut n_params = vec![0.0; window_size + 1];
         parse_f64_arr(obj, "n", &mut n_params)?;

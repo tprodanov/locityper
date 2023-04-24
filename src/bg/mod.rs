@@ -9,7 +9,6 @@ use {
     depth::{ReadDepth, ReadDepthParams},
     insertsz::InsertDistr,
     err_prof::ErrorProfile,
-    ser::{LoadError},
 };
 pub use ser::JsonSer;
 
@@ -128,7 +127,7 @@ impl JsonSer for BgDistr {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
         if obj.has_key("bg_depth") && obj.has_key("insert_distr") && obj.has_key("error_profile") {
             Ok(Self {
                 insert_distr: InsertDistr::load(&obj["insert_distr"])?,
@@ -136,7 +135,7 @@ impl JsonSer for BgDistr {
                 depth: ReadDepth::load(&obj["bg_depth"])?,
             })
         } else {
-            Err(LoadError(format!(
+            Err(Error::JsonLoad(format!(
                 "BgDistr: Failed to parse '{}': missing 'bg_depth', 'insert_distr' or 'error_profile' keys!", obj)))
         }
     }

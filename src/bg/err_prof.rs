@@ -4,13 +4,14 @@ use std::{
 };
 use htslib::bam::Record;
 use crate::{
+    Error,
     ext::vec::{VecExt, F64Ext},
     seq::cigar::{Operation, Cigar, RAW_OPERATIONS},
     math::{
         Ln,
         distr::{NBinom, Multinomial},
     },
-    bg::ser::{JsonSer, LoadError},
+    bg::ser::JsonSer,
 };
 
 /// Counts of five operation types (=, X, I, D, S).
@@ -191,15 +192,15 @@ impl JsonSer for ErrorProfile {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
         if !obj.has_key("op_distr") {
-            return Err(LoadError(format!(
+            return Err(Error::JsonLoad(format!(
                 "ErrorProfile: Failed to parse '{}': missing 'op_distr' field!", obj)))?;
         }
         let op_distr = Multinomial::load(&obj["op_distr"])?;
-        let no_del_prob = obj["no_del_prob"].as_f64().ok_or_else(|| LoadError(format!(
+        let no_del_prob = obj["no_del_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
             "ErrorProfile: Failed to parse '{}': missing or incorrect 'no_del_prob' field!", obj)))?;
-        let min_ln_prob = obj["min_ln_prob"].as_f64().ok_or_else(|| LoadError(format!(
+        let min_ln_prob = obj["min_ln_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
             "ErrorProfile: Failed to parse '{}': missing or incorrect 'min_ln_prob' field!", obj)))?;
         Ok(Self { op_distr, no_del_prob, min_ln_prob })
     }

@@ -2,8 +2,9 @@ use std::fmt;
 use statrs::function::gamma::ln_gamma;
 use once_cell::sync::OnceCell;
 use crate::{
+    Error,
     math::Ln,
-    bg::ser::{JsonSer, LoadError},
+    bg::ser::JsonSer,
 };
 
 /// Calculates ln-factorial. Stores up to 1024 values in a cache.
@@ -68,17 +69,17 @@ impl JsonSer for Multinomial {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
         let mut lnp = Vec::new();
         if let json::JsonValue::Array(arr) = &obj["lnp"] {
             for val in arr.into_iter() {
                 let valf = val.as_f64().ok_or_else(||
-                    LoadError(format!("Failed to parse '{}': array '{}' has non-float element", obj, "lnp")))?;
+                    Error::JsonLoad(format!("Failed to parse '{}': array '{}' has non-float element", obj, "lnp")))?;
                 lnp.push(valf);
             }
             Ok(Self { lnp })
         } else {
-            Err(LoadError(format!("Failed to parse '{}': missing or incorrect array '{}'", obj, "lnp")))
+            Err(Error::JsonLoad(format!("Failed to parse '{}': missing or incorrect array '{}'", obj, "lnp")))
         }
     }
 }

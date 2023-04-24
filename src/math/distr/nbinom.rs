@@ -3,7 +3,10 @@ use statrs::function::{
     beta::beta_reg,
     gamma::ln_gamma,
 };
-use crate::bg::ser::{JsonSer, LoadError};
+use crate::{
+    Error,
+    bg::ser::JsonSer,
+};
 use super::{DiscretePmf, DiscreteCdf, WithMoments, LinearCache};
 
 /// Negative Binomial distribution,
@@ -84,10 +87,10 @@ impl JsonSer for NBinom {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
-        let n = obj["n"].as_f64().ok_or_else(|| LoadError(format!(
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        let n = obj["n"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
             "NBinom: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
-        let p = obj["p"].as_f64().ok_or_else(|| LoadError(format!(
+        let p = obj["p"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
             "NBinom: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
         Ok(Self::new(n, p))
     }

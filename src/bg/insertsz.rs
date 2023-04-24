@@ -6,7 +6,7 @@ use crate::{
     Error,
     algo::bisect,
     ext::vec::{VecExt, F64Ext},
-    bg::ser::{JsonSer, LoadError},
+    bg::ser::JsonSer,
     math::distr::{DiscretePmf, NBinom, LinearCache},
 };
 
@@ -217,20 +217,20 @@ impl JsonSer for InsertDistr {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, LoadError> {
-        let max_size = obj["max_size"].as_usize().ok_or_else(|| LoadError(format!(
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        let max_size = obj["max_size"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
             "InsertDistr: Failed to parse '{}': missing or incorrect 'max_size' field!", obj)))?;
         if max_size == 0 {
             return Ok(Self::undefined());
         }
-        let n = obj["n"].as_f64().ok_or_else(|| LoadError(format!(
+        let n = obj["n"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
             "InsertDistr: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
-        let p = obj["p"].as_f64().ok_or_else(|| LoadError(format!(
+        let p = obj["p"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
             "InsertDistr: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
         let orient_probs = [
-            obj["fr_prob"].as_f64().ok_or_else(|| LoadError(format!(
+            obj["fr_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
                 "InsertDistr: Failed to parse '{}': missing or incorrect 'fr_prob' field!", obj)))?,
-            obj["ff_prob"].as_f64().ok_or_else(|| LoadError(format!(
+            obj["ff_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
                 "InsertDistr: Failed to parse '{}': missing or incorrect 'ff_prob' field!", obj)))?,
         ];
         Ok(Self {
