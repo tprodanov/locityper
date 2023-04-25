@@ -235,4 +235,3 @@ impl JsonSer for SimAnneal {
         Ok(res)
     }
 }
-
