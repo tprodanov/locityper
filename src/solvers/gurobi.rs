@@ -3,6 +3,7 @@ use grb::{
     Env, Var, Model, Status, attr, parameter, c, add_binvar,
     expr::{LinExpr, GurobiSum},
 };
+use rand::Rng;
 use crate::{
     Error,
     model::{
@@ -11,7 +12,6 @@ use crate::{
     },
     bg::ser::json_get,
 };
-use super::Solver;
 
 /// Gurobi ILP solver.
 #[derive(Clone)]
@@ -131,9 +131,9 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
 
 // GurobiSolver implements Solver and not MultiTrySolver, as the latter cannot store information between steps.
 
-impl Solver for GurobiSolver {
+impl super::Solver for GurobiSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut impl rand::Rng) -> Result<(), Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<(), Error> {
         let (mut model, vars) = define_model(assignments)?;
         let mut best_lik = assignments.likelihood();
 

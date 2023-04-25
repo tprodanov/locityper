@@ -9,11 +9,11 @@ use crate::{
     ext::vec::F64Ext,
     bg::ser::json_get,
 };
-use super::Solver;
 
 const HIGHS_NAME: &'static str = "HiGHS";
 
 /// ILP Solver using HiGHS library.
+#[derive(Clone)]
 pub struct HighsSolver {
     /// Solver type: possible values are `choose`, `simplex` and `ipm`.
     solver_type: String,
@@ -114,9 +114,9 @@ impl HighsSolver {
     }
 }
 
-impl Solver for HighsSolver {
+impl super::Solver for HighsSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, _rng: &mut impl rand::Rng) -> Result<(), Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, _rng: &mut super::SolverRng) -> Result<(), Error> {
         let problem = self.define_model(assignments);
         let mut model = problem.optimise(Sense::Maximise);
         model.set_option("parallel", "off");

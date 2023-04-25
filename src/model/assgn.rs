@@ -4,7 +4,6 @@ use std::{
     io,
 };
 use once_cell::unsync::OnceCell;
-#[cfg(feature = "stochastic")]
 use rand::Rng;
 use crate::{
     ext::vec::F64Ext,
@@ -445,7 +444,6 @@ impl ReadAssignment {
     /// Calculates the probability of a random reassignment from a random read pair `rp` to a random location.
     /// Returns the read pair index, new assignment and the improvement in likelihood.
     /// Does not actually update any assignments.
-    #[cfg(feature = "stochastic")]
     pub fn random_reassignment<R: Rng>(&self, rng: &mut R) -> (usize, u16, f64) {
         let rp = self.non_trivial_reads[rng.gen_range(0..self.non_trivial_reads.len())];
         let start_ix = self.read_ixs[rp];

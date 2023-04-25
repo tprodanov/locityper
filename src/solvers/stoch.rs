@@ -60,7 +60,7 @@ impl MultiTrySolver for GreedySolver {
     }
 
     /// Single greedy iteration to find the best read assignment.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut impl Rng) -> Result<(), Error> {
+    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<(), Error> {
         let mut buffer = Vec::new();
         assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
         let mut curr_plato = 0;
@@ -107,6 +107,7 @@ impl fmt::Display for GreedySolver {
 /// Simulated annealing solver.
 ///
 /// Randomly selects direction based on the current temperature, and stops once there are no improvement `plato_size`.
+#[derive(Clone)]
 pub struct SimAnneal {
     /// Number of tries the solver makes to assign reads anew.
     tries: u16,
@@ -150,7 +151,7 @@ impl SimAnneal {
     }
 
     /// Finds temperature coefficient by checking 100 random reassignments and their probabilities.
-    fn find_temperature_coeff(&self, assignments: &ReadAssignment, rng: &mut impl Rng) -> f64 {
+    fn find_temperature_coeff(&self, assignments: &ReadAssignment, rng: &mut super::SolverRng) -> f64 {
         let mut neg_sum = 0.0;
         let mut neg_count: u32 = 0;
         const INIT_ITERS: u32 = 100;
@@ -181,7 +182,7 @@ impl MultiTrySolver for SimAnneal {
     }
 
     /// Run simulated annealing once to find the best read assignment.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut impl Rng) -> Result<(), Error> {
+    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<(), Error> {
         assignments.init_assignments(
             |possible_alns| IterExt::argmax(possible_alns.iter().map(ReadWindows::ln_prob)).0);
         let coeff = self.find_temperature_coeff(assignments, rng);

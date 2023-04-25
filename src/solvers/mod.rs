@@ -1,16 +1,14 @@
 use crate::{
     model::assgn::ReadAssignment,
-    bg::ser::JsonSer,
 };
 
-#[cfg(feature = "stochastic")]
+pub mod scheme;
 pub mod stoch;
 #[cfg(feature = "gurobi")]
 pub mod gurobi;
 #[cfg(feature = "highs")]
 pub mod highs;
 
-#[cfg(feature = "stochastic")]
 pub use self::stoch::{GreedySolver, SimAnneal};
 #[cfg(feature = "gurobi")]
 pub use self::gurobi::GurobiSolver;
@@ -18,10 +16,14 @@ pub use self::gurobi::GurobiSolver;
 pub use self::highs::HighsSolver;
 use crate::Error;
 
+/// In order for `Solver` to be object-safe, rng type should be known in advance.
+/// For that reason we use `SmallRng`, and not `impl rand::Rng`.
+type SolverRng = rand::rngs::SmallRng;
+
 /// General trait for all solvers.
-pub trait Solver : Default + Send {
+pub trait Solver : Send {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut impl rand::Rng) -> Result<(), Error>;
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
 
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error>;
@@ -36,14 +38,14 @@ pub trait MultiTrySolver {
     fn set_tries(&mut self, tries: u16) -> &mut Self;
 
     /// Try once.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut impl rand::Rng) -> Result<(), Error>;
+    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
 
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error>;
 }
 
-impl<T: MultiTrySolver + Default + Send + JsonSer> Solver for T {
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut impl rand::Rng) -> Result<(), Error> {
+impl<T: MultiTrySolver + Send> Solver for T {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error> {
         let mut last_lik = f64::NEG_INFINITY;
         let mut best_lik = assignments.likelihood();
         let mut best_assgns = assignments.read_assignments().to_vec();
