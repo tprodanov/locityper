@@ -11,7 +11,7 @@ use crate::{
         Ln,
         distr::{NBinom, Multinomial},
     },
-    bg::ser::JsonSer,
+    bg::ser::{JsonSer, json_get},
 };
 
 /// Counts of five operation types (=, X, I, D, S).
@@ -196,17 +196,11 @@ impl JsonSer for ErrorProfile {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        let matches = obj["matches"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
-            "ErrorProfile: Failed to parse '{}': missing or incorrect 'matches' field!", obj)))?;
-        let mismatches = obj["mismatches"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
-            "ErrorProfile: Failed to parse '{}': missing or incorrect 'mismatches' field!", obj)))?;
-        let insertions = obj["insertions"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
-            "ErrorProfile: Failed to parse '{}': missing or incorrect 'insertions' field!", obj)))?;
-        let op_distr = Multinomial::from_ln(&[matches, mismatches, insertions]);
-        let no_del_prob = obj["no_del_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
-            "ErrorProfile: Failed to parse '{}': missing or incorrect 'no_del_prob' field!", obj)))?;
-        let min_ln_prob = obj["min_ln_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
-            "ErrorProfile: Failed to parse '{}': missing or incorrect 'min_ln_prob' field!", obj)))?;
-        Ok(Self { op_distr, no_del_prob, min_ln_prob })
+        json_get!(obj -> matches (as_f64), mismatches (as_f64), insertions (as_f64),
+            no_del_prob (as_f64), min_ln_prob (as_f64));
+        Ok(Self {
+            op_distr: Multinomial::from_ln(&[matches, mismatches, insertions]),
+            no_del_prob, min_ln_prob
+        })
     }
 }

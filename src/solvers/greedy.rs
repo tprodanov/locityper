@@ -9,145 +9,128 @@ use crate::{
     Error,
     ext::vec::F64Ext,
     model::assgn::ReadAssignment,
+    bg::ser::{JsonSer, json_get},
 };
 use super::Solver;
 
-/// Builder, that constructs `GreedySolver`.
+/// Assigns reads in a greedy way.
+///
+/// In one step, the solver examines `sample_size` read pairs, and selects the best read pair to switch location.
+/// If no improvement was made for `plato_iters` iterations, the solver stops.
 #[derive(Clone)]
-pub struct GreedyBuilder {
+pub struct GreedySolver {
+    /// Number of tries the solver makes to assign reads anew.
+    tries: usize,
+    /// Number of read-pairs, examined per iteration.
     sample_size: usize,
-    plato_iters: u32,
+    /// Number of iteration without improvement, after which the solver stops.
+    plato_iters: usize,
 }
 
-impl Default for GreedyBuilder {
-    /// Creates default GreedyBuilder: seed is not set, sample size is 100, and there can be up to 5 plato iterations.
+impl Default for GreedySolver {
     fn default() -> Self {
         Self {
+            tries: 3,
             sample_size: 100,
             plato_iters: 5,
         }
     }
 }
 
-impl GreedyBuilder {
+impl GreedySolver {
+    pub fn set_tries(&mut self, tries: usize) -> &mut Self {
+        assert_ne!(tries, 0, "Number of tries cannot be 0.");
+        self.tries = tries;
+        self
+    }
+
     pub fn set_sample_size(&mut self, sample_size: usize) -> &mut Self {
+        assert_ne!(sample_size, 0, "Number of read-pairs (sample_size) cannot be 0.");
         self.sample_size = sample_size;
         self
     }
 
-    pub fn set_plato_iters(&mut self, plato_iters: u32) -> &mut Self {
+    pub fn set_plato_iters(&mut self, plato_iters: usize) -> &mut Self {
         self.plato_iters = plato_iters;
         self
     }
 
-    /// Builds the solver.
-    pub fn build(&self, assignments: ReadAssignment) -> GreedySolver {
-        GreedySolver {
-            sample_size: min(self.sample_size, assignments.non_trivial_reads().len()),
-            rng: SmallRng::seed_from_u64(0),
-            assignments,
-            is_finished: false,
-            buffer: Vec::with_capacity(16),
-            plato_iters: self.plato_iters,
-            curr_plato: 0,
+    /// Single greedy iteration to find the best read assignment.
+    fn solve_once(
+        &self,
+        assignments: &mut ReadAssignment,
+        rng: &mut impl Rng,
+        buffer: &mut Vec<f64>
+    ) -> Result<(), Error>
+    {
+        assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
+        let mut curr_plato = 0;
+        while curr_plato <= self.plato_iters {
+            let mut best_rp = 0;
+            let mut best_assgn = 0;
+            let mut best_improv = 0.0;
+            for &rp in assignments.non_trivial_reads().choose_multiple(rng, self.sample_size) {
+                buffer.clear();
+                assignments.possible_reassignments(rp, buffer);
+                let (assgn, improv) = F64Ext::argmax(buffer);
+                if improv > best_improv {
+                    best_rp = rp;
+                    best_assgn = assgn as u16;
+                    best_improv = improv;
+                }
+            }
+            if best_improv > 0.0 {
+                curr_plato = 0;
+                assignments.reassign(best_rp, best_assgn);
+            } else {
+                curr_plato += 1;
+            }
         }
-    }
-}
-
-/// In addition to seed, has two parameters: `sample_size` and `plato_iters`.
-///
-/// In one step, the solver examines `sample_size` read pairs, and selects the best read pair to switch location.
-/// If no improvement was made for `plato_iters` iterations, the solver stops.
-pub struct GreedySolver {
-    assignments: ReadAssignment,
-    rng: SmallRng,
-    is_finished: bool,
-    buffer: Vec<f64>,
-    /// Number of read-pairs, examined per iteration.
-    sample_size: usize,
-    /// Number of iteration without improvement, after which the solver stops.
-    plato_iters: u32,
-    /// Current number of iterations without improvement.
-    curr_plato: u32,
-}
-
-impl GreedySolver {
-    /// Creates GreedySolver with default parameters (seed `GreedyBuilder::default`).
-    pub fn new(assignments: ReadAssignment) -> Self {
-        GreedyBuilder::default().build(assignments)
-    }
-
-    /// Creates GreedyBuilder.
-    pub fn builder() -> GreedyBuilder {
-        GreedyBuilder::default()
+        Ok(())
     }
 }
 
 impl Solver for GreedySolver {
-    fn is_seedable() -> bool { true }
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut impl Rng) -> Result<(), Error> {
+        let mut last_lik = f64::NEG_INFINITY;
+        let mut best_lik = f64::NEG_INFINITY;
+        let mut best_assgns = assignments.read_assignments().to_vec();
+        let mut buffer = Vec::new();
 
-    fn set_seed(&mut self, seed: u64) -> Result<(), Error> {
-        self.rng = SmallRng::seed_from_u64(seed);
-        Ok(())
-    }
-
-    fn reset(&mut self) -> Result<(), Error> {
-        self.is_finished = false;
-        // self.assignments.init_assignments(solvers::init_best)
-        // self.assignments.init_assignments(|_| 0)
-        self.assignments.init_assignments(|alns| self.rng.gen_range(0..alns.len()));
-        Ok(())
-    }
-
-    /// Perform one iteration, and return the likelihood improvement.
-    fn step(&mut self) -> Result<(), Error> {
-        if self.is_finished {
-            log::warn!("GreedySolver is finished, but `step` is called one more time.")
-        }
-        let mut best_rp = 0;
-        let mut best_assgn = 0;
-        let mut best_improv = 0.0;
-        for &rp in self.assignments.non_trivial_reads().choose_multiple(&mut self.rng, self.sample_size) {
-            self.buffer.clear();
-            self.assignments.possible_reassignments(rp, &mut self.buffer);
-            let (assgn, improv) = F64Ext::argmax(&self.buffer);
-            if improv > best_improv {
-                best_rp = rp;
-                best_assgn = assgn as u16;
-                best_improv = improv;
+        for _ in 0..self.tries {
+            self.solve_once(assignments, rng, &mut buffer).expect("None is impossible");
+            last_lik = assignments.likelihood();
+            if last_lik > best_lik {
+                best_assgns.copy_from_slice(assignments.read_assignments());
+                best_lik = last_lik;
             }
         }
-        if best_improv > 0.0 {
-            self.curr_plato = 0;
-            self.assignments.reassign(best_rp, best_assgn);
-        } else {
-            self.curr_plato += 1;
-            self.is_finished = self.curr_plato > self.plato_iters;
+        if best_lik > last_lik {
+            assignments.set_assignments(&best_assgns);
         }
         Ok(())
-    }
-
-    /// Returns true if the solver is finished.
-    fn is_finished(&self) -> bool {
-        self.is_finished
-    }
-
-    /// Return the current read assignments.
-    fn current_assignments(&self) -> &ReadAssignment {
-        &self.assignments
-    }
-
-    fn recalculate_likelihood(&mut self) {
-        self.assignments.recalc_likelihood();
-    }
-
-    fn take(self) -> ReadAssignment {
-        self.assignments
     }
 }
 
 impl fmt::Display for GreedySolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Greedy({},{})", self.sample_size, self.plato_iters)
+        write!(f, "Greedy({} tries, {} reads/iter, plato {})", self.tries, self.sample_size, self.plato_iters)
+    }
+}
+
+impl JsonSer for GreedySolver {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            tries: self.tries,
+            sample_size: self.sample_size,
+            plato_iters: self.plato_iters,
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        json_get!(obj -> tries (as_usize), sample_size (as_usize), plato_iters (as_usize));
+        let mut res = Self::default();
+        res.set_tries(tries).set_sample_size(sample_size).set_plato_iters(plato_iters);
+        Ok(res)
     }
 }

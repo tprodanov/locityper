@@ -15,7 +15,7 @@ use crate::{
 };
 use super::{
     err_prof::ErrorProfile,
-    ser::{JsonSer, parse_f64_arr},
+    ser::{JsonSer, parse_f64_arr, json_get},
 };
 
 pub trait DepthDistr {
@@ -404,20 +404,13 @@ impl JsonSer for ReadDepth {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        let ploidy = obj["ploidy"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'ploidy' field!", obj)))?;
-        let window_size = obj["window"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'window' field!", obj)))?;
-        let window_padding = obj["window_padding"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
-            "ReadDepth: Failed to parse '{}': missing or incorrect 'window_padding' field!", obj)))?;
-        let mut n_params = vec![0.0; window_size + 1];
+        json_get!(obj -> ploidy (as_u8), window_size (as_u32), window_padding (as_u32));
+        let mut n_params = vec![0.0; window_size as usize + 1];
         parse_f64_arr(obj, "n", &mut n_params)?;
-        let mut p_params = vec![0.0; window_size + 1];
+        let mut p_params = vec![0.0; window_size as usize + 1];
         parse_f64_arr(obj, "p", &mut p_params)?;
         Ok(Self {
-            ploidy: u8::try_from(ploidy).unwrap(),
-            window_size: u32::try_from(window_size).unwrap(),
-            window_padding: u32::try_from(window_padding).unwrap(),
+            ploidy, window_size, window_padding,
             distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p)).collect(),
         })
     }
