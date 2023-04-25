@@ -299,7 +299,7 @@ struct MainWorker<T, R: FastxRead<Record = T>, W> {
     /// Send reads between threads in vectors of this size.
     chunk_size: usize,
     /// Does the worker currently recruit reads?
-    in_progress: Vec<bool>,
+    is_busy: Vec<bool>,
     /// Recruitment statistics.
     stats: Stats,
 
@@ -330,7 +330,7 @@ where T: RecordExt,
         Self {
             writers, senders, receivers, handles, chunk_size,
             reader: Some(reader),
-            in_progress: vec![false; n_workers],
+            is_busy: vec![false; n_workers],
             stats: Stats::new(),
             to_send: Vec::new(),
             to_write: Vec::new(),
@@ -339,11 +339,10 @@ where T: RecordExt,
 
     /// Starts the process: provides the first task to each worker.
     fn start(&mut self) -> io::Result<()> {
-        for (in_progress, sender) in self.in_progress.iter_mut().zip(&self.senders) {
-            let mut shipment = vec![Default::default(); self.chunk_size];
-            fill_shipment(&mut self.reader, &mut shipment)?;
+        for (is_busy, sender) in self.is_busy.iter_mut().zip(&self.senders) {
+            let shipment = read_new_shipment(&mut self.reader, self.chunk_size)?;
             if !shipment.is_empty() {
-                *in_progress = true;
+                *is_busy = true;
                 sender.send(shipment).expect("Recruitment worker has failed!");
             }
             if self.reader.is_none() {
@@ -355,9 +354,9 @@ where T: RecordExt,
 
     fn recv_send_iteration(&mut self) -> bool {
         let mut any_action = false;
-        for ((receiver, sender), in_progress) in self.receivers.iter().zip(&self.senders)
-                .zip(self.in_progress.iter_mut()) {
-            if *in_progress {
+        for ((receiver, sender), is_busy) in self.receivers.iter().zip(&self.senders)
+                .zip(self.is_busy.iter_mut()) {
+            if *is_busy {
                 match receiver.try_recv() {
                     Ok(recv_shipment) => {
                         any_action = true;
@@ -365,16 +364,16 @@ where T: RecordExt,
                         if let Some(send_shipment) = self.to_send.pop() {
                             sender.send(send_shipment).expect("Recruitment worker has failed!");
                         } else {
-                            *in_progress = false;
+                            *is_busy = false;
                         }
                     }
-                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Empty) => { continue; }
                     Err(TryRecvError::Disconnected) => panic!("Recruitment worker has failed!"),
                 }
             } else if let Some(send_shipment) = self.to_send.pop() {
                 any_action = true;
                 sender.send(send_shipment).expect("Recruitment worker has failed!");
-                *in_progress = true;
+                *is_busy = true;
             }
         }
         any_action
@@ -395,8 +394,7 @@ where T: RecordExt,
             }
         }
         if self.to_send.is_empty() {
-            let mut shipment = vec![Default::default(); self.chunk_size];
-            fill_shipment(&mut self.reader, &mut shipment)?;
+            let shipment = read_new_shipment(&mut self.reader, self.chunk_size)?;
             if !shipment.is_empty() {
                 self.to_send.push(shipment);
             }
@@ -426,8 +424,8 @@ where T: RecordExt,
         for shipment in self.to_write.into_iter() {
             write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
         }
-        for (&in_progress, receiver) in self.in_progress.iter().zip(&self.receivers) {
-            if in_progress {
+        for (&is_busy, receiver) in self.is_busy.iter().zip(&self.receivers) {
+            if is_busy {
                 // Block thread and wait for the task completion.
                 let shipment = receiver.recv().expect("Recruitment worker has failed!");
                 write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
@@ -460,6 +458,15 @@ where T: RecordExt,
         }
     }
     Ok(())
+}
+
+fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> io::Result<Shipment<T>>
+where T: RecordExt,
+      R: FastxRead<Record = T>,
+{
+    let mut shipment = vec![Default::default(); chunk_size];
+    fill_shipment(opt_reader, &mut shipment)?;
+    Ok(shipment)
 }
 
 /// Writes recruited records to the output files.

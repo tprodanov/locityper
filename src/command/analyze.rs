@@ -319,29 +319,32 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
     bwa_cmd.args(&["mem",
         "-aYPp", // Output all alignments, use soft clipping, skip pairing, interleaved input.
         "-c", "65535", // No filtering on common minimizers.
+        "-v", "1", // Reduce the number of messages.
         "-t", &args.threads.to_string()])
         .arg(locus.db_locus_dir.join(paths::LOCUS_FASTA)) // Input fasta.
         .arg(&locus.reads_filename) // Input FASTQ.
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut bwa_child = bwa_cmd.spawn()?;
     let bwa_stdout = bwa_child.stdout.take().unwrap();
-    let mut guard = sys_ext::ChildGuard::new(bwa_child);
 
     let mut samtools_cmd = Command::new(&args.samtools);
     samtools_cmd.args(&["view",
         // Output BAM, exclude unmapped reads.
-        "--bam", "--excl-flags", "4"])
+        "-bF4"])
         .arg("-o").arg(&locus.tmp_aln_filename)
         .stdin(Stdio::from(bwa_stdout));
 
     log::debug!("    {} | {}", fmt_ext::command(&bwa_cmd), fmt_ext::command(&samtools_cmd));
-    let output = samtools_cmd.output()?;
+    let samtools_output = samtools_cmd.output()?;
+    let bwa_output = bwa_child.wait_with_output()?;
     log::debug!("    Finished in {}", fmt_ext::Duration(start.elapsed()));
-    if !output.status.success() {
-        return Err(Error::SubprocessFail(output));
+    if !bwa_output.status.success() {
+        return Err(Error::SubprocessFail(bwa_output));
+    } else if !samtools_output.status.success() {
+        return Err(Error::SubprocessFail(samtools_output));
     }
     fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)?;
-    guard.disarm();
     Ok(())
 }
 
