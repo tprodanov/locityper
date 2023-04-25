@@ -7,7 +7,7 @@ use crate::{
         windows::ReadWindows,
         assgn::ReadAssignment,
     },
-    bg::ser::{JsonSer, json_get},
+    bg::ser::json_get,
 };
 use super::MultiTrySolver;
 
@@ -18,7 +18,7 @@ use super::MultiTrySolver;
 #[derive(Clone)]
 pub struct GreedySolver {
     /// Number of tries the solver makes to assign reads anew.
-    tries: usize,
+    tries: u16,
     /// Number of read-pairs, examined per iteration.
     sample_size: usize,
     /// Number of iteration without improvement, after which the solver stops.
@@ -49,11 +49,11 @@ impl GreedySolver {
 }
 
 impl MultiTrySolver for GreedySolver {
-    fn tries(&self) -> usize {
+    fn tries(&self) -> u16 {
         self.tries
     }
 
-    fn set_tries(&mut self, tries: usize) -> &mut Self {
+    fn set_tries(&mut self, tries: u16) -> &mut Self {
         assert_ne!(tries, 0, "Number of tries cannot be 0.");
         self.tries = tries;
         self
@@ -87,6 +87,15 @@ impl MultiTrySolver for GreedySolver {
         }
         Ok(())
     }
+
+    /// Sets solver parameters.
+    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
+        json_get!(obj -> tries (as_u16), sample_size (as_usize), plato_size (as_usize));
+        self.set_tries(tries)
+            .set_sample_size(sample_size)
+            .set_plato_size(plato_size);
+        Ok(())
+    }
 }
 
 impl fmt::Display for GreedySolver {
@@ -95,29 +104,12 @@ impl fmt::Display for GreedySolver {
     }
 }
 
-impl JsonSer for GreedySolver {
-    fn save(&self) -> json::JsonValue {
-        json::object!{
-            tries: self.tries,
-            sample_size: self.sample_size,
-            plato_size: self.plato_size,
-        }
-    }
-
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> tries (as_usize), sample_size (as_usize), plato_size (as_usize));
-        let mut res = Self::default();
-        res.set_tries(tries).set_sample_size(sample_size).set_plato_size(plato_size);
-        Ok(res)
-    }
-}
-
 /// Simulated annealing solver.
 ///
 /// Randomly selects direction based on the current temperature, and stops once there are no improvement `plato_size`.
 pub struct SimAnneal {
     /// Number of tries the solver makes to assign reads anew.
-    tries: usize,
+    tries: u16,
     /// Temperature starts at 1, and decreases by `cooling_temp` every step.
     cooling_temp: f64,
     /// Initialize temperature constant in such way, that initially
@@ -178,11 +170,11 @@ impl SimAnneal {
 }
 
 impl MultiTrySolver for SimAnneal {
-    fn tries(&self) -> usize {
+    fn tries(&self) -> u16 {
         self.tries
     }
 
-    fn set_tries(&mut self, tries: usize) -> &mut Self {
+    fn set_tries(&mut self, tries: u16) -> &mut Self {
         assert_ne!(tries, 0, "Number of tries cannot be 0.");
         self.tries = tries;
         self
@@ -209,29 +201,21 @@ impl MultiTrySolver for SimAnneal {
         }
         Ok(())
     }
+
+    /// Sets solver parameters.
+    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
+        json_get!(obj -> tries (as_u16), cooling_temp (as_f64), init_prob (as_f64), plato_size (as_usize));
+        self.set_tries(tries)
+            .set_cooling_temp(cooling_temp)
+            .set_init_prob(init_prob)
+            .set_plato_size(plato_size);
+        Ok(())
+    }
 }
 
 impl fmt::Display for SimAnneal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "SimAnneal({} tries, cool.temp {}, init.prob {}, plato {})",
             self.tries, self.cooling_temp, self.init_prob, self.plato_size)
-    }
-}
-
-impl JsonSer for SimAnneal {
-    fn save(&self) -> json::JsonValue {
-        json::object!{
-            tries: self.tries,
-            cooling_temp: self.cooling_temp,
-            init_prob: self.init_prob,
-            plato_size: self.plato_size,
-        }
-    }
-
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> tries (as_usize), cooling_temp (as_f64), init_prob (as_f64), plato_size (as_usize));
-        let mut res = Self::default();
-        res.set_tries(tries).set_cooling_temp(cooling_temp).set_init_prob(init_prob).set_plato_size(plato_size);
-        Ok(res)
     }
 }

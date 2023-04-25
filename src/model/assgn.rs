@@ -319,7 +319,7 @@ impl ReadAssignment {
         Self {
             depth: vec![0; contig_windows.n_windows() as usize],
             read_assgn: vec![0; read_ixs.len() - 1],
-            likelihood: f64::NAN,
+            likelihood: f64::NEG_INFINITY,
             contig_windows, depth_distrs, read_windows, read_ixs, non_trivial_reads,
         }
     }

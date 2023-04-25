@@ -7,7 +7,7 @@ use crate::{
         assgn::ReadAssignment,
     },
     ext::vec::F64Ext,
-    bg::ser::{JsonSer, json_get},
+    bg::ser::json_get,
 };
 use super::Solver;
 
@@ -130,7 +130,24 @@ impl Solver for HighsSolver {
                 format!("Model finished with non-optimal status {:?}", solved_model.status())));
         }
         let solution = solved_model.get_solution();
-        self.set_assignments(assignments, solution.columns());
+
+        let old_lik = assignments.likelihood();
+        if old_lik.is_finite() {
+            let old_assgns = assignments.read_assignments().to_vec();
+            self.set_assignments(assignments, solution.columns());
+            if assignments.likelihood() < old_lik {
+                // Previous solution was better.
+                assignments.set_assignments(&old_assgns);
+            }
+        } else {
+            self.set_assignments(assignments, solution.columns());
+        }
+        Ok(())
+    }
+
+    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
+        json_get!(obj -> solver_type (as_str));
+        self.set_type(solver_type);
         Ok(())
     }
 }
@@ -138,20 +155,5 @@ impl Solver for HighsSolver {
 impl fmt::Display for HighsSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}-{}", HIGHS_NAME, self.solver_type)
-    }
-}
-
-impl JsonSer for HighsSolver {
-    fn save(&self) -> json::JsonValue {
-        json::object!{
-            solver_type: &self.solver_type as &str,
-        }
-    }
-
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> solver_type (as_str));
-        let mut res = Self::default();
-        res.set_type(solver_type);
-        Ok(res)
     }
 }
