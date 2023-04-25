@@ -457,9 +457,14 @@ fn estimate_bg_from_reads(
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
-    let pairings = ReadMateGrouping::from_unsorted_bam(records1.iter(), Some(records1.len()));
+    let insert_distr = if args.input.len() > 1 || args.interleaved {
+        let pairings = ReadMateGrouping::from_unsorted_bam(records1.iter(), Some(records1.len()));
+        InsertDistr::estimate(&pairings, params)?
+    } else {
+        // Single-end input.
+        InsertDistr::undefined()
+    };
 
-    let insert_distr = InsertDistr::estimate(&pairings, params)?;
     let max_insert_size = i64::from(insert_distr.max_size());
     let err_prof = ErrorProfile::estimate(records1.iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
         max_insert_size, params);

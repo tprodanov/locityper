@@ -80,6 +80,7 @@ impl<'a> ReadMateGrouping<'a> {
     pub fn from_mixed_bam(records: &'a [Record]) -> Result<Self, Error> {
         let mut pairs: FnvHashMap<&'a [u8], [Option<&'a Record>; 2]> = FnvHashMap::with_capacity_and_hasher(
             records.len() / 2, Default::default());
+        let mut all_paired = true;
         for record in records {
             // Record must be primary, paired, both mates are mapped.
             // 1 on RHS: record is paired.
@@ -90,7 +91,12 @@ impl<'a> ReadMateGrouping<'a> {
                     return Err(Error::InvalidData(format!("Read {} has several {} mates",
                         String::from_utf8_lossy(old_rec.qname()), if ix == 0 { "first" } else { "second" })));
                 }
+            } else {
+                all_paired &= record.is_paired();
             }
+        }
+        if !pairs.is_empty() && !all_paired {
+            return Err(Error::InvalidData("Input BAM file contains both paired and unpaired records.".to_owned()));
         }
         Ok(Self {
             pairs: pairs.into_values()

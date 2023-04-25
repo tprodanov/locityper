@@ -37,8 +37,17 @@ impl Multinomial {
         Multinomial { lnp }
     }
 
+    /// Creates Multinomial distribution from ln-probabilities (must sum up to one).
+    pub fn from_ln(lnp: &[f64]) -> Self {
+        assert!(Ln::sum(lnp).abs() <= 1e-12,
+            "Cannot construct multinomial distribution ({:?}): Probabilities do not sum up to one", lnp);
+        Multinomial {
+            lnp: lnp.iter().copied().collect(),
+        }
+    }
+
     /// Returns ln-probabilities of all events.
-    pub fn ln_probabilities(&self) -> &[f64] {
+    pub fn ln_probs(&self) -> &[f64] {
         &self.lnp
     }
 

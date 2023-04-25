@@ -179,25 +179,30 @@ impl ErrorProfile {
 
 impl fmt::Debug for ErrorProfile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "ErrorProfile {{ (M+S, X, I): {:?}; D: NBinom(p = {:.6}) }}", self.op_distr, self.no_del_prob)
+        writeln!(f, "ErrorProfile {{ (M, X, I): {:?}; D: NBinom(p = {:.6}) }}", self.op_distr, 1.0 - self.no_del_prob)
     }
 }
 
 impl JsonSer for ErrorProfile {
     fn save(&self) -> json::JsonValue {
+        let err_probs = self.op_distr.ln_probs();
         json::object!{
-            op_distr: self.op_distr.save(),
+            matches: err_probs[0],
+            mismatches: err_probs[1],
+            insertions: err_probs[2],
             no_del_prob: self.no_del_prob,
             min_ln_prob: self.min_ln_prob,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        if !obj.has_key("op_distr") {
-            return Err(Error::JsonLoad(format!(
-                "ErrorProfile: Failed to parse '{}': missing 'op_distr' field!", obj)))?;
-        }
-        let op_distr = Multinomial::load(&obj["op_distr"])?;
+        let matches = obj["matches"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
+            "ErrorProfile: Failed to parse '{}': missing or incorrect 'matches' field!", obj)))?;
+        let mismatches = obj["mismatches"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
+            "ErrorProfile: Failed to parse '{}': missing or incorrect 'mismatches' field!", obj)))?;
+        let insertions = obj["insertions"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
+            "ErrorProfile: Failed to parse '{}': missing or incorrect 'insertions' field!", obj)))?;
+        let op_distr = Multinomial::from_ln(&[matches, mismatches, insertions]);
         let no_del_prob = obj["no_del_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
             "ErrorProfile: Failed to parse '{}': missing or incorrect 'no_del_prob' field!", obj)))?;
         let min_ln_prob = obj["min_ln_prob"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
