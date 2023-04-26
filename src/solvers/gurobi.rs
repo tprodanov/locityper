@@ -44,10 +44,10 @@ fn set_assignments(
     model: &Model,
     assignment_vars: &[Var],
     assignments: &mut ReadAssignment,
-) -> Result<(), Error> {
+) -> Result<f64, Error> {
     let vals = model.get_obj_attr_batch(attr::X, assignment_vars.iter().copied())?;
     let mut i = 0;
-    assignments.try_init_assignments::<_, Error>(|locs| {
+    let lik = assignments.try_init_assignments::<_, Error>(|locs| {
         let j = i + locs.len();
         let new_assgn = vals[i..j].iter().position(|&v| v >= 0.9999 && v <= 1.0001)
             .ok_or_else(|| Error::solver("Gurobi", "Cannot identify read assignment (output is not 0/1)"))?;
@@ -55,7 +55,7 @@ fn set_assignments(
         Ok(new_assgn)
     })?;
     assert_eq!(i, vals.len(), "Numbers of total read assignments do not match");
-    Ok(())
+    Ok(lik)
 }
 
 fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error> {
@@ -132,7 +132,7 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
 
 impl super::Solver for GurobiSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<(), Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<f64, Error> {
         let (mut model, vars) = define_model(assignments)?;
         let mut best_lik = assignments.likelihood();
 
@@ -142,7 +142,7 @@ impl super::Solver for GurobiSolver {
                 model.set_param(parameter::IntParam::OutputFlag, 0)?;
                 model.set_param(parameter::IntParam::Threads, 1)?;
             }
-            model.set_param(parameter::IntParam::Seed, rng.gen_range(0..=i32::MAX))?;
+            model.set_param(parameter::IntParam::Seed, rng.gen::<i32>())?;
             model.optimize()?;
             let status = model.status()?;
             if status != Status::Optimal {
@@ -151,14 +151,13 @@ impl super::Solver for GurobiSolver {
             let ilp_lik = model.get_attr(attr::ObjVal)?;
 
             if ilp_lik > best_lik {
-                set_assignments(&model, &vars, assignments)?;
-                best_lik = assignments.likelihood();
+                best_lik = set_assignments(&model, &vars, assignments)?;
                 if (best_lik - ilp_lik).abs() > 1e-5 {
                     log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, best_lik);
                 }
             }
         }
-        Ok(())
+        Ok(best_lik)
     }
 }
 

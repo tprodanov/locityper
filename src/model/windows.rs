@@ -7,7 +7,7 @@ use crate::{
     ext::vec::F64Ext,
     bg::depth::ReadDepth,
     seq::{
-        self, ContigId, ContigNames,
+        self, ContigId, ContigNames, ContigSet,
         kmers::KmerCounts,
     },
 };
@@ -78,6 +78,7 @@ fn sech_weight(x: f64, c1: f64, c2: f64) -> f64 {
 #[derive(Clone)]
 pub struct ContigWindows {
     contig_id: ContigId,
+    window: u32,
     /// Start of the windows within contig (ignoring boundary).
     start: u32,
     /// End of the windows within contig (ignoring boundary). `end - start` divides window size.
@@ -99,14 +100,14 @@ impl ContigWindows {
     ) -> Self
     {
         let contig_len = seq.len() as u32;
-        let window_size = depth.window_size();
+        let window = depth.window_size();
         let window_padding = depth.window_padding();
-        assert!(contig_len > window_size + 2 * params.boundary_size,
+        assert!(contig_len > window + 2 * params.boundary_size,
             "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
-        let n_windows = (f64::from(contig_len - 2 * params.boundary_size) / f64::from(window_size))
+        let n_windows = (f64::from(contig_len - 2 * params.boundary_size) / f64::from(window))
             .floor() as u32;
-        let sum_len = n_windows * window_size;
+        let sum_len = n_windows * window;
         let start = (contig_len - sum_len) / 2;
         let end = start + sum_len;
         debug_assert!(start >= window_padding && end + window_padding <= contig_len);
@@ -118,15 +119,23 @@ impl ContigWindows {
         let mut window_gcs = Vec::with_capacity(n_windows as usize);
         let mut window_weights = Vec::with_capacity(n_windows as usize);
         for j in 0..n_windows {
-            let padded_start = start + window_size * j - window_padding;
-            let padded_end = start + window_size * (j + 1) + window_padding;
+            let padded_start = start + window * j - window_padding;
+            let padded_end = start + window * (j + 1) + window_padding;
             window_gcs.push(seq::gc_content(&seq[padded_start as usize..padded_end as usize]).round() as u8);
 
             let mean_kmer_freq = F64Ext::mean(&contig_kmer_counts[padded_start.saturating_sub(halfk) as usize
                 ..min(padded_end - halfk, contig_len - k + 1) as usize]);
             window_weights.push(sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer));
         }
-        Self { contig_id, start, end, window_gcs, window_weights }
+        Self { contig_id, window, start, end, window_gcs, window_weights }
+    }
+
+    /// Creates a set of contig windows for each contig.
+    pub fn new_all(set: &ContigSet, depth: &ReadDepth, params: &super::Params) -> Vec<Self> {
+        let contigs = set.contigs();
+        contigs.ids().zip(set.seqs())
+            .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), depth, params))
+            .collect()
     }
 
     pub fn n_windows(&self) -> u32 {
@@ -147,7 +156,7 @@ pub struct MultiContigWindows {
 }
 
 impl MultiContigWindows {
-    pub fn new(window_size: u32, contig_ids: &[ContigId], contig_windows: &[ContigWindows]) -> Self {
+    pub fn new(contig_ids: &[ContigId], contig_windows: &[ContigWindows]) -> Self {
         let n = contig_ids.len();
         let mut by_contig = Vec::<ContigWindows>::with_capacity(n);
         let mut cns = Vec::<u8>::with_capacity(n);
@@ -168,7 +177,7 @@ impl MultiContigWindows {
         }
         Self {
             ln_ploidy: (n as f64).ln(),
-            window: window_size,
+            window: by_contig[0].window,
             by_contig, cns, wshifts,
         }
     }
@@ -211,11 +220,6 @@ impl MultiContigWindows {
     /// Returns iterator over pairs `(contig_id, contig_cn)`.
     pub fn contigs_cns(&self) -> impl Iterator<Item = (ContigId, u8)> + '_ {
         self.ids().zip(self.cns.iter().copied())
-    }
-
-    /// Returns the number of windows corresponding to `i`-th contig.
-    pub(crate) fn get_n_windows(&self, i: usize) -> u32 {
-        self.by_contig[i].n_windows()
     }
 
     /// Returns window shift for the `i`-th contig.

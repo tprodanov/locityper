@@ -4,11 +4,12 @@ use std::{
     cmp::min,
 };
 use rand::{
-    SeedableRng,
-    rngs::SmallRng,
     distributions::{Bernoulli, Distribution},
 };
-use crate::seq::kmers;
+use crate::{
+    seq::kmers,
+    ext::sys as sys_ext,
+};
 
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
@@ -269,14 +270,7 @@ pub trait FastxRead: Send {
     /// Subsamples the reader with the `rate` and optional `seed`.
     fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, seed: Option<u64>) -> io::Result<()> {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate must be within (0, 1).");
-        let rng = if let Some(seed) = seed {
-            if seed.count_ones() < 5 {
-                log::warn!("Seed ({}) is too simple, consider using a more random number.", seed);
-            }
-            SmallRng::seed_from_u64(seed)
-        } else {
-            SmallRng::from_entropy()
-        };
+        let rng = sys_ext::init_rng(seed);
         let mut successes = Bernoulli::new(rate).unwrap().sample_iter(rng);
 
         let mut record = Self::Record::default();

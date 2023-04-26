@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use crate::{
     model::assgn::ReadAssignment,
 };
@@ -26,9 +27,10 @@ pub trait SetParams {
 }
 
 /// General trait for all solvers.
-pub trait Solver : Send + SetParams + CloneSolver {
+pub trait Solver : Send + SetParams + CloneSolver + Display {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
+    /// Returns likelihood of the assignment.
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<f64, Error>;
 }
 
 /// Solver that tries several times and selects the best result.
@@ -43,8 +45,8 @@ pub trait MultiTrySolver {
     fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
 }
 
-impl<T: 'static + MultiTrySolver + SetParams + Send + Clone> Solver for T {
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error> {
+impl<T: 'static + MultiTrySolver + SetParams + Send + Clone + Display> Solver for T {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<f64, Error> {
         let mut last_lik = f64::NEG_INFINITY;
         let mut best_lik = assignments.likelihood();
         let mut best_assgns = assignments.read_assignments().to_vec();
@@ -60,7 +62,7 @@ impl<T: 'static + MultiTrySolver + SetParams + Send + Clone> Solver for T {
         if best_lik > last_lik {
             assignments.set_assignments(&best_assgns);
         }
-        Ok(())
+        Ok(best_lik)
     }
 }
 

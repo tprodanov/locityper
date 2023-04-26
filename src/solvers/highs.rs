@@ -100,7 +100,7 @@ impl HighsSolver {
     }
 
     /// Query read assignments from the ILP solution, and set them to `assignments`.
-    fn set_assignments(&self, assignments: &mut ReadAssignment, vals: &[f64]) {
+    fn set_assignments(&self, assignments: &mut ReadAssignment, vals: &[f64]) -> f64 {
         let mut i = 0;
         assignments.init_assignments(|locs| {
             let j = i + locs.len();
@@ -109,13 +109,13 @@ impl HighsSolver {
             let new_assgn = F64Ext::argmax(&vals[i..j]).0;
             i = j;
             new_assgn
-        });
+        })
     }
 }
 
 impl super::Solver for HighsSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, _rng: &mut super::SolverRng) -> Result<(), Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, _rng: &mut super::SolverRng) -> Result<f64, Error> {
         let problem = self.define_model(assignments);
         let mut model = problem.optimise(Sense::Maximise);
         model.set_option("parallel", "off");
@@ -133,15 +133,16 @@ impl super::Solver for HighsSolver {
         let old_lik = assignments.likelihood();
         if old_lik.is_finite() {
             let old_assgns = assignments.read_assignments().to_vec();
-            self.set_assignments(assignments, solution.columns());
-            if assignments.likelihood() < old_lik {
+            let new_lik = self.set_assignments(assignments, solution.columns());
+            if new_lik < old_lik {
                 // Previous solution was better.
-                assignments.set_assignments(&old_assgns);
+                Ok(assignments.set_assignments(&old_assgns))
+            } else {
+                Ok(new_lik)
             }
         } else {
-            self.set_assignments(assignments, solution.columns());
+            Ok(self.set_assignments(assignments, solution.columns()))
         }
-        Ok(())
     }
 }
 

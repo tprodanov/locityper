@@ -10,7 +10,7 @@ impl VecExt {
     /// Return indices, sorted according to the vector values.
     pub fn argsort<T: PartialOrd>(a: &[T]) -> Vec<usize> {
         let mut ixs: Vec<usize> = (0..a.len()).collect();
-        ixs.sort_by(|&i, &j| a[i].partial_cmp(&a[j]).expect("Error in `argsort`: elements are not comparable"));
+        ixs.sort_unstable_by(|&i, &j| a[i].partial_cmp(&a[j]).expect("Error in `argsort`: elements are not comparable"));
         ixs
     }
 
@@ -25,7 +25,7 @@ impl VecExt {
 
     /// Sort vector/slice using `partial_ord`.
     pub fn sort<T: PartialOrd>(a: &mut [T]) {
-        a.sort_by(|x, y| x.partial_cmp(y).expect("Error in sort: elements are not comparable"));
+        a.sort_unstable_by(|x, y| x.partial_cmp(y).expect("Error in sort: elements are not comparable"));
     }
 
     /// For each moving window of size `w`, calculates sum over elements in `a`.
@@ -141,16 +141,10 @@ impl F64Ext {
 pub struct IterExt;
 
 impl IterExt {
-    /// Sort iterator over f64.
-    pub fn sorted<T: PartialOrd>(it: impl Iterator<Item = T>) -> Vec<T> {
-        let mut v: Vec<T> = it.collect();
-        VecExt::sort(&mut v);
-        v
-    }
-
     /// Consume iterator and find `q`-th quantile in it. Takes *O(n log n)*.
     pub fn quantile(it: impl Iterator<Item = f64>, q: f64) -> f64 {
-        let v = IterExt::sorted(it);
+        let mut v: Vec<f64> = it.collect();
+        VecExt::sort(&mut v);
         F64Ext::quantile_sorted(&v, q)
     }
 

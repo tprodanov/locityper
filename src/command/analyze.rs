@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
+use rand::Rng;
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use fnv::FnvHashSet;
@@ -21,8 +22,10 @@ use crate::{
     model::{
         Params as AssgnParams,
         locs::PrelimAlignments,
+        windows::ContigWindows,
         assgn::CachedDepthDistrs,
     },
+    solvers::scheme::Scheme,
 };
 use htslib::bam::{self, Read as BamRead};
 use super::paths;
@@ -32,13 +35,15 @@ struct Args {
     database: Option<PathBuf>,
     output: Option<PathBuf>,
     subset_loci: FnvHashSet<String>,
+    ploidy: u8,
+    solvers_scheme: Option<PathBuf>,
 
     interleaved: bool,
     threads: u16,
     force: bool,
     bwa: Option<PathBuf>,
     samtools: PathBuf,
-    solvers_scheme: Option<PathBuf>,
+    seed: Option<u64>,
 
     recr_params: recruit::Params,
     assgn_params: AssgnParams,
@@ -51,13 +56,15 @@ impl Default for Args {
             database: None,
             output: None,
             subset_loci: FnvHashSet::default(),
+            ploidy: 2,
+            solvers_scheme: None,
 
             interleaved: false,
             threads: 4,
             force: false,
             bwa: None,
             samtools: PathBuf::from("samtools"),
-            solvers_scheme: None,
+            seed: None,
 
             recr_params: Default::default(),
             assgn_params: Default::default(),
@@ -76,6 +83,7 @@ impl Args {
         if !self.interleaved && n_input == 1 {
             log::warn!("Running in single-end mode.");
         }
+        validate_param!(self.ploidy > 0 && self.ploidy <= 11, "Ploidy ({}) must be within [1, 10]", self.ploidy);
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
@@ -86,6 +94,7 @@ impl Args {
             Some(sys_ext::find_exe(BWA2).or_else(|_| sys_ext::find_exe(BWA1))?)
         };
         self.samtools = sys_ext::find_exe(self.samtools)?;
+
         self.recr_params.validate()?;
         self.assgn_params.validate()?;
         Ok(self)
@@ -130,14 +139,16 @@ fn print_help() {
         "-c, --chunk-size".green(), "INT".yellow(), defaults.recr_params.chunk_size);
 
     println!("\n{}", "Locus genotyping:".bold());
+    println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
+        "-p, --ploidy".green(), "INT".yellow(), defaults.ploidy);
     println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
         {EMPTY}  Please see README for information on the file content.",
-        "-s, --solvers".green(), "FILE".yellow());
+        "-S, --solvers".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
         {EMPTY}  the best alignment [{:.1}].",
-        "-d, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(), Ln::to_log10(defaults.assgn_params.prob_diff));
+        "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(), Ln::to_log10(defaults.assgn_params.prob_diff));
     println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{:.1}].",
-        "-u, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+        "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
         Ln::to_log10(defaults.assgn_params.unmapped_penalty));
     println!("    {:KEY$} {} \n\
         {EMPTY}  Contig windows receive different weight depending on average k-mer\n\
@@ -151,6 +162,9 @@ fn print_help() {
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
+        {EMPTY}  input and product version.",
+        "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  BWA executable. Default: {} or {}.",
         "   --bwa".green(), "EXE".yellow(), BWA2.underline(), BWA1.underline());
     println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
@@ -184,9 +198,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('m') | Long("min-matches") => args.recr_params.min_matches = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
-            Short('s') | Long("solvers") => args.solvers_scheme = Some(parser.value()?.parse()?),
-            Short('d') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
-            Short('u') | Long("unmapped") =>
+            Short('S') | Long("solvers") => args.solvers_scheme = Some(parser.value()?.parse()?),
+            Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
+            Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
             Long("rare-kmer") => {
                 let mut values = parser.values()?;
@@ -201,6 +215,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
+            Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
             Long("bwa") => args.bwa = Some(parser.value()?.parse()?),
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
@@ -396,8 +411,10 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
 fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
+    scheme: &Scheme,
     cached_distrs: &CachedDepthDistrs,
-    args: &Args
+    rng: &mut impl Rng,
+    args: &Args,
 ) -> Result<(), Error>
 {
     log::info!("Analyzing {}", locus.set.tag());
@@ -405,16 +422,16 @@ fn analyze_locus(
 
     log::debug!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let mut bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
-    let locs = PrelimAlignments::from_records(bam_reader.records(), Rc::clone(&locus.set.contigs()),
+    let mut locs = PrelimAlignments::from_records(bam_reader.records(), Rc::clone(&locus.set.contigs()),
         bg_distr.error_profile(), &args.assgn_params, ())?;
-    // let _locs = PrelimAlignments::from_records(
-    //     bam_reader.records().map(Result::unwrap),
-    //     Rc::clone(&contigs), bg.error_profile(),
-    //     min_prob, params.boundary_size, &mut dbg_writer).unwrap();
+    let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
+    let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
 
-    // log::info!("Unmapped penalty: {:.1}", unmapped_penalty);
-    // let paired_locs = locs.identify_locations(bg.insert_size(), unmapped_penalty, prob_diff);
-    Ok(())
+    // Select a new seed for the locus.
+    // Useful when many loci are analyzed, as we cannot use the same seed for all of them.
+    let seed = rng.gen::<u64>();
+    let tuples = vec![]; // PLACEHOLDER.
+    scheme.solve(&all_alns, &contig_windows, &locus.contigs, &cached_distrs, &tuples, &args.assgn_params, seed, args.threads)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -433,8 +450,11 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
     recruit_reads(&loci, &args)?;
 
+    // if let Some(scheme_filename)
+
+    let mut rng = sys_ext::init_rng(args.seed);
     for locus in loci.iter() {
-        analyze_locus(locus, &bg_distr, &cached_distrs, &args)?;
+        analyze_locus(locus, &bg_distr, &cached_distrs, &mut rng, &args)?;
     }
     Ok(())
 }

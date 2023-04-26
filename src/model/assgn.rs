@@ -188,6 +188,14 @@ impl ReadAssignment {
             if nw > 1 {
                 non_trivial_reads.push(rp);
             }
+
+            // TODO: Do not store reads with only one possible alignment.
+            // if nw > 1 {
+            //     assert!(nw <= usize::from(u16::MAX), "Read pair {} has too many alignment locations ({})", rp, nw);
+            //     ix += nw;
+            //     non_trivial_reads.push(rp);
+            // }
+            // read_ixs.push(ix);
         }
 
         Self {
@@ -272,6 +280,11 @@ impl ReadAssignment {
     /// Returns the slice of read assignments.
     pub fn read_assignments(&self) -> &[u16] {
         &self.read_assgn
+    }
+
+    /// Consumes self and returns the vector with read assignments.
+    pub fn take_read_assignments(self) -> Vec<u16> {
+        self.read_assgn
     }
 
     /// Returns the current read-pair alignment given the read pair with index `rp`.
