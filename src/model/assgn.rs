@@ -5,12 +5,8 @@ use std::{
 use once_cell::unsync::OnceCell;
 use rand::Rng;
 use crate::{
-    err::{Error, validate_param},
     seq::ContigNames,
-    math::{
-        Ln,
-        distr::{DiscretePmf, WithQuantile, Mixure, NBinom, Uniform, LinearCache},
-    },
+    math::distr::{DiscretePmf, WithQuantile, Mixure, NBinom, Uniform, LinearCache},
     bg::{self,
         depth::GC_BINS,
     },
@@ -135,43 +131,6 @@ impl CachedDepthDistrs {
     }
 }
 
-/// Read depth model parameters.
-#[derive(Clone, Debug)]
-pub struct Params {
-    /// Boundary size: ignore left- and right-most `boundary_size` bp.
-    pub boundary_size: u32,
-    /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
-    pub prob_diff: f64,
-
-    /// Average k-mer frequency is calculated for a window in question.
-    /// If the value does not exceed `rare_kmer`, the window received a weight = 1.
-    /// If the value equals to `semicommon_kmer`, weight would be 0.5.
-    pub rare_kmer: f64,
-    pub semicommon_kmer: f64,
-}
-
-impl Default for Params {
-    fn default() -> Self {
-        Self {
-            boundary_size: 1000,
-            prob_diff: Ln::from_log10(8.0),
-            rare_kmer: 3.0,
-            semicommon_kmer: 5.0,
-        }
-    }
-}
-
-impl Params {
-    fn validate(&self) -> Result<(), Error> {
-        validate_param!(self.prob_diff >= 0.0, "Probability difference ({:.4}) cannot be negative", self.prob_diff);
-        validate_param!(self.rare_kmer > 1.0, "First k-mer frequency threshold ({:.4}) must be over 1",
-            self.rare_kmer);
-        validate_param!(self.rare_kmer < self.semicommon_kmer,
-            "k-mer frequency thresholds ({:.4}, {:.4}) are non-increasing", self.rare_kmer, self.semicommon_kmer);
-        Ok(())
-    }
-}
-
 /// Read assignment to a vector of contigs and the corresponding likelihoods.
 pub struct ReadAssignment {
     /// Contigs subset, to which reads the reads are assigned,
@@ -211,7 +170,7 @@ impl ReadAssignment {
         contig_windows: MultiContigWindows,
         all_alns: &AllPairAlignments,
         cached_distrs: &CachedDepthDistrs,
-        params: &Params,
+        params: &super::Params,
     ) -> Self
     {
         let mut ix = 0;

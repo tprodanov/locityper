@@ -5,12 +5,8 @@ use std::{
 use htslib::bam::Record;
 use crate::{
     Error,
-    ext::vec::{VecExt, F64Ext},
     seq::cigar::{Operation, Cigar, RAW_OPERATIONS},
-    math::{
-        Ln,
-        distr::{NBinom, Multinomial},
-    },
+    math::distr::{NBinom, Multinomial},
     bg::ser::{JsonSer, json_get},
 };
 
@@ -84,7 +80,6 @@ impl OpCounts<u64> {
             // Probabilities are normalized in Multinomial::new.
             op_distr: Multinomial::new(&[corr_match_prob, corr_ins_prob, corr_del_prob]),
             no_del_prob: 1.0 - corr_del_prob,
-            min_ln_prob: f64::NEG_INFINITY,
         }
     }
 }
@@ -124,8 +119,6 @@ pub struct ErrorProfile {
     /// Probability of success (no deletion) per base-pair in the read sequence.
     /// Used in Neg.Binomial distribution.
     no_del_prob: f64,
-    /// Minimum allowed alignment likelihood (in ln-space).
-    min_ln_prob: f64,
 }
 
 impl ErrorProfile {
@@ -142,30 +135,16 @@ impl ErrorProfile {
         log::info!("Estimating read error profiles");
         let mut n_reads = 0;
         let mut prof_builder = OpCounts::<u64>::default();
-        let mut cigars = Vec::new();
         for record in records {
             if super::read_unpaired_or_proper_pair(record, max_insert_size) {
                 n_reads += 1;
                 // NOTE: Need to check if the record is completely within the region.
                 let cigar = cigar_getter(record);
                 prof_builder += &OpCounts::<u32>::calculate(&cigar);
-                cigars.push(cigar);
             }
         }
         log::info!("    Used {} reads", n_reads);
-        let mut prof = prof_builder.get_profile(params.err_rate_mult);
-
-        let mut probs: Vec<_> = cigars.iter().map(|cigar| prof.ln_prob(cigar)).collect();
-        VecExt::sort(&mut probs);
-        let min_ln_prob = params.err_quantile_mult * F64Ext::quantile_sorted(&probs, params.err_quantile);
-        prof.min_ln_prob = min_ln_prob;
-        log::info!("    Minimum alignment likelihood: 10^({:.2})", Ln::to_log10(min_ln_prob));
-        prof
-    }
-
-    /// Returns minimum allowed alignment ln-probability.
-    pub fn min_aln_ln_prob(&self) -> f64 {
-        self.min_ln_prob
+        prof_builder.get_profile(params.err_rate_mult)
     }
 
     /// Returns alignment ln-probability.
@@ -191,16 +170,14 @@ impl JsonSer for ErrorProfile {
             mismatches: err_probs[1],
             insertions: err_probs[2],
             no_del_prob: self.no_del_prob,
-            min_ln_prob: self.min_ln_prob,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> matches (as_f64), mismatches (as_f64), insertions (as_f64),
-            no_del_prob (as_f64), min_ln_prob (as_f64));
+        json_get!(obj -> matches (as_f64), mismatches (as_f64), insertions (as_f64), no_del_prob (as_f64));
         Ok(Self {
             op_distr: Multinomial::from_ln(&[matches, mismatches, insertions]),
-            no_del_prob, min_ln_prob
+            no_del_prob,
         })
     }
 }

@@ -28,7 +28,7 @@ fn init_logger() {
                 message
             ))
         })
-        .level(log::LevelFilter::Debug)
+        .level(log::LevelFilter::Trace)
         .level_for("highs", log::LevelFilter::Info)
         .chain(std::io::stderr())
         // .chain(fern::log_file("output.log")?)

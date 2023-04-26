@@ -3,9 +3,10 @@ use std::{
     io::{self, Write},
     fmt, mem,
 };
-use htslib::bam::Record;
+use htslib::bam;
 use nohash::IntMap;
 use crate::{
+    Error,
     seq::{
         Interval, ContigId, ContigNames,
         aln::{Strand, ReadEnd, Alignment},
@@ -67,7 +68,7 @@ pub(crate) struct MateAln {
 
 impl MateAln {
     /// Creates a new alignment extension from a htslib `Record`.
-    fn from_record(record: &Record, contigs: Rc<ContigNames>, err_prof: &ErrorProfile) -> Self {
+    fn from_record(record: &bam::Record, contigs: Rc<ContigNames>, err_prof: &ErrorProfile) -> Self {
         let aln = Alignment::from_record(record, contigs);
         Self {
             strand: aln.strand(),
@@ -111,28 +112,26 @@ impl PrelimAlignments {
     /// Creates `PrelimAlignments` from records.
     ///
     /// Only store read pairs where at least one read-end alignment
-    /// (i)  has probability over `min_ln_prob` AND
+    /// (i)  has probability over `unmapped_penalty` AND
     /// (ii) middle of the alignment lies within an inner region of any contig (beyond the boundary region).
-    pub(crate) fn from_records<I, W>(
-        records: I,
+    pub(crate) fn from_records(
+        records: bam::Records<impl bam::Read>,
         contigs: Rc<ContigNames>,
         err_prof: &ErrorProfile,
-        min_ln_prob: f64,
-        boundary_size: u32,
-        mut dbg_writer: W,
-    ) -> io::Result<Self>
-    where I: Iterator<Item = Record>,
-          W: DbgWrite,
+        params: &super::Params,
+        mut dbg_writer: impl DbgWrite,
+    ) -> Result<Self, Error>
     {
         log::info!("[{}] Reading read alignments, alignment ln-probability threshold = {:.1}",
-            contigs.tag(), min_ln_prob);
-        assert!(min_ln_prob.is_finite(), "PrelimAlignments: min_ln_prob must be finite!");
+            contigs.tag(), Ln::to_log10(params.unmapped_penalty));
         let mut alns = IntMap::default();
         let mut curr_hash = 0;
         let mut curr_alns = Vec::new();
         let mut read_fits = false;
+        let max_ends: Vec<_> = contigs.lengths().iter().map(|len| len.saturating_sub(params.boundary_size)).collect();
 
         for record in records {
+            let record = record?;
             if record.is_unmapped() {
                 continue;
             }
@@ -154,10 +153,10 @@ impl PrelimAlignments {
 
             let mate_aln = MateAln::from_record(&record, Rc::clone(&contigs), err_prof);
             dbg_writer.write_mate_aln(if curr_alns.is_empty() { record.qname() } else { &[] }, hash, &mate_aln)?;
-            if !read_fits && mate_aln.ln_prob >= min_ln_prob {
+            if !read_fits && mate_aln.ln_prob > params.unmapped_penalty {
                 let interval = &mate_aln.interval;
                 let middle = interval.middle();
-                read_fits = middle >= boundary_size && middle + boundary_size < contigs.get_len(interval.contig_id());
+                read_fits = middle >= params.boundary_size && middle < max_ends[interval.contig_id().ix()];
             }
             curr_alns.push(mate_aln);
         }
@@ -175,16 +174,7 @@ impl PrelimAlignments {
     }
 
     /// Find paired-end alignment locations for each contig.
-    /// Parameters:
-    /// - unmapped_penalty for a single read mate (ln-space),
-    /// - prob_diff: store alignment locations with ln-probability >= best_prob - prob_diff (ln-space).
-    pub fn identify_locations(
-        &mut self,
-        insert_distr: &InsertDistr,
-        unmapped_penalty: f64,
-        prob_diff: f64
-    ) -> AllPairAlignments {
-        assert!(prob_diff >= 0.0, "Probability difference cannot be negative!");
+    pub fn identify_locations(&mut self, insert_distr: &InsertDistr, params: &super::Params) -> AllPairAlignments {
         let n_reads = self.alns.len();
         let ln_ncontigs = (self.contigs.len() as f64).ln();
         log::info!("Identify paired alignment location and probabilities ({} read pairs)", n_reads);
@@ -193,8 +183,7 @@ impl PrelimAlignments {
             // log::debug!("Read {}", name_hash);
             // Sort alignments first by contig id, then by read-end.
             alns.sort_unstable_by_key(MateAln::sort_key);
-            let pair_alns = identify_pair_alignments(name_hash, alns, insert_distr,
-                unmapped_penalty, prob_diff, ln_ncontigs);
+            let pair_alns = identify_pair_alignments(name_hash, alns, insert_distr, ln_ncontigs, params);
             res.push(pair_alns);
         }
         res
@@ -207,15 +196,14 @@ const BISECT_RIGHT_STEP: usize = 4;
 
 /// For a single read-pair, find all paired-read alignments to the same contig.
 fn extend_pair_alignments(
-        new_alns: &mut Vec<PairAlignment>,
-        buffer: &mut Vec<f64>,
-        alns1: &[MateAln],
-        alns2: &[MateAln],
-        insert_distr: &InsertDistr,
-        unmapped_penalty: f64,
-        prob_diff: f64,
+    new_alns: &mut Vec<PairAlignment>,
+    buffer: &mut Vec<f64>,
+    alns1: &[MateAln],
+    alns2: &[MateAln],
+    insert_distr: &InsertDistr,
+    params: &super::Params,
 ) {
-    let thresh_prob = 2.0 * unmapped_penalty - prob_diff;
+    let thresh_prob = 2.0 * params.unmapped_penalty - params.prob_diff;
     let alns1_empty = alns1.is_empty();
     if !alns1_empty {
         buffer.clear();
@@ -236,15 +224,15 @@ fn extend_pair_alignments(
             }
         }
 
-        let prob = aln1.ln_prob + unmapped_penalty;
-        if prob >= thresh_prob && prob + prob_diff >= best_prob1 {
+        let prob = aln1.ln_prob + params.unmapped_penalty;
+        if prob >= thresh_prob && prob + params.prob_diff >= best_prob1 {
             new_alns.push(PairAlignment::new(TwoIntervals::First(aln1.interval.clone()), prob));
         }
     }
 
     for (j, aln2) in alns2.iter().enumerate() {
-        let prob = aln2.ln_prob + unmapped_penalty;
-        if prob >= thresh_prob && (alns1_empty || prob + prob_diff >= buffer[j]) {
+        let prob = aln2.ln_prob + params.unmapped_penalty;
+        if prob >= thresh_prob && (alns1_empty || prob + params.prob_diff >= buffer[j]) {
             new_alns.push(PairAlignment::new(TwoIntervals::Second(aln2.interval.clone()), prob));
         }
     }
@@ -255,9 +243,8 @@ fn identify_pair_alignments(
     name_hash: u64,
     alns: &[MateAln],
     insert_distr: &InsertDistr,
-    unmapped_penalty: f64,
-    prob_diff: f64,
     ln_ncontigs: f64,
+    params: &super::Params,
 ) -> ReadPairAlignments {
     let mut pair_alns = Vec::new();
     let mut buffer = Vec::with_capacity(16);
@@ -274,14 +261,12 @@ fn identify_pair_alignments(
             bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key1), i, n, BISECT_RIGHT_STEP)
         } else { i };
         let k = bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key2), j, n, BISECT_RIGHT_STEP);
-
-        extend_pair_alignments(&mut pair_alns, &mut buffer, &alns[i..j], &alns[j..k],
-            insert_distr, unmapped_penalty, prob_diff);
+        extend_pair_alignments(&mut pair_alns, &mut buffer, &alns[i..j], &alns[j..k], insert_distr, params);
         i = k;
     }
 
     // Probability of both mates unmapped = unmapped_penalty^2.
-    let mut unmapped_prob = 2.0 * unmapped_penalty;
+    let mut unmapped_prob = 2.0 * params.unmapped_penalty;
     // Normalization factor for all pair-end alignment probabilities.
     // Unmapped probability is multiplied by the number of contigs because there should be an unmapped
     // possibility for every contig, but we do not store them explicitely.

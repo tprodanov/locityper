@@ -29,10 +29,6 @@ pub struct Params {
     pub ins_quantile: f64,
     pub ins_quantile_mult: f64,
 
-    /// Similar as for insert size quantiles, calculate minimal possible alignment probability
-    /// as `<err_quantile_mult> & <err_quantile>` (in log-space).
-    pub err_quantile: f64,
-    pub err_quantile_mult: f64,
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
     pub err_rate_mult: f64,
@@ -42,15 +38,10 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             depth: Default::default(),
-
             min_mapq: 20,
             max_clipping: 0.02,
-
             ins_quantile: 0.99,
             ins_quantile_mult: 3.0,
-
-            err_quantile: 0.01,
-            err_quantile_mult: 2.0,
             err_rate_mult: 1.2,
         }
     }
@@ -61,19 +52,12 @@ impl Params {
     pub fn validate(&self) -> Result<(), Error> {
         validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
-
         validate_param!(0.5 <= self.ins_quantile && self.ins_quantile <= 1.0,
             "Insert size quantile ({:.5}) must be within [0.5, 1]", self.ins_quantile);
         validate_param!(self.ins_quantile_mult >= 1.0,
             "Insert size quantile multiplier ({:.5}) must be at least 1", self.ins_quantile_mult);
-
-        validate_param!(0.0 <= self.err_quantile && self.err_quantile <= 0.5,
-            "Alignment likelihood quantile ({:.5}) must be within [0, 0.5]", self.err_quantile);
-        validate_param!(self.err_quantile_mult >= 1.0,
-            "Alignment likelihood quantile multiplier ({:.5}) must be at least 1", self.err_quantile_mult);
         validate_param!(0.2 <= self.err_rate_mult,
             "Error rate multiplier ({:.5}) should not be too low", self.err_rate_mult);
-
         self.depth.validate()
     }
 }

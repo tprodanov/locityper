@@ -156,11 +156,6 @@ fn print_help(extended: bool) {
             {EMPTY}  the {}-th insert size quantile [{}, {}].",
             "-I, --ins-quantile".green(), "FLOAT FLOAT".yellow(),
             "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.ins_quantile_mult, defaults.params.ins_quantile);
-        println!("    {:KEY$} {}\n\
-            {EMPTY}  Min allowed alignment log-likelihood is calculated as {}\n\
-            {EMPTY}  multiplied by the {}-th log-likelihood quantile [{}, {}].",
-            "-E, --err-quantile".green(), "FLOAT FLOAT".yellow(),
-            "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.err_quantile_mult, defaults.params.err_quantile);
         println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
             {EMPTY}  read mappings missed due to higher error rate [{}].",
             "-m, --err-mult".green(), "FLOAT".yellow(), defaults.params.err_rate_mult);
@@ -183,6 +178,9 @@ fn print_help(extended: bool) {
             {EMPTY}  Must not be smaller than {} [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
             defaults.params.depth.boundary_size);
+        println!("    {:KEY$} {:VAL$}  Ignore reads with alignment likelihood under 10^{} [{:.1}]",
+            "    --min-aln-lik".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            crate::math::Ln::to_log10(defaults.params.depth.min_aln_prob));
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
             "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
@@ -237,10 +235,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('I') | Long("ins-quant") | Long("ins-quantile") => {
                 args.params.ins_quantile_mult = parser.value()?.parse()?;
                 args.params.ins_quantile = parser.value()?.parse()?;
-            }
-            Short('E') | Long("err-quant") | Long("err-quantile") => {
-                args.params.err_quantile_mult = parser.value()?.parse()?;
-                args.params.err_quantile = parser.value()?.parse()?;
             }
             Short('m') | Long("err-mult") | Long("err-multiplier") =>
                 args.params.err_rate_mult = parser.value()?.parse()?,

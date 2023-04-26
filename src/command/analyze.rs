@@ -1,5 +1,6 @@
 use std::{
     io, fs,
+    rc::Rc,
     process::{Command, Stdio},
     cmp::max,
     path::{Path, PathBuf},
@@ -11,13 +12,18 @@ use fnv::FnvHashSet;
 use crate::{
     err::{Error, validate_param},
     seq::{
-        ContigSet,
         recruit, fastx,
+        ContigSet,
     },
     bg::{BgDistr, JsonSer},
     ext::{fmt as fmt_ext, sys as sys_ext},
-    model::assgn::{self, CachedDepthDistrs},
+    model::{
+        Params as AssgnParams,
+        locs::PrelimAlignments,
+        assgn::CachedDepthDistrs,
+    },
 };
+use htslib::bam::{self, Read as BamRead};
 use super::paths;
 
 struct Args {
@@ -33,7 +39,7 @@ struct Args {
     samtools: PathBuf,
 
     recr_params: recruit::Params,
-    assgn_params: assgn::Params,
+    assgn_params: AssgnParams,
 }
 
 impl Default for Args {
@@ -357,6 +363,30 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
     Ok(())
 }
 
+fn analyze_locus(
+    locus: &LocusData,
+    bg_distr: &BgDistr,
+    cached_distrs: &CachedDepthDistrs,
+    args: &Args
+) -> Result<(), Error>
+{
+    log::info!("Analyzing {}", locus.set.tag());
+    map_reads(locus, &args)?;
+
+    log::debug!("    [{}] Calculating read alignment probabilities", locus.set.tag());
+    let mut bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
+    let locs = PrelimAlignments::from_records(bam_reader.records(), Rc::clone(&locus.set.contigs()),
+        bg_distr.error_profile(), &args.assgn_params, ())?;
+    // let _locs = PrelimAlignments::from_records(
+    //     bam_reader.records().map(Result::unwrap),
+    //     Rc::clone(&contigs), bg.error_profile(),
+    //     min_prob, params.boundary_size, &mut dbg_writer).unwrap();
+
+    // log::info!("Unmapped penalty: {:.1}", unmapped_penalty);
+    // let paired_locs = locs.identify_locations(bg.insert_size(), unmapped_penalty, prob_diff);
+    Ok(())
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     let db_dir = args.database.as_ref().unwrap();
@@ -374,8 +404,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     recruit_reads(&loci, &args)?;
 
     for locus in loci.iter() {
-        log::info!("Analyzing {}", locus.set.tag());
-        map_reads(locus, &args)?;
+        analyze_locus(locus, &bg_distr, &cached_distrs, &args)?;
     }
     Ok(())
 }

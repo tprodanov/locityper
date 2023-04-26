@@ -13,7 +13,7 @@ use crate::{
 };
 use super::{
     locs::{TwoIntervals, ReadPairAlignments},
-    assgn::{Params, CachedDepthDistrs, DistrBox},
+    assgn::{CachedDepthDistrs, DistrBox},
 };
 
 /// First window in `MultiContigWindows` represents an unmapped window.
@@ -95,7 +95,7 @@ impl ContigWindows {
         seq: &[u8],
         kmer_counts: &KmerCounts,
         depth: &ReadDepth,
-        params: &Params,
+        params: &super::Params,
     ) -> Self
     {
         let contig_len = seq.len() as u32;

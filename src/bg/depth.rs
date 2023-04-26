@@ -10,7 +10,10 @@ use crate::{
     },
     algo::{bisect, loess::Loess},
     ext::vec::{VecExt, F64Ext},
-    math::distr::{NBinom, WithMoments},
+    math::{
+        Ln,
+        distr::{NBinom, WithMoments},
+    },
     err::{Error, validate_param},
 };
 use super::{
@@ -64,7 +67,6 @@ fn count_reads<'a>(
     params: &ReadDepthParams,
     err_prof: &ErrorProfile,
     max_insert_size: i64,
-    min_aln_ln_prob: f64,
 ) -> Vec<WindowCounts> {
     assert!(interval.len() >= params.window_size + 2 * params.boundary_size, "Input interval is too short!");
     let n_windows = (f64::from(interval.len() - 2 * params.boundary_size) / f64::from(params.window_size))
@@ -84,7 +86,7 @@ fn count_reads<'a>(
             let middle = (aln_start + aln_end) as u32 / 2;
             if start <= middle && middle < end {
                 let cigar = Cigar::infer_ext_cigar(record, ref_seq, interval_start);
-                if err_prof.ln_prob(&cigar) >= min_aln_ln_prob {
+                if err_prof.ln_prob(&cigar) >= params.min_aln_prob {
                     let ix = (middle - start) / params.window_size;
                     windows[ix as usize].add_read(record);
                 }
@@ -245,6 +247,9 @@ pub struct ReadDepthParams {
     /// Default: 1.2.
     pub max_kmer_freq: f64,
 
+    /// Do not use reads with alignment probability < `min_aln_prob` (ln-space) for read depth calculation.
+    pub min_aln_prob: f64,
+
     /// When calculating read depth averages for various GC-content values, use `frac_windows` fraction
     /// across all windows. For example, if frac_windows is 0.1 (default),
     /// use 10% of all observations with the most similar GC-content values.
@@ -274,6 +279,7 @@ impl Default for ReadDepthParams {
             window_padding: 100,
             boundary_size: 1000,
             max_kmer_freq: 1.2,
+            min_aln_prob: Ln::from_log10(-10.0),
 
             frac_windows: 0.1,
             min_tail_obs: 100,
@@ -297,6 +303,8 @@ impl ReadDepthParams {
             "Maximum k-mer frequency ({}) must be at least 1", self.max_kmer_freq);
         validate_param!(0.0 < self.frac_windows && self.frac_windows <= 1.0,
             "Fraction of windows ({}) must be within (0, 1]", self.frac_windows);
+        validate_param!(self.min_aln_prob < 0.0,
+            "Minimum alignment probability ({:.5}) must be under 0.", Ln::to_log10(self.min_aln_prob));
 
         if self.min_tail_obs < 100 {
             log::warn!("Number of windows with extreme GC-content ({}) is too small, consider using a larger value",
@@ -327,7 +335,7 @@ pub struct ReadDepth {
 
 impl ReadDepth {
     /// Estimates read depth from primary alignments, mapped to the `interval` with sequence `ref_seq`.
-    /// Ignore reads with alignment probability < `min_aln_ln_prob` and with insert size > `max_insert_size`.
+    /// Ignore reads with alignment probability < `params.a` and with insert size > `max_insert_size`.
     pub fn estimate<'a>(
         records: impl Iterator<Item = &'a Record>,
         interval: &Interval,
@@ -342,8 +350,7 @@ impl ReadDepth {
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
 
-        let min_aln_ln_prob = err_prof.min_aln_ln_prob();
-        let mut windows = count_reads(records, interval, ref_seq, params, err_prof, max_insert_size, min_aln_ln_prob);
+        let mut windows = count_reads(records, interval, ref_seq, params, err_prof, max_insert_size);
         let gc_contents = filter_windows(&mut windows, interval.start(), &ref_seq, &kmer_counts, params);
         assert!(windows.len() > 0, "ReadDepth: no applicable windows!");
 
