@@ -2,6 +2,7 @@ pub mod contigs;
 pub mod interv;
 pub mod cigar;
 pub mod aln;
+#[cfg(feature = "devel")]
 pub mod compl;
 pub mod kmers;
 pub mod panvcf;

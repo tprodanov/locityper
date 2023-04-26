@@ -32,7 +32,7 @@ smallvec = { version = "1", default-features = false }
 # debug = 1  # Remove later
 
 [features]
-default = ["gurobi", "highs", "devel"]
+default = ["gurobi", "highs"]
 gurobi = ["dep:grb"]
 highs = ["dep:highs"]
 devel = []

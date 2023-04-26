@@ -1,16 +1,12 @@
 use std::{
-    cmp::min,
     rc::Rc,
     io,
 };
 use once_cell::unsync::OnceCell;
 use rand::Rng;
 use crate::{
-    ext::vec::F64Ext,
-    seq::{
-        self,
-        kmers::KmerCounts,
-    },
+    err::{Error, validate_param},
+    seq::ContigNames,
     math::{
         Ln,
         distr::{DiscretePmf, WithQuantile, Mixure, NBinom, Uniform, LinearCache},
@@ -21,7 +17,7 @@ use crate::{
 };
 use super::{
     locs::{AllPairAlignments, TwoIntervals},
-    windows::{UNMAPPED_WINDOW, INIT_WSHIFT, ReadWindows, ContigWindows},
+    windows::{UNMAPPED_WINDOW, ReadWindows, MultiContigWindows},
 };
 
 /// Fake proxy distribution, that has 1.0 probability for all values.
@@ -75,7 +71,7 @@ const UNIFSIZE_MULT: f64 = 2.0;
 /// Store read depth probabilities for values between 0 and 255 for each GC content.
 const CACHE_SIZE: usize = 256;
 
-type DistrBox = Box<dyn DiscretePmf>;
+pub(super) type DistrBox = Box<dyn DiscretePmf>;
 
 /// Store cached depth distbrutions.
 pub struct CachedDepthDistrs {
@@ -110,8 +106,8 @@ impl CachedDepthDistrs {
     }
 
     /// Returns read depth distribution in regular windows at GC-content and contig CN.
-    pub fn regular_distr(&self, gc_content: usize) -> &Rc<LinearCache<NBinom>> {
-        self.cached[gc_content].get_or_init(||
+    pub fn regular_distr(&self, gc_content: u8) -> &Rc<LinearCache<NBinom>> {
+        self.cached[usize::from(gc_content)].get_or_init(||
             Rc::new(self.bg_depth
                 .depth_distribution(gc_content)
                 .mul(self.mul_coef)
@@ -119,14 +115,14 @@ impl CachedDepthDistrs {
     }
 
     /// Returns depth bound for the given GC-content and contig CN (see `DEPTH_BOUND_QUANTILE`).
-    pub fn uniform_size(&self, gc_content: usize) -> u32 {
-        *self.unif_size[gc_content].get_or_init(||
+    pub fn uniform_size(&self, gc_content: u8) -> u32 {
+        *self.unif_size[usize::from(gc_content)].get_or_init(||
             (UNIFSIZE_MULT * self.regular_distr(gc_content).quantile(UNIFSIZE_QUANTILE)) as u32)
     }
 
     /// Returns a box to either `RepeatedDistr`, `NBinom`, `Uniform`, or `Mixure<NBinom, Uniform>`,
     /// depending on the CN and `nbinom_weight`.
-    pub fn get_distribution(&self, gc_content: usize, cn: u8, nbinom_weight: f64) -> DistrBox {
+    pub fn get_distribution(&self, gc_content: u8, cn: u8, nbinom_weight: f64) -> DistrBox {
         if nbinom_weight < 0.00001 {
             RepeatedDistr::new_box(Uniform::new(0, self.uniform_size(gc_content)), cn)
         } else if nbinom_weight > 0.99999 {
@@ -137,86 +133,6 @@ impl CachedDepthDistrs {
             RepeatedDistr::new_box(mixure, cn)
         }
     }
-}
-
-/// Calculates weight of a positive value x.
-/// If x <= c1, returns 1.
-/// If x = c2, returns 0.5 (returns ln 0.5).
-/// For values between c1 and infinity, the weight is distributed according to a sech function.
-/// ```
-/// f(x) = { 1                              if x in [0, c1].
-///                x - c1
-///        { sech ------- * ln(2 + sqrt3)   if x > c1.
-///               c2 - c1
-/// ```
-fn sech_weight(x: f64, c1: f64, c2: f64) -> f64 {
-    if x <= c1 {
-        return 1.0;
-    }
-    // ln(2 + sqrt(3)).
-    const LN2_SQRT3: f64 = 1.31695789692481;
-    let t = (x - c1) / (c2 - c1) * LN2_SQRT3;
-    let expt = t.exp();
-    2.0 * expt / (expt * expt + 1.0)
-}
-
-/// For each window in the contig group, identifies appropriate read depth distribution.
-fn identify_depth_distributions(
-    windows: &ContigWindows,
-    cached_distrs: &CachedDepthDistrs,
-    ref_seqs: &[Vec<u8>],
-    kmer_counts: &KmerCounts,
-    params: &Params,
-) -> Vec<DistrBox>
-{
-    let k = kmer_counts.k();
-    assert!(k % 2 == 1, "k-mer ({}) size must be odd!", k);
-    let halfk = k / 2;
-    let mut distrs: Vec<DistrBox> = Vec::with_capacity(windows.n_windows() as usize);
-    const _: () = assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
-    distrs.push(Box::new(cached_distrs.unmapped_distr()));
-
-    // Percentage of unique k-mers: good, adequate, bad.
-    let mut window_counts: (u16, u16, u16) = (0, 0, 0);
-    let window_size = cached_distrs.bg_depth.window_size();
-    debug_assert_eq!(window_size, windows.window_size());
-    let gc_padding = cached_distrs.bg_depth.window_padding();
-
-    for (i, (contig_id, contig_cn)) in windows.contigs_cns().enumerate() {
-        let curr_kmer_counts = &kmer_counts.get(contig_id);
-        let n_windows = windows.get_n_windows(i);
-        let contig_len = windows.contig_names().get_len(contig_id);
-        let ref_seq = &ref_seqs[contig_id.ix()];
-        assert_eq!(contig_len as usize, ref_seq.len(), "Contig length and reference length do not match!");
-
-        for j in 0..n_windows {
-            // TODO: Add WINDOW PADDING.
-            let start = window_size * j;
-            let end = start + window_size;
-            let mean_kmer_freq = if min(contig_len, end) - start >= k {
-                let start_ix = start.saturating_sub(halfk) as usize;
-                let end_ix = min(end - halfk, contig_len - k + 1) as usize;
-                F64Ext::mean(&curr_kmer_counts[start_ix..end_ix])
-            } else { 0.0 };
-            let weight = sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer);
-            // log::debug!("{}:{}  ({}-{})   {:.4}  -> {:.4}", contig_id, j, start, end, mean_kmer_freq, weight);
-            if mean_kmer_freq <= params.rare_kmer {
-                window_counts.0 += 1;
-            } else if mean_kmer_freq <= params.semicommon_kmer {
-                window_counts.1 += 1;
-            } else {
-                window_counts.2 += 1;
-            }
-            let gc_content = seq::gc_content(
-                &ref_seq[start.saturating_sub(gc_padding) as usize..min(end + gc_padding, contig_len) as usize])
-                .round() as usize;
-            distrs.push(cached_distrs.get_distribution(gc_content, contig_cn, weight));
-        }
-    }
-    log::debug!("    There are {} windows.   k-mer uniqueness: {} good, {} adequate, {} bad",
-        windows.n_windows() - 1, window_counts.0, window_counts.1, window_counts.2);
-    debug_assert_eq!(windows.n_windows() as usize, distrs.len());
-    distrs
 }
 
 /// Read depth model parameters.
@@ -245,17 +161,28 @@ impl Default for Params {
     }
 }
 
+impl Params {
+    fn validate(&self) -> Result<(), Error> {
+        validate_param!(self.prob_diff >= 0.0, "Probability difference ({:.4}) cannot be negative", self.prob_diff);
+        validate_param!(self.rare_kmer > 1.0, "First k-mer frequency threshold ({:.4}) must be over 1",
+            self.rare_kmer);
+        validate_param!(self.rare_kmer < self.semicommon_kmer,
+            "k-mer frequency thresholds ({:.4}, {:.4}) are non-increasing", self.rare_kmer, self.semicommon_kmer);
+        Ok(())
+    }
+}
+
 /// Read assignment to a vector of contigs and the corresponding likelihoods.
 pub struct ReadAssignment {
     /// Contigs subset, to which reads the reads are assigned,
     /// plus the number of windows (and shifts) at each window.
-    contig_windows: ContigWindows,
+    contig_windows: MultiContigWindows,
 
     /// Current read depth at each window (concatenated across different contigs).
-    /// Length: `contig_windows.n_windows()`.
+    /// Length: `contig_windows.total_windows()`.
     depth: Vec<u32>,
 
-    /// Read depth distribution at each window (length: `contig_windows.n_windows()`).
+    /// Read depth distribution at each window (length: `contig_windows.total_windows()`).
     depth_distrs: Vec<DistrBox>,
 
     /// A vector of possible read alignments to the vector of contigs (length: n_reads).
@@ -277,29 +204,16 @@ pub struct ReadAssignment {
     likelihood: f64,
 }
 
-impl Params {
-    fn check(&self) {
-        assert!(self.prob_diff >= 0.0, "Probability difference ({:.4}) cannot be negative!", self.prob_diff);
-        assert!(self.rare_kmer < self.semicommon_kmer, "k-mer frequency thresholds ({:.4}, {:.4}) are non-increasing",
-            self.rare_kmer, self.semicommon_kmer);
-    }
-}
-
 impl ReadAssignment {
     /// Creates an instance that stores read assignments to given contigs.
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
-        contig_windows: ContigWindows,
+        contig_windows: MultiContigWindows,
         all_alns: &AllPairAlignments,
         cached_distrs: &CachedDepthDistrs,
-        all_ref_seqs: &[Vec<u8>],
-        kmer_counts: &KmerCounts,
         params: &Params,
-    ) -> Self {
-        params.check();
-        let depth_distrs = identify_depth_distributions(&contig_windows, cached_distrs, all_ref_seqs, kmer_counts,
-            params);
-
+    ) -> Self
+    {
         let mut ix = 0;
         let mut read_windows = Vec::new();
         let mut read_ixs = vec![ix];
@@ -318,10 +232,11 @@ impl ReadAssignment {
         }
 
         Self {
-            depth: vec![0; contig_windows.n_windows() as usize],
+            depth: vec![0; contig_windows.total_windows() as usize],
             read_assgn: vec![0; read_ixs.len() - 1],
             likelihood: f64::NEG_INFINITY,
-            contig_windows, depth_distrs, read_windows, read_ixs, non_trivial_reads,
+            depth_distrs: contig_windows.get_distributions(cached_distrs),
+            contig_windows, read_windows, read_ixs, non_trivial_reads,
         }
     }
 
@@ -555,7 +470,7 @@ impl ReadAssignment {
     }
 
     /// Returns all information about windows.
-    pub fn contig_windows(&self) -> &ContigWindows {
+    pub fn contig_windows(&self) -> &MultiContigWindows {
         &self.contig_windows
     }
 
@@ -567,13 +482,12 @@ impl ReadAssignment {
     /// Write read depth to a CSV file in the following format (tab-separated):
     /// General lines: `prefix  contig  window  depth  depth_lik`.
     /// Last line:     `prefix  NA      read_lik  depth_lik  sum_lik`.
-    pub fn write_depth<W: io::Write>(&self, prefix: &str, f: &mut W) -> io::Result<()> {
+    pub fn write_depth<W: io::Write>(&self, prefix: &str, contigs: &ContigNames, f: &mut W) -> io::Result<()> {
         let unmapped_reads = self.depth[UNMAPPED_WINDOW as usize];
         let unmapped_prob = self.depth_distrs[UNMAPPED_WINDOW as usize].ln_pmf(unmapped_reads);
         let mut sum_depth_lik = unmapped_prob;
         writeln!(f, "{}\tunmapped\tNA\t{}\t{:.3}", prefix, unmapped_reads, unmapped_prob)?;
 
-        let contigs = self.contig_windows.contig_names();
         for (i, contig_id) in self.contig_windows.ids().enumerate() {
             let curr_prefix = format!("{}\t{}\t", prefix, contigs.get_name(contig_id));
             let wshift = self.contig_windows.get_wshift(i) as usize;

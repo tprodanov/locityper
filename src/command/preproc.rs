@@ -181,8 +181,8 @@ fn print_help(extended: bool) {
             "    --window-padd".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_padding);
         println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region.\n\
             {EMPTY}  Must not be smaller than {} [{}].",
-            "    --edge-padd".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
-            defaults.params.depth.edge_padding);
+            "    --boundary".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
+            defaults.params.depth.boundary_size);
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
             "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
@@ -255,7 +255,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Short('w') | Long("window") => args.params.depth.window_size = parser.value()?.parse()?,
             Long("window-padd") | Long("window-padding") => args.params.depth.window_padding = parser.value()?.parse()?,
-            Long("edge-padd") | Long("edge-padding") => args.params.depth.edge_padding = parser.value()?.parse()?,
+            Long("boundary") => args.params.depth.boundary_size = parser.value()?.parse()?,
             Long("kmer-freq") | Long("kmer-frequency") => args.params.depth.max_kmer_freq = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
                 args.params.depth.frac_windows = parser.value()?.parse()?,

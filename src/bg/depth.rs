@@ -55,8 +55,8 @@ impl WindowCounts {
     }
 }
 
-/// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.edge_padding`
-/// and ~ `interval.end() - params.edge_padding`.
+/// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.boundary_size`
+/// and ~ `interval.end() - params.boundary_size`.
 fn count_reads<'a>(
     records: impl Iterator<Item = &'a Record>,
     interval: &Interval,
@@ -66,8 +66,8 @@ fn count_reads<'a>(
     max_insert_size: i64,
     min_aln_ln_prob: f64,
 ) -> Vec<WindowCounts> {
-    assert!(interval.len() >= params.window_size + 2 * params.edge_padding, "Input interval is too short!");
-    let n_windows = (f64::from(interval.len() - 2 * params.edge_padding) / f64::from(params.window_size))
+    assert!(interval.len() >= params.window_size + 2 * params.boundary_size, "Input interval is too short!");
+    let n_windows = (f64::from(interval.len() - 2 * params.boundary_size) / f64::from(params.window_size))
         .floor() as u32;
     let sum_len = n_windows * params.window_size;
     let interval_start = interval.start();
@@ -237,9 +237,9 @@ pub struct ReadDepthParams {
     /// Default: 100.
     pub window_padding: u32,
 
-    /// Ignore left-most and right-most `edge_padding` base-pairs. Must not be smaller than `window_padding`.
+    /// Ignore left-most and right-most `boundary_size` base-pairs. Must not be smaller than `window_padding`.
     /// Default: 1000.
-    pub edge_padding: u32,
+    pub boundary_size: u32,
 
     /// Filter windows with too many frequent k-mers (average frequency must be at most this value).
     /// Default: 1.2.
@@ -272,7 +272,7 @@ impl Default for ReadDepthParams {
             ploidy: 2,
             window_size: 100,
             window_padding: 100,
-            edge_padding: 1000,
+            boundary_size: 1000,
             max_kmer_freq: 1.2,
 
             frac_windows: 0.1,
@@ -286,11 +286,11 @@ impl ReadDepthParams {
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
         validate_param!(self.ploidy > 0, "Ploidy cannot be zero");
-        validate_param!(self.edge_padding >= self.window_padding,
-            "Edge padding ({}) must not be smaller than window padding ({})", self.edge_padding, self.window_padding);
-        if self.edge_padding < self.window_size {
+        validate_param!(self.boundary_size >= self.window_padding,
+            "Edge padding ({}) must not be smaller than window padding ({})", self.boundary_size, self.window_padding);
+        if self.boundary_size < self.window_size {
             log::warn!("Edge padding ({}) is smaller than the window size ({}), consider using a larger value",
-                self.edge_padding, self.window_size);
+                self.boundary_size, self.window_size);
         }
 
         validate_param!(self.max_kmer_freq >= 1.0,
@@ -376,13 +376,14 @@ impl ReadDepth {
         self.window_size
     }
 
+    /// Returns window padding - added to both sides of the window to calculate GC-content and k-mer frequencies.
     pub fn window_padding(&self) -> u32 {
         self.window_padding
     }
 
     /// Returns read depth distribution at GC-content `gc_content` (between 0 and 100).
-    pub fn depth_distribution(&self, gc_content: usize) -> &NBinom {
-        &self.distributions[gc_content]
+    pub fn depth_distribution(&self, gc_content: u8) -> &NBinom {
+        &self.distributions[usize::from(gc_content)]
     }
 
     /// Returns iterator over read-depth distributions at GC-contents between 0 and 100.

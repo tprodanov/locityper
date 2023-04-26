@@ -36,8 +36,7 @@ impl HighsSolver {
     }
 
     fn define_model(&self, assignments: &mut ReadAssignment) -> RowProblem {
-        let contig_windows = assignments.contig_windows();
-        let total_windows = contig_windows.n_windows() as usize;
+        let total_windows = assignments.contig_windows().total_windows() as usize;
         // Number of trivial and non-trivial reads mapped to a window.
         let mut window_depth = vec![(0_u32, 0_u32); total_windows];
         let mut window_depth_constrs: Vec<Vec<(Col, f64)>> = vec![Vec::new(); total_windows];

@@ -59,13 +59,12 @@ fn set_assignments(
 }
 
 fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error> {
-    let contig_windows = assignments.contig_windows();
     let env = Env::new("")?;
-    let mut model = Model::with_env(&contig_windows.ids_str(), &env)?;
+    let mut model = Model::with_env("", &env)?;
     model.set_param(parameter::IntParam::OutputFlag, 0)?;
     model.set_param(parameter::IntParam::Threads, 1)?;
 
-    let total_windows = contig_windows.n_windows() as usize;
+    let total_windows = assignments.contig_windows().total_windows() as usize;
     let mut window_depth = vec![(0_u32, 0_u32); total_windows];
     let mut window_depth_constrs = vec![LinExpr::new(); total_windows];
     let mut objective = LinExpr::new();

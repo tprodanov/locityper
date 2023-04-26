@@ -54,7 +54,7 @@ impl Default for Args {
             loci: Vec::new(),
             bed_files: Vec::new(),
 
-            ref_name: None,
+            ref_name: Some("REF".to_owned()),
             max_expansion: 4000,
             moving_window: 400,
             jellyfish: PathBuf::from("jellyfish"),
@@ -71,7 +71,12 @@ impl Args {
         validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
             "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
 
-            self.jellyfish = sys_ext::find_exe(self.jellyfish)?;
+        match self.ref_name.as_ref().map(|s| s as &str) {
+            Some("NONE") | Some("None") | Some("none") => self.ref_name = None,
+            _ => {},
+        }
+
+        self.jellyfish = sys_ext::find_exe(self.jellyfish)?;
         self.bwa = self.bwa.into_iter().filter_map(|path| sys_ext::find_exe(path).ok()).collect();
         validate_param!(!self.bwa.is_empty(), "No BWA executables found");
         // Make window size odd.
@@ -88,7 +93,7 @@ fn print_help() {
     let defaults = Args::default();
     println!("{}", "Adds complex locus/loci to the database.".yellow());
 
-    println!("\n{} {} add -d db -r reference.fa -v vars.vcf.gz -l/-L loci [arguments]",
+    println!("\n{} {} add -d db -r ref.fa -v vars.vcf.gz -l/-L loci [arguments]",
         "Usage:".bold(), super::PKG_NAME);
 
     println!("\n{}", "Input arguments:".bold());
@@ -110,9 +115,9 @@ fn print_help() {
         "-L, --loci-bed".green(), "FILE".yellow());
 
     println!("\n{}", "Optional parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Reference genome name. If provided, add reference locus sequence\n\
-        {EMPTY}  to the list of potential haplotypes.",
-        "-g, --genome".green(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Reference genome name [{}].\n\
+        {EMPTY}  Use `NONE` to ignore reference locus sequence.",
+        "-g, --genome".green(), "STR".yellow(), defaults.ref_name.as_ref().unwrap());
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
         "-e, --expand".green(), "INT".yellow(), "INT".yellow(), defaults.max_expansion);
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
