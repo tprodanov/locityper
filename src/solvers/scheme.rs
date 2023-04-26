@@ -8,6 +8,7 @@ use crate::{
 use super::Solver;
 
 /// One element of the scheme: a solver and ratio of haplotypes, on which it is executed.
+#[derive(Clone)]
 struct Element {
     solver: Box<dyn Solver>,
     ratio: f64,
@@ -40,7 +41,7 @@ impl Element {
                 } else {
                     panic!("Gurobi feature is disabled. Consider recompiling with `gurobi` feature enabled.");
                 },
-            _ => panic!("Unknown solver name '{}'", solver_name),
+            _ => panic!("Unknown solver '{}'", solver_name),
         };
 
         let ratio = if obj.has_key("ratio") {
@@ -59,6 +60,7 @@ impl Element {
 /// Solver scheme.
 /// Consists of multiple solvers, each executed on (possibly) smaller subset of haplotypes.
 /// First element has `Subset::All`.
+#[derive(Clone)]
 pub struct Scheme(Vec<Element>);
 
 impl Default for Scheme {

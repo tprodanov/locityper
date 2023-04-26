@@ -313,6 +313,7 @@ impl ReadDepthParams {
 }
 
 /// Background read depth distributions for each GC-content value.
+#[derive(Clone)]
 pub struct ReadDepth {
     /// Read depth is calculated per windows with this size.
     window_size: u32,

@@ -78,9 +78,9 @@ const CACHE_SIZE: usize = 256;
 type DistrBox = Box<dyn DiscretePmf>;
 
 /// Store cached depth distbrutions.
-pub struct CachedDepthDistrs<'a> {
+pub struct CachedDepthDistrs {
     /// Background read depth distribution.
-    bg_depth: &'a bg::depth::ReadDepth,
+    bg_depth: bg::depth::ReadDepth,
     /// Multiplication coefficient: assume that read depth is `mul_coef` * bg read depth.
     mul_coef: f64,
 
@@ -90,15 +90,15 @@ pub struct CachedDepthDistrs<'a> {
     unif_size: [OnceCell<u32>; GC_BINS],
 }
 
-impl<'a> CachedDepthDistrs<'a> {
+impl CachedDepthDistrs {
     /// Create a set of cached depth distributions.
     /// Assume that there are `mul_coef` as much reads, as in the background distribution.
-    pub fn new(bg_depth: &'a bg::depth::ReadDepth, is_paired_end: bool) -> Self {
+    pub fn new(bg_distr: &bg::BgDistr) -> Self {
         const NBINOM_CELL: OnceCell<Rc<LinearCache<NBinom>>> = OnceCell::new();
         const U32_CELL: OnceCell<u32> = OnceCell::new();
         Self {
-            bg_depth,
-            mul_coef: if is_paired_end { 2.0 } else { 1.0 },
+            bg_depth: bg_distr.depth().clone(),
+            mul_coef: if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 },
             cached: [NBINOM_CELL; GC_BINS],
             unif_size: [U32_CELL; GC_BINS],
         }
@@ -163,7 +163,7 @@ fn sech_weight(x: f64, c1: f64, c2: f64) -> f64 {
 /// For each window in the contig group, identifies appropriate read depth distribution.
 fn identify_depth_distributions(
     windows: &ContigWindows,
-    cached_distrs: &CachedDepthDistrs<'_>,
+    cached_distrs: &CachedDepthDistrs,
     ref_seqs: &[Vec<u8>],
     kmer_counts: &KmerCounts,
     params: &Params,
@@ -173,14 +173,15 @@ fn identify_depth_distributions(
     assert!(k % 2 == 1, "k-mer ({}) size must be odd!", k);
     let halfk = k / 2;
     let mut distrs: Vec<DistrBox> = Vec::with_capacity(windows.n_windows() as usize);
-    debug_assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
+    const _: () = assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
     distrs.push(Box::new(cached_distrs.unmapped_distr()));
 
     // Percentage of unique k-mers: good, adequate, bad.
     let mut window_counts: (u16, u16, u16) = (0, 0, 0);
     let window_size = cached_distrs.bg_depth.window_size();
-    assert_eq!(window_size, windows.window_size());
+    debug_assert_eq!(window_size, windows.window_size());
     let gc_padding = cached_distrs.bg_depth.window_padding();
+
     for (i, (contig_id, contig_cn)) in windows.contigs_cns().enumerate() {
         let curr_kmer_counts = &kmer_counts.get(contig_id);
         let n_windows = windows.get_n_windows(i);
@@ -189,6 +190,7 @@ fn identify_depth_distributions(
         assert_eq!(contig_len as usize, ref_seq.len(), "Contig length and reference length do not match!");
 
         for j in 0..n_windows {
+            // TODO: Add WINDOW PADDING.
             let start = window_size * j;
             let end = start + window_size;
             let mean_kmer_freq = if min(contig_len, end) - start >= k {
@@ -226,7 +228,7 @@ pub struct Params {
     pub prob_diff: f64,
 
     /// Average k-mer frequency is calculated for a window in question.
-    /// If the value is less-or-equal than `rare_kmer`, the window received a weight = 1.
+    /// If the value does not exceed `rare_kmer`, the window received a weight = 1.
     /// If the value equals to `semicommon_kmer`, weight would be 0.5.
     pub rare_kmer: f64,
     pub semicommon_kmer: f64,
@@ -289,7 +291,7 @@ impl ReadAssignment {
     pub fn new(
         contig_windows: ContigWindows,
         all_alns: &AllPairAlignments,
-        cached_distrs: &CachedDepthDistrs<'_>,
+        cached_distrs: &CachedDepthDistrs,
         all_ref_seqs: &[Vec<u8>],
         kmer_counts: &KmerCounts,
         params: &Params,

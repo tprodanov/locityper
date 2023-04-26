@@ -20,13 +20,15 @@ use crate::Error;
 /// For that reason we use `SmallRng`, and not `impl rand::Rng`.
 type SolverRng = rand::rngs::SmallRng;
 
-/// General trait for all solvers.
-pub trait Solver : Send {
-    /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
-
+pub trait SetParams {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error>;
+}
+
+/// General trait for all solvers.
+pub trait Solver : Send + SetParams + CloneSolver {
+    /// Distribute reads between several haplotypes in a best way.
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
 }
 
 /// Solver that tries several times and selects the best result.
@@ -39,12 +41,9 @@ pub trait MultiTrySolver {
 
     /// Try once.
     fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
-
-    /// Sets solver parameters.
-    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error>;
 }
 
-impl<T: MultiTrySolver + Send> Solver for T {
+impl<T: 'static + MultiTrySolver + SetParams + Send + Clone> Solver for T {
     fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error> {
         let mut last_lik = f64::NEG_INFINITY;
         let mut best_lik = assignments.likelihood();
@@ -63,8 +62,21 @@ impl<T: MultiTrySolver + Send> Solver for T {
         }
         Ok(())
     }
+}
 
-    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        self.set_params(obj)
+/// We cannot ask `Solver` to inherit `Clone`, because then the trait is not object-safe.
+pub trait CloneSolver {
+    fn clone_box(&self) -> Box<dyn Solver>;
+}
+
+impl<T: 'static + Solver + Clone> CloneSolver for T {
+    fn clone_box(&self) -> Box<dyn Solver> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn Solver> {
+    fn clone(&self) -> Box<dyn Solver> {
+        self.clone_box()
     }
 }

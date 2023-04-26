@@ -144,7 +144,9 @@ impl super::Solver for HighsSolver {
         }
         Ok(())
     }
+}
 
+impl super::SetParams for HighsSolver {
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
         json_get!(obj -> solver_type (as_str));
         self.set_type(solver_type);

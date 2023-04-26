@@ -87,7 +87,9 @@ impl MultiTrySolver for GreedySolver {
         }
         Ok(())
     }
+}
 
+impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
         json_get!(obj -> tries (as_u16), sample_size (as_usize), plato_size (as_usize));
@@ -202,7 +204,9 @@ impl MultiTrySolver for SimAnneal {
         }
         Ok(())
     }
+}
 
+impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
         json_get!(obj -> tries (as_u16), cooling_temp (as_f64), init_prob (as_f64), plato_size (as_usize));

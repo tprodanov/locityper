@@ -16,6 +16,7 @@ use crate::{
     },
     bg::{BgDistr, JsonSer},
     ext::{fmt as fmt_ext, sys as sys_ext},
+    model::assgn::{self, CachedDepthDistrs},
 };
 use super::paths;
 
@@ -28,10 +29,11 @@ struct Args {
     interleaved: bool,
     threads: u16,
     force: bool,
-    bwa: PathBuf,
+    bwa: Option<PathBuf>,
     samtools: PathBuf,
 
-    params: recruit::Params,
+    recr_params: recruit::Params,
+    assgn_params: assgn::Params,
 }
 
 impl Default for Args {
@@ -45,10 +47,11 @@ impl Default for Args {
             interleaved: false,
             threads: 4,
             force: false,
-            bwa: PathBuf::new(),
+            bwa: None,
             samtools: PathBuf::from("samtools"),
 
-            params: Default::default(),
+            recr_params: Default::default(),
+            assgn_params: Default::default(),
         }
     }
 }
@@ -68,11 +71,11 @@ impl Args {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
-        if self.bwa.as_os_str().is_empty() {
-            self.bwa = sys_ext::find_exe(BWA2).or_else(|_| sys_ext::find_exe(BWA1))?;
+        self.bwa = if let Some(bwa) = self.bwa {
+            Some(sys_ext::find_exe(bwa)?)
         } else {
-            self.bwa = sys_ext::find_exe(self.bwa)?;
-        }
+            Some(sys_ext::find_exe(BWA2).or_else(|_| sys_ext::find_exe(BWA1))?)
+        };
         self.samtools = sys_ext::find_exe(self.samtools)?;
         Ok(self)
     }
@@ -107,13 +110,19 @@ fn print_help() {
 
     println!("\n{}", "Read recruitment:".bold());
     println!("    {:KEY$} {:VAL$}  k-mer size (no larger than 16) [{}].",
-        "-k, --recr-kmer".green(), "INT".yellow(), defaults.params.minimizer_k);
+        "-k, --recr-kmer".green(), "INT".yellow(), defaults.recr_params.minimizer_k);
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
-        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.params.minimizer_w);
+        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.minimizer_w);
     println!("    {:KEY$} {:VAL$}  Recruit single-/paired-reads with at least {} k-mers matches [{}].",
-        "-m, --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_matches);
+        "-m, --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.min_matches);
     println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].",
-        "-c, --chunk-size".green(), "INT".yellow(), defaults.params.chunk_size);
+        "-c, --chunk-size".green(), "INT".yellow(), defaults.recr_params.chunk_size);
+
+    println!("\n{}", "Locus genotyping:".bold());
+    println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
+        {EMPTY}  Please see README for information on the file content.",
+        "-s, --solvers".green(), "FILE".yellow());
+    // println!("    {:KEY$} {:VAL$}  Probability difference")
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -148,15 +157,15 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
 
-            Short('k') | Long("recr-kmer") => args.params.minimizer_k = parser.value()?.parse()?,
-            Short('w') | Long("recr-window") => args.params.minimizer_w = parser.value()?.parse()?,
-            Short('m') | Long("min-matches") => args.params.min_matches = parser.value()?.parse()?,
-            Short('c') | Long("chunk") | Long("chunk-size") => args.params.chunk_size = parser.value()?.parse()?,
+            Short('k') | Long("recr-kmer") => args.recr_params.minimizer_k = parser.value()?.parse()?,
+            Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
+            Short('m') | Long("min-matches") => args.recr_params.min_matches = parser.value()?.parse()?,
+            Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
-            Long("bwa") => args.bwa = parser.value()?.parse()?,
+            Long("bwa") => args.bwa = Some(parser.value()?.parse()?),
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -284,7 +293,7 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
         log::info!("Skipping read recruitment to {} loci", loci.len() - filt_loci.len());
     }
 
-    let targets = recruit::Targets::new(filt_loci.iter().map(|locus| &locus.set), &args.params);
+    let targets = recruit::Targets::new(filt_loci.iter().map(|locus| &locus.set), &args.recr_params);
     let writers: Vec<_> = filt_loci.iter()
         .map(|locus| sys_ext::create_gzip(&locus.tmp_reads_filename))
         .collect::<Result<_, _>>()?;
@@ -292,15 +301,15 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
-        targets.recruit(reader, writers, args.threads, args.params.chunk_size)?;
+        targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
-        targets.recruit(reader, writers, args.threads, args.params.chunk_size)?;
+        targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
             fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
-        targets.recruit(reader, writers, args.threads, args.params.chunk_size)?;
+        targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     }
     for locus in filt_loci.iter() {
         fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)?;
@@ -315,7 +324,7 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
     }
 
     let start = Instant::now();
-    let mut bwa_cmd = Command::new(&args.bwa);
+    let mut bwa_cmd = Command::new(args.bwa.as_ref().unwrap());
     bwa_cmd.args(&["mem",
         "-aYPp", // Output all alignments, use soft clipping, skip pairing, interleaved input.
         "-c", "65535", // No filtering on common minimizers.
@@ -356,6 +365,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::SAMPLE_PARAMS))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
+    let cached_distrs = CachedDepthDistrs::new(&bg_distr);
+    validate_param!(bg_distr.depth().window_padding() <= args.assgn_params.boundary_size,
+        "Window padding ({}) must not exceed boundary size ({})", bg_distr.depth().window_padding(),
+        args.assgn_params.boundary_size);
 
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
     recruit_reads(&loci, &args)?;

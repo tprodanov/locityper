@@ -161,7 +161,9 @@ impl super::Solver for GurobiSolver {
         }
         Ok(())
     }
+}
 
+impl super::SetParams for GurobiSolver {
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
         json_get!(obj -> tries (as_u16));
         self.set_tries(tries);

@@ -55,8 +55,8 @@ impl Default for Args {
             bed_files: Vec::new(),
 
             ref_name: None,
-            max_expansion: 2000,
-            moving_window: 200,
+            max_expansion: 4000,
+            moving_window: 400,
             jellyfish: PathBuf::from("jellyfish"),
             bwa: vec![PathBuf::from("bwa"), PathBuf::from("bwa-mem2")],
         }
