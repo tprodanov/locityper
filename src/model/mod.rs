@@ -37,9 +37,13 @@ impl Default for Params {
 }
 
 impl Params {
-    fn validate(&self) -> Result<(), Error> {
-        validate_param!(self.prob_diff > 0.0 && self.prob_diff.is_normal(),
-            "Probability difference ({:.4}) must be positive", Ln::to_log10(self.prob_diff));
+    pub fn validate(&mut self) -> Result<(), Error> {
+        validate_param!(!self.prob_diff.is_nan() && self.prob_diff.is_finite(),
+            "Unexpected probability difference ({:.4}) value", self.prob_diff);
+        self.prob_diff = self.prob_diff.abs();
+        if self.prob_diff < 1.0 {
+            log::warn!("Note that probability difference ({}) is in log-10 space", Ln::to_log10(self.prob_diff));
+        }
         validate_param!(self.unmapped_penalty < 0.0 && self.unmapped_penalty.is_normal(),
             "Unmapped penalty ({:.4}) must be negative", Ln::to_log10(self.unmapped_penalty));
         validate_param!(self.rare_kmer > 1.0, "First k-mer frequency threshold ({:.4}) must be over 1",

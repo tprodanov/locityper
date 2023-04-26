@@ -180,18 +180,20 @@ fn kmer_hash(mut key: u32) -> u32 {
     key
 }
 
+pub(crate) const MAX_MINIMIZER_K: u8 = 16;
+pub(crate) const MAX_MINIMIZER_W: u8 = 64;
+
 /// Finds sequence minimizers.
 /// Minimizer is a k-mer with the smallest hash value across `w` consecutive k-mers.
 ///
 /// `k` must be at most 16. `w` must be at most 64.
 pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<u32>) {
+    debug_assert!(0 < k && k <= MAX_MINIMIZER_K, "kmer-size must be within [1, {}]", MAX_MINIMIZER_K);
+    debug_assert!(1 < w && w <= MAX_MINIMIZER_W, "w must be within [2, {}]", MAX_MINIMIZER_W);
     let k = u32::from(k);
     let w = u32::from(w);
-    const MAXW: usize = 64;
-    const MOD_MAXW: u32 = MAXW as u32 - 1; // Must be the power of two.
+    const MOD_MAXW: u32 = MAX_MINIMIZER_W as u32 - 1; // Must be the power of two.
     const UNDEF: u32 = u32::MAX;
-    debug_assert!(0 < k && k <= 16, "k-size must be within [1, 16]");
-    debug_assert!(1 < w && w <= MAXW as u32, "w must be within [2, {}]", MAXW);
 
     let mask: u32 = if k == 16 { -1_i32 as u32 } else { (1_u32 << 2 * k) - 1 };
     let rv_shift = 2 * k - 2;
@@ -199,7 +201,7 @@ pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<u32>) {
     let mut rv_kmer: u32 = 0;
 
     // Hashes in a window, stored in a cycling array.
-    let mut hashes = [UNDEF; MAXW];
+    let mut hashes = [UNDEF; MAX_MINIMIZER_W as usize];
     // At what index will the first k-mer be available.
     let mut reset = k - 1;
     // Start of the window with consecutive k-mers.
@@ -208,7 +210,8 @@ pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<u32>) {
     /// Function that goes over indices `start..end`, and returns new `start`.
     /// Additionally, the function pushes the new minimizer to the buffer, if it is not `UNDEF`.
     #[inline]
-    fn select_minimizer(buffer: &mut Vec<u32>, hashes: &mut [u32; MAXW], start: u32, end: u32) -> u32 {
+    fn select_minimizer(buffer: &mut Vec<u32>, hashes: &mut [u32; MAX_MINIMIZER_W as usize], start: u32, end: u32
+    ) -> u32 {
         let mut minimizer = UNDEF;
         let mut new_start = end;
         for j in start..end {

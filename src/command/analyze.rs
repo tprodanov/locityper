@@ -11,6 +11,7 @@ use const_format::{str_repeat, concatcp};
 use fnv::FnvHashSet;
 use crate::{
     err::{Error, validate_param},
+    math::Ln,
     seq::{
         recruit, fastx,
         ContigSet,
@@ -37,6 +38,7 @@ struct Args {
     force: bool,
     bwa: Option<PathBuf>,
     samtools: PathBuf,
+    solvers_scheme: Option<PathBuf>,
 
     recr_params: recruit::Params,
     assgn_params: AssgnParams,
@@ -55,6 +57,7 @@ impl Default for Args {
             force: false,
             bwa: None,
             samtools: PathBuf::from("samtools"),
+            solvers_scheme: None,
 
             recr_params: Default::default(),
             assgn_params: Default::default(),
@@ -83,6 +86,8 @@ impl Args {
             Some(sys_ext::find_exe(BWA2).or_else(|_| sys_ext::find_exe(BWA1))?)
         };
         self.samtools = sys_ext::find_exe(self.samtools)?;
+        self.recr_params.validate()?;
+        self.assgn_params.validate()?;
         Ok(self)
     }
 }
@@ -128,7 +133,18 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
         {EMPTY}  Please see README for information on the file content.",
         "-s, --solvers".green(), "FILE".yellow());
-    // println!("    {:KEY$} {:VAL$}  Probability difference")
+    println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
+        {EMPTY}  the best alignment [{:.1}].",
+        "-d, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(), Ln::to_log10(defaults.assgn_params.prob_diff));
+    println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{:.1}].",
+        "-u, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+        Ln::to_log10(defaults.assgn_params.unmapped_penalty));
+    println!("    {:KEY$} {} \n\
+        {EMPTY}  Contig windows receive different weight depending on average k-mer\n\
+        {EMPTY}  frequency. Windows with values under {} [{}] receive full weight.\n\
+        {EMPTY}  Windows with values equal to {} [{}] receive half weight.",
+        "    --rare-kmer".green(), "FLOAT FLOAT".yellow(), "FLOAT_1".yellow(), defaults.assgn_params.rare_kmer,
+        "FLOAT_2".yellow(), defaults.assgn_params.semicommon_kmer);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -167,6 +183,20 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
             Short('m') | Long("min-matches") => args.recr_params.min_matches = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
+
+            Short('s') | Long("solvers") => args.solvers_scheme = Some(parser.value()?.parse()?),
+            Short('d') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
+            Short('u') | Long("unmapped") =>
+                args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
+            Long("rare-kmer") => {
+                let mut values = parser.values()?;
+                args.assgn_params.rare_kmer = values.next()
+                    .ok_or_else(|| lexopt::Error::MissingValue { option: Some("rare-kmer".to_owned()) })?
+                    .parse()?;
+                args.assgn_params.semicommon_kmer = values.next()
+                    .ok_or_else(|| lexopt::Error::MissingValue { option: Some("rare-kmer".to_owned()) })?
+                    .parse()?;
+            }
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,

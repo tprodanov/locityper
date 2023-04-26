@@ -19,6 +19,7 @@ use htslib::bam::{
 };
 use crate::{
     err::{Error, validate_param},
+    math::Ln,
     algo::parse_int,
     ext::{sys as sys_ext, fmt as fmt_ext},
     seq::{
@@ -180,7 +181,7 @@ fn print_help(extended: bool) {
             defaults.params.depth.boundary_size);
         println!("    {:KEY$} {:VAL$}  Ignore reads with alignment likelihood under 10^{} [{:.1}]",
             "    --min-aln-lik".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-            crate::math::Ln::to_log10(defaults.params.depth.min_aln_prob));
+            Ln::to_log10(defaults.params.depth.min_aln_prob));
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
             "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
@@ -250,6 +251,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('w') | Long("window") => args.params.depth.window_size = parser.value()?.parse()?,
             Long("window-padd") | Long("window-padding") => args.params.depth.window_padding = parser.value()?.parse()?,
             Long("boundary") => args.params.depth.boundary_size = parser.value()?.parse()?,
+            Long("min-aln-lik") => args.params.depth.min_aln_prob = Ln::from_log10(parser.value()?.parse()?),
             Long("kmer-freq") | Long("kmer-frequency") => args.params.depth.max_kmer_freq = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
                 args.params.depth.frac_windows = parser.value()?.parse()?,

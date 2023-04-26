@@ -10,6 +10,7 @@ use const_format::formatcp;
 use nohash::IntMap;
 use smallvec::{smallvec, SmallVec};
 use crate::{
+    err::{Error, validate_param},
     seq::{
         ContigSet,
         kmers,
@@ -37,6 +38,18 @@ impl Default for Params {
             min_matches: 2,
             chunk_size: 10000,
         }
+    }
+}
+
+impl Params {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_param!(0 < self.minimizer_k && self.minimizer_k <= kmers::MAX_MINIMIZER_K,
+            "Minimizer kmer-size must be within [1, {}]", kmers::MAX_MINIMIZER_K);
+        validate_param!(1 < self.minimizer_w && self.minimizer_w <= kmers::MAX_MINIMIZER_W,
+            "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
+        validate_param!(self.min_matches != 0, "Minimal number of matches cannot be zero");
+        validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
+        Ok(())
     }
 }
 
