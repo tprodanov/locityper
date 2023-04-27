@@ -33,12 +33,11 @@ pub fn parse_f64_arr(obj: &json::JsonValue, key: &str, arr: &mut [f64]) -> Resul
 /// ```
 macro_rules! json_get {
     ($obj:ident -> $var:ident ($convert:ident)) => {
-        println!("Define {} ({})", stringify!($var), stringify!($convert));
         let $var = match $obj[std::stringify!($var)].$convert() {
             Some(val) => val,
             None => {
                 let mut obj_str = $obj.to_string();
-                const SUBSTR_SIZE: usize = 20;
+                const SUBSTR_SIZE: usize = 200;
                 if obj_str.len() > SUBSTR_SIZE {
                     obj_str = format!("{}...", &obj_str[..SUBSTR_SIZE]);
                 }

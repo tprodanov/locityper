@@ -29,7 +29,7 @@ impl Default for Params {
         Self {
             boundary_size: 200,
             prob_diff: Ln::from_log10(5.0),
-            unmapped_penalty: Ln::from_log10(10.0),
+            unmapped_penalty: Ln::from_log10(-10.0),
             rare_kmer: 3.0,
             semicommon_kmer: 5.0,
         }

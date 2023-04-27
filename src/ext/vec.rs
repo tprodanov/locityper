@@ -227,7 +227,7 @@ fn count_combinations(n: u64, r: u64) -> u64 {
 
 /// Count the number of combinations with replacement.
 fn count_repl_combinations(n: u64, r: u64) -> u64 {
-    count_combinations(n + r - 1, n)
+    count_combinations(n + r - 1, r)
 }
 
 /// Structure that stores tuples of fixed size.
@@ -264,19 +264,24 @@ impl<T> Tuples<T> {
     pub fn tup_len(&self) -> usize {
         self.tup_len
     }
+
+    /// Iterates over all tuples in the set.
+    pub fn iter(&self) -> std::slice::ChunksExact<'_, T> {
+        self.data.chunks_exact(self.tup_len)
+    }
 }
 
 impl<T: Copy> Tuples<T> {
-    fn init_repl_combinations(&mut self, v: &[T], subtuple: &mut [T], depth: usize) {
+    fn init_repl_combinations(&mut self, v: &[T], subtuple: &mut [T], depth: usize, start_ix: usize) {
         if depth + 1 == self.tup_len {
-            for &el in v.iter() {
+            for &el in &v[start_ix..] {
                 self.data.extend_from_slice(subtuple);
                 self.data.push(el);
             }
         } else {
-            for &el in v.iter() {
+            for (i, &el) in v[start_ix..].iter().enumerate() {
                 subtuple[depth] = el;
-                self.init_repl_combinations(v, subtuple, depth + 1);
+                self.init_repl_combinations(v, subtuple, depth + 1, start_ix + i);
             }
         }
     }
@@ -292,7 +297,7 @@ impl<T: Copy> Tuples<T> {
         if tup_len == 1 {
             res.data.extend_from_slice(v);
         } else {
-            res.init_repl_combinations(v, &mut subtuple, 0);
+            res.init_repl_combinations(v, &mut subtuple, 0, 0);
         }
         assert_eq!(res.len(), count);
         res

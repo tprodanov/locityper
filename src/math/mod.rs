@@ -120,3 +120,8 @@ impl Phred {
         -0.1 * phred * LOG10
     }
 }
+
+/// Number of non-fractional digits in the 10-base representation of x.
+pub fn num_digits(x: u64) -> usize {
+    (x as f64).log10().floor() as usize + 1
+}

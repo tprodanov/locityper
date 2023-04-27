@@ -3,13 +3,14 @@
 
 use std::{
     rc::Rc,
+    time::Instant,
 };
 use crate::{
+    ext,
+    math::{self, Ln},
     err::{Error, validate_param},
     bg::ser::json_get,
     seq::{ContigId, ContigNames},
-    ext::vec::Tuples,
-    ext::rand::XoshiroRng,
     model::{
         Params,
         locs::AllPairAlignments,
@@ -122,17 +123,22 @@ impl Scheme {
         contig_windows: &[ContigWindows],
         contigs: &Rc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
-        tuples: &Tuples<ContigId>,
+        tuples: &ext::vec::Tuples<ContigId>,
         params: &Params,
-        rng: &mut XoshiroRng,
+        rng: &mut ext::rand::XoshiroRng,
     ) -> Result<(), Error>
     {
         let tag = contigs.tag();
         let n = tuples.len();
-        // Best likelihoods and read assignments for each tuple.
-        let mut likelihoods = vec![f64::NAN; n];
-        let mut best_assgns = vec![None; n];
+        let mut width1 = math::num_digits(n as u64);
+        let width2 = 12 * tuples.tup_len();
         let mut rem_ixs: Vec<_> = (0..n).collect();
+        // Best likelihoods and read assignments for each tuple.
+        // Do not store actual best assignments.
+        // Instead, if needed, we can store Rng states, in order to reconstruct solutions later.
+        let mut likelihoods = vec![f64::NAN; n];
+        let mut best_lik = f64::NEG_INFINITY;
+        let mut best_str = "???".to_owned();
 
         for (stage_ix, stage) in self.0.iter().enumerate() {
             // Consider at least one tuple irrespective of the ratio.
@@ -140,22 +146,29 @@ impl Scheme {
             if m < rem_ixs.len() {
                 rem_ixs.sort_unstable_by(|&i, &j| likelihoods[j].total_cmp(&likelihoods[i]));
                 rem_ixs.truncate(m);
+                width1 = math::num_digits(m as u64);
             }
 
             let solver = &stage.solver;
-            log::info!("    [{}] Stage {:3} - {:20}  ({} tuples, 1 thread)", tag, LATIN_NUMS[stage_ix], m, solver);
-            for &ix in rem_ixs.iter() {
+            let timer = Instant::now();
+            log::info!("    [{}] Stage {}. {}  ({} tuples, 1 thread)", tag, LATIN_NUMS[stage_ix], solver, m);
+            for (i, &ix) in rem_ixs.iter().enumerate() {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
                 let contigs_str = mcontig_windows.ids_str(contigs);
                 let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
                 let lik = solver.solve(&mut assgn, rng)?;
-                let best_lik = &mut likelihoods[ix];
-                if lik > *best_lik {
-                    *best_lik = lik;
-                    best_assgns[ix] = Some(assgn.take_read_assignments());
+                let stored_lik = &mut likelihoods[ix];
+                *stored_lik = stored_lik.max(lik);
+                log::debug!("        [{:width1$} / {}] {:width2$}  -> {:11.2}", i + 1, m, contigs_str,
+                    Ln::to_log10(*stored_lik));
+
+                if lik > best_lik {
+                    best_lik = lik;
+                    best_str = contigs_str;
                 }
-                log::debug!("        {:30}  Likelihood {:.2}", contigs_str, *best_lik);
             }
+            log::info!("    [{}] Stage {} finished in {}. Best: {} ({:.2})", tag, LATIN_NUMS[stage_ix],
+                ext::fmt::Duration(timer.elapsed()), best_str, Ln::to_log10(best_lik))
         }
         Ok(())
     }
@@ -166,9 +179,9 @@ impl Scheme {
         contig_windows: &[ContigWindows],
         contigs: &Rc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
-        tuples: &Tuples<ContigId>,
+        tuples: &ext::vec::Tuples<ContigId>,
         params: &Params,
-        rng: &mut XoshiroRng,
+        rng: &mut ext::rand::XoshiroRng,
         threads: u16,
     ) -> Result<(), Error>
     {

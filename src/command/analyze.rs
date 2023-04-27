@@ -427,7 +427,8 @@ fn analyze_locus(
     let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
 
-    let tuples = ext::vec::Tuples::new(usize::from(args.ploidy)); // PLACEHOLDER.
+    let contig_ids: Vec<_> = contigs.ids().collect();
+    let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
     scheme.solve(&all_alns, &contig_windows, &contigs, &cached_distrs, &tuples, &args.assgn_params,
         &mut rng, args.threads)
 }

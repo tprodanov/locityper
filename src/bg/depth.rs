@@ -413,13 +413,14 @@ impl JsonSer for ReadDepth {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> ploidy (as_u8), window_size (as_u32), window_padding (as_u32));
-        let mut n_params = vec![0.0; window_size as usize + 1];
+        json_get!(obj -> ploidy (as_u8), window (as_usize), window_padding (as_u32));
+        let mut n_params = vec![0.0; window + 1];
         parse_f64_arr(obj, "n", &mut n_params)?;
-        let mut p_params = vec![0.0; window_size as usize + 1];
+        let mut p_params = vec![0.0; window + 1];
         parse_f64_arr(obj, "p", &mut p_params)?;
         Ok(Self {
-            ploidy, window_size, window_padding,
+            ploidy, window_padding,
+            window_size: window as u32,
             distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p)).collect(),
         })
     }
