@@ -11,6 +11,7 @@ use crate::{
         assgn::ReadAssignment,
     },
     bg::ser::json_get,
+    ext::rand::XoshiroRng,
 };
 
 /// Gurobi ILP solver.
@@ -132,7 +133,7 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
 
 impl super::Solver for GurobiSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<f64, Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         let (mut model, vars) = define_model(assignments)?;
         let mut best_lik = assignments.likelihood();
 
@@ -142,7 +143,7 @@ impl super::Solver for GurobiSolver {
                 model.set_param(parameter::IntParam::OutputFlag, 0)?;
                 model.set_param(parameter::IntParam::Threads, 1)?;
             }
-            model.set_param(parameter::IntParam::Seed, rng.gen::<i32>())?;
+            model.set_param(parameter::IntParam::Seed, rng.gen::<i32>().abs())?;
             model.optimize()?;
             let status = model.status()?;
             if status != Status::Optimal {

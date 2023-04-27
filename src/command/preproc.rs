@@ -311,7 +311,10 @@ fn set_strobealign_stdin(
         let mut writer = io::BufWriter::new(child_stdin);
         move || {
             match to_bg {
-                true => reader.subsample(&mut writer, subsampling_rate, subsampling_seed),
+                true => {
+                    let mut rng = ext::rand::init_rng(subsampling_seed);
+                    reader.subsample(&mut writer, subsampling_rate, &mut rng)
+                }
                 false => reader.write_next_n(&mut writer, n_reads).map(|_| ()),
             }
         }

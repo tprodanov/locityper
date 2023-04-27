@@ -1,6 +1,7 @@
 use std::fmt::Display;
 use crate::{
     model::assgn::ReadAssignment,
+    ext::rand::XoshiroRng,
 };
 
 pub mod scheme;
@@ -17,10 +18,6 @@ pub use self::gurobi::GurobiSolver;
 pub use self::highs::HighsSolver;
 use crate::Error;
 
-/// In order for `Solver` to be object-safe, rng type should be known in advance.
-/// For that reason we use `SmallRng`, and not `impl rand::Rng`.
-type SolverRng = rand::rngs::SmallRng;
-
 pub trait SetParams {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error>;
@@ -30,7 +27,9 @@ pub trait SetParams {
 pub trait Solver : Send + SetParams + CloneSolver + Display {
     /// Distribute reads between several haplotypes in a best way.
     /// Returns likelihood of the assignment.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<f64, Error>;
+    ///
+    /// In order for `Solver` to be object-safe, rng type should be known in advance.
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error>;
 }
 
 /// Solver that tries several times and selects the best result.
@@ -42,11 +41,11 @@ pub trait MultiTrySolver {
     fn set_tries(&mut self, tries: u16) -> &mut Self;
 
     /// Try once.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<(), Error>;
+    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error>;
 }
 
 impl<T: 'static + MultiTrySolver + SetParams + Send + Clone + Display> Solver for T {
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut SolverRng) -> Result<f64, Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         let mut last_lik = f64::NEG_INFINITY;
         let mut best_lik = assignments.likelihood();
         let mut best_assgns = assignments.read_assignments().to_vec();

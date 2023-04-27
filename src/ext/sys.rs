@@ -5,7 +5,6 @@ use std::{
     ffi::OsStr,
     process::Child,
 };
-use rand::SeedableRng;
 use flate2::{
     bufread::MultiGzDecoder,
     write::GzEncoder,
@@ -140,17 +139,5 @@ impl Drop for ChildGuard {
                 Ok(_) => log::error!("Successfully killed child process"),
             }
         }
-    }
-}
-
-/// Inits random number generator from an optional seed.
-pub fn init_rng(seed: Option<u64>) -> rand::rngs::SmallRng {
-    if let Some(seed) = seed {
-        if seed.count_ones() < 5 {
-            log::warn!("Seed ({}) is too simple, consider using a more random number.", seed);
-        }
-        rand::rngs::SmallRng::seed_from_u64(seed)
-    } else {
-        rand::rngs::SmallRng::from_entropy()
     }
 }

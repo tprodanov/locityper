@@ -6,7 +6,6 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use rand::Rng;
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use fnv::FnvHashSet;
@@ -413,7 +412,7 @@ fn analyze_locus(
     bg_distr: &BgDistr,
     scheme: &Scheme,
     cached_distrs: &CachedDepthDistrs,
-    rng: &mut impl Rng,
+    mut rng: ext::rand::XoshiroRng,
     args: &Args,
 ) -> Result<(), Error>
 {
@@ -428,11 +427,9 @@ fn analyze_locus(
     let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
 
-    // Select a new seed for the locus.
-    // Useful when many loci are analyzed, as we cannot use the same seed for all of them.
-    let seed = rng.gen::<u64>();
     let tuples = ext::vec::Tuples::new(usize::from(args.ploidy)); // PLACEHOLDER.
-    scheme.solve(&all_alns, &contig_windows, &contigs, &cached_distrs, &tuples, &args.assgn_params, seed, args.threads)
+    scheme.solve(&all_alns, &contig_windows, &contigs, &cached_distrs, &tuples, &args.assgn_params,
+        &mut rng, args.threads)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -456,9 +453,12 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         None => Scheme::default(),
     };
 
-    let mut rng = ext::sys::init_rng(args.seed);
+    let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {
-        analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, &mut rng, &args)?;
+        let rng_clone = rng.clone();
+        // Jump over 2^128 random numbers. This way, all loci have independent random numbers.
+        rng.jump();
+        analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, rng_clone, &args)?;
     }
     Ok(())
 }

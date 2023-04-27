@@ -2,7 +2,10 @@ use std::fmt;
 use rand::{Rng, seq::SliceRandom};
 use crate::{
     Error,
-    ext::vec::{F64Ext, IterExt},
+    ext::{
+        vec::{F64Ext, IterExt},
+        rand::XoshiroRng,
+    },
     model::{
         windows::ReadWindows,
         assgn::ReadAssignment,
@@ -60,7 +63,7 @@ impl MultiTrySolver for GreedySolver {
     }
 
     /// Single greedy iteration to find the best read assignment.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<(), Error> {
+    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
         let mut buffer = Vec::new();
         assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
         let mut curr_plato = 0;
@@ -153,7 +156,7 @@ impl SimAnneal {
     }
 
     /// Finds temperature coefficient by checking 100 random reassignments and their probabilities.
-    fn find_temperature_coeff(&self, assignments: &ReadAssignment, rng: &mut super::SolverRng) -> f64 {
+    fn find_temperature_coeff(&self, assignments: &ReadAssignment, rng: &mut XoshiroRng) -> f64 {
         let mut neg_sum = 0.0;
         let mut neg_count: u32 = 0;
         const INIT_ITERS: u32 = 100;
@@ -184,7 +187,7 @@ impl MultiTrySolver for SimAnneal {
     }
 
     /// Run simulated annealing once to find the best read assignment.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut super::SolverRng) -> Result<(), Error> {
+    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
         assignments.init_assignments(
             |possible_alns| IterExt::argmax(possible_alns.iter().map(ReadWindows::ln_prob)).0);
         let coeff = self.find_temperature_coeff(assignments, rng);
@@ -194,7 +197,7 @@ impl MultiTrySolver for SimAnneal {
         let mut curr_plato = 0;
         while curr_plato <= self.plato_size {
             let (rp, new_assign, improv) = assignments.random_reassignment(rng);
-            if improv > 0.0 || (curr_temp > 0.0 && rng.gen_range(0.0..=1.0) <= (improv / curr_temp).exp()) {
+            if improv > 0.0 || (curr_temp > 0.0 && rng.gen::<f64>() <= (improv / curr_temp).exp()) {
                 assignments.reassign(rp, new_assign);
                 curr_plato = 0;
             } else {

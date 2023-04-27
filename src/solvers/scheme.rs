@@ -4,12 +4,12 @@
 use std::{
     rc::Rc,
 };
-use rand::SeedableRng;
 use crate::{
     err::{Error, validate_param},
     bg::ser::json_get,
     seq::{ContigId, ContigNames},
     ext::vec::Tuples,
+    ext::rand::XoshiroRng,
     model::{
         Params,
         locs::AllPairAlignments,
@@ -124,11 +124,10 @@ impl Scheme {
         cached_distrs: &CachedDepthDistrs,
         tuples: &Tuples<ContigId>,
         params: &Params,
-        seed: u64,
+        rng: &mut XoshiroRng,
     ) -> Result<(), Error>
     {
         let tag = contigs.tag();
-        let mut rng = super::SolverRng::seed_from_u64(seed);
         let n = tuples.len();
         // Best likelihoods and read assignments for each tuple.
         let mut likelihoods = vec![f64::NAN; n];
@@ -149,7 +148,7 @@ impl Scheme {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
                 let contigs_str = mcontig_windows.ids_str(contigs);
                 let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
-                let lik = solver.solve(&mut assgn, &mut rng)?;
+                let lik = solver.solve(&mut assgn, rng)?;
                 let best_lik = &mut likelihoods[ix];
                 if lik > *best_lik {
                     *best_lik = lik;
@@ -169,12 +168,12 @@ impl Scheme {
         cached_distrs: &CachedDepthDistrs,
         tuples: &Tuples<ContigId>,
         params: &Params,
-        seed: u64,
+        rng: &mut XoshiroRng,
         threads: u16,
     ) -> Result<(), Error>
     {
         if threads == 1 {
-            self.solve_single_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, params, seed)
+            self.solve_single_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, params, rng)
         } else {
             unimplemented!("Multi-thread solution is not implemented")
         }

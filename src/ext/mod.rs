@@ -3,3 +3,4 @@
 pub mod vec;
 pub mod fmt;
 pub mod sys;
+pub mod rand;
