@@ -256,7 +256,7 @@ impl MainWorker {
                 contig_windows: contig_windows.clone(),
                 tuples: tuples.clone(),
                 params: params.clone(),
-                // cached_distrs: cached_distrs.clone(),
+                cached_distrs: cached_distrs.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
             };
@@ -280,7 +280,7 @@ struct Worker {
     contig_windows: Vec<ContigWindows>,
     tuples: Tuples<ContigId>,
     params: Params,
-    // cached_distrs: CachedDepthDistrs,
+    cached_distrs: CachedDepthDistrs,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
 }

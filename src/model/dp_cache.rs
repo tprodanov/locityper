@@ -1,7 +1,7 @@
 use std::{
-    rc::Rc,
+    sync::Arc,
 };
-use once_cell::unsync::OnceCell;
+use once_cell::sync::OnceCell;
 use crate::{
     math::distr::{DiscretePmf, WithQuantile, Mixure, NBinom, Uniform, LinearCache},
     bg::{self,
@@ -71,7 +71,7 @@ pub struct CachedDepthDistrs {
     mul_coef: f64,
 
     /// Cached read depth distributions in windows with few common k-mers (one for each GC-content).
-    cached: [OnceCell<Rc<LinearCache<NBinom>>>; GC_BINS],
+    cached: [OnceCell<Arc<LinearCache<NBinom>>>; GC_BINS],
     /// Uniform distribution size (one for each GC-content).
     unif_size: [OnceCell<u32>; GC_BINS],
 }
@@ -80,7 +80,7 @@ impl CachedDepthDistrs {
     /// Create a set of cached depth distributions.
     /// Assume that there are `mul_coef` as much reads, as in the background distribution.
     pub fn new(bg_distr: &bg::BgDistr) -> Self {
-        const NBINOM_CELL: OnceCell<Rc<LinearCache<NBinom>>> = OnceCell::new();
+        const NBINOM_CELL: OnceCell<Arc<LinearCache<NBinom>>> = OnceCell::new();
         const U32_CELL: OnceCell<u32> = OnceCell::new();
         Self {
             bg_depth: bg_distr.depth().clone(),
@@ -96,9 +96,9 @@ impl CachedDepthDistrs {
     }
 
     /// Returns read depth distribution in regular windows at GC-content and contig CN.
-    pub fn regular_distr(&self, gc_content: u8) -> &Rc<LinearCache<NBinom>> {
+    pub fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<NBinom>> {
         self.cached[usize::from(gc_content)].get_or_init(||
-            Rc::new(self.bg_depth
+            Arc::new(self.bg_depth
                 .depth_distribution(gc_content)
                 .mul(self.mul_coef)
                 .cached(CACHE_SIZE)))
@@ -116,9 +116,9 @@ impl CachedDepthDistrs {
         if nbinom_weight < 0.00001 {
             RepeatedDistr::new_box(Uniform::new(0, self.uniform_size(gc_content)), cn)
         } else if nbinom_weight > 0.99999 {
-            RepeatedDistr::new_box(Rc::clone(&self.regular_distr(gc_content)), cn)
+            RepeatedDistr::new_box(Arc::clone(&self.regular_distr(gc_content)), cn)
         } else {
-            let mixure = Mixure::new(Rc::clone(&self.regular_distr(gc_content)), nbinom_weight,
+            let mixure = Mixure::new(Arc::clone(&self.regular_distr(gc_content)), nbinom_weight,
                 Uniform::new(0, self.uniform_size(gc_content)));
             RepeatedDistr::new_box(mixure, cn)
         }

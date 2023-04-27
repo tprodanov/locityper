@@ -77,13 +77,19 @@ pub trait WithQuantile: DiscreteCdf + WithMoments {
     }
 }
 
-impl<T: DiscretePmf + ?Sized> DiscretePmf for std::rc::Rc<T> {
+impl<T, U> DiscretePmf for U
+where T: DiscretePmf + ?Sized,
+      U: Deref<Target = T>,
+{
     fn ln_pmf(&self, k: u32) -> f64 {
         self.deref().ln_pmf(k)
     }
 }
 
-impl<T: DiscreteCdf + ?Sized> DiscreteCdf for std::rc::Rc<T> {
+impl<T, U> DiscreteCdf for U
+where T: DiscreteCdf + ?Sized,
+      U: Deref<Target = T>,
+{
     fn cdf(&self, k: u32) -> f64 {
         self.deref().cdf(k)
     }

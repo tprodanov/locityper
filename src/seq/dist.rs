@@ -2,7 +2,7 @@ use std::{
     cmp::min,
     io::{self, Write},
 };
-use once_cell::unsync::OnceCell;
+use once_cell::sync::OnceCell;
 use nohash::IntMap;
 use bio::alignment::sparse::lcskpp;
 use super::{
