@@ -1,5 +1,6 @@
 use std::{
-    io, fs,
+    fs,
+    io::{self, Write},
     process::{Command, Stdio},
     cmp::max,
     path::{Path, PathBuf},
@@ -255,8 +256,8 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> O
 struct LocusData {
     set: ContigSet,
     db_locus_dir: PathBuf,
-    /// Output directory with locus data.
-    out_locus_dir: PathBuf,
+    // /// Output directory with locus data.
+    // out_locus_dir: PathBuf,
     /// Temporary file with recruited reads.
     tmp_reads_filename: PathBuf,
     /// Final file with recruited reads.
@@ -265,6 +266,8 @@ struct LocusData {
     tmp_aln_filename: PathBuf,
     /// Final file with read alignments to the haplotypes.
     aln_filename: PathBuf,
+    /// File with haplotype-pair likelihoods.
+    lik_filename: PathBuf,
 }
 
 impl LocusData {
@@ -275,12 +278,13 @@ impl LocusData {
         }
         ext::sys::mkdir(&out_locus_dir)?;
         Ok(Self {
+            set,
+            db_locus_dir: db_locus_dir.to_owned(),
             tmp_reads_filename: out_locus_dir.join("reads.tmp.fq.gz"),
             reads_filename: out_locus_dir.join("reads.fq.gz"),
             tmp_aln_filename: out_locus_dir.join("aln.tmp.bam"),
             aln_filename: out_locus_dir.join("aln.bam"),
-            db_locus_dir: db_locus_dir.to_owned(),
-            out_locus_dir, set,
+            lik_filename: out_locus_dir.join("lik.csv.gz"),
         })
     }
 }
@@ -429,8 +433,11 @@ fn analyze_locus(
 
     let contig_ids: Vec<_> = contigs.ids().collect();
     let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
-    scheme.solve(all_alns, contig_windows, &contigs, cached_distrs, tuples, &args.assgn_params,
-        &mut rng, args.threads)
+
+    let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
+    writeln!(lik_writer, "stage\tgenotype\tlik")?;
+    scheme.solve(all_alns, contig_windows, &contigs, cached_distrs, tuples, lik_writer,
+        &args.assgn_params, &mut rng, args.threads)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {

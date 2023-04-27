@@ -2,8 +2,9 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    time::Instant,
     thread,
+    io::Write,
+    time::Instant,
     cmp::min,
     sync::{
         Arc,
@@ -16,7 +17,7 @@ use crate::{
         vec::Tuples,
         rand::XoshiroRng,
     },
-    math::{self, Ln},
+    math::{self, Ln, Phred},
     err::{Error, validate_param},
     bg::ser::json_get,
     seq::{ContigId, ContigNames},
@@ -48,8 +49,8 @@ impl Stage {
     }
 
     fn from_json(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> solver_name (as_str));
-        let mut solver: Box<dyn Solver> = match &solver_name.to_lowercase() as &str {
+        json_get!(obj -> solver (as_str));
+        let mut solver: Box<dyn Solver> = match &solver.to_lowercase() as &str {
             "greedy" => Box::new(super::GreedySolver::default()),
             "simanneal" | "simulatedannealing" => Box::new(super::SimAnneal::default()),
             "highs" =>
@@ -64,12 +65,12 @@ impl Stage {
                 } else {
                     panic!("Gurobi feature is disabled. Consider recompiling with `gurobi` feature enabled.");
                 },
-            _ => panic!("Unknown solver '{}'", solver_name),
+            _ => panic!("Unknown solver '{}'", solver),
         };
 
         let ratio = if obj.has_key("ratio") {
-            json_get!(obj -> val (as_f64));
-            val
+            json_get!(obj -> ratio (as_f64));
+            ratio
         } else {
             1.0
         };
@@ -91,8 +92,8 @@ impl Default for Scheme {
         Self(vec![
             // First, run Greedy solver on all haplotypes.
             Stage::with_default::<super::GreedySolver>(1.0).unwrap(),
-            // Then, run HiGHS solver on the best 1%.
-            Stage::with_default::<super::HighsSolver>(0.01).unwrap(),
+            // Then, run HiGHS solver on the best 3%.
+            Stage::with_default::<super::HighsSolver>(0.03).unwrap(),
         ])
     }
 }
@@ -134,6 +135,7 @@ impl Scheme {
         contigs: &Arc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
         tuples: Tuples<ContigId>,
+        mut writer: impl Write,
         params: &Params,
         rng: &mut XoshiroRng,
     ) -> Result<(), Error>
@@ -145,9 +147,10 @@ impl Scheme {
         // Best likelihoods and read assignments for each tuple.
         // Do not store actual best assignments.
         // Instead, if needed, we can store Rng states, in order to reconstruct solutions later.
-        let mut likelihoods = vec![f64::NAN; n];
+        let mut likelihoods = vec![f64::NEG_INFINITY; n];
         let mut best_lik = f64::NEG_INFINITY;
-        let mut best_str = "???".to_owned();
+        let mut best_ix = 0;
+        let mut best_str = String::new();
 
         for (stage_ix, stage) in self.0.iter().enumerate() {
             let m = filter_ixs(&mut rem_ixs, &likelihoods, stage.ratio);
@@ -160,6 +163,8 @@ impl Scheme {
                 let contigs_str = mcontig_windows.ids_str(contigs);
                 let mut assgn = ReadAssignment::new(mcontig_windows, &all_alns, cached_distrs, params);
                 let lik = solver.solve(&mut assgn, rng)?;
+                writeln!(writer, "{}\t{}\t{:.3}", stage_ix + 1, contigs_str, Ln::to_log10(lik))?;
+
                 let stored_lik = &mut likelihoods[ix];
                 *stored_lik = stored_lik.max(lik);
                 log::debug!("        [{:width1$} / {}] {:width2$}  -> {:11.2}", i + 1, m, contigs_str,
@@ -167,12 +172,17 @@ impl Scheme {
 
                 if lik > best_lik {
                     best_lik = lik;
+                    best_ix = ix;
                     best_str = contigs_str;
                 }
             }
             log::info!("    [{}] Stage {} finished in {}. Best: {} ({:.2})", tag, LATIN_NUMS[stage_ix],
                 ext::fmt::Duration(timer.elapsed()), best_str, Ln::to_log10(best_lik))
         }
+        let norm_fct = Ln::sum(&likelihoods);
+        likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
+        log::info!("    [{}] Overall best: {}  (Quality = {:.1}, Norm.Likelihood = {})",
+            tag, best_str, Phred::from_likelihoods(&mut likelihoods, best_ix), Ln::to_log10(likelihoods[best_ix]));
         Ok(())
     }
 
@@ -183,13 +193,14 @@ impl Scheme {
         contigs: &Arc<ContigNames>,
         cached_distrs: &Arc<CachedDepthDistrs>,
         tuples: Tuples<ContigId>,
+        writer: impl Write,
         params: &Params,
         rng: &mut XoshiroRng,
         threads: u16,
     ) -> Result<(), Error>
     {
         let main_worker = MainWorker::new(self.clone(), Arc::new(all_alns), Arc::new(contig_windows),
-            Arc::clone(&contigs), cached_distrs, Arc::new(tuples), params, rng, threads);
+            Arc::clone(&contigs), cached_distrs, Arc::new(tuples), writer, params, rng, threads);
         main_worker.run()
     }
 
@@ -200,15 +211,17 @@ impl Scheme {
         contigs: &Arc<ContigNames>,
         cached_distrs: &Arc<CachedDepthDistrs>,
         tuples: Tuples<ContigId>,
+        writer: impl Write,
         params: &Params,
         rng: &mut XoshiroRng,
         threads: u16,
     ) -> Result<(), Error>
     {
         if threads == 1 {
-            self.solve_single_thread(all_alns, contig_windows, contigs, &cached_distrs, tuples, params, rng)
+            self.solve_single_thread(all_alns, contig_windows, contigs, &cached_distrs, tuples, writer, params, rng)
         } else {
-            self.solve_multi_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, params, rng, threads)
+            self.solve_multi_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, writer,
+                params, rng, threads)
         }
     }
 }
@@ -229,16 +242,17 @@ fn filter_ixs(rem_ixs: &mut Vec<usize>, likelihoods: &[f64], ratio: f64) -> usiz
 type Task = (usize, Vec<usize>);
 type Solution = Vec<f64>;
 
-struct MainWorker {
+struct MainWorker<W> {
     scheme: Scheme,
     contigs: Arc<ContigNames>,
     tuples: Arc<Tuples<ContigId>>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
     handles: Vec<thread::JoinHandle<Result<(), Error>>>,
+    writer: W,
 }
 
-impl MainWorker {
+impl<W: Write> MainWorker<W> {
     fn new(
         scheme: Scheme,
         all_alns: Arc<AllPairAlignments>,
@@ -246,6 +260,7 @@ impl MainWorker {
         contigs: Arc<ContigNames>,
         cached_distrs: &Arc<CachedDepthDistrs>,
         tuples: Arc<Tuples<ContigId>>,
+        writer: W,
         params: &Params,
         rng: &mut XoshiroRng,
         threads: u16,
@@ -274,10 +289,10 @@ impl MainWorker {
             receivers.push(sol_receiver);
             handles.push(thread::spawn(|| worker.run()));
         }
-        MainWorker { scheme, contigs, tuples, senders, receivers, handles }
+        MainWorker { scheme, contigs, tuples, senders, receivers, handles, writer }
     }
 
-    fn run(self) -> Result<(), Error> {
+    fn run(mut self) -> Result<(), Error> {
         let n_workers = self.handles.len();
         let tag = self.contigs.tag();
         let n = self.tuples.len();
@@ -285,9 +300,10 @@ impl MainWorker {
         // Best likelihoods and read assignments for each tuple.
         // Do not store actual best assignments.
         // Instead, if needed, we can store Rng states, in order to reconstruct solutions later.
-        let mut likelihoods = vec![f64::NAN; n];
+        let mut likelihoods = vec![f64::NEG_INFINITY; n];
         let mut best_lik = f64::NEG_INFINITY;
         let mut best_ix = 0;
+        let mut best_str = String::new();
 
         for (stage_ix, stage) in self.scheme.0.iter().enumerate() {
             let timer = Instant::now();
@@ -312,20 +328,26 @@ impl MainWorker {
                     let worker_likelihoods = receiver.recv().expect("Recruitment worker has failed!");
                     assert_eq!(worker_likelihoods.len(), end - start);
                     for (&ix, &lik) in rem_ixs[start..end].iter().zip(&worker_likelihoods) {
+                        let contigs_str = self.contigs.get_names(self.tuples[ix].iter().copied());
+                        writeln!(self.writer, "{}\t{}\t{:.3}", stage_ix + 1, contigs_str, Ln::to_log10(lik))?;
                         let stored_lik = &mut likelihoods[ix];
                         *stored_lik = stored_lik.max(lik);
                         if lik > best_lik {
                             best_lik = lik;
                             best_ix = ix;
+                            best_str = contigs_str;
                         }
                     }
                 }
             }
 
-            let best_str = self.contigs.get_names(self.tuples[best_ix].iter().copied());
             log::info!("    [{}] Stage {} finished in {}. Best: {} ({:.2})", tag, LATIN_NUMS[stage_ix],
                 ext::fmt::Duration(timer.elapsed()), best_str, Ln::to_log10(best_lik))
         }
+        let norm_fct = Ln::sum(&likelihoods);
+        likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
+        log::info!("    [{}] Overall best: {}  (Quality = {:.1}, Norm.Likelihood = {})",
+            tag, best_str, Phred::from_likelihoods(&mut likelihoods, best_ix), Ln::to_log10(likelihoods[best_ix]));
 
         std::mem::drop(self.senders);
         for handle in self.handles.into_iter() {

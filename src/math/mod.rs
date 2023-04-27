@@ -5,18 +5,6 @@ pub const LOG10: f64 = 2.302585092994045684_f64;
 /// Constant 1 / log(10).
 pub const INV_LOG10: f64 = 0.4342944819032518277_f64;
 
-/// Returns the smaller value between `a` and `b`.
-/// However, if only one of them equals -INF, returns the other one.
-fn non_inf_min(a: f64, b: f64) -> f64 {
-    if a == f64::NEG_INFINITY {
-        b
-    } else if b == f64::NEG_INFINITY {
-        a
-    } else {
-        a.min(b)
-    }
-}
-
 pub struct Ln;
 
 impl Ln {
@@ -70,7 +58,7 @@ impl Ln {
             0 => f64::NEG_INFINITY,
             1 => f(&a[0]),
             _ => {
-                let m = a.iter().map(|v| f(v)).fold(f64::INFINITY, non_inf_min);
+                let m = a.iter().map(|v| f(v)).fold(f64::NEG_INFINITY, f64::max);
                 let s = a.iter().fold(0.0_f64, |acc, el| acc + (f(&el) - m).exp());
                 m + s.ln()
             },
@@ -84,7 +72,7 @@ impl Ln {
             0 => init,
             1 => Ln::add(init, f(&a[0])),
             _ => {
-                let m = a.iter().map(|v| f(v)).fold(init, non_inf_min);
+                let m = a.iter().map(|v| f(v)).fold(init, f64::max);
                 let s = a.iter().fold((init - m).exp(), |acc, el| acc + (f(&el) - m).exp());
                 m + s.ln()
             },
@@ -103,9 +91,9 @@ impl Phred {
     }
 
     /// Convert log probability to a Phred quality.
-    pub fn from_lprob(lprob: f64) -> f64 {
+    pub fn from_ln_prob(lprob: f64) -> f64 {
         debug_assert!(lprob <= 0.0);
-        -10.0 * INV_LOG10 * lprob
+        -10.0 * Ln::to_log10(lprob)
     }
 
     /// Convert phred quality into regular probability (0 - 1).
@@ -115,9 +103,19 @@ impl Phred {
     }
 
     /// Convert phred quality into regular probability (0 - 1).
-    pub fn to_lprob(phred: f64) -> f64 {
+    pub fn to_ln_prob(phred: f64) -> f64 {
         debug_assert!(phred >= 0.0);
-        -0.1 * phred * LOG10
+        -0.1 * Ln::from_log10(phred)
+    }
+
+
+    /// Returns Phred score ln-likelihood with index `ix` across all `likelihoods`.
+    pub fn from_likelihoods(likelihoods: &mut [f64], ix: usize) -> f64 {
+        let stored = likelihoods[ix];
+        likelihoods[ix] = f64::NEG_INFINITY;
+        let error_prob = Ln::sum(likelihoods);
+        likelihoods[ix] = stored;
+        Self::from_ln_prob(error_prob)
     }
 }
 

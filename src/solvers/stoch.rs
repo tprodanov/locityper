@@ -95,10 +95,18 @@ impl MultiTrySolver for GreedySolver {
 impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> tries (as_u16), sample_size (as_usize), plato_size (as_usize));
-        self.set_tries(tries)
-            .set_sample_size(sample_size)
-            .set_plato_size(plato_size);
+        if obj.has_key("tries") {
+            json_get!(obj -> tries (as_u16));
+            self.set_tries(tries);
+        }
+        if obj.has_key("sample_size") {
+            json_get!(obj -> sample_size (as_usize));
+            self.set_sample_size(sample_size);
+        }
+        if obj.has_key("plato_size") {
+            json_get!(obj -> plato_size (as_usize));
+            self.set_plato_size(plato_size);
+        }
         Ok(())
     }
 }
@@ -212,6 +220,7 @@ impl MultiTrySolver for SimAnneal {
 impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
+        // TODO: Set params only if they exist.
         json_get!(obj -> tries (as_u16), cooling_temp (as_f64), init_prob (as_f64), plato_size (as_usize));
         self.set_tries(tries)
             .set_cooling_temp(cooling_temp)
