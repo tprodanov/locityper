@@ -434,6 +434,7 @@ fn analyze_locus(
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+    let timer = Instant::now();
     let args = parse_args(argv)?.validate()?;
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
@@ -461,5 +462,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         rng.long_jump();
         analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, rng_clone, &args)?;
     }
+    log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }

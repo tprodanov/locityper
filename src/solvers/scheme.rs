@@ -4,6 +4,7 @@
 use std::{
     time::Instant,
     thread,
+    cmp::min,
     sync::{
         Arc,
         mpsc::{self, Sender, Receiver},
@@ -139,7 +140,6 @@ impl Scheme {
     {
         let tag = contigs.tag();
         let n = tuples.len();
-        let mut width1 = math::num_digits(n as u64);
         let width2 = 12 * tuples.tup_len();
         let mut rem_ixs: Vec<_> = (0..n).collect();
         // Best likelihoods and read assignments for each tuple.
@@ -150,14 +150,8 @@ impl Scheme {
         let mut best_str = "???".to_owned();
 
         for (stage_ix, stage) in self.0.iter().enumerate() {
-            // Consider at least one tuple irrespective of the ratio.
-            let m = ((n as f64 * stage.ratio).ceil() as usize).clamp(1, n);
-            if m < rem_ixs.len() {
-                rem_ixs.sort_unstable_by(|&i, &j| likelihoods[j].total_cmp(&likelihoods[i]));
-                rem_ixs.truncate(m);
-                width1 = math::num_digits(m as u64);
-            }
-
+            let m = filter_ixs(&mut rem_ixs, &likelihoods, stage.ratio);
+            let width1 = math::num_digits(m as u64);
             let solver = &stage.solver;
             let timer = Instant::now();
             log::info!("    [{}] Stage {}. {}  ({} tuples, 1 thread)", tag, LATIN_NUMS[stage_ix], solver, m);
@@ -194,7 +188,9 @@ impl Scheme {
         threads: u16,
     ) -> Result<(), Error>
     {
-        unimplemented!()
+        let main_worker = MainWorker::new(self.clone(), Arc::new(all_alns), Arc::new(contig_windows),
+            Arc::clone(&contigs), cached_distrs, Arc::new(tuples), params, rng, threads);
+        main_worker.run()
     }
 
     pub fn solve(
@@ -217,26 +213,39 @@ impl Scheme {
     }
 }
 
+///Keep only the best `ratio` indices (out of the total number).
+fn filter_ixs(rem_ixs: &mut Vec<usize>, likelihoods: &[f64], ratio: f64) -> usize {
+    let n = likelihoods.len();
+    // Consider at least one tuple irrespective of the ratio.
+    let m = ((n as f64 * ratio).ceil() as usize).clamp(1, n);
+    if m < rem_ixs.len() {
+        rem_ixs.sort_unstable_by(|&i, &j| likelihoods[j].total_cmp(&likelihoods[i]));
+        rem_ixs.truncate(m);
+    }
+    m
+}
+
 /// Task, sent to the workers: stage index + tuple indices to solve.
 type Task = (usize, Vec<usize>);
 type Solution = Vec<f64>;
 
 struct MainWorker {
+    scheme: Scheme,
     contigs: Arc<ContigNames>,
-    tuples: Tuples<ContigId>,
+    tuples: Arc<Tuples<ContigId>>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
-    handles: Vec<thread::JoinHandle<()>>,
+    handles: Vec<thread::JoinHandle<Result<(), Error>>>,
 }
 
 impl MainWorker {
     fn new(
-        scheme: &Scheme,
-        all_alns: AllPairAlignments,
-        contig_windows: Vec<ContigWindows>,
-        contigs: &Arc<ContigNames>,
+        scheme: Scheme,
+        all_alns: Arc<AllPairAlignments>,
+        contig_windows: Arc<Vec<ContigWindows>>,
+        contigs: Arc<ContigNames>,
         cached_distrs: &Arc<CachedDepthDistrs>,
-        tuples: Tuples<ContigId>,
+        tuples: Arc<Tuples<ContigId>>,
         params: &Params,
         rng: &mut XoshiroRng,
         threads: u16,
@@ -245,18 +254,18 @@ impl MainWorker {
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
-        let all_alns = Arc::new(all_alns);
-        for i in 0..n_workers {
+
+        for _ in 0..n_workers {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
                 scheme: scheme.clone(),
                 rng: rng.clone(),
                 all_alns: Arc::clone(&all_alns),
-                contig_windows: contig_windows.clone(),
-                tuples: tuples.clone(),
-                params: params.clone(),
+                contig_windows: Arc::clone(&contig_windows),
+                tuples: Arc::clone(&tuples),
                 cached_distrs: Arc::clone(&cached_distrs),
+                params: params.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
             };
@@ -265,11 +274,64 @@ impl MainWorker {
             receivers.push(sol_receiver);
             handles.push(thread::spawn(|| worker.run()));
         }
-        MainWorker {
-            contigs: Arc::clone(&contigs),
-            tuples: tuples,
-            senders, receivers, handles,
+        MainWorker { scheme, contigs, tuples, senders, receivers, handles }
+    }
+
+    fn run(self) -> Result<(), Error> {
+        let n_workers = self.handles.len();
+        let tag = self.contigs.tag();
+        let n = self.tuples.len();
+        let mut rem_ixs: Vec<_> = (0..n).collect();
+        // Best likelihoods and read assignments for each tuple.
+        // Do not store actual best assignments.
+        // Instead, if needed, we can store Rng states, in order to reconstruct solutions later.
+        let mut likelihoods = vec![f64::NAN; n];
+        let mut best_lik = f64::NEG_INFINITY;
+        let mut best_ix = 0;
+
+        for (stage_ix, stage) in self.scheme.0.iter().enumerate() {
+            let timer = Instant::now();
+            let m = filter_ixs(&mut rem_ixs, &likelihoods, stage.ratio);
+            log::info!("    [{}] Stage {}. {}  ({} tuples, {} threads)", tag, LATIN_NUMS[stage_ix], stage.solver,
+                m, n_workers);
+
+            // Ceiling division.
+            let per_worker = (m + n_workers - 1) / n_workers;
+            for (i, sender) in self.senders.iter().enumerate() {
+                let start = per_worker * i;
+                if start < m {
+                    let end = min(start + per_worker, m);
+                    sender.send((stage_ix, rem_ixs[start..end].to_vec())).expect("Recruitment worker has failed!");
+                }
+            }
+
+            for (i, receiver) in self.receivers.iter().enumerate() {
+                let start = per_worker * i;
+                if start < m {
+                    let end = min(start + per_worker, m);
+                    let worker_likelihoods = receiver.recv().expect("Recruitment worker has failed!");
+                    assert_eq!(worker_likelihoods.len(), end - start);
+                    for (&ix, &lik) in rem_ixs[start..end].iter().zip(&worker_likelihoods) {
+                        let stored_lik = &mut likelihoods[ix];
+                        *stored_lik = stored_lik.max(lik);
+                        if lik > best_lik {
+                            best_lik = lik;
+                            best_ix = ix;
+                        }
+                    }
+                }
+            }
+
+            let best_str = self.contigs.get_names(self.tuples[best_ix].iter().copied());
+            log::info!("    [{}] Stage {} finished in {}. Best: {} ({:.2})", tag, LATIN_NUMS[stage_ix],
+                ext::fmt::Duration(timer.elapsed()), best_str, Ln::to_log10(best_lik))
         }
+
+        std::mem::drop(self.senders);
+        for handle in self.handles.into_iter() {
+            handle.join().expect("Process failed for unknown reason")?;
+        }
+        Ok(())
     }
 }
 
@@ -277,16 +339,36 @@ struct Worker {
     scheme: Scheme,
     rng: XoshiroRng,
     all_alns: Arc<AllPairAlignments>,
-    contig_windows: Vec<ContigWindows>,
-    tuples: Tuples<ContigId>,
-    params: Params,
+    contig_windows: Arc<Vec<ContigWindows>>,
+    tuples: Arc<Tuples<ContigId>>,
     cached_distrs: Arc<CachedDepthDistrs>,
+    params: Params,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
 }
 
 impl Worker {
-    fn run(self) {
+    fn run(mut self) -> Result<(), Error> {
+        // Block thread and wait for the shipment.
+        while let Ok((stage_ix, task)) = self.receiver.recv() {
+            let n = task.len();
+            assert_ne!(n, 0);
+            let all_alns = &self.all_alns;
+            let solver = &self.scheme.0[stage_ix].solver;
+            let tuples = &self.tuples;
+            let contig_windows = &self.contig_windows;
+            let mut likelihoods = Vec::with_capacity(n);
 
+            for ix in task.into_iter() {
+                let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
+                let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, &self.cached_distrs, &self.params);
+                likelihoods.push(solver.solve(&mut assgn, &mut self.rng)?);
+            }
+            if let Err(_) = self.sender.send(likelihoods) {
+                log::error!("Read recruitment: main thread stopped before the child thread.");
+                break;
+            }
+        }
+        Ok(())
     }
 }

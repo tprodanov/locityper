@@ -1,5 +1,5 @@
 use std::{
-    fmt,
+    fmt::{self, Write as FmtWrite},
     io::{self, BufRead},
     fs::File,
     sync::Arc,
@@ -154,6 +154,18 @@ impl ContigNames {
     /// Get contig name from an id.
     pub fn get_name(&self, id: ContigId) -> &str {
         &self.names[id.ix()]
+    }
+
+    /// Returns contig names, joined with a comma.
+    pub fn get_names(&self, ids: impl Iterator<Item = ContigId>) -> String {
+        let mut s = String::new();
+        for id in ids {
+            if !s.is_empty() {
+                write!(s, ",").unwrap();
+            }
+            write!(s, "{}", self.names[id.ix()]).unwrap();
+        }
+        s
     }
 
     /// Get contig length from an id.

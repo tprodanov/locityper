@@ -203,12 +203,9 @@ impl MultiContigWindows {
     /// Returns string with all contig names through a comma.
     pub fn ids_str(&self, contigs: &ContigNames) -> String {
         let mut s = String::new();
-        let mut first = true;
         for (id, cn) in self.contigs_cns() {
             for _ in 0..cn {
-                if first {
-                    first = false;
-                } else {
+                if !s.is_empty() {
                     write!(s, ",").unwrap();
                 }
                 write!(s, "{}", contigs.get_name(id)).unwrap();
