@@ -24,7 +24,8 @@ use crate::{
         Params,
         locs::AllPairAlignments,
         windows::{ContigWindows, MultiContigWindows},
-        assgn::{CachedDepthDistrs, ReadAssignment},
+        assgn::ReadAssignment,
+        dp_cache::CachedDepthDistrs,
     },
 };
 use super::Solver;

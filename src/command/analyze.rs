@@ -22,7 +22,7 @@ use crate::{
         Params as AssgnParams,
         locs::PrelimAlignments,
         windows::ContigWindows,
-        assgn::CachedDepthDistrs,
+        dp_cache::CachedDepthDistrs,
     },
     solvers::scheme::Scheme,
 };

@@ -13,7 +13,7 @@ use crate::{
 };
 use super::{
     locs::{TwoIntervals, ReadPairAlignments},
-    assgn::{CachedDepthDistrs, DistrBox},
+    dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
 /// First window in `MultiContigWindows` represents an unmapped window.

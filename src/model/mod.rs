@@ -1,6 +1,7 @@
 pub mod windows;
 pub mod locs;
 pub mod assgn;
+pub mod dp_cache;
 
 use crate::{
     math::Ln,
