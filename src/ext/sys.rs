@@ -39,6 +39,14 @@ pub fn open(filename: &Path) -> io::Result<Box<dyn BufRead + Send>> {
     }
 }
 
+/// Loads full JSON contents from a file.
+pub fn load_json(filename: &Path) -> io::Result<json::JsonValue> {
+    let stream = open(filename)?;
+    let contents = io::read_to_string(stream)?;
+    json::parse(&contents).map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+        format!("Failed parsing {}: invalid JSON format", filename.display())))
+}
+
 /// Creates a buffered file OR stdout if filename is `-`.
 pub fn create_uncompressed(filename: &Path) -> io::Result<Box<dyn Write>> {
     if filename == OsStr::new("-") {

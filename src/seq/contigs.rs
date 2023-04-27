@@ -9,7 +9,7 @@ use fnv::FnvHashMap;
 use bio::io::fasta::{self, FastaRead};
 use crate::{
     Error,
-    ext::{vec::VecOrNone, sys as sys_ext},
+    ext::{self, vec::VecOrNone},
     seq::kmers::KmerCounts,
 };
 
@@ -220,8 +220,8 @@ impl ContigSet {
         descriptions: impl VecOrNone<Option<String>>,
     ) -> Result<Self, Error>
     {
-        let (contigs, seqs) = ContigNames::load_fasta(tag, sys_ext::open(fasta_filename)?, descriptions)?;
-        let kmer_counts = KmerCounts::load(sys_ext::open(kmers_filename)?, contigs.lengths())?;
+        let (contigs, seqs) = ContigNames::load_fasta(tag, ext::sys::open(fasta_filename)?, descriptions)?;
+        let kmer_counts = KmerCounts::load(ext::sys::open(kmers_filename)?, contigs.lengths())?;
         Ok(Self { contigs, seqs, kmer_counts })
     }
 

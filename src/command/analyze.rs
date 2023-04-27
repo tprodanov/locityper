@@ -18,7 +18,7 @@ use crate::{
         ContigSet,
     },
     bg::{BgDistr, JsonSer},
-    ext::{fmt as fmt_ext, sys as sys_ext},
+    ext,
     model::{
         Params as AssgnParams,
         locs::PrelimAlignments,
@@ -36,7 +36,7 @@ struct Args {
     output: Option<PathBuf>,
     subset_loci: FnvHashSet<String>,
     ploidy: u8,
-    solvers_scheme: Option<PathBuf>,
+    solvers: Option<PathBuf>,
 
     interleaved: bool,
     threads: u16,
@@ -57,7 +57,7 @@ impl Default for Args {
             output: None,
             subset_loci: FnvHashSet::default(),
             ploidy: 2,
-            solvers_scheme: None,
+            solvers: None,
 
             interleaved: false,
             threads: 4,
@@ -89,11 +89,11 @@ impl Args {
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
         self.bwa = if let Some(bwa) = self.bwa {
-            Some(sys_ext::find_exe(bwa)?)
+            Some(ext::sys::find_exe(bwa)?)
         } else {
-            Some(sys_ext::find_exe(BWA2).or_else(|_| sys_ext::find_exe(BWA1))?)
+            Some(ext::sys::find_exe(BWA2).or_else(|_| ext::sys::find_exe(BWA1))?)
         };
-        self.samtools = sys_ext::find_exe(self.samtools)?;
+        self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
         self.assgn_params.validate()?;
@@ -198,7 +198,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('m') | Long("min-matches") => args.recr_params.min_matches = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
-            Short('S') | Long("solvers") => args.solvers_scheme = Some(parser.value()?.parse()?),
+            Short('S') | Long("solvers") => args.solvers = Some(parser.value()?.parse()?),
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
@@ -274,7 +274,7 @@ impl LocusData {
         if out_locus_dir.exists() && force {
             fs::remove_dir_all(&out_locus_dir)?;
         }
-        sys_ext::mkdir(&out_locus_dir)?;
+        ext::sys::mkdir(&out_locus_dir)?;
         Ok(Self {
             tmp_reads_filename: out_locus_dir.join("reads.tmp.fq.gz"),
             reads_filename: out_locus_dir.join("reads.fq.gz"),
@@ -298,9 +298,9 @@ fn load_loci(
     log::info!("Loading database.");
     let db_loci_dir = db_path.join(paths::LOCI_DIR);
     let out_loci_dir = out_path.join(paths::LOCI_DIR);
-    sys_ext::mkdir(&out_loci_dir)?;
+    ext::sys::mkdir(&out_loci_dir)?;
     if force {
-        log::warn!("Force flag is set: overwriting output directories {}/*", fmt_ext::path(&out_loci_dir));
+        log::warn!("Force flag is set: overwriting output directories {}/*", ext::fmt::path(&out_loci_dir));
     }
 
     let mut loci = Vec::new();
@@ -318,7 +318,7 @@ fn load_loci(
             let kmers_filename = path.join(paths::KMERS);
             match ContigSet::load(name, &fasta_filename, &kmers_filename, ()) {
                 Ok(set) => loci.push(LocusData::new(set, &path, &out_loci_dir, force)?),
-                Err(e) => log::error!("Could not load locus information from {}: {:?}", fmt_ext::path(&path), e),
+                Err(e) => log::error!("Could not load locus information from {}: {:?}", ext::fmt::path(&path), e),
             }
         }
     }
@@ -346,20 +346,20 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
 
     let targets = recruit::Targets::new(filt_loci.iter().map(|locus| &locus.set), &args.recr_params);
     let writers: Vec<_> = filt_loci.iter()
-        .map(|locus| sys_ext::create_gzip(&locus.tmp_reads_filename))
+        .map(|locus| ext::sys::create_gzip(&locus.tmp_reads_filename))
         .collect::<Result<_, _>>()?;
 
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
-        let reader = fastx::Reader::new(sys_ext::open(&args.input[0])?)?;
+        let reader = fastx::Reader::new(ext::sys::open(&args.input[0])?)?;
         targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     } else if args.interleaved {
-        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(sys_ext::open(&args.input[0])?)?);
+        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(ext::sys::open(&args.input[0])?)?);
         targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     } else {
         let reader = fastx::PairedEndReaders::new(
-            fastx::Reader::new(sys_ext::open(&args.input[0])?)?,
-            fastx::Reader::new(sys_ext::open(&args.input[1])?)?);
+            fastx::Reader::new(ext::sys::open(&args.input[0])?)?,
+            fastx::Reader::new(ext::sys::open(&args.input[1])?)?);
         targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     }
     for locus in filt_loci.iter() {
@@ -395,10 +395,10 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
         .arg("-o").arg(&locus.tmp_aln_filename)
         .stdin(Stdio::from(bwa_stdout));
 
-    log::debug!("    {} | {}", fmt_ext::command(&bwa_cmd), fmt_ext::command(&samtools_cmd));
+    log::debug!("    {} | {}", ext::fmt::command(&bwa_cmd), ext::fmt::command(&samtools_cmd));
     let samtools_output = samtools_cmd.output()?;
     let bwa_output = bwa_child.wait_with_output()?;
-    log::debug!("    Finished in {}", fmt_ext::Duration(start.elapsed()));
+    log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     if !bwa_output.status.success() {
         return Err(Error::SubprocessFail(bwa_output));
     } else if !samtools_output.status.success() {
@@ -422,7 +422,8 @@ fn analyze_locus(
 
     log::debug!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let mut bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
-    let mut locs = PrelimAlignments::from_records(bam_reader.records(), Rc::clone(&locus.set.contigs()),
+    let contigs = locus.set.contigs();
+    let mut locs = PrelimAlignments::from_records(bam_reader.records(), Rc::clone(&contigs),
         bg_distr.error_profile(), &args.assgn_params, ())?;
     let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
@@ -430,8 +431,8 @@ fn analyze_locus(
     // Select a new seed for the locus.
     // Useful when many loci are analyzed, as we cannot use the same seed for all of them.
     let seed = rng.gen::<u64>();
-    let tuples = vec![]; // PLACEHOLDER.
-    scheme.solve(&all_alns, &contig_windows, &locus.contigs, &cached_distrs, &tuples, &args.assgn_params, seed, args.threads)
+    let tuples = ext::vec::Tuples::new(usize::from(args.ploidy)); // PLACEHOLDER.
+    scheme.solve(&all_alns, &contig_windows, &contigs, &cached_distrs, &tuples, &args.assgn_params, seed, args.threads)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -450,11 +451,14 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
     recruit_reads(&loci, &args)?;
 
-    // if let Some(scheme_filename)
+    let scheme = match args.solvers.as_ref() {
+        Some(filename) => Scheme::from_json(&ext::sys::load_json(filename)?)?,
+        None => Scheme::default(),
+    };
 
-    let mut rng = sys_ext::init_rng(args.seed);
+    let mut rng = ext::sys::init_rng(args.seed);
     for locus in loci.iter() {
-        analyze_locus(locus, &bg_distr, &cached_distrs, &mut rng, &args)?;
+        analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, &mut rng, &args)?;
     }
     Ok(())
 }

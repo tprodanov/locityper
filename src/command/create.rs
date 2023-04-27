@@ -17,7 +17,7 @@ use crate::{
         Interval, ContigNames,
         kmers::{MAX_KMER, JfKmerGetter},
     },
-    ext::{sys as sys_ext, fmt as fmt_ext},
+    ext,
 };
 use super::paths;
 
@@ -50,7 +50,7 @@ impl Args {
         self.threads = max(self.threads, 1);
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
-        self.jellyfish = sys_ext::find_exe(self.jellyfish)?;
+        self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         validate_param!(self.kmer_size % 2 == 1 && self.kmer_size <= MAX_KMER,
             "k-mer size ({}) must be odd, and at most {}", self.kmer_size, MAX_KMER);
         Ok(self)
@@ -140,7 +140,7 @@ fn select_bg_interval(
 {
     if let Some(s) = bg_region {
         let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
-            format!("Reference file {} does not contain region {}", fmt_ext::path(ref_filename), s)))?;
+            format!("Reference file {} does not contain region {}", ext::fmt::path(ref_filename), s)))?;
         return if contigs.in_bounds(&region) {
             Ok(region)
         } else {
@@ -154,13 +154,13 @@ fn select_bg_interval(
                 return Ok(region);
             } else {
                 log::error!("Chromosome {} is in the reference file {}, but is shorter than expected",
-                    region.contig_name(), fmt_ext::path(ref_filename));
+                    region.contig_name(), ext::fmt::path(ref_filename));
             }
         }
     }
     Err(Error::InvalidInput(format!(
         "Reference file {} does not contain any of the default background regions. \
-        Consider setting region via --region or use a different reference file.", fmt_ext::path(ref_filename))))
+        Consider setting region via --region or use a different reference file.", ext::fmt::path(ref_filename))))
 }
 
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
@@ -174,25 +174,25 @@ fn extract_bg_region<R: Read + Seek>(
 {
     let seq = region.fetch_seq(fasta)?;
     let bg_dir = db_path.join(paths::BG_DIR);
-    sys_ext::mkdir(&bg_dir)?;
+    ext::sys::mkdir(&bg_dir)?;
     let bg_fasta_filename = bg_dir.join(paths::BG_FASTA);
-    log::info!("Writing background region {} to {}", region, fmt_ext::path(&bg_fasta_filename));
-    let mut fasta_writer = sys_ext::create_gzip(&bg_fasta_filename)?;
+    log::info!("Writing background region {} to {}", region, ext::fmt::path(&bg_fasta_filename));
+    let mut fasta_writer = ext::sys::create_gzip(&bg_fasta_filename)?;
     crate::seq::write_fasta(&mut fasta_writer, format!("bg {}", region).as_bytes(), &seq)?;
 
     log::info!("Calculating k-mer counts on the background region.");
     let kmer_counts = kmer_getter.fetch_one(seq)?;
-    let mut kmers_out = sys_ext::create_gzip(&bg_dir.join(paths::KMERS))?;
+    let mut kmers_out = ext::sys::create_gzip(&bg_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_out)?;
     Ok(())
 }
 
 fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: u64) -> Result<PathBuf, Error> {
     let mut jf_path = db_path.join(paths::JF_DIR);
-    sys_ext::mkdir(&jf_path)?;
+    ext::sys::mkdir(&jf_path)?;
     jf_path.push(&format!("{}.jf", args.kmer_size));
     if jf_path.exists() {
-        log::warn!("{} already exists, skipping k-mer counting!", fmt_ext::path(&jf_path));
+        log::warn!("{} already exists, skipping k-mer counting!", ext::fmt::path(&jf_path));
         return Ok(jf_path)
     }
 
@@ -204,7 +204,7 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
         .arg("--output").arg(&jf_path)
         .arg(ref_filename);
     log::info!("Counting {}-mers in {} threads", args.kmer_size, args.threads);
-    log::debug!("    {}", fmt_ext::command(&command));
+    log::debug!("    {}", ext::fmt::command(&command));
 
     let start = Instant::now();
     let output = command.output()?;
@@ -222,11 +222,11 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_path = args.database.as_ref().unwrap();
     if db_path.exists() {
         if args.force {
-            log::warn!("Completely removing output directory {}", fmt_ext::path(db_path));
+            log::warn!("Completely removing output directory {}", ext::fmt::path(db_path));
             fs::remove_dir_all(db_path)?;
         }
     }
-    sys_ext::mkdir(db_path)?;
+    ext::sys::mkdir(db_path)?;
 
     // unwrap as args.reference was previously checked to be Some.
     let ref_filename = args.reference.as_ref().unwrap();
@@ -237,7 +237,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
     extract_bg_region(&region, &mut fasta, &db_path, &kmer_getter)?;
 
-    sys_ext::mkdir(&db_path.join(paths::LOCI_DIR))?;
+    ext::sys::mkdir(&db_path.join(paths::LOCI_DIR))?;
     log::info!("Success!");
     Ok(())
 }

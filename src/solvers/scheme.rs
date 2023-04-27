@@ -9,6 +9,7 @@ use crate::{
     err::{Error, validate_param},
     bg::ser::json_get,
     seq::{ContigId, ContigNames},
+    ext::vec::Tuples,
     model::{
         Params,
         locs::AllPairAlignments,
@@ -31,7 +32,7 @@ impl Stage {
     }
 
     fn new(solver: Box<dyn Solver>, ratio: f64) -> Result<Self, Error> {
-        validate_param!(ratio > 0.0 && ratio <= 1.0, "Ratio ({}) must be within (0, 1].", ratio);
+        validate_param!(ratio >= 0.0 && ratio <= 1.0, "Ratio ({}) must be within [0, 1].", ratio);
         Ok(Self { solver, ratio })
     }
 
@@ -89,7 +90,7 @@ const MAX_STAGES: usize = 10;
 const LATIN_NUMS: [&'static str; MAX_STAGES] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
 
 impl Scheme {
-    pub fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    pub fn from_json(obj: &json::JsonValue) -> Result<Self, Error> {
         let json_arr = match obj {
             json::JsonValue::Array(arr) => arr,
             _ => return Err(Error::JsonLoad(format!("Failed to parse '{}': must be an array", obj))),
@@ -121,7 +122,7 @@ impl Scheme {
         contig_windows: &[ContigWindows],
         contigs: &Rc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
-        tuples: &[Vec<ContigId>],
+        tuples: &Tuples<ContigId>,
         params: &Params,
         seed: u64,
     ) -> Result<(), Error>
@@ -135,7 +136,8 @@ impl Scheme {
         let mut rem_ixs: Vec<_> = (0..n).collect();
 
         for (stage_ix, stage) in self.0.iter().enumerate() {
-            let m = (n as f64 * stage.ratio).ceil() as usize;
+            // Consider at least one tuple irrespective of the ratio.
+            let m = ((n as f64 * stage.ratio).ceil() as usize).clamp(1, n);
             if m < rem_ixs.len() {
                 rem_ixs.sort_unstable_by(|&i, &j| likelihoods[j].total_cmp(&likelihoods[i]));
                 rem_ixs.truncate(m);
@@ -165,7 +167,7 @@ impl Scheme {
         contig_windows: &[ContigWindows],
         contigs: &Rc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
-        tuples: &[Vec<ContigId>],
+        tuples: &Tuples<ContigId>,
         params: &Params,
         seed: u64,
         threads: u16,

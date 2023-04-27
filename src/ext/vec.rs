@@ -215,3 +215,96 @@ where T: fmt::Debug
     }
 }
 
+/// Count the number of combinations.
+/// Taken from https://stackoverflow.com/questions/65561566/number-of-combinations-permutations.
+fn count_combinations(n: u64, r: u64) -> u64 {
+    if r > n {
+        0
+    } else {
+        (1..=r.min(n - r)).fold(1, |acc, val| acc * (n - val + 1) / val)
+    }
+}
+
+/// Count the number of combinations with replacement.
+fn count_repl_combinations(n: u64, r: u64) -> u64 {
+    count_combinations(n + r - 1, n)
+}
+
+/// Structure that stores tuples of fixed size.
+pub struct Tuples<T> {
+    /// Linear storage of all tuples.
+    data: Vec<T>,
+    /// Size of a single tuple.
+    tup_len: usize,
+}
+
+impl<T> Tuples<T> {
+    pub fn new(tup_len: usize) -> Self {
+        assert!(tup_len > 0, "Cannot construct tuples with empty length.");
+        Self {
+            data: Vec::new(),
+            tup_len,
+        }
+    }
+
+    pub fn with_capacity(tup_len: usize, capacity: usize) -> Self {
+        assert!(tup_len > 0, "Cannot construct tuples with empty length.");
+        Self {
+            data: Vec::with_capacity(capacity * tup_len),
+            tup_len,
+        }
+    }
+
+    /// Returns the number of tuples in the set.
+    pub fn len(&self) -> usize {
+        self.data.len() / self.tup_len
+    }
+
+    /// Returns tuple length.
+    pub fn tup_len(&self) -> usize {
+        self.tup_len
+    }
+}
+
+impl<T: Copy> Tuples<T> {
+    fn init_repl_combinations(&mut self, v: &[T], subtuple: &mut [T], depth: usize) {
+        if depth + 1 == self.tup_len {
+            for &el in v.iter() {
+                self.data.extend_from_slice(subtuple);
+                self.data.push(el);
+            }
+        } else {
+            for &el in v.iter() {
+                subtuple[depth] = el;
+                self.init_repl_combinations(v, subtuple, depth + 1);
+            }
+        }
+    }
+
+    /// Stores all tuples of size `tup_len`, constructed from vector `v` through all combinations with replacement.
+    pub fn repl_combinations(v: &[T], tup_len: usize) -> Self {
+        assert!(!v.is_empty(), "Cannot construct combinations on an empty vector or empty tuple size");
+        let count = usize::try_from(count_repl_combinations(v.len() as u64, tup_len as u64)).unwrap();
+        assert!(count < 10_000_000, "Number of possible tuples ({}) is too great", count);
+        let mut res = Tuples::with_capacity(tup_len, count);
+
+        let mut subtuple = vec![v[0]; tup_len - 1];
+        if tup_len == 1 {
+            res.data.extend_from_slice(v);
+        } else {
+            res.init_repl_combinations(v, &mut subtuple, 0);
+        }
+        assert_eq!(res.len(), count);
+        res
+    }
+}
+
+impl<T> std::ops::Index<usize> for Tuples<T> {
+    type Output = [T];
+
+    fn index(&self, index: usize) -> &[T] {
+        let i = index * self.tup_len;
+        let j = i + self.tup_len;
+        &self.data[i..j]
+    }
+}

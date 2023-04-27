@@ -19,8 +19,8 @@ use crate::{
     err::{Error, validate_param},
     algo::bisect,
     ext::{
+        self,
         vec::{VecExt, F64Ext, IterExt},
-        sys as sys_ext, fmt as fmt_ext,
     },
     seq::{
         self, NamedInterval, ContigNames,
@@ -76,8 +76,8 @@ impl Args {
             _ => {},
         }
 
-        self.jellyfish = sys_ext::find_exe(self.jellyfish)?;
-        self.bwa = self.bwa.into_iter().filter_map(|path| sys_ext::find_exe(path).ok()).collect();
+        self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
+        self.bwa = self.bwa.into_iter().filter_map(|path| ext::sys::find_exe(path).ok()).collect();
         validate_param!(!self.bwa.is_empty(), "No BWA executables found");
         // Make window size odd.
         self.moving_window += 1 - self.moving_window % 2;
@@ -185,7 +185,7 @@ fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) 
     }
 
     for filename in bed_files.iter() {
-        for line in sys_ext::open(filename)?.lines() {
+        for line in ext::sys::open(filename)?.lines() {
             let interval = NamedInterval::parse_bed(&mut line?.split('\t'), contigs)?;
             if !names.insert(interval.name().to_string()) {
                 return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
@@ -291,13 +291,13 @@ fn write_locus(
     bwa_executables: &[PathBuf],
 ) -> Result<(), Error>
 {
-    log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), fmt_ext::path(locus_dir));
+    log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), ext::fmt::path(locus_dir));
     let mut bed_out = File::create(locus_dir.join(paths::LOCUS_BED))?;
     writeln!(bed_out, "{}", locus.bed_fmt())?;
     std::mem::drop(bed_out);
 
     let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
-    let mut fasta_out = sys_ext::create_gzip(&fasta_filename)?;
+    let mut fasta_out = ext::sys::create_gzip(&fasta_filename)?;
     for (name, seq) in seqs.iter() {
         if Some(name) == ref_name.as_ref() {
             seq::write_fasta(&mut fasta_out, format!("{} {}", name, locus.interval()).as_bytes(), seq)?;
@@ -311,14 +311,14 @@ fn write_locus(
     log::debug!("    [{}] Counting k-mers", locus.name());
     let seqs = seqs.into_iter().map(|(_name, seq)| seq).collect();
     let kmer_counts = kmer_getter.fetch(seqs)?;
-    let mut kmers_out = sys_ext::create_gzip(&locus_dir.join(paths::KMERS))?;
+    let mut kmers_out = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_out)?;
 
     log::debug!("    [{}] Indexing haplotypes", locus.name());
     for bwa in bwa_executables.iter() {
         let mut bwa_command = Command::new(bwa);
         bwa_command.arg("index").arg(&fasta_filename);
-        log::debug!("        {}", fmt_ext::command(&bwa_command));
+        log::debug!("        {}", ext::fmt::command(&bwa_command));
         let bwa_output = bwa_command.output()?;
         if !bwa_output.status.success() {
             return Err(Error::SubprocessFail(bwa_output));
@@ -389,10 +389,10 @@ where R: Read + Seek,
 
     let dir = loci_dir.join(new_locus.name());
     if dir.exists() {
-        log::warn!("    Clearing directory {}", fmt_ext::path(&dir));
+        log::warn!("    Clearing directory {}", ext::fmt::path(&dir));
         fs::remove_dir_all(&dir)?;
     }
-    sys_ext::mkdir(&dir)?;
+    ext::sys::mkdir(&dir)?;
     log::debug!("    [{}] Reconstructing haplotypes", new_locus.name());
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
@@ -413,7 +413,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
-    let mut jf_filenames = sys_ext::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
+    let mut jf_filenames = ext::sys::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
     if jf_filenames.len() != 1 {
         return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
             db_path.display(), jf_filenames.len())));
@@ -423,7 +423,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
     let loci_dir = db_path.join(paths::LOCI_DIR);
-    sys_ext::mkdir(&loci_dir)?;
+    ext::sys::mkdir(&loci_dir)?;
     for locus in loci.iter() {
         add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?;
     }
