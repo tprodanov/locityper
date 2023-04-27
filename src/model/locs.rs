@@ -351,6 +351,7 @@ impl fmt::Display for PairAlignment {
 }
 
 /// Read-pair alignments for a single read-pair.
+#[derive(Clone)]
 pub struct ReadPairAlignments {
     /// Hash of the read name.
     name_hash: u64,
@@ -392,6 +393,7 @@ impl ReadPairAlignments {
 
 /// All read-pair alignments for all read-pairs.
 /// Key: read name hash.
+#[derive(Clone)]
 pub struct AllPairAlignments(Vec<ReadPairAlignments>);
 
 impl AllPairAlignments {

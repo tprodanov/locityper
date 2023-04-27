@@ -4,9 +4,18 @@
 use std::{
     rc::Rc,
     time::Instant,
+    thread,
+    sync::{
+        Arc,
+        mpsc::{self, Sender, Receiver},
+    },
 };
 use crate::{
-    ext,
+    ext::{
+        self,
+        vec::Tuples,
+        rand::XoshiroRng,
+    },
     math::{self, Ln},
     err::{Error, validate_param},
     bg::ser::json_get,
@@ -119,13 +128,13 @@ impl Scheme {
 
     fn solve_single_thread(
         &self,
-        all_alns: &AllPairAlignments,
-        contig_windows: &[ContigWindows],
+        all_alns: AllPairAlignments,
+        contig_windows: Vec<ContigWindows>,
         contigs: &Rc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
-        tuples: &ext::vec::Tuples<ContigId>,
+        tuples: Tuples<ContigId>,
         params: &Params,
-        rng: &mut ext::rand::XoshiroRng,
+        rng: &mut XoshiroRng,
     ) -> Result<(), Error>
     {
         let tag = contigs.tag();
@@ -153,9 +162,9 @@ impl Scheme {
             let timer = Instant::now();
             log::info!("    [{}] Stage {}. {}  ({} tuples, 1 thread)", tag, LATIN_NUMS[stage_ix], solver, m);
             for (i, &ix) in rem_ixs.iter().enumerate() {
-                let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
+                let mcontig_windows = MultiContigWindows::new(&tuples[ix], &contig_windows);
                 let contigs_str = mcontig_windows.ids_str(contigs);
-                let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
+                let mut assgn = ReadAssignment::new(mcontig_windows, &all_alns, cached_distrs, params);
                 let lik = solver.solve(&mut assgn, rng)?;
                 let stored_lik = &mut likelihoods[ix];
                 *stored_lik = stored_lik.max(lik);
@@ -173,22 +182,110 @@ impl Scheme {
         Ok(())
     }
 
-    pub fn solve(
+    fn solve_multi_thread(
         &self,
-        all_alns: &AllPairAlignments,
-        contig_windows: &[ContigWindows],
+        all_alns: AllPairAlignments,
+        contig_windows: Vec<ContigWindows>,
         contigs: &Rc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
-        tuples: &ext::vec::Tuples<ContigId>,
+        tuples: Tuples<ContigId>,
         params: &Params,
-        rng: &mut ext::rand::XoshiroRng,
+        rng: &mut XoshiroRng,
+        threads: u16,
+    ) -> Result<(), Error>
+    {
+        unimplemented!()
+    }
+
+    pub fn solve(
+        &self,
+        all_alns: AllPairAlignments,
+        contig_windows: Vec<ContigWindows>,
+        contigs: &Rc<ContigNames>,
+        cached_distrs: &CachedDepthDistrs,
+        tuples: Tuples<ContigId>,
+        params: &Params,
+        rng: &mut XoshiroRng,
         threads: u16,
     ) -> Result<(), Error>
     {
         if threads == 1 {
             self.solve_single_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, params, rng)
         } else {
-            unimplemented!("Multi-thread solution is not implemented")
+            self.solve_multi_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, params, rng, threads)
         }
+    }
+}
+
+/// Task, sent to the workers: stage index + tuple indices to solve.
+type Task = (usize, Vec<usize>);
+type Solution = Vec<f64>;
+
+struct MainWorker {
+    contigs: Rc<ContigNames>,
+    tuples: Tuples<ContigId>,
+    senders: Vec<Sender<Task>>,
+    receivers: Vec<Receiver<Solution>>,
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+impl MainWorker {
+    fn new(
+        scheme: &Scheme,
+        all_alns: AllPairAlignments,
+        contig_windows: Vec<ContigWindows>,
+        contigs: &Rc<ContigNames>,
+        cached_distrs: &CachedDepthDistrs,
+        tuples: Tuples<ContigId>,
+        params: &Params,
+        rng: &mut XoshiroRng,
+        threads: u16,
+    ) -> Self {
+        let n_workers = usize::from(threads);
+        let mut senders = Vec::with_capacity(n_workers);
+        let mut receivers = Vec::with_capacity(n_workers);
+        let mut handles = Vec::with_capacity(n_workers);
+        for i in 0..n_workers {
+            let (task_sender, task_receiver) = mpsc::channel();
+            let (sol_sender, sol_receiver) = mpsc::channel();
+            let worker = Worker {
+                scheme: scheme.clone(),
+                rng: rng.clone(),
+                // all_alns: all_alns.clone(),
+                contig_windows: contig_windows.clone(),
+                tuples: tuples.clone(),
+                params: params.clone(),
+                // cached_distrs: cached_distrs.clone(),
+                receiver: task_receiver,
+                sender: sol_sender,
+            };
+            rng.jump();
+            senders.push(task_sender);
+            receivers.push(sol_receiver);
+            handles.push(thread::spawn(|| worker.run()));
+        }
+        MainWorker {
+            contigs: Rc::clone(&contigs),
+            tuples: tuples,
+            senders, receivers, handles,
+        }
+    }
+}
+
+struct Worker {
+    scheme: Scheme,
+    rng: XoshiroRng,
+    // all_alns: AllPairAlignments,
+    contig_windows: Vec<ContigWindows>,
+    tuples: Tuples<ContigId>,
+    params: Params,
+    // cached_distrs: CachedDepthDistrs,
+    receiver: Receiver<Task>,
+    sender: Sender<Solution>,
+}
+
+impl Worker {
+    fn run(self) {
+
     }
 }

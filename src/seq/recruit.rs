@@ -338,7 +338,7 @@ where T: RecordExt,
             let worker = Worker::new(targets.clone(), receiver1, sender2);
             senders.push(sender1);
             receivers.push(receiver2);
-            handles.push(thread::spawn(move || worker.run()));
+            handles.push(thread::spawn(|| worker.run()));
         }
         Self {
             writers, senders, receivers, handles, chunk_size,

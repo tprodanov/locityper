@@ -231,6 +231,7 @@ fn count_repl_combinations(n: u64, r: u64) -> u64 {
 }
 
 /// Structure that stores tuples of fixed size.
+#[derive(Clone)]
 pub struct Tuples<T> {
     /// Linear storage of all tuples.
     data: Vec<T>,

@@ -429,7 +429,7 @@ fn analyze_locus(
 
     let contig_ids: Vec<_> = contigs.ids().collect();
     let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
-    scheme.solve(&all_alns, &contig_windows, &contigs, &cached_distrs, &tuples, &args.assgn_params,
+    scheme.solve(all_alns, contig_windows, &contigs, &cached_distrs, tuples, &args.assgn_params,
         &mut rng, args.threads)
 }
 
@@ -457,8 +457,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {
         let rng_clone = rng.clone();
-        // Jump over 2^128 random numbers. This way, all loci have independent random numbers.
-        rng.jump();
+        // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
+        rng.long_jump();
         analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, rng_clone, &args)?;
     }
     Ok(())

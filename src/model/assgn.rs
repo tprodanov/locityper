@@ -70,6 +70,7 @@ const CACHE_SIZE: usize = 256;
 pub(super) type DistrBox = Box<dyn DiscretePmf>;
 
 /// Store cached depth distbrutions.
+#[derive(Clone)]
 pub struct CachedDepthDistrs {
     /// Background read depth distribution.
     bg_depth: bg::depth::ReadDepth,
