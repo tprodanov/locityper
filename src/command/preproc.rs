@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Stdio, Command, ChildStdin},
     time::Instant,
-    rc::Rc,
+    sync::Arc,
     thread,
 };
 use colored::Colorize;
@@ -443,7 +443,7 @@ fn estimate_bg_from_reads(
 
     let bam_filename2 = out_dir.join("to_bg.bam");
     let contig0 = ContigId::new(0);
-    let interval = Interval::full_contig(Rc::clone(contig_set.contigs()), contig0);
+    let interval = Interval::full_contig(Arc::clone(contig_set.contigs()), contig0);
     log::info!("Mapping reads to non-duplicated region {}", interval);
     run_strobealign(args, &bg_fasta_filename, &bam_filename2, true)?;
 

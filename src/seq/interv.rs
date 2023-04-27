@@ -1,7 +1,7 @@
 use std::{
     fmt,
     io::{self, Read, Seek},
-    rc::Rc,
+    sync::Arc,
     cmp::{min, max, Ordering},
 };
 use regex::Regex;
@@ -35,7 +35,7 @@ const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^{}(={})?$", INTERVAL_IN
 /// Genomic interval.
 #[derive(Clone)]
 pub struct Interval {
-    contigs: Rc<ContigNames>,
+    contigs: Arc<ContigNames>,
     contig_id: ContigId,
     start: u32,
     end: u32,
@@ -43,7 +43,7 @@ pub struct Interval {
 
 impl Interval {
     /// Create a new interval from contig names, contig id, start and end.
-    pub fn new(contigs: Rc<ContigNames>, contig_id: ContigId, start: u32, end: u32) -> Self {
+    pub fn new(contigs: Arc<ContigNames>, contig_id: ContigId, start: u32, end: u32) -> Self {
         assert!(contig_id.ix() < contigs.len(),
             "Cannot create interval with contig id {} (total {} contigs)", contig_id.ix(), contigs.len());
         assert!(start < end, "Cannot create an empty interval {}:{}-{}",
@@ -52,7 +52,7 @@ impl Interval {
     }
 
     /// Creates an empty interval from the contig id and interval start.
-    pub fn new_empty(contigs: Rc<ContigNames>, contig_id: ContigId, start: u32) -> Self {
+    pub fn new_empty(contigs: Arc<ContigNames>, contig_id: ContigId, start: u32) -> Self {
         assert!(contig_id.ix() < contigs.len(),
             "Cannot create interval with id {}, when there are {} contigs in total",
             contig_id.ix(), contigs.len());
@@ -63,23 +63,23 @@ impl Interval {
     }
 
     /// Creates a new interval, covering the full contig.
-    pub fn full_contig(contigs: Rc<ContigNames>, contig_id: ContigId) -> Self {
+    pub fn full_contig(contigs: Arc<ContigNames>, contig_id: ContigId) -> Self {
         let end = contigs.get_len(contig_id);
         Self::new(contigs, contig_id, 0, end)
     }
 
-    fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Rc<ContigNames>) -> Result<Self, Error> {
+    fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
         let contig_id = contigs.try_get_id(&captures[1])
             .ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}': unknown contig", s)))?;
         let start: u32 = parse_int(&captures[2])
             .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
         let end: u32 = parse_int(&captures[3])
             .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        Ok(Self::new(Rc::clone(contigs), contig_id, start - 1, end))
+        Ok(Self::new(Arc::clone(contigs), contig_id, start - 1, end))
     }
 
     /// Parses interval from string "name:start-end", where start is 1-based, inclusive.
-    pub fn parse(s: &str, contigs: &Rc<ContigNames>) -> Result<Self, Error> {
+    pub fn parse(s: &str, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
         lazy_static! {
             static ref RE: Regex = Regex::new(INTERVAL_PATTERN).unwrap();
         }
@@ -89,7 +89,7 @@ impl Interval {
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
     /// Start is 0-based, inclusive, end is 0-based, non-inclusive.
-    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Rc<ContigNames>) -> Result<Self, Error>
+    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> Result<Self, Error>
     where I: Iterator<Item = &'a str>,
     {
         let contig_name = split.next()
@@ -102,7 +102,7 @@ impl Interval {
         let end = split.next()
             .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?
             .parse::<u32>().map_err(|e| Error::ParsingError(format!("Cannot parse BED line: {}", e)))?;
-        Ok(Self::new(Rc::clone(contigs), contig_id, start, end))
+        Ok(Self::new(Arc::clone(contigs), contig_id, start, end))
     }
 
     /// Contig id.
@@ -117,7 +117,7 @@ impl Interval {
         self.contigs.get_name(self.contig_id)
     }
 
-    pub fn contigs(&self) -> &Rc<ContigNames> {
+    pub fn contigs(&self) -> &Arc<ContigNames> {
         &self.contigs
     }
 
@@ -196,7 +196,7 @@ impl Interval {
     /// Limit new start to 0 and new end to the contig length.
     pub fn expand(&self, left: u32, right: u32) -> Self {
         Self {
-            contigs: Rc::clone(&self.contigs),
+            contigs: Arc::clone(&self.contigs),
             contig_id: self.contig_id,
             start: self.start.saturating_sub(left),
             end: min(self.end + right, self.contigs.get_len(self.contig_id)),
@@ -227,7 +227,7 @@ impl fmt::Display for Interval {
 
 impl PartialEq for Interval {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.contigs, &other.contigs) && self.contig_id == other.contig_id
+        Arc::ptr_eq(&self.contigs, &other.contigs) && self.contig_id == other.contig_id
             && self.start == other.start && self.end == other.end
     }
 }
@@ -236,7 +236,7 @@ impl Eq for Interval {}
 
 impl Ord for Interval {
     fn cmp(&self, other: &Self) -> Ordering {
-        debug_assert!(Rc::ptr_eq(&self.contigs, &other.contigs),
+        debug_assert!(Arc::ptr_eq(&self.contigs, &other.contigs),
             "Cannot compare intervals from different contig sets!");
         (self.contig_id, self.start, self.end).cmp(&(other.contig_id, other.start, other.end))
     }
@@ -287,7 +287,7 @@ impl NamedInterval {
 
     /// Parse interval name from string "contig:start-end[@name]".
     /// If name is not set, set it to `contig:start-end`.
-    pub fn parse(s: &str, contigs: &Rc<ContigNames>) -> Result<Self, Error> {
+    pub fn parse(s: &str, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
         lazy_static! {
             static ref RE: Regex = Regex::new(NAMED_INTERVAL_PATTERN).unwrap();
         }
@@ -299,7 +299,7 @@ impl NamedInterval {
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
     /// Start is 0-based, inclusive, end is 0-based, non-inclusive.
-    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Rc<ContigNames>) -> Result<Self, Error>
+    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> Result<Self, Error>
     where I: Iterator<Item = &'a str>,
     {
         let interval = Interval::parse_bed(split, contigs)?;
@@ -325,7 +325,7 @@ impl NamedInterval {
     /// Name remains the same if it was set explicitely, otherwise it is created from the new interval positions.
     pub fn with_new_range(&self, new_start: u32, new_end: u32) -> Self {
         let new_interval = Interval::new(
-            Rc::clone(self.interval.contigs()), self.interval.contig_id(), new_start, new_end);
+            Arc::clone(self.interval.contigs()), self.interval.contig_id(), new_start, new_end);
         Self::new(new_interval, if self.explicit_name { Some(&self.name) } else { None }).unwrap()
     }
 }

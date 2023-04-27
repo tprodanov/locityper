@@ -1,10 +1,10 @@
 use std::{
     io, fs,
-    rc::Rc,
     process::{Command, Stdio},
     cmp::max,
     path::{Path, PathBuf},
     time::Instant,
+    sync::Arc,
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
@@ -411,7 +411,7 @@ fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
     scheme: &Scheme,
-    cached_distrs: &CachedDepthDistrs,
+    cached_distrs: &Arc<CachedDepthDistrs>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
 ) -> Result<(), Error>
@@ -422,14 +422,14 @@ fn analyze_locus(
     log::debug!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let mut bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
-    let mut locs = PrelimAlignments::from_records(bam_reader.records(), Rc::clone(&contigs),
+    let mut locs = PrelimAlignments::from_records(bam_reader.records(), Arc::clone(&contigs),
         bg_distr.error_profile(), &args.assgn_params, ())?;
     let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
 
     let contig_ids: Vec<_> = contigs.ids().collect();
     let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
-    scheme.solve(all_alns, contig_windows, &contigs, &cached_distrs, tuples, &args.assgn_params,
+    scheme.solve(all_alns, contig_windows, &contigs, cached_distrs, tuples, &args.assgn_params,
         &mut rng, args.threads)
 }
 
@@ -441,7 +441,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::SAMPLE_PARAMS))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
-    let cached_distrs = CachedDepthDistrs::new(&bg_distr);
+    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr));
     validate_param!(bg_distr.depth().window_padding() <= args.assgn_params.boundary_size,
         "Window padding ({}) must not exceed boundary size ({})", bg_distr.depth().window_padding(),
         args.assgn_params.boundary_size);

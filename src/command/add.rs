@@ -2,7 +2,7 @@ use std::{
     cmp::max,
     io::{BufRead, Read, Seek, Write},
     fs::{self, File},
-    rc::Rc,
+    sync::Arc,
     process::Command,
     path::{Path, PathBuf},
 };
@@ -173,7 +173,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 }
 
 /// Loads named interval from a list of loci and a list of BED files. Names must not repeat.
-fn load_loci(contigs: &Rc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) -> Result<Vec<NamedInterval>, Error> {
+fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) -> Result<Vec<NamedInterval>, Error> {
     let mut intervals = Vec::new();
     let mut names = FnvHashSet::default();
     for locus in loci.iter() {

@@ -4,7 +4,7 @@ use std::{
     fs,
     io::{Read, Seek},
     cmp::max,
-    rc::Rc,
+    sync::Arc,
     process::Command,
     path::{Path, PathBuf},
     time::Instant,
@@ -134,7 +134,7 @@ const BG_REGIONS: [&'static str; 1] = ["chr17:72062001-76562000"];
 /// Returns error if no interval is appropriate (chromosome not in the contig set, or interval is out of bounds).
 fn select_bg_interval(
     ref_filename: &Path,
-    contigs: &Rc<ContigNames>,
+    contigs: &Arc<ContigNames>,
     bg_region: &Option<String>
 ) -> Result<Interval, Error>
 {

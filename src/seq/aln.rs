@@ -1,5 +1,7 @@
-use std::fmt;
-use std::rc::Rc;
+use std::{
+    fmt,
+    sync::Arc,
+};
 use htslib::bam::{
     Record,
     ext::BamRecordExtensions,
@@ -114,7 +116,7 @@ pub struct Alignment {
 
 impl Alignment {
     /// Creates a new Alignment from the record.
-    pub fn from_record(record: &Record, contigs: Rc<ContigNames>) -> Self {
+    pub fn from_record(record: &Record, contigs: Arc<ContigNames>) -> Self {
         let cigar = Cigar::infer_ext_cigar_md(record, ());
         let contig_id = ContigId::new(record.tid());
         let start = u32::try_from(record.pos()).unwrap();

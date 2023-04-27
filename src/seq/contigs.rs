@@ -2,7 +2,7 @@ use std::{
     fmt,
     io::{self, BufRead},
     fs::File,
-    rc::Rc,
+    sync::Arc,
     path::Path,
 };
 use fnv::FnvHashMap;
@@ -104,7 +104,7 @@ impl ContigNames {
         tag: impl Into<String>,
         stream: impl BufRead,
         mut descriptions: impl VecOrNone<Option<String>>,
-    ) -> io::Result<(Rc<Self>, Vec<Vec<u8>>)>
+    ) -> io::Result<(Arc<Self>, Vec<Vec<u8>>)>
     {
         let mut reader = fasta::Reader::from_bufread(stream);
         let mut names_lengths = Vec::new();
@@ -114,7 +114,7 @@ impl ContigNames {
             reader.read(&mut record)?;
             if record.is_empty() {
                 let contigs = Self::new(tag, names_lengths.into_iter());
-                return Ok((Rc::new(contigs), seqs));
+                return Ok((Arc::new(contigs), seqs));
             }
 
             let mut ref_seq = record.seq().to_vec();
@@ -129,12 +129,12 @@ impl ContigNames {
     pub fn load_indexed_fasta(
         tag: impl Into<String>,
         filename: &(impl AsRef<Path> + fmt::Debug),
-    ) -> io::Result<(Rc<Self>, fasta::IndexedReader<File>)>
+    ) -> io::Result<(Arc<Self>, fasta::IndexedReader<File>)>
     {
         let fasta = fasta::IndexedReader::from_file(&filename)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let contigs = ContigNames::from_index(tag, &fasta.index);
-        Ok((Rc::new(contigs), fasta))
+        Ok((Arc::new(contigs), fasta))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -205,7 +205,7 @@ impl fmt::Debug for ContigNames {
 
 /// Contigs, their complete sequences, and k-mer counts.
 pub struct ContigSet {
-    contigs: Rc<ContigNames>,
+    contigs: Arc<ContigNames>,
     seqs: Vec<Vec<u8>>,
     kmer_counts: KmerCounts,
 }
@@ -236,7 +236,7 @@ impl ContigSet {
     }
 
     /// Returns inner Contig names.
-    pub fn contigs(&self) -> &Rc<ContigNames> {
+    pub fn contigs(&self) -> &Arc<ContigNames> {
         &self.contigs
     }
 

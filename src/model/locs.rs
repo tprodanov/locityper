@@ -1,5 +1,5 @@
 use std::{
-    rc::Rc,
+    sync::Arc,
     io::{self, Write},
     fmt, mem,
 };
@@ -68,7 +68,7 @@ pub(crate) struct MateAln {
 
 impl MateAln {
     /// Creates a new alignment extension from a htslib `Record`.
-    fn from_record(record: &bam::Record, contigs: Rc<ContigNames>, err_prof: &ErrorProfile) -> Self {
+    fn from_record(record: &bam::Record, contigs: Arc<ContigNames>, err_prof: &ErrorProfile) -> Self {
         let aln = Alignment::from_record(record, contigs);
         Self {
             strand: aln.strand(),
@@ -104,7 +104,7 @@ impl fmt::Display for MateAln {
 /// Preliminary, unpaired, read alignments.
 /// Keys: read name hash, values: all alignments for the read pair.
 pub(crate) struct PrelimAlignments {
-    contigs: Rc<ContigNames>,
+    contigs: Arc<ContigNames>,
     alns: IntMap<u64, Vec<MateAln>>,
 }
 
@@ -116,7 +116,7 @@ impl PrelimAlignments {
     /// (ii) middle of the alignment lies within an inner region of any contig (beyond the boundary region).
     pub(crate) fn from_records(
         records: bam::Records<impl bam::Read>,
-        contigs: Rc<ContigNames>,
+        contigs: Arc<ContigNames>,
         err_prof: &ErrorProfile,
         params: &super::Params,
         mut dbg_writer: impl DbgWrite,
@@ -151,7 +151,7 @@ impl PrelimAlignments {
                 read_fits = false;
             }
 
-            let mate_aln = MateAln::from_record(&record, Rc::clone(&contigs), err_prof);
+            let mate_aln = MateAln::from_record(&record, Arc::clone(&contigs), err_prof);
             dbg_writer.write_mate_aln(if curr_alns.is_empty() { record.qname() } else { &[] }, hash, &mate_aln)?;
             if !read_fits && mate_aln.ln_prob > params.unmapped_penalty {
                 let interval = &mate_aln.interval;
@@ -351,7 +351,6 @@ impl fmt::Display for PairAlignment {
 }
 
 /// Read-pair alignments for a single read-pair.
-#[derive(Clone)]
 pub struct ReadPairAlignments {
     /// Hash of the read name.
     name_hash: u64,
@@ -393,7 +392,6 @@ impl ReadPairAlignments {
 
 /// All read-pair alignments for all read-pairs.
 /// Key: read name hash.
-#[derive(Clone)]
 pub struct AllPairAlignments(Vec<ReadPairAlignments>);
 
 impl AllPairAlignments {

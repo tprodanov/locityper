@@ -2,7 +2,6 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    rc::Rc,
     time::Instant,
     thread,
     sync::{
@@ -131,7 +130,7 @@ impl Scheme {
         &self,
         all_alns: AllPairAlignments,
         contig_windows: Vec<ContigWindows>,
-        contigs: &Rc<ContigNames>,
+        contigs: &Arc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
         tuples: Tuples<ContigId>,
         params: &Params,
@@ -187,8 +186,8 @@ impl Scheme {
         &self,
         all_alns: AllPairAlignments,
         contig_windows: Vec<ContigWindows>,
-        contigs: &Rc<ContigNames>,
-        cached_distrs: &CachedDepthDistrs,
+        contigs: &Arc<ContigNames>,
+        cached_distrs: &Arc<CachedDepthDistrs>,
         tuples: Tuples<ContigId>,
         params: &Params,
         rng: &mut XoshiroRng,
@@ -202,8 +201,8 @@ impl Scheme {
         &self,
         all_alns: AllPairAlignments,
         contig_windows: Vec<ContigWindows>,
-        contigs: &Rc<ContigNames>,
-        cached_distrs: &CachedDepthDistrs,
+        contigs: &Arc<ContigNames>,
+        cached_distrs: &Arc<CachedDepthDistrs>,
         tuples: Tuples<ContigId>,
         params: &Params,
         rng: &mut XoshiroRng,
@@ -211,7 +210,7 @@ impl Scheme {
     ) -> Result<(), Error>
     {
         if threads == 1 {
-            self.solve_single_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, params, rng)
+            self.solve_single_thread(all_alns, contig_windows, contigs, &cached_distrs, tuples, params, rng)
         } else {
             self.solve_multi_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, params, rng, threads)
         }
@@ -223,7 +222,7 @@ type Task = (usize, Vec<usize>);
 type Solution = Vec<f64>;
 
 struct MainWorker {
-    contigs: Rc<ContigNames>,
+    contigs: Arc<ContigNames>,
     tuples: Tuples<ContigId>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
@@ -235,8 +234,8 @@ impl MainWorker {
         scheme: &Scheme,
         all_alns: AllPairAlignments,
         contig_windows: Vec<ContigWindows>,
-        contigs: &Rc<ContigNames>,
-        cached_distrs: &CachedDepthDistrs,
+        contigs: &Arc<ContigNames>,
+        cached_distrs: &Arc<CachedDepthDistrs>,
         tuples: Tuples<ContigId>,
         params: &Params,
         rng: &mut XoshiroRng,
@@ -246,17 +245,18 @@ impl MainWorker {
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
+        let all_alns = Arc::new(all_alns);
         for i in 0..n_workers {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
                 scheme: scheme.clone(),
                 rng: rng.clone(),
-                // all_alns: all_alns.clone(),
+                all_alns: Arc::clone(&all_alns),
                 contig_windows: contig_windows.clone(),
                 tuples: tuples.clone(),
                 params: params.clone(),
-                cached_distrs: cached_distrs.clone(),
+                cached_distrs: Arc::clone(&cached_distrs),
                 receiver: task_receiver,
                 sender: sol_sender,
             };
@@ -266,7 +266,7 @@ impl MainWorker {
             handles.push(thread::spawn(|| worker.run()));
         }
         MainWorker {
-            contigs: Rc::clone(&contigs),
+            contigs: Arc::clone(&contigs),
             tuples: tuples,
             senders, receivers, handles,
         }
@@ -276,11 +276,11 @@ impl MainWorker {
 struct Worker {
     scheme: Scheme,
     rng: XoshiroRng,
-    // all_alns: AllPairAlignments,
+    all_alns: Arc<AllPairAlignments>,
     contig_windows: Vec<ContigWindows>,
     tuples: Tuples<ContigId>,
     params: Params,
-    cached_distrs: CachedDepthDistrs,
+    cached_distrs: Arc<CachedDepthDistrs>,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
 }
