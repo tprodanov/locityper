@@ -3,9 +3,8 @@
 
 use std::{
     thread,
-    io::Write,
-    time::Instant,
-    cmp::min,
+    io::{self, Write},
+    time::{Instant, Duration},
     sync::{
         Arc,
         mpsc::{self, Sender, Receiver},
@@ -128,6 +127,11 @@ impl Scheme {
         Ok(Self(stages))
     }
 
+    /// Returns the number of stages in the scheme.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     fn solve_single_thread(
         &self,
         all_alns: AllPairAlignments,
@@ -135,54 +139,27 @@ impl Scheme {
         contigs: &Arc<ContigNames>,
         cached_distrs: &CachedDepthDistrs,
         tuples: Tuples<ContigId>,
-        mut writer: impl Write,
+        lik_writer: impl Write,
         params: &Params,
         rng: &mut XoshiroRng,
     ) -> Result<(), Error>
     {
-        let tag = contigs.tag();
-        let n = tuples.len();
-        let width2 = 12 * tuples.tup_len();
-        let mut rem_ixs: Vec<_> = (0..n).collect();
-        // Best likelihoods and read assignments for each tuple.
-        // Do not store actual best assignments.
-        // Instead, if needed, we can store Rng states, in order to reconstruct solutions later.
-        let mut likelihoods = vec![f64::NEG_INFINITY; n];
-        let mut best_lik = f64::NEG_INFINITY;
-        let mut best_ix = 0;
-        let mut best_str = String::new();
-
+        let total_tuples = tuples.len();
+        let mut helper = Helper::new(&self, contigs.tag(), lik_writer, total_tuples)?;
+        let mut rem_ixs = (0..total_tuples).collect();
         for (stage_ix, stage) in self.0.iter().enumerate() {
-            let m = filter_ixs(&mut rem_ixs, &likelihoods, stage.ratio);
-            let width1 = math::num_digits(m as u64);
+            helper.start_stage(stage_ix, &mut rem_ixs);
             let solver = &stage.solver;
-            let timer = Instant::now();
-            log::info!("    [{}] Stage {}. {}  ({} tuples, 1 thread)", tag, LATIN_NUMS[stage_ix], solver, m);
-            for (i, &ix) in rem_ixs.iter().enumerate() {
+            for &ix in rem_ixs.iter() {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], &contig_windows);
-                let contigs_str = mcontig_windows.ids_str(contigs);
                 let mut assgn = ReadAssignment::new(mcontig_windows, &all_alns, cached_distrs, params);
                 let lik = solver.solve(&mut assgn, rng)?;
-                writeln!(writer, "{}\t{}\t{:.3}", stage_ix + 1, contigs_str, Ln::to_log10(lik))?;
-
-                let stored_lik = &mut likelihoods[ix];
-                *stored_lik = stored_lik.max(lik);
-                log::debug!("        [{:width1$} / {}] {:width2$}  -> {:11.2}", i + 1, m, contigs_str,
-                    Ln::to_log10(*stored_lik));
-
-                if lik > best_lik {
-                    best_lik = lik;
-                    best_ix = ix;
-                    best_str = contigs_str;
-                }
+                let contigs_str = contigs.get_names(tuples[ix].iter().copied());
+                helper.update(ix, contigs_str, lik)?;
             }
-            log::info!("    [{}] Stage {} finished in {}. Best: {} ({:.2})", tag, LATIN_NUMS[stage_ix],
-                ext::fmt::Duration(timer.elapsed()), best_str, Ln::to_log10(best_lik))
+            helper.finish_stage();
         }
-        let norm_fct = Ln::sum(&likelihoods);
-        likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
-        log::info!("    [{}] Overall best: {}  (Quality = {:.1}, Norm.Likelihood = {})",
-            tag, best_str, Phred::from_likelihoods(&mut likelihoods, best_ix), Ln::to_log10(likelihoods[best_ix]));
+        helper.finish_overall();
         Ok(())
     }
 
@@ -200,8 +177,8 @@ impl Scheme {
     ) -> Result<(), Error>
     {
         let main_worker = MainWorker::new(self.clone(), Arc::new(all_alns), Arc::new(contig_windows),
-            Arc::clone(&contigs), cached_distrs, Arc::new(tuples), writer, params, rng, threads);
-        main_worker.run()
+            Arc::clone(&contigs), cached_distrs, Arc::new(tuples), params, rng, threads);
+        main_worker.run(writer)
     }
 
     pub fn solve(
@@ -217,6 +194,7 @@ impl Scheme {
         threads: u16,
     ) -> Result<(), Error>
     {
+        log::info!("    [{}] Genotyping complex locus in {} stages, {} threads", contigs.tag(), self.len(), threads);
         if threads == 1 {
             self.solve_single_thread(all_alns, contig_windows, contigs, &cached_distrs, tuples, writer, params, rng)
         } else {
@@ -226,33 +204,21 @@ impl Scheme {
     }
 }
 
-///Keep only the best `ratio` indices (out of the total number).
-fn filter_ixs(rem_ixs: &mut Vec<usize>, likelihoods: &[f64], ratio: f64) -> usize {
-    let n = likelihoods.len();
-    // Consider at least one tuple irrespective of the ratio.
-    let m = ((n as f64 * ratio).ceil() as usize).clamp(1, n);
-    if m < rem_ixs.len() {
-        rem_ixs.sort_unstable_by(|&i, &j| likelihoods[j].total_cmp(&likelihoods[i]));
-        rem_ixs.truncate(m);
-    }
-    m
-}
-
 /// Task, sent to the workers: stage index + tuple indices to solve.
 type Task = (usize, Vec<usize>);
-type Solution = Vec<f64>;
+/// Tuple index and likelihood.
+type Solution = (usize, f64);
 
-struct MainWorker<W> {
+struct MainWorker {
     scheme: Scheme,
     contigs: Arc<ContigNames>,
     tuples: Arc<Tuples<ContigId>>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
     handles: Vec<thread::JoinHandle<Result<(), Error>>>,
-    writer: W,
 }
 
-impl<W: Write> MainWorker<W> {
+impl MainWorker {
     fn new(
         scheme: Scheme,
         all_alns: Arc<AllPairAlignments>,
@@ -260,7 +226,6 @@ impl<W: Write> MainWorker<W> {
         contigs: Arc<ContigNames>,
         cached_distrs: &Arc<CachedDepthDistrs>,
         tuples: Arc<Tuples<ContigId>>,
-        writer: W,
         params: &Params,
         rng: &mut XoshiroRng,
         threads: u16,
@@ -289,70 +254,51 @@ impl<W: Write> MainWorker<W> {
             receivers.push(sol_receiver);
             handles.push(thread::spawn(|| worker.run()));
         }
-        MainWorker { scheme, contigs, tuples, senders, receivers, handles, writer }
+        MainWorker { scheme, contigs, tuples, senders, receivers, handles }
     }
 
-    fn run(mut self) -> Result<(), Error> {
+    fn run(self, lik_writer: impl Write) -> Result<(), Error> {
         let n_workers = self.handles.len();
-        let tag = self.contigs.tag();
-        let n = self.tuples.len();
-        let mut rem_ixs: Vec<_> = (0..n).collect();
-        // Best likelihoods and read assignments for each tuple.
-        // Do not store actual best assignments.
-        // Instead, if needed, we can store Rng states, in order to reconstruct solutions later.
-        let mut likelihoods = vec![f64::NEG_INFINITY; n];
-        let mut best_lik = f64::NEG_INFINITY;
-        let mut best_ix = 0;
-        let mut best_str = String::new();
+        let total_tuples = self.tuples.len();
+        let mut helper = Helper::new(&self.scheme, self.contigs.tag(), lik_writer, total_tuples)?;
+        let mut rem_jobs = vec![0; n_workers];
+        let mut rem_ixs = (0..total_tuples).collect();
 
-        for (stage_ix, stage) in self.scheme.0.iter().enumerate() {
-            let timer = Instant::now();
-            let m = filter_ixs(&mut rem_ixs, &likelihoods, stage.ratio);
-            log::info!("    [{}] Stage {}. {}  ({} tuples, {} threads)", tag, LATIN_NUMS[stage_ix], stage.solver,
-                m, n_workers);
-
-            // Ceiling division.
-            let per_worker = (m + n_workers - 1) / n_workers;
-            for (i, sender) in self.senders.iter().enumerate() {
-                let start = per_worker * i;
-                if start < m {
-                    let end = min(start + per_worker, m);
-                    sender.send((stage_ix, rem_ixs[start..end].to_vec())).expect("Recruitment worker has failed!");
+        for stage_ix in 0..self.scheme.len() {
+            helper.start_stage(stage_ix, &mut rem_ixs);
+            rem_jobs.fill(0);
+            let m = rem_ixs.len();
+            let mut start = 0;
+            for (i, (sender, jobs)) in self.senders.iter().zip(rem_jobs.iter_mut()).enumerate() {
+                if start == m {
+                    break;
                 }
+                let rem_workers = n_workers - i;
+                // Ceiling division.
+                *jobs = ((m - start) + rem_workers - 1) / rem_workers;
+                sender.send((stage_ix, rem_ixs[start..start + *jobs].to_vec()))
+                    .expect("Genotyping worker has failed!");
+                start += *jobs;
             }
+            assert_eq!(start, m);
 
-            for (i, receiver) in self.receivers.iter().enumerate() {
-                let start = per_worker * i;
-                if start < m {
-                    let end = min(start + per_worker, m);
-                    let worker_likelihoods = receiver.recv().expect("Recruitment worker has failed!");
-                    assert_eq!(worker_likelihoods.len(), end - start);
-                    for (&ix, &lik) in rem_ixs[start..end].iter().zip(&worker_likelihoods) {
+            while helper.solved_tuples < m {
+                for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
+                    if *jobs > 0 {
+                        let (ix, lik) = receiver.recv().expect("Genotyping worker has failed!");
                         let contigs_str = self.contigs.get_names(self.tuples[ix].iter().copied());
-                        writeln!(self.writer, "{}\t{}\t{:.3}", stage_ix + 1, contigs_str, Ln::to_log10(lik))?;
-                        let stored_lik = &mut likelihoods[ix];
-                        *stored_lik = stored_lik.max(lik);
-                        if lik > best_lik {
-                            best_lik = lik;
-                            best_ix = ix;
-                            best_str = contigs_str;
-                        }
+                        helper.update(ix, contigs_str, lik)?;
+                        *jobs -= 1;
                     }
                 }
             }
-
-            log::info!("    [{}] Stage {} finished in {}. Best: {} ({:.2})", tag, LATIN_NUMS[stage_ix],
-                ext::fmt::Duration(timer.elapsed()), best_str, Ln::to_log10(best_lik))
+            helper.finish_stage();
         }
-        let norm_fct = Ln::sum(&likelihoods);
-        likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
-        log::info!("    [{}] Overall best: {}  (Quality = {:.1}, Norm.Likelihood = {})",
-            tag, best_str, Phred::from_likelihoods(&mut likelihoods, best_ix), Ln::to_log10(likelihoods[best_ix]));
-
         std::mem::drop(self.senders);
         for handle in self.handles.into_iter() {
             handle.join().expect("Process failed for unknown reason")?;
         }
+        helper.finish_overall();
         Ok(())
     }
 }
@@ -379,18 +325,117 @@ impl Worker {
             let solver = &self.scheme.0[stage_ix].solver;
             let tuples = &self.tuples;
             let contig_windows = &self.contig_windows;
-            let mut likelihoods = Vec::with_capacity(n);
 
             for ix in task.into_iter() {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
                 let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, &self.cached_distrs, &self.params);
-                likelihoods.push(solver.solve(&mut assgn, &mut self.rng)?);
-            }
-            if let Err(_) = self.sender.send(likelihoods) {
-                log::error!("Read recruitment: main thread stopped before the child thread.");
-                break;
+                let lik = solver.solve(&mut assgn, &mut self.rng)?;
+
+                if let Err(_) = self.sender.send((ix, lik)) {
+                    log::error!("Read recruitment: main thread stopped before the child thread.");
+                    break;
+                }
             }
         }
         Ok(())
+    }
+}
+
+struct Helper<'a, W> {
+    scheme: &'a Scheme,
+    tag: &'a str,
+    lik_writer: W,
+
+    stage_ix: usize,
+    solved_tuples: usize,
+    curr_tuples: usize,
+    num_width: usize,
+
+    likelihoods: Vec<f64>,
+    best_lik: f64,
+    best_ix: usize,
+    best_str: String,
+
+    timer: Instant,
+    stage_start: Duration,
+    last_msg: Duration,
+}
+
+impl<'a, W: Write> Helper<'a, W> {
+    fn new(scheme: &'a Scheme, tag: &'a str, mut lik_writer: W, total_tuples: usize) -> io::Result<Self> {
+        writeln!(lik_writer, "stage\tgenotype\tlik")?;
+        Ok(Self {
+            scheme, tag, lik_writer,
+
+            stage_ix: 0,
+            solved_tuples: 0,
+            curr_tuples: total_tuples,
+            num_width: math::num_digits(total_tuples as u64),
+
+            likelihoods: vec![f64::NEG_INFINITY; total_tuples],
+            best_lik: f64::NEG_INFINITY,
+            best_ix: 0,
+            best_str: String::new(),
+
+            timer: Instant::now(),
+            stage_start: Duration::default(),
+            last_msg: Duration::default(),
+        })
+    }
+
+    fn start_stage(&mut self, stage_ix: usize, rem_ixs: &mut Vec<usize>) {
+        self.stage_start = self.timer.elapsed();
+        self.stage_ix = stage_ix;
+        let stage = &self.scheme.0[stage_ix];
+        let total_tuples = self.likelihoods.len();
+        // Consider at least one tuple irrespective of the ratio.
+        self.curr_tuples = ((total_tuples as f64 * stage.ratio).ceil() as usize).clamp(1, self.curr_tuples);
+        if self.curr_tuples < rem_ixs.len() {
+            rem_ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].total_cmp(&self.likelihoods[i]));
+            rem_ixs.truncate(self.curr_tuples);
+            self.num_width = math::num_digits(self.curr_tuples as u64);
+        }
+
+        self.solved_tuples = 0;
+        self.last_msg = self.stage_start;
+        log::info!("    [{}] Stage {:>3}.  {}  ({} tuples)", self.tag, LATIN_NUMS[stage_ix], stage.solver,
+            self.curr_tuples);
+    }
+
+    fn update(&mut self, ix: usize, tuple_str: String, lik: f64) -> io::Result<()> {
+        writeln!(self.lik_writer, "{}\t{}\t{:.3}", self.stage_ix + 1, &tuple_str, Ln::to_log10(lik))?;
+        let stored_lik = &mut self.likelihoods[ix];
+        *stored_lik = stored_lik.max(lik);
+        if lik > self.best_lik {
+            self.best_lik = lik;
+            self.best_ix = ix;
+            self.best_str = tuple_str;
+        }
+        self.solved_tuples += 1;
+        let now_dur = self.timer.elapsed();
+        const UPDATE_FREQ: u64 = 2;
+        if (now_dur - self.last_msg).as_secs() >= UPDATE_FREQ {
+            let per_tuple = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_tuples as f64;
+            log::debug!("        [{:width$}/{},  {:.4} s/tuple]  Best: {} -> {:11.2}", self.solved_tuples,
+                self.curr_tuples, per_tuple, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
+            self.last_msg = now_dur;
+        }
+        Ok(())
+    }
+
+    fn finish_stage(&mut self) {
+        self.last_msg = self.timer.elapsed();
+        log::info!("    [{}] Stage {:>3} finished in {}.  Best: {} -> {:11.2}", self.tag, LATIN_NUMS[self.stage_ix],
+            ext::fmt::Duration(self.last_msg - self.stage_start), self.best_str, Ln::to_log10(self.best_lik));
+    }
+
+    /// Returns index of the best tuple, as well as its quality.
+    fn finish_overall(mut self) -> (usize, f64) {
+        let norm_fct = Ln::sum(&self.likelihoods);
+        self.likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
+        let quality = Phred::from_likelihoods(&mut self.likelihoods, self.best_ix);
+        log::info!("    [{}] Overall best: {}  (Quality = {:.1}, Confidence = {:.4}%)", self.tag, self.best_str,
+            quality, self.likelihoods[self.best_ix].exp() * 100.0);
+        (self.best_ix, quality)
     }
 }

@@ -423,7 +423,7 @@ fn analyze_locus(
     log::info!("Analyzing {}", locus.set.tag());
     map_reads(locus, &args)?;
 
-    log::debug!("    [{}] Calculating read alignment probabilities", locus.set.tag());
+    log::info!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let mut bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
     let mut locs = PrelimAlignments::from_records(bam_reader.records(), Arc::clone(&contigs),
@@ -434,8 +434,7 @@ fn analyze_locus(
     let contig_ids: Vec<_> = contigs.ids().collect();
     let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
 
-    let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
-    writeln!(lik_writer, "stage\tgenotype\tlik")?;
+    let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     scheme.solve(all_alns, contig_windows, &contigs, cached_distrs, tuples, lik_writer,
         &args.assgn_params, &mut rng, args.threads)
 }

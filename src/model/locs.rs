@@ -177,7 +177,8 @@ impl PrelimAlignments {
     pub fn identify_locations(&mut self, insert_distr: &InsertDistr, params: &super::Params) -> AllPairAlignments {
         let n_reads = self.alns.len();
         let ln_ncontigs = (self.contigs.len() as f64).ln();
-        log::info!("Identify paired alignment location and probabilities ({} read pairs)", n_reads);
+        log::info!("    [{}] Identify paired alignment location and probabilities ({} {})",
+            self.contigs.tag(), n_reads, if insert_distr.is_paired_end() { "read pairs" } else { "reads" });
         let mut res = AllPairAlignments::with_capacity(n_reads);
         for (&name_hash, alns) in self.alns.iter_mut() {
             // log::debug!("Read {}", name_hash);
