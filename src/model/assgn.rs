@@ -4,6 +4,7 @@ use std::{
 use rand::Rng;
 use crate::{
     seq::ContigNames,
+    math::Ln,
 };
 use super::{
     locs::{AllPairAlignments, TwoIntervals},
@@ -332,27 +333,30 @@ impl ReadAssignment {
     }
 
     /// Write read depth to a CSV file in the following format (tab-separated):
-    /// General lines: `prefix  contig  window  depth  depth_lik`.
-    /// Last line:     `prefix  NA      read_lik  depth_lik  sum_lik`.
+    /// General lines:  `prefix  contig   window    depth     depth_lik`.
+    /// Last two lines: `prefix  unmapped NA        count     NA`.
+    ///                 `prefix  summary  sum_lik   read_lik  depth_lik`.
     pub fn write_depth<W: io::Write>(&self, prefix: &str, contigs: &ContigNames, f: &mut W) -> io::Result<()> {
-        let unmapped_reads = self.depth[UNMAPPED_WINDOW as usize];
-        let unmapped_prob = self.depth_distrs[UNMAPPED_WINDOW as usize].ln_pmf(unmapped_reads);
-        let mut sum_depth_lik = unmapped_prob;
-        writeln!(f, "{}\tunmapped\tNA\t{}\t{:.3}", prefix, unmapped_reads, unmapped_prob)?;
-
+        // log10-likelihood of read depth.
+        let mut sum_depth_lik = 0.0;
         for (i, contig_id) in self.contig_windows.ids().enumerate() {
             let curr_prefix = format!("{}\t{}\t", prefix, contigs.get_name(contig_id));
             let wshift = self.contig_windows.get_wshift(i) as usize;
             for w in wshift..self.contig_windows.get_wshift(i + 1) as usize {
                 let depth = self.depth[w];
-                let ln_prob = self.depth_distrs[w].ln_pmf(depth);
-                writeln!(f, "{}{}\t{}\t{:.3}", curr_prefix, w - wshift, depth, ln_prob)?;
-                sum_depth_lik += ln_prob;
+                let log10_prob = Ln::to_log10(self.depth_distrs[w].ln_pmf(depth));
+                writeln!(f, "{}{}\t{}\t{:.3}", curr_prefix, w - wshift, depth, log10_prob)?;
+                sum_depth_lik += log10_prob;
             }
         }
-        let lik = self.likelihood;
-        writeln!(f, "{}\tNA\t{:.8}\t{:.8}\t{:.8}", prefix, lik - sum_depth_lik, sum_depth_lik, lik)?;
-        Ok(())
+
+        let unmapped_reads = self.depth[UNMAPPED_WINDOW as usize];
+        let unmapped_lik = self.depth_distrs[UNMAPPED_WINDOW as usize].ln_pmf(unmapped_reads);
+        assert_eq!(unmapped_lik, 0.0, "Unmapped read depth likelihood should be 0.");
+        writeln!(f, "{}\tunmapped\tNA\t{}\tNA", prefix, unmapped_reads)?;
+
+        let total_lik = Ln::to_log10(self.likelihood);
+        writeln!(f, "{}\tsummary\t{:.8}\t{:.8}\t{:.8}", prefix, total_lik, total_lik - sum_depth_lik, sum_depth_lik)
     }
 
     /// Write reads and their assignments to a CSV file in the following format (tab-separated):

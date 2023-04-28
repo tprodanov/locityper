@@ -30,25 +30,28 @@ use crate::{
 };
 use super::Solver;
 
-/// One stage of the scheme: a solver and ratio of haplotypes, on which it is executed.
+/// One stage of the scheme: a solver and fraction of haplotypes, on which it is executed.
 #[derive(Clone)]
 struct Stage {
     solver: Box<dyn Solver>,
-    ratio: f64,
+    /// Fraction of best tuples, used for analysis.
+    fraction: f64,
+    /// Write debug information about read assignments?
+    write: bool,
 }
 
 impl Stage {
-    fn with_default<S: Solver + Default + 'static>(ratio: f64) -> Result<Self, Error> {
-        Self::new(Box::new(S::default()), ratio)
+    fn with_default<S: Solver + Default + 'static>(fraction: f64, write: bool) -> Result<Self, Error> {
+        Self::new(Box::new(S::default()), fraction, write)
     }
 
-    fn new(solver: Box<dyn Solver>, ratio: f64) -> Result<Self, Error> {
-        validate_param!(ratio >= 0.0 && ratio <= 1.0, "Ratio ({}) must be within [0, 1].", ratio);
-        Ok(Self { solver, ratio })
+    fn new(solver: Box<dyn Solver>, fraction: f64, write: bool) -> Result<Self, Error> {
+        validate_param!(fraction >= 0.0 && fraction <= 1.0, "Ratio ({}) must be within [0, 1].", fraction);
+        Ok(Self { solver, fraction, write })
     }
 
     fn from_json(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> solver (as_str));
+        json_get!(obj -> solver (as_str), fraction? (as_f64), write? (as_bool));
         let mut solver: Box<dyn Solver> = match &solver.to_lowercase() as &str {
             "greedy" => Box::new(super::GreedySolver::default()),
             "simanneal" | "simulatedannealing" => Box::new(super::SimAnneal::default()),
@@ -67,22 +70,16 @@ impl Stage {
             _ => panic!("Unknown solver '{}'", solver),
         };
 
-        let ratio = if obj.has_key("ratio") {
-            json_get!(obj -> ratio (as_f64));
-            ratio
-        } else {
-            1.0
-        };
         if obj.has_key("params") {
             solver.set_params(&obj["params"])?;
         }
-        Self::new(solver, ratio)
+        Self::new(solver, fraction.unwrap_or(1.0), write.unwrap_or(false))
     }
 }
 
 /// Solver scheme.
 /// Consists of multiple solvers, each executed on (possibly) smaller subset of haplotypes.
-/// First stage must have ratio = 1.
+/// First stage must have fraction = 1.
 #[derive(Clone)]
 pub struct Scheme(Vec<Stage>);
 
@@ -90,9 +87,9 @@ impl Default for Scheme {
     fn default() -> Self {
         Self(vec![
             // First, run Greedy solver on all haplotypes.
-            Stage::with_default::<super::GreedySolver>(1.0).unwrap(),
+            Stage::with_default::<super::GreedySolver>(1.0, false).unwrap(),
             // Then, run HiGHS solver on the best 3%.
-            Stage::with_default::<super::HighsSolver>(0.03).unwrap(),
+            Stage::with_default::<super::HighsSolver>(0.03, false).unwrap(),
         ])
     }
 }
@@ -116,12 +113,12 @@ impl Scheme {
             return Err(Error::JsonLoad(format!("Failed to parse '{}': empty array is not allowed", obj)));
         }
         for (i, el) in stages.iter().enumerate() {
-            if i == 0 && el.ratio < 1.0 {
+            if i == 0 && el.fraction < 1.0 {
                 return Err(Error::JsonLoad(
-                    "Cannot create solver scheme: first ratio is smaller than one".to_owned()));
-            } else if i > 0 && el.ratio > stages[i - 1].ratio {
+                    "Cannot create solver scheme: first fraction is smaller than one".to_owned()));
+            } else if i > 0 && el.fraction > stages[i - 1].fraction {
                 return Err(Error::JsonLoad(
-                    "Cannot create solver scheme: ratios must be non-increasing".to_owned()));
+                    "Cannot create solver scheme: fractions must be non-increasing".to_owned()));
             }
         }
         Ok(Self(stages))
@@ -132,75 +129,66 @@ impl Scheme {
         self.0.len()
     }
 
-    fn solve_single_thread(
-        &self,
-        all_alns: AllPairAlignments,
-        contig_windows: Vec<ContigWindows>,
-        contigs: &Arc<ContigNames>,
-        cached_distrs: &CachedDepthDistrs,
-        tuples: Tuples<ContigId>,
-        lik_writer: impl Write,
-        params: &Params,
-        rng: &mut XoshiroRng,
-    ) -> Result<(), Error>
-    {
-        let total_tuples = tuples.len();
-        let mut helper = Helper::new(&self, contigs.tag(), lik_writer, total_tuples)?;
-        let mut rem_ixs = (0..total_tuples).collect();
-        for (stage_ix, stage) in self.0.iter().enumerate() {
-            helper.start_stage(stage_ix, &mut rem_ixs);
-            let solver = &stage.solver;
-            for &ix in rem_ixs.iter() {
-                let mcontig_windows = MultiContigWindows::new(&tuples[ix], &contig_windows);
-                let mut assgn = ReadAssignment::new(mcontig_windows, &all_alns, cached_distrs, params);
-                let lik = solver.solve(&mut assgn, rng)?;
-                let contigs_str = contigs.get_names(tuples[ix].iter().copied());
-                helper.update(ix, contigs_str, lik)?;
-            }
-            helper.finish_stage();
-        }
-        helper.finish_overall();
-        Ok(())
+    fn iter(&self) -> std::slice::Iter<'_, Stage> {
+        self.0.iter()
     }
 
-    fn solve_multi_thread(
-        &self,
-        all_alns: AllPairAlignments,
-        contig_windows: Vec<ContigWindows>,
-        contigs: &Arc<ContigNames>,
-        cached_distrs: &Arc<CachedDepthDistrs>,
-        tuples: Tuples<ContigId>,
-        writer: impl Write,
-        params: &Params,
-        rng: &mut XoshiroRng,
-        threads: u16,
-    ) -> Result<(), Error>
-    {
-        let main_worker = MainWorker::new(self.clone(), Arc::new(all_alns), Arc::new(contig_windows),
-            Arc::clone(&contigs), cached_distrs, Arc::new(tuples), params, rng, threads);
-        main_worker.run(writer)
+    /// Returns true if debug information is written at any of the stages.
+    pub fn any_write(&self) -> bool {
+        self.iter().any(|stage| stage.write)
     }
+}
 
-    pub fn solve(
-        &self,
-        all_alns: AllPairAlignments,
-        contig_windows: Vec<ContigWindows>,
-        contigs: &Arc<ContigNames>,
-        cached_distrs: &Arc<CachedDepthDistrs>,
-        tuples: Tuples<ContigId>,
-        writer: impl Write,
-        params: &Params,
-        rng: &mut XoshiroRng,
-        threads: u16,
-    ) -> Result<(), Error>
-    {
-        log::info!("    [{}] Genotyping complex locus in {} stages, {} threads", contigs.tag(), self.len(), threads);
-        if threads == 1 {
-            self.solve_single_thread(all_alns, contig_windows, contigs, &cached_distrs, tuples, writer, params, rng)
-        } else {
-            self.solve_multi_thread(all_alns, contig_windows, contigs, cached_distrs, tuples, writer,
-                params, rng, threads)
+/// Various structures, needed for sample genotyping.
+pub struct Data {
+    pub scheme: Scheme,
+    pub all_alns: AllPairAlignments,
+    pub contig_windows: Vec<ContigWindows>,
+    pub contigs: Arc<ContigNames>,
+    pub cached_distrs: Arc<CachedDepthDistrs>,
+    pub tuples: Tuples<ContigId>,
+    pub params: Params,
+}
+
+fn solve_single_thread(data: Data, lik_writer: impl Write, rng: &mut XoshiroRng) -> Result<(), Error> {
+    let total_tuples = data.tuples.len();
+    let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_tuples)?;
+    let mut rem_ixs = (0..total_tuples).collect();
+    for (stage_ix, stage) in data.scheme.iter().enumerate() {
+        helper.start_stage(stage_ix, &mut rem_ixs);
+        let solver = &stage.solver;
+        for &ix in rem_ixs.iter() {
+            let mcontig_windows = MultiContigWindows::new(&data.tuples[ix], &data.contig_windows);
+            let mut assgn = ReadAssignment::new(mcontig_windows, &data.all_alns, &data.cached_distrs, &data.params);
+            let lik = solver.solve(&mut assgn, rng)?;
+            let contigs_str = data.contigs.get_names(data.tuples[ix].iter().copied());
+            helper.update(ix, contigs_str, lik)?;
         }
+        helper.finish_stage();
+    }
+    helper.finish_overall();
+    Ok(())
+}
+
+fn solve_multi_thread(data: Data, writer: impl Write, rng: &mut XoshiroRng, threads: u16) -> Result<(), Error>
+{
+    let main_worker = MainWorker::new(Arc::new(data), rng, threads);
+    main_worker.run(writer)
+}
+
+pub fn solve(
+    data: Data,
+    writer: impl Write,
+    rng: &mut XoshiroRng,
+    threads: u16,
+) -> Result<(), Error>
+{
+    log::info!("    [{}] Genotyping complex locus in {} stages and {} threads",
+        data.contigs.tag(), data.scheme.len(), threads);
+    if threads == 1 {
+        solve_single_thread(data, writer, rng)
+    } else {
+        solve_multi_thread(data, writer, rng, threads)
     }
 }
 
@@ -210,26 +198,14 @@ type Task = (usize, Vec<usize>);
 type Solution = (usize, f64);
 
 struct MainWorker {
-    scheme: Scheme,
-    contigs: Arc<ContigNames>,
-    tuples: Arc<Tuples<ContigId>>,
+    data: Arc<Data>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
     handles: Vec<thread::JoinHandle<Result<(), Error>>>,
 }
 
 impl MainWorker {
-    fn new(
-        scheme: Scheme,
-        all_alns: Arc<AllPairAlignments>,
-        contig_windows: Arc<Vec<ContigWindows>>,
-        contigs: Arc<ContigNames>,
-        cached_distrs: &Arc<CachedDepthDistrs>,
-        tuples: Arc<Tuples<ContigId>>,
-        params: &Params,
-        rng: &mut XoshiroRng,
-        threads: u16,
-    ) -> Self {
+    fn new(data: Arc<Data>, rng: &mut XoshiroRng, threads: u16) -> Self {
         let n_workers = usize::from(threads);
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
@@ -239,13 +215,8 @@ impl MainWorker {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
-                scheme: scheme.clone(),
+                data: Arc::clone(&data),
                 rng: rng.clone(),
-                all_alns: Arc::clone(&all_alns),
-                contig_windows: Arc::clone(&contig_windows),
-                tuples: Arc::clone(&tuples),
-                cached_distrs: Arc::clone(&cached_distrs),
-                params: params.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
             };
@@ -254,17 +225,20 @@ impl MainWorker {
             receivers.push(sol_receiver);
             handles.push(thread::spawn(|| worker.run()));
         }
-        MainWorker { scheme, contigs, tuples, senders, receivers, handles }
+        MainWorker { data, senders, receivers, handles }
     }
 
     fn run(self, lik_writer: impl Write) -> Result<(), Error> {
         let n_workers = self.handles.len();
-        let total_tuples = self.tuples.len();
-        let mut helper = Helper::new(&self.scheme, self.contigs.tag(), lik_writer, total_tuples)?;
+        let total_tuples = self.data.tuples.len();
+        let scheme = &self.data.scheme;
+        let tuples = &self.data.tuples;
+        let contigs = &self.data.contigs;
+        let mut helper = Helper::new(&scheme, self.data.contigs.tag(), lik_writer, total_tuples)?;
         let mut rem_jobs = vec![0; n_workers];
         let mut rem_ixs = (0..total_tuples).collect();
 
-        for stage_ix in 0..self.scheme.len() {
+        for stage_ix in 0..scheme.len() {
             helper.start_stage(stage_ix, &mut rem_ixs);
             rem_jobs.fill(0);
             let m = rem_ixs.len();
@@ -286,7 +260,7 @@ impl MainWorker {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, lik) = receiver.recv().expect("Genotyping worker has failed!");
-                        let contigs_str = self.contigs.get_names(self.tuples[ix].iter().copied());
+                        let contigs_str = contigs.get_names(tuples[ix].iter().copied());
                         helper.update(ix, contigs_str, lik)?;
                         *jobs -= 1;
                     }
@@ -304,13 +278,8 @@ impl MainWorker {
 }
 
 struct Worker {
-    scheme: Scheme,
+    data: Arc<Data>,
     rng: XoshiroRng,
-    all_alns: Arc<AllPairAlignments>,
-    contig_windows: Arc<Vec<ContigWindows>>,
-    tuples: Arc<Tuples<ContigId>>,
-    cached_distrs: Arc<CachedDepthDistrs>,
-    params: Params,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
 }
@@ -321,14 +290,16 @@ impl Worker {
         while let Ok((stage_ix, task)) = self.receiver.recv() {
             let n = task.len();
             assert_ne!(n, 0);
-            let all_alns = &self.all_alns;
-            let solver = &self.scheme.0[stage_ix].solver;
-            let tuples = &self.tuples;
-            let contig_windows = &self.contig_windows;
+            let all_alns = &self.data.all_alns;
+            let solver = &self.data.scheme.0[stage_ix].solver;
+            let tuples = &self.data.tuples;
+            let contig_windows = &self.data.contig_windows;
+            let cached_distrs = &self.data.cached_distrs;
+            let params = &self.data.params;
 
             for ix in task.into_iter() {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
-                let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, &self.cached_distrs, &self.params);
+                let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
                 let lik = solver.solve(&mut assgn, &mut self.rng)?;
 
                 if let Err(_) = self.sender.send((ix, lik)) {
@@ -388,8 +359,8 @@ impl<'a, W: Write> Helper<'a, W> {
         self.stage_ix = stage_ix;
         let stage = &self.scheme.0[stage_ix];
         let total_tuples = self.likelihoods.len();
-        // Consider at least one tuple irrespective of the ratio.
-        self.curr_tuples = ((total_tuples as f64 * stage.ratio).ceil() as usize).clamp(1, self.curr_tuples);
+        // Consider at least one tuple irrespective of the fraction.
+        self.curr_tuples = ((total_tuples as f64 * stage.fraction).ceil() as usize).clamp(1, self.curr_tuples);
         if self.curr_tuples < rem_ixs.len() {
             rem_ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].total_cmp(&self.likelihoods[i]));
             rem_ixs.truncate(self.curr_tuples);

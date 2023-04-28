@@ -25,7 +25,7 @@ use crate::{
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
     },
-    solvers::scheme::Scheme,
+    solvers::scheme,
 };
 use htslib::bam::{self, Read as BamRead};
 use super::paths;
@@ -417,7 +417,7 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
 fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
-    scheme: &Scheme,
+    scheme: &scheme::Scheme,
     cached_distrs: &Arc<CachedDepthDistrs>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
@@ -438,8 +438,14 @@ fn analyze_locus(
     let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
 
     let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
-    scheme.solve(all_alns, contig_windows, &contigs, cached_distrs, tuples, lik_writer,
-        &args.assgn_params, &mut rng, args.threads)
+    let data = scheme::Data {
+        scheme: scheme.clone(),
+        params: args.assgn_params.clone(),
+        contigs: Arc::clone(&contigs),
+        cached_distrs: Arc::clone(&cached_distrs),
+        all_alns, contig_windows, tuples,
+    };
+    scheme::solve(data, lik_writer, &mut rng, args.threads)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -460,8 +466,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     recruit_reads(&loci, &args)?;
 
     let scheme = match args.solvers.as_ref() {
-        Some(filename) => Scheme::from_json(&ext::sys::load_json(filename)?)?,
-        None => Scheme::default(),
+        Some(filename) => scheme::Scheme::from_json(&ext::sys::load_json(filename)?)?,
+        None => scheme::Scheme::default(),
     };
 
     let mut rng = ext::rand::init_rng(args.seed);

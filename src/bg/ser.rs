@@ -42,7 +42,7 @@ pub fn json_err(obj: &json::JsonValue, key: &str) -> Error {
 /// // Creates three variables and fetches their values (var1: f64, var2: usize and var3: bool).
 /// json_get!(obj -> var1 (as_f64), var2 (as_usize), var3 (as_bool));
 /// ```
-/// The macro also supports optional values, using `json_get!(obj -> var1 (as_f64))`
+/// The macro also supports optional values, using `json_get!(obj -> var1? (as_f64))`
 /// will set `var1` to `Option<f64>`.
 /// Nevertheless, the error is produced if the variable is present in the json file, but has incorrect type.
 macro_rules! json_get {
