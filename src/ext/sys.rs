@@ -106,6 +106,15 @@ pub fn count_lines<R: BufRead>(mut stream: R) -> io::Result<u64> {
     Ok(count)
 }
 
+/// Directly concantenates files, without trying to decompress them.
+/// Therefore, if input files are already gzipped, output writer should be plain, without compression.
+pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut writer: impl Write) -> io::Result<()> {
+    for filename in filenames {
+        let mut reader = File::open(filename)?;
+        io::copy(&mut reader, &mut writer)?;
+    }
+    Ok(())
+}
 
 /// RAII child wrapper, that kills the child if it gets dropped.
 pub struct ChildGuard {

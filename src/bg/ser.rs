@@ -25,29 +25,50 @@ pub fn parse_f64_arr(obj: &json::JsonValue, key: &str, arr: &mut [f64]) -> Resul
     }
 }
 
+#[doc(hidden)]
+pub fn json_err(obj: &json::JsonValue, key: &str) -> Error {
+    let mut obj_str = obj.to_string();
+    const SUBSTR_SIZE: usize = 200;
+    if obj_str.len() > SUBSTR_SIZE {
+        obj_str = format!("{}...", &obj_str[..SUBSTR_SIZE]);
+    }
+    return Error::JsonLoad(
+        format!("Failed to parse '{}': missing or incorrect '{}' field!", obj_str, key));
+}
+
 /// Function that simplifies fetching from Json value.
 /// Usage:
 /// ```
 /// // Creates three variables and fetches their values (var1: f64, var2: usize and var3: bool).
 /// json_get!(obj -> var1 (as_f64), var2 (as_usize), var3 (as_bool));
 /// ```
+/// The macro also supports optional values, using `json_get!(obj -> var1 (as_f64))`
+/// will set `var1` to `Option<f64>`.
+/// Nevertheless, the error is produced if the variable is present in the json file, but has incorrect type.
 macro_rules! json_get {
     ($obj:ident -> $var:ident ($convert:ident)) => {
         let $var = match $obj[std::stringify!($var)].$convert() {
             Some(val) => val,
-            None => {
-                let mut obj_str = $obj.to_string();
-                const SUBSTR_SIZE: usize = 200;
-                if obj_str.len() > SUBSTR_SIZE {
-                    obj_str = format!("{}...", &obj_str[..SUBSTR_SIZE]);
-                }
-                return Err($crate::Error::JsonLoad(
-                    format!("Failed to parse '{}': missing or incorrect '{}' field!", obj_str, stringify!($var))));
+            None => Err($crate::bg::ser::json_err($obj, stringify!($var)))?,
+        };
+    };
+    ($obj:ident -> $var:ident ? ($convert:ident)) => {
+        let val = &$obj[std::stringify!($var)];
+        let $var = if val.is_null() {
+            None
+        } else {
+            match $obj[std::stringify!($var)].$convert() {
+                Some(val) => Some(val),
+                None => Err($crate::bg::ser::json_err($obj, stringify!($var)))?,
             }
         };
     };
     ($obj:ident -> $var:ident ($convert:ident) , $($tail:tt)*) => {
         json_get!($obj -> $var ($convert));
+        json_get!($obj -> $($tail)*);
+    };
+    ($obj:ident -> $var:ident ? ($convert:ident) , $($tail:tt)*) => {
+        json_get!($obj -> $var ? ($convert));
         json_get!($obj -> $($tail)*);
     };
 }
