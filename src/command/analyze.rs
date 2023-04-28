@@ -129,13 +129,15 @@ fn print_help() {
         "    --subset-loci".green(), "STR+".yellow());
 
     println!("\n{}", "Read recruitment:".bold());
-    println!("    {:KEY$} {:VAL$}  k-mer size (no larger than 16) [{}].",
+    println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than 16) [{}].",
         "-k, --recr-kmer".green(), "INT".yellow(), defaults.recr_params.minimizer_k);
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
         "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.minimizer_w);
-    println!("    {:KEY$} {:VAL$}  Recruit single-/paired-reads with at least {} k-mers matches [{}].",
-        "-m, --min-matches".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.min_matches);
-    println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].",
+    println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
+        {EMPTY}  of minimizers matching one of the targets [{:.1}].",
+        "-m, --matches-frac".green(), "FLOAT".yellow(), defaults.recr_params.matches_frac);
+    println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
+        {EMPTY}  May impact runtime in multi-threaded read recruitment.",
         "-c, --chunk-size".green(), "INT".yellow(), defaults.recr_params.chunk_size);
 
     println!("\n{}", "Locus genotyping:".bold());
@@ -195,7 +197,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('k') | Long("recr-kmer") => args.recr_params.minimizer_k = parser.value()?.parse()?,
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
-            Short('m') | Long("min-matches") => args.recr_params.min_matches = parser.value()?.parse()?,
+            Short('m') | Long("matches-frac") | Long("matches-fraction") =>
+                args.recr_params.matches_frac = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
             Short('S') | Long("solvers") => args.solvers = Some(parser.value()?.parse()?),

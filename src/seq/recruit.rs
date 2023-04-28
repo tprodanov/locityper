@@ -25,7 +25,7 @@ pub struct Params {
     pub minimizer_k: u8,
     pub minimizer_w: u8,
     /// Recruit reads that have at least this number of matching minimizers with one of the targets. Default: 2.
-    pub min_matches: u8,
+    pub matches_frac: f32,
     /// Pass reads between threads in chunks of this size. Default: 10000.
     pub chunk_size: usize,
 }
@@ -35,7 +35,7 @@ impl Default for Params {
         Self {
             minimizer_k: 15,
             minimizer_w: 10,
-            min_matches: 2,
+            matches_frac: 0.3,
             chunk_size: 10000,
         }
     }
@@ -47,7 +47,8 @@ impl Params {
             "Minimizer kmer-size must be within [1, {}]", kmers::MAX_MINIMIZER_K);
         validate_param!(1 < self.minimizer_w && self.minimizer_w <= kmers::MAX_MINIMIZER_W,
             "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
-        validate_param!(self.min_matches != 0, "Minimal number of matches cannot be zero");
+        validate_param!(self.matches_frac > 0.0 && self.matches_frac <= 1.0,
+            "Matches ratio ({:.5}) cannot be zero, and cannot be over 1.", self.matches_frac);
         validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
         Ok(())
     }
@@ -62,7 +63,7 @@ struct Stats {
     last_processed: u64,
 }
 
-const UPDATE_FREQ: u64 = 1_000_000;
+const UPDATE_FREQ: u64 = 2_000_000;
 
 impl Stats {
     fn new() -> Self {
@@ -89,9 +90,9 @@ impl Stats {
     }
 
     fn print_log(&mut self) {
-        let mln_processed = self.processed as f64 * 1e-6;
-        let per_read = self.timer.elapsed().as_secs_f64() / mln_processed;
-        log::debug!("    Recruited {:11} /{:7.1}M reads,  {:.2} us/read", self.recruited, mln_processed, per_read);
+        let processed = self.processed as f64;
+        let speed = 1e-3 * processed / self.timer.elapsed().as_secs_f64();
+        log::debug!("    Recruited {:11} /{:7.1}M reads,  {:.0}k reads/s", self.recruited, 1e-6 * processed, speed);
         self.last_processed = self.processed;
     }
 
@@ -116,8 +117,8 @@ pub struct Targets {
     minimizer_w: u8,
     /// Minimizers appearing across the targets.
     minim_to_loci: MinimToLoci,
-    /// Minimal number of k-mer matches per read/read-pair, needed to recruit the read to the corresponding locus.
-    min_matches: u8,
+    /// Minimal ratio of minimizer matches per read/read-pair, needed to recruit the read to the corresponding locus.
+    matches_frac: f32,
     n_loci: u16,
 }
 
@@ -155,21 +156,21 @@ impl Targets {
             minim_to_loci, n_loci,
             minimizer_k: params.minimizer_k,
             minimizer_w: params.minimizer_w,
-            min_matches: params.min_matches,
+            matches_frac: params.matches_frac,
         }
     }
 
     /// Record a specific single- or paired-read to one or more loci.
     ///
     /// The read is written to all loci (to the corresponding `out_files[locus_ix]`),
-    /// for which the number of loci_matches will be at least `min_matches`.
+    /// for which the ratio of loci_matches will be at least `matches_frac`.
     /// Returns true if the read was recruited anywhere.
     fn recruit_record<T: RecordExt>(
         &self,
         record: &T,
         answer: &mut Answer,
         buffer_minimizers: &mut Vec<u32>,
-        buffer_matches: &mut IntMap<u16, u8>,
+        buffer_matches: &mut IntMap<u16, u16>,
     ) {
         buffer_minimizers.clear();
         record.minimizers(self.minimizer_k, self.minimizer_w, buffer_minimizers);
@@ -184,9 +185,13 @@ impl Targets {
             }
         }
         answer.clear();
-        for (&locus_ix, &count) in buffer_matches.iter() {
-            if count >= self.min_matches {
-                answer.push(locus_ix);
+        if !buffer_matches.is_empty() {
+            const FLOAT_U16MAX: f32 = u16::MAX as f32;
+            let thresh = (buffer_minimizers.len() as f32 * self.matches_frac).min(FLOAT_U16MAX) as u16;
+            for (&locus_ix, &count) in buffer_matches.iter() {
+                if count >= thresh {
+                    answer.push(locus_ix);
+                }
             }
         }
     }
@@ -260,7 +265,7 @@ type Shipment<T> = Vec<(T, Answer)>;
 struct Worker<T> {
     targets: Targets,
     buffer1: Vec<u32>,
-    buffer2: IntMap<u16, u8>,
+    buffer2: IntMap<u16, u16>,
     /// Receives records that need to be recruited.
     receiver: Receiver<Shipment<T>>,
     /// Sends already recruited reads back to the main thread.

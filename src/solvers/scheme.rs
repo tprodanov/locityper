@@ -415,9 +415,9 @@ impl<'a, W: Write> Helper<'a, W> {
         let now_dur = self.timer.elapsed();
         const UPDATE_FREQ: u64 = 2;
         if (now_dur - self.last_msg).as_secs() >= UPDATE_FREQ {
-            let per_tuple = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_tuples as f64;
+            let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_tuples as f64;
             log::debug!("        [{:width$}/{},  {:.4} s/tuple]  Best: {} -> {:11.2}", self.solved_tuples,
-                self.curr_tuples, per_tuple, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
+                self.curr_tuples, speed, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
             self.last_msg = now_dur;
         }
         Ok(())
