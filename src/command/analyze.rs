@@ -259,8 +259,8 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> O
 struct LocusData {
     set: ContigSet,
     db_locus_dir: PathBuf,
-    // /// Output directory with locus data.
-    // out_locus_dir: PathBuf,
+    /// Output directory with locus data.
+    out_dir: PathBuf,
     /// Temporary file with recruited reads.
     tmp_reads_filename: PathBuf,
     /// Final file with recruited reads.
@@ -275,19 +275,19 @@ struct LocusData {
 
 impl LocusData {
     fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path, force: bool) -> io::Result<Self> {
-        let out_locus_dir = out_loci_dir.join(set.tag());
-        if out_locus_dir.exists() && force {
-            fs::remove_dir_all(&out_locus_dir)?;
+        let out_dir = out_loci_dir.join(set.tag());
+        if out_dir.exists() && force {
+            fs::remove_dir_all(&out_dir)?;
         }
-        ext::sys::mkdir(&out_locus_dir)?;
+        ext::sys::mkdir(&out_dir)?;
         Ok(Self {
-            set,
             db_locus_dir: db_locus_dir.to_owned(),
-            tmp_reads_filename: out_locus_dir.join("reads.tmp.fq.gz"),
-            reads_filename: out_locus_dir.join("reads.fq.gz"),
-            tmp_aln_filename: out_locus_dir.join("aln.tmp.bam"),
-            aln_filename: out_locus_dir.join("aln.bam"),
-            lik_filename: out_locus_dir.join("lik.csv.gz"),
+            tmp_reads_filename: out_dir.join("reads.tmp.fq.gz"),
+            reads_filename: out_dir.join("reads.fq.gz"),
+            tmp_aln_filename: out_dir.join("aln.tmp.bam"),
+            aln_filename: out_dir.join("aln.bam"),
+            lik_filename: out_dir.join("lik.csv.gz"),
+            set, out_dir,
         })
     }
 }
@@ -445,7 +445,8 @@ fn analyze_locus(
         cached_distrs: Arc::clone(&cached_distrs),
         all_alns, contig_windows, tuples,
     };
-    scheme::solve(data, lik_writer, &mut rng, args.threads)
+    let dbg_prefix = locus.out_dir.join("assignments.");
+    scheme::solve(data, lik_writer, &dbg_prefix, &mut rng, args.threads)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {

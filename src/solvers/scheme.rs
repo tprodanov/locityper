@@ -5,6 +5,7 @@ use std::{
     thread,
     io::{self, Write},
     time::{Instant, Duration},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         mpsc::{self, Sender, Receiver},
@@ -134,7 +135,7 @@ impl Scheme {
     }
 
     /// Returns true if debug information is written at any of the stages.
-    pub fn any_write(&self) -> bool {
+    pub fn has_dbg_output(&self) -> bool {
         self.iter().any(|stage| stage.write)
     }
 }
@@ -150,7 +151,13 @@ pub struct Data {
     pub params: Params,
 }
 
-fn solve_single_thread(data: Data, lik_writer: impl Write, rng: &mut XoshiroRng) -> Result<(), Error> {
+fn solve_single_thread(
+    data: Data,
+    lik_writer: impl Write,
+    mut dbg_writer: impl Write,
+    rng: &mut XoshiroRng
+) -> Result<(), Error>
+{
     let total_tuples = data.tuples.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_tuples)?;
     let mut rem_ixs = (0..total_tuples).collect();
@@ -162,6 +169,9 @@ fn solve_single_thread(data: Data, lik_writer: impl Write, rng: &mut XoshiroRng)
             let mut assgn = ReadAssignment::new(mcontig_windows, &data.all_alns, &data.cached_distrs, &data.params);
             let lik = solver.solve(&mut assgn, rng)?;
             let contigs_str = data.contigs.get_names(data.tuples[ix].iter().copied());
+            if stage.write {
+                assgn.write_depth(&mut dbg_writer, &format!("{}\t{}", stage_ix + 1, contigs_str))?;
+            }
             helper.update(ix, contigs_str, lik)?;
         }
         helper.finish_stage();
@@ -170,26 +180,60 @@ fn solve_single_thread(data: Data, lik_writer: impl Write, rng: &mut XoshiroRng)
     Ok(())
 }
 
-fn solve_multi_thread(data: Data, writer: impl Write, rng: &mut XoshiroRng, threads: u16) -> Result<(), Error>
+/// Creates `threads` debug files for writing read assignments, and returns their file names.
+/// If `has_dbg_output` is false, returns a vector of `threads` sink objects + an empty vector of names.
+fn create_debug_files(
+    dbg_prefix: &Path,
+    threads: usize,
+    has_dbg_output: bool,
+) -> io::Result<(Vec<Box<dyn Write + Send>>, Vec<PathBuf>)>
 {
-    let main_worker = MainWorker::new(Arc::new(data), rng, threads);
-    main_worker.run(writer)
+    if !has_dbg_output {
+        return Ok(((0..threads).map(|_| Box::new(io::sink()) as Box<dyn Write + Send>).collect(), vec![]));
+    }
+    let filenames: Vec<_> = (0..threads).map(|i| if i == 0 {
+        ext::sys::path_append(dbg_prefix, "csv.gz")
+    } else {
+        ext::sys::path_append(dbg_prefix, format!("{}.csv.gz", i))
+    }).collect();
+
+    let mut writers = Vec::with_capacity(threads);
+    for filename in filenames.iter() {
+        // Using `for` instead of `collect`, as it becomes hard to cast Box and process Errors at the same time.
+        writers.push(Box::new(ext::sys::create_gzip(filename)?) as Box<dyn Write + Send>);
+    }
+    writeln!(writers[0], "stage\tgenotype\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
+    Ok((writers, filenames))
 }
 
 pub fn solve(
     data: Data,
-    writer: impl Write,
+    lik_writer: impl Write,
+    dbg_prefix: &Path,
     rng: &mut XoshiroRng,
     threads: u16,
 ) -> Result<(), Error>
 {
-    log::info!("    [{}] Genotyping complex locus in {} stages and {} threads",
-        data.contigs.tag(), data.scheme.len(), threads);
+    log::info!("    [{}] Genotyping complex locus in {} stages and {} threads across {} possible tuples",
+        data.contigs.tag(), data.scheme.len(), threads, data.tuples.len());
+    let (mut dbg_writers, dbg_filenames) = create_debug_files(dbg_prefix, usize::from(threads),
+        data.scheme.has_dbg_output())?;
+
     if threads == 1 {
-        solve_single_thread(data, writer, rng)
+        solve_single_thread(data, lik_writer, dbg_writers.pop().unwrap(), rng)?;
     } else {
-        solve_multi_thread(data, writer, rng, threads)
+        let main_worker = MainWorker::new(Arc::new(data), rng, threads, dbg_writers);
+        main_worker.run(lik_writer)?;
     }
+
+    // Merge output files if there is debug output and more than one thread.
+    if dbg_filenames.len() > 1 {
+        // By this point, all dbg_writers should be already dropped.
+        let mut file1 = std::fs::OpenOptions::new().append(true).open(&dbg_filenames[0])?;
+        ext::sys::concat_files(dbg_filenames[1..].iter(), &mut file1)?;
+        dbg_filenames[1..].iter().map(std::fs::remove_file).collect::<io::Result<()>>()?;
+    }
+    Ok(())
 }
 
 /// Task, sent to the workers: stage index + tuple indices to solve.
@@ -205,13 +249,20 @@ struct MainWorker {
 }
 
 impl MainWorker {
-    fn new(data: Arc<Data>, rng: &mut XoshiroRng, threads: u16) -> Self {
+    fn new(
+        data: Arc<Data>,
+        rng: &mut XoshiroRng,
+        threads: u16,
+        dbg_writers: Vec<impl Write + Send + 'static>
+    ) -> Self
+    {
         let n_workers = usize::from(threads);
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
+        debug_assert_eq!(n_workers, dbg_writers.len());
 
-        for _ in 0..n_workers {
+        for dbg_writer in dbg_writers.into_iter() {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
@@ -219,6 +270,7 @@ impl MainWorker {
                 rng: rng.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
+                dbg_writer,
             };
             rng.jump();
             senders.push(task_sender);
@@ -277,22 +329,25 @@ impl MainWorker {
     }
 }
 
-struct Worker {
+struct Worker<W> {
     data: Arc<Data>,
     rng: XoshiroRng,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
+    dbg_writer: W,
 }
 
-impl Worker {
+impl<W: Write> Worker<W> {
     fn run(mut self) -> Result<(), Error> {
         // Block thread and wait for the shipment.
         while let Ok((stage_ix, task)) = self.receiver.recv() {
             let n = task.len();
             assert_ne!(n, 0);
             let all_alns = &self.data.all_alns;
-            let solver = &self.data.scheme.0[stage_ix].solver;
+            let stage = &self.data.scheme.0[stage_ix];
+            let solver = &stage.solver;
             let tuples = &self.data.tuples;
+            let contigs = &self.data.contigs;
             let contig_windows = &self.data.contig_windows;
             let cached_distrs = &self.data.cached_distrs;
             let params = &self.data.params;
@@ -301,6 +356,10 @@ impl Worker {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
                 let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
                 let lik = solver.solve(&mut assgn, &mut self.rng)?;
+                if stage.write {
+                    let contigs_str = contigs.get_names(tuples[ix].iter().copied());
+                    assgn.write_depth(&mut self.dbg_writer, &format!("{}\t{}", stage_ix + 1, contigs_str))?;
+                }
 
                 if let Err(_) = self.sender.send((ix, lik)) {
                     log::error!("Read recruitment: main thread stopped before the child thread.");

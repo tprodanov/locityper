@@ -75,7 +75,7 @@ pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> io::Result<Vec<
 }
 
 /// Returns a path with a new suffix appended to the end.
-pub fn append_path(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
+pub fn path_append(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     let mut os_string = path.as_os_str().to_owned();
     os_string.push(suffix.as_ref());
     os_string.into()

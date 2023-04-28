@@ -3,7 +3,6 @@ use std::{
 };
 use rand::Rng;
 use crate::{
-    seq::ContigNames,
     math::Ln,
 };
 use super::{
@@ -332,20 +331,22 @@ impl ReadAssignment {
         &self.depth_distrs[window]
     }
 
+    pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tdepth\tlik";
+
     /// Write read depth to a CSV file in the following format (tab-separated):
-    /// General lines:  `prefix  contig   window    depth     depth_lik`.
-    /// Last two lines: `prefix  unmapped NA        count     NA`.
-    ///                 `prefix  summary  sum_lik   read_lik  depth_lik`.
-    pub fn write_depth<W: io::Write>(&self, prefix: &str, contigs: &ContigNames, f: &mut W) -> io::Result<()> {
+    /// General lines:  `prefix  contig(1|2)  window   depth     depth_lik`.
+    /// Last two lines: `prefix  unmapped     NA       count     NA`.
+    ///                 `prefix  summary      sum_lik  read_lik  depth_lik`.
+    pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
         // log10-likelihood of read depth.
         let mut sum_depth_lik = 0.0;
-        for (i, contig_id) in self.contig_windows.ids().enumerate() {
-            let curr_prefix = format!("{}\t{}\t", prefix, contigs.get_name(contig_id));
+        for i in 0..self.contig_windows.n_contigs() {
+            let curr_prefix = format!("{}\t{}\t", prefix, i + 1);
             let wshift = self.contig_windows.get_wshift(i) as usize;
             for w in wshift..self.contig_windows.get_wshift(i + 1) as usize {
                 let depth = self.depth[w];
                 let log10_prob = Ln::to_log10(self.depth_distrs[w].ln_pmf(depth));
-                writeln!(f, "{}{}\t{}\t{:.3}", curr_prefix, w - wshift, depth, log10_prob)?;
+                writeln!(f, "{}{}\t{}\t{:.3}", curr_prefix, w - wshift + 1, depth, log10_prob)?;
                 sum_depth_lik += log10_prob;
             }
         }
@@ -361,7 +362,7 @@ impl ReadAssignment {
 
     /// Write reads and their assignments to a CSV file in the following format (tab-separated):
     /// `prefix  read_hash  aln1  aln2  w1  w2  prob  selected`
-    pub fn write_reads<W: io::Write>(&self, prefix: &str, f: &mut W, all_alns: &AllPairAlignments) -> io::Result<()> {
+    pub fn write_reads(&self, f: &mut impl io::Write, prefix: &str, all_alns: &AllPairAlignments) -> io::Result<()> {
         assert_eq!(all_alns.len() + 1, self.read_ixs.len());
         for (rp, paired_alns) in all_alns.iter().enumerate() {
             let hash = paired_alns.name_hash();
