@@ -14,7 +14,7 @@ use crate::{
     err::{Error, validate_param},
     math::Ln,
     seq::{
-        recruit, fastx,
+        recruit, fastx, kmers,
         ContigSet,
     },
     bg::{BgDistr, JsonSer},
@@ -129,8 +129,9 @@ fn print_help() {
         "    --subset-loci".green(), "STR+".yellow());
 
     println!("\n{}", "Read recruitment:".bold());
-    println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than 16) [{}].",
-        "-k, --recr-kmer".green(), "INT".yellow(), defaults.recr_params.minimizer_k);
+    println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than {}) [{}].",
+        "-k, --recr-kmer".green(), "INT".yellow(), kmers::MAX_MINIMIZER_K,
+        defaults.recr_params.minimizer_k);
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
         "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.minimizer_w);
     println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\

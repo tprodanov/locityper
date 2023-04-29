@@ -13,7 +13,7 @@ use crate::{
     err::{Error, validate_param},
     seq::{
         ContigSet,
-        kmers,
+        kmers::{self, Minimizer},
         fastx::{RecordExt, FastxRead},
     },
 };
@@ -106,7 +106,7 @@ impl Stats {
 
 const CAPACITY: usize = 4;
 /// Key: minimizer, value: vector of loci indices, where the minimizer appears.
-type MinimToLoci = IntMap<u32, SmallVec<[u16; CAPACITY]>>;
+type MinimToLoci = IntMap<Minimizer, SmallVec<[u16; CAPACITY]>>;
 /// Vector of loci indices, to which the read was recruited.
 type Answer = Vec<u16>;
 
@@ -169,7 +169,7 @@ impl Targets {
         &self,
         record: &T,
         answer: &mut Answer,
-        buffer_minimizers: &mut Vec<u32>,
+        buffer_minimizers: &mut Vec<Minimizer>,
         buffer_matches: &mut IntMap<u16, u16>,
     ) {
         buffer_minimizers.clear();
@@ -264,7 +264,7 @@ type Shipment<T> = Vec<(T, Answer)>;
 
 struct Worker<T> {
     targets: Targets,
-    buffer1: Vec<u32>,
+    buffer1: Vec<Minimizer>,
     buffer2: IntMap<u16, u16>,
     /// Receives records that need to be recruited.
     receiver: Receiver<Shipment<T>>,

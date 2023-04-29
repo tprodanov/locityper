@@ -117,7 +117,7 @@ pub fn canonical_kmers(seq: &[u8], k: u8, buffer: &mut Vec<u64>) {
     assert!(0 < k && k <= MAX_KMER, "k-mer size must be within [1, {}].", MAX_KMER);
     let k_usize = usize::from(k);
     assert!(seq.len() >= k_usize, "Sequence is too short!");
-    let mask: u64 = if k == 32 { -1_i64 as u64 } else { (1_u64 << 2 * k) - 1 };
+    let mask = kmer_mask_64(k);
     let rv_shift = 2 * k - 2;
     let mut fw_kmer: u64 = 0;
     let mut rv_kmer: u64 = 0;
@@ -148,28 +148,28 @@ pub fn canonical_kmers(seq: &[u8], k: u8, buffer: &mut Vec<u64>) {
     }
 }
 
-// fn murmur3_hash(mut key: u64) -> u64 {
-//     key ^= key >> 33;
-//     key = key.wrapping_mul(0xff51afd7ed558ccd);
-//     key ^= key >> 33;
-//     key = key.wrapping_mul(0xc4ceb9fe1a85ec53);
-//     key ^= key >> 33;
-//     key
-// }
+#[cfg(feature = "minim64")]
+pub type Minimizer = u64;
+#[cfg(not(feature = "minim64"))]
+pub type Minimizer = u32;
 
-// /// Fast u32 hash, taken from [here](https://github.com/skeeto/hash-prospector).
-// fn u32_hash(mut key: u32) -> u32 {
-//     key ^= key >> 16;
-//     key = key.wrapping_mul(0x7feb352d);
-//     key ^= key >> 15;
-//     key = key.wrapping_mul(0x846ca68b);
-//     key ^= key >> 16;
-//     key
-// }
-
-/// Fast u32 hash, adapted from [here](https://github.com/skeeto/hash-prospector).
-/// Additionally, u32 `FNV_OFFSET` is used to scramble input value.
+#[cfg(feature = "minim64")]
+fn kmer_hash(mut key: u64) -> u64 {
+    // Fast u64 hash, adapted from Murmur3 hash.
+    // Additionally, u64 `FNV_OFFSET` is used to scramble input value.
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    key ^= FNV_OFFSET;
+    key ^= key >> 33;
+    key = key.wrapping_mul(0xff51afd7ed558ccd);
+    key ^= key >> 33;
+    // key = key.wrapping_mul(0xc4ceb9fe1a85ec53);
+    // key ^= key >> 33;
+    key
+}
+#[cfg(not(feature = "minim64"))]
 fn kmer_hash(mut key: u32) -> u32 {
+    // Fast u32 hash, adapted from [here](https://github.com/skeeto/hash-prospector).
+    // Additionally, u32 `FNV_OFFSET` is used to scramble input value.
     const FNV_OFFSET: u32 = 0x811c9dc5;
     key ^= FNV_OFFSET;
     key ^= key >> 16;
@@ -180,26 +180,44 @@ fn kmer_hash(mut key: u32) -> u32 {
     key
 }
 
-pub(crate) const MAX_MINIMIZER_K: u8 = 16;
-pub(crate) const MAX_MINIMIZER_W: u8 = 64;
+// Largest allowed k-mer size within a minimizer.
+#[cfg(feature = "minim64")]
+pub const MAX_MINIMIZER_K: u8 = 32;
+#[cfg(not(feature = "minim64"))]
+pub const MAX_MINIMIZER_K: u8 = 16;
+
+/// Biggest allowed window size (number of consecutive k-mer).
+pub const MAX_MINIMIZER_W: u8 = 64;
+
+#[inline]
+fn kmer_mask_64(k: u8) -> u64 {
+    if k == 32 { -1_i64 as u64 } else { (1_u64 << 2 * k) - 1 }
+}
+
+#[cfg(not(feature = "minim64"))]
+#[inline]
+fn kmer_mask_32(k: u8) -> u32 {
+    if k == 16 { -1_i32 as u32 } else { (1_u32 << 2 * k) - 1 }
+}
 
 /// Finds sequence minimizers.
 /// Minimizer is a k-mer with the smallest hash value across `w` consecutive k-mers.
 ///
 /// `k` must be at most 16. `w` must be at most 64.
-pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<u32>) {
+pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<Minimizer>) {
     debug_assert!(0 < k && k <= MAX_MINIMIZER_K, "kmer-size must be within [1, {}]", MAX_MINIMIZER_K);
     debug_assert!(1 < w && w <= MAX_MINIMIZER_W, "w must be within [2, {}]", MAX_MINIMIZER_W);
+    const MOD_MAXW: u32 = MAX_MINIMIZER_W as u32 - 1; // Must be the power of two.
+    const UNDEF: Minimizer = Minimizer::MAX;
+
+    #[cfg(feature = "minim64")]
+    let mask = kmer_mask_64(k);
+    #[cfg(not(feature = "minim64"))]
+    let mask = kmer_mask_32(k);
+
     let k = u32::from(k);
     let w = u32::from(w);
-    const MOD_MAXW: u32 = MAX_MINIMIZER_W as u32 - 1; // Must be the power of two.
-    const UNDEF: u32 = u32::MAX;
-
-    let mask: u32 = if k == 16 { -1_i32 as u32 } else { (1_u32 << 2 * k) - 1 };
     let rv_shift = 2 * k - 2;
-    let mut fw_kmer: u32 = 0;
-    let mut rv_kmer: u32 = 0;
-
     // Hashes in a window, stored in a cycling array.
     let mut hashes = [UNDEF; MAX_MINIMIZER_W as usize];
     // At what index will the first k-mer be available.
@@ -207,10 +225,16 @@ pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<u32>) {
     // Start of the window with consecutive k-mers.
     let mut start = reset;
 
+    let mut fw_kmer: Minimizer = 0;
+    let mut rv_kmer: Minimizer = 0;
+
     /// Function that goes over indices `start..end`, and returns new `start`.
     /// Additionally, the function pushes the new minimizer to the buffer, if it is not `UNDEF`.
     #[inline]
-    fn select_minimizer(buffer: &mut Vec<u32>, hashes: &mut [u32; MAX_MINIMIZER_W as usize], start: u32, end: u32
+    fn select_minimizer(
+        buffer: &mut Vec<Minimizer>,
+        hashes: &mut [Minimizer; MAX_MINIMIZER_W as usize],
+        start: u32, end: u32,
     ) -> u32 {
         let mut minimizer = UNDEF;
         let mut new_start = end;
@@ -229,7 +253,7 @@ pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<u32>) {
 
     for (i, &nt) in seq.iter().enumerate() {
         let i = i as u32;
-        let (fw_enc, rv_enc): (u32, u32) = match nt {
+        let (fw_enc, rv_enc): (Minimizer, Minimizer) = match nt {
             b'A' => (0, 3),
             b'C' => (1, 2),
             b'G' => (2, 1),

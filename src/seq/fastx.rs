@@ -3,7 +3,7 @@ use std::{
     fmt,
     cmp::min,
 };
-use crate::seq::kmers;
+use crate::seq::kmers::{self, Minimizer};
 
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
@@ -137,7 +137,7 @@ pub trait RecordExt : Default + Clone + Send + 'static {
 
     /// Extracts all minimizers from the record (see `kmers::minimizers`).
     /// The function does not clear the buffer in advance.
-    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<u32>);
+    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<Minimizer>);
 }
 
 impl RecordExt for Record {
@@ -153,7 +153,7 @@ impl RecordExt for Record {
         kmers::canonical_kmers(&self.seq, k, buffer);
     }
 
-    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<u32>) {
+    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<Minimizer>) {
         kmers::minimizers(&self.seq, k, n, buffer);
     }
 }
@@ -171,7 +171,7 @@ impl RecordExt for PairedRecord {
         kmers::canonical_kmers(&self[1].seq, k, buffer);
     }
 
-    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<u32>) {
+    fn minimizers(&self, k: u8, n: u8, buffer: &mut Vec<Minimizer>) {
         kmers::minimizers(&self[0].seq, k, n, buffer);
         kmers::minimizers(&self[1].seq, k, n, buffer);
     }
