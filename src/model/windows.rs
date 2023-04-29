@@ -169,10 +169,10 @@ impl MultiContigWindows {
                 cns[i] = cns[i].checked_add(1).unwrap();
                 continue;
             }
-            let element = contig_windows[id.ix()].clone();
-            curr_wshift += element.n_windows();
+            let curr_contig = contig_windows[id.ix()].clone();
+            curr_wshift += curr_contig.n_windows();
             wshifts.push(curr_wshift);
-            by_contig.push(element);
+            by_contig.push(curr_contig);
             cns.push(1);
         }
         Self {
@@ -309,11 +309,16 @@ impl MultiContigWindows {
         let mut distrs: Vec<DistrBox> = Vec::with_capacity(self.total_windows() as usize);
         distrs.push(Box::new(cached_distrs.unmapped_distr()));
 
-        for (element, &contig_cn) in self.by_contig.iter().zip(&self.cns) {
-            for (&gc_content, &weight) in element.window_gcs.iter().zip(&element.window_weights) {
+        for (curr_contig, &contig_cn) in self.by_contig.iter().zip(&self.cns) {
+            for (&gc_content, &weight) in curr_contig.window_gcs.iter().zip(&curr_contig.window_weights) {
                 distrs.push(cached_distrs.get_distribution(gc_content, contig_cn, weight));
             }
         }
         distrs
+    }
+
+    /// Returns all window weights for i-th contig.
+    pub(crate) fn get_weights(&self, i: usize) -> &[f64] {
+        &self.by_contig[i].window_weights
     }
 }
