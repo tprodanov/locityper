@@ -148,12 +148,12 @@ pub fn canonical_kmers(seq: &[u8], k: u8, buffer: &mut Vec<u64>) {
     }
 }
 
-#[cfg(feature = "minim64")]
+#[cfg(not(feature = "minim32"))]
 pub type Minimizer = u64;
-#[cfg(not(feature = "minim64"))]
+#[cfg(feature = "minim32")]
 pub type Minimizer = u32;
 
-#[cfg(feature = "minim64")]
+#[cfg(not(feature = "minim32"))]
 fn kmer_hash(mut key: u64) -> u64 {
     // Fast u64 hash, adapted from Murmur3 hash.
     // Additionally, u64 `FNV_OFFSET` is used to scramble input value.
@@ -166,7 +166,7 @@ fn kmer_hash(mut key: u64) -> u64 {
     // key ^= key >> 33;
     key
 }
-#[cfg(not(feature = "minim64"))]
+#[cfg(feature = "minim32")]
 fn kmer_hash(mut key: u32) -> u32 {
     // Fast u32 hash, adapted from [here](https://github.com/skeeto/hash-prospector).
     // Additionally, u32 `FNV_OFFSET` is used to scramble input value.
@@ -181,9 +181,9 @@ fn kmer_hash(mut key: u32) -> u32 {
 }
 
 // Largest allowed k-mer size within a minimizer.
-#[cfg(feature = "minim64")]
+#[cfg(not(feature = "minim32"))]
 pub const MAX_MINIMIZER_K: u8 = 32;
-#[cfg(not(feature = "minim64"))]
+#[cfg(feature = "minim32")]
 pub const MAX_MINIMIZER_K: u8 = 16;
 
 /// Biggest allowed window size (number of consecutive k-mer).
@@ -194,7 +194,7 @@ fn kmer_mask_64(k: u8) -> u64 {
     if k == 32 { -1_i64 as u64 } else { (1_u64 << 2 * k) - 1 }
 }
 
-#[cfg(not(feature = "minim64"))]
+#[cfg(feature = "minim32")]
 #[inline]
 fn kmer_mask_32(k: u8) -> u32 {
     if k == 16 { -1_i32 as u32 } else { (1_u32 << 2 * k) - 1 }
@@ -210,9 +210,9 @@ pub fn minimizers(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<Minimizer>) {
     const MOD_MAXW: u32 = MAX_MINIMIZER_W as u32 - 1; // Must be the power of two.
     const UNDEF: Minimizer = Minimizer::MAX;
 
-    #[cfg(feature = "minim64")]
+    #[cfg(not(feature = "minim32"))]
     let mask = kmer_mask_64(k);
-    #[cfg(not(feature = "minim64"))]
+    #[cfg(feature = "minim32")]
     let mask = kmer_mask_32(k);
 
     let k = u32::from(k);

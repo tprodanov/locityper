@@ -130,8 +130,7 @@ fn print_help() {
 
     println!("\n{}", "Read recruitment:".bold());
     println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than {}) [{}].",
-        "-k, --recr-kmer".green(), "INT".yellow(), kmers::MAX_MINIMIZER_K,
-        defaults.recr_params.minimizer_k);
+        "-k, --recr-kmer".green(), "INT".yellow(), kmers::MAX_MINIMIZER_K, defaults.recr_params.minimizer_k);
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
         "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.minimizer_w);
     println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\

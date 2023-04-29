@@ -37,5 +37,5 @@ smallvec = { version = "1", default-features = false }
 default = ["gurobi", "highs"]
 gurobi = ["dep:grb"]
 highs = ["dep:highs"]
-minim64 = []
+minim32 = []
 devel = []
