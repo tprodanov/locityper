@@ -6,8 +6,7 @@ pub mod aln;
 pub mod compl;
 pub mod kmers;
 pub mod panvcf;
-#[cfg(feature = "devel")]
-pub mod dist;
+// pub mod dist;
 pub mod fastx;
 pub mod recruit;
 
