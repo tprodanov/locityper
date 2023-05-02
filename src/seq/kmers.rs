@@ -54,8 +54,8 @@ impl Kmer for u32 {
         self ^= self >> 16;
         self = self.wrapping_mul(0x85ebca6b);
         self ^= self >> 13;
-        self = self.wrapping_mul(0xc2b2ae35);
-        self ^= self >> 16;
+        // self = self.wrapping_mul(0xc2b2ae35);
+        // self ^= self >> 16;
         // 0 will always produce 0. Here, we take bit-inversion, so that 0 will produce u32::MAX = UNDEF.
         // This corresponds to AA..AA k-mer, which is a very bad minimizer.
         !self
@@ -76,14 +76,12 @@ impl Kmer for u64 {
 
     const UNDEF: Self = Self::MAX;
 
-    /// Murmur3 for uint64.
+    /// fasthash (https://github.com/rurban/smhasher/blob/master/fasthash.cpp) mix function.
     #[inline]
     fn fast_hash(mut self) -> u64 {
-        self ^= self >> 33;
-        self = self.wrapping_mul(0xff51afd7ed558ccd);
-        self ^= self >> 33;
-        self = self.wrapping_mul(0xc4ceb9fe1a85ec53);
-        self ^= self >> 33;
+        self ^= self >> 23;
+        self = self.wrapping_mul(0x2127599bf4325c37);
+        self ^= self >> 47;
         !self
     }
 

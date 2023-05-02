@@ -9,6 +9,7 @@ pub mod panvcf;
 // pub mod dist;
 pub mod fastx;
 pub mod recruit;
+pub mod wfa;
 
 pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames, ContigSet};
