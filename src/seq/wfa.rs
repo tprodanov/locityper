@@ -1,4 +1,7 @@
-use std::ffi::c_char;
+use std::{
+    cmp::max,
+    ffi::c_char,
+};
 use crate::{
     err::{Error, validate_param},
     seq::cigar::{Cigar, CigarItem, Operation},
@@ -13,9 +16,9 @@ mod cwfa {
 }
 
 pub struct Penalties {
-    pub mismatch: i32,
-    pub gap_opening: i32,
-    pub gap_extension: i32,
+    pub mismatch: u32,
+    pub gap_opening: u32,
+    pub gap_extension: u32,
 }
 
 impl Default for Penalties {
@@ -29,11 +32,13 @@ impl Default for Penalties {
 }
 
 impl Penalties {
-    pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(self.mismatch > 0, "Mismatch penalty ({}) must be positive", self.mismatch);
-        validate_param!(self.gap_opening > 0, "Open gap penalty ({}) must be positive", self.gap_opening);
-        validate_param!(self.gap_extension > 0, "Extend gap penalty ({}) must be positive", self.gap_extension);
-        Ok(())
+    /// Returns worst possible score (everything is not aligned).
+    pub fn worst_score(&self, mut len1: u32, mut len2: u32) -> u32 {
+        if len1 > len2 {
+            (len1, len2) = (len2, len1);
+        }
+        max(self.mismatch * len1 + if len1 == len2 { 0 } else { self.gap_opening + self.gap_extension * (len2 - len1) },
+            2 * self.gap_opening + self.gap_extension * (len1 + len2))
     }
 }
 
@@ -57,9 +62,9 @@ impl Aligner {
 
         // Set the cost model and parameters.
         attributes.distance_metric = cwfa::distance_metric_t_gap_affine;
-        attributes.affine_penalties.mismatch = penalties.mismatch;
-        attributes.affine_penalties.gap_opening = penalties.gap_opening;
-        attributes.affine_penalties.gap_extension = penalties.gap_extension;
+        attributes.affine_penalties.mismatch = penalties.mismatch as i32;
+        attributes.affine_penalties.gap_opening = penalties.gap_opening as i32;
+        attributes.affine_penalties.gap_extension = penalties.gap_extension as i32;
 
         Self(unsafe { cwfa::wavefront_aligner_new(&mut attributes) })
     }

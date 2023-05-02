@@ -15,6 +15,8 @@ pub const LOCI_DIR: &'static str = "loci";
 pub const LOCUS_BED: &'static str = "ref.bed";
 /// Haplotypes for the locus are stored in `database/loci/<locus_name>/haplotypes.fa.gz`.
 pub const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
+/// Pairwise hapltype alignments are stored in `database/loci/<locus_name>/haplotypes.paf.gz`.
+pub const LOCUS_PAF: &'static str = "haplotypes.paf.gz";
 
 /// Sample parameters, estimated from the background regions, are stored in `output/bg/params.gz`.
 pub const SAMPLE_PARAMS: &'static str = "params.gz";

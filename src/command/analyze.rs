@@ -61,7 +61,7 @@ impl Default for Args {
             solvers: None,
 
             interleaved: false,
-            threads: 4,
+            threads: 8,
             force: false,
             bwa: None,
             samtools: PathBuf::from("samtools"),

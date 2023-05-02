@@ -38,7 +38,7 @@ impl Default for Args {
             database: None,
             kmer_size: 25,
             bg_region: None,
-            threads: 4,
+            threads: 8,
             force: false,
             jellyfish: PathBuf::from("jellyfish"),
         }

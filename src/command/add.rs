@@ -25,6 +25,8 @@ use crate::{
     seq::{
         self, NamedInterval, ContigNames,
         kmers::JfKmerGetter,
+        wfa::Penalties,
+        dist,
     },
 };
 use super::paths;
@@ -40,6 +42,9 @@ struct Args {
     ref_name: Option<String>,
     max_expansion: u32,
     moving_window: u32,
+
+    penalties: Penalties,
+    threads: u16,
     jellyfish: PathBuf,
     bwa: Vec<PathBuf>,
 }
@@ -57,6 +62,9 @@ impl Default for Args {
             ref_name: Some("REF".to_owned()),
             max_expansion: 4000,
             moving_window: 400,
+
+            penalties: Default::default(),
+            threads: 8,
             jellyfish: PathBuf::from("jellyfish"),
             bwa: vec![PathBuf::from("bwa"), PathBuf::from("bwa-mem2")],
         }
@@ -114,7 +122,7 @@ fn print_help() {
         {EMPTY}  If fourth column is present, it is used for the locus name (must be unique).",
         "-L, --loci-bed".green(), "FILE".yellow());
 
-    println!("\n{}", "Optional parameters:".bold());
+    println!("\n{}", "Haplotype extraction parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Reference genome name [{}].\n\
         {EMPTY}  Use `NONE` to ignore reference locus sequence.",
         "-g, --genome".green(), "STR".yellow(), defaults.ref_name.as_ref().unwrap());
@@ -124,7 +132,17 @@ fn print_help() {
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.moving_window);
 
+    println!("\n{}", "Sequence filtering parameters:".bold());
+    println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}]",
+        "-M, --mismatch".green(), "INT".yellow(), defaults.penalties.mismatch);
+    println!("    {:KEY$} {:VAL$}  Gap open penalty [{}]",
+        "-O, --gap-open".green(), "INT".yellow(), defaults.penalties.gap_opening);
+    println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}]",
+        "-E, --gap-extend".green(), "INT".yellow(), defaults.penalties.gap_extension);
+
     println!("\n{}", "Execution parameters:".bold());
+    println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
+        "-@, --threads".green(), "INT".yellow(), defaults.threads);
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
     println!("    {:KEY$} {:VAL$}  One or more BWA executable, each used for haplotypes indexing.\n\
@@ -155,6 +173,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
+
+            Short('M') | Long("mismatch") => args.penalties.mismatch = parser.value()?.parse()?,
+            Short('O') | Long("gap-open") | Long("gap-opening") =>
+                args.penalties.gap_opening = parser.value()?.parse()?,
+            Short('E') | Long("gap-extend") | Long("gap-extension") =>
+                args.penalties.gap_extension = parser.value()?.parse()?,
+
+            Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
             Long("bwa") => args.bwa = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
 
@@ -288,34 +314,38 @@ fn write_locus(
     ref_name: &Option<String>,
     seqs: Vec<(String, Vec<u8>)>,
     kmer_getter: &JfKmerGetter,
-    bwa_executables: &[PathBuf],
+    args: &Args,
 ) -> Result<(), Error>
 {
-    log::debug!("    [{}] Writing haplotypes to {}/", locus.name(), ext::fmt::path(locus_dir));
-    let mut bed_out = File::create(locus_dir.join(paths::LOCUS_BED))?;
-    writeln!(bed_out, "{}", locus.bed_fmt())?;
-    std::mem::drop(bed_out);
+    log::info!("    [{}] Writing haplotypes to {}/", locus.name(), ext::fmt::path(locus_dir));
+    let mut bed_writer = File::create(locus_dir.join(paths::LOCUS_BED))?;
+    writeln!(bed_writer, "{}", locus.bed_fmt())?;
+    std::mem::drop(bed_writer);
 
     let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
-    let mut fasta_out = ext::sys::create_gzip(&fasta_filename)?;
+    let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
     for (name, seq) in seqs.iter() {
         if Some(name) == ref_name.as_ref() {
-            seq::write_fasta(&mut fasta_out, format!("{} {}", name, locus.interval()).as_bytes(), seq)?;
+            seq::write_fasta(&mut fasta_writer, format!("{} {}", name, locus.interval()).as_bytes(), seq)?;
         } else {
-            seq::write_fasta(&mut fasta_out, name.as_bytes(), seq)?;
+            seq::write_fasta(&mut fasta_writer, name.as_bytes(), seq)?;
         }
     }
-    fasta_out.flush()?;
-    std::mem::drop(fasta_out);
+    fasta_writer.flush()?;
+    std::mem::drop(fasta_writer);
 
-    log::debug!("    [{}] Counting k-mers", locus.name());
+    log::info!("    [{}] Calculating distance between haplotypes", locus.name());
+    let paf_writer = ext::sys::create_gzip(&locus_dir.join(paths::LOCUS_PAF))?;
+    dist::calculate_all_distances(&seqs, paf_writer, &args.penalties, args.threads)?;
+
+    log::info!("    [{}] Counting k-mers", locus.name());
     let seqs = seqs.into_iter().map(|(_name, seq)| seq).collect();
     let kmer_counts = kmer_getter.fetch(seqs)?;
-    let mut kmers_out = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
-    kmer_counts.save(&mut kmers_out)?;
+    let mut kmers_writer = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
+    kmer_counts.save(&mut kmers_writer)?;
 
-    log::debug!("    [{}] Indexing haplotypes", locus.name());
-    for bwa in bwa_executables.iter() {
+    log::info!("    [{}] Indexing haplotypes", locus.name());
+    for bwa in args.bwa.iter() {
         let mut bwa_command = Command::new(bwa);
         bwa_command.arg("index").arg(&fasta_filename);
         log::debug!("        {}", ext::fmt::command(&bwa_command));
@@ -398,7 +428,7 @@ where R: Read + Seek,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
         vcf_file.header(), &vcf_recs)?;
     // TODO: Check on Ns within sequences + filter very similar sequences.
-    write_locus(&dir, &new_locus, &args.ref_name, seqs, kmer_getter, &args.bwa)?;
+    write_locus(&dir, &new_locus, &args.ref_name, seqs, kmer_getter, &args)?;
     Ok(true)
 }
 

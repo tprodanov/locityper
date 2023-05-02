@@ -38,10 +38,6 @@ fn init_logger() {
 
 fn main() {
     init_logger();
-    // let args: Vec<_> = std::env::args().collect();
-    // command::run(&args).unwrap();
-
-    use seq::wfa;
-    let aligner = wfa::Aligner::new(&wfa::Penalties::default());
-    println!("{:?}", aligner.align(b"ACGTAGAC", b"ACGTAGACA"));
+    let args: Vec<_> = std::env::args().collect();
+    command::run(&args).unwrap();
 }

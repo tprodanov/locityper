@@ -8,179 +8,60 @@ use bio::alignment::sparse::lcskpp;
 use smallvec::SmallVec;
 use super::{
     contigs::{ContigId, ContigNames},
-    kmers::{minimizers, Minimizer},
+    wfa::{Aligner, Penalties},
+    cigar::{Cigar, Operation},
 };
 
-const CAPACITY: usize = 4;
-/// Map from `minimizer hash` to vector of relative positions with this minimizer across the sequence.
-/// Relative position simply means that we ignore all positions that do not have minimizers at all.
-type MinimIxs = IntMap<Minimizer, SmallVec<[u32; CAPACITY]>>;
-
-fn create_minim_ixs(minimizers: &[Minimizer]) -> MinimIxs {
-    let mut minim_ixs = MinimIxs::default();
-    for (ix, &minim) in minimizers.iter().enumerate() {
-        minim_ixs.entry(minim).or_default().push(ix as u32);
-    }
-    minim_ixs
-}
-
-// impl<'a> ContigKmers<'a> {
-//     fn new(contig_id: ContigId, seq: &'a [u8], kmer_counts: &'a KmerCounts, threshold: KmerCount) -> Self {
-//         let ref_occurances = kmer_counts.get(contig_id);
-//         let k: u8 = kmer_counts.k().try_into().unwrap();
-//         let mut canon_kmers = Vec::with_capacity(seq.len() + 1 - k as usize);
-//         canonical_kmers(seq, k, &mut canon_kmers);
-//         assert_eq!(canon_kmers.len(), ref_occurances.len());
-
-//         let mut kmer_positions = IntMap::default();
-//         let mut rare_kmers = 0;
-//         let mut nonoverl_kmers = 0;
-//         let mut next_nonoverl_pos = 0;
-
-//         for (pos, (kmer, &ref_count)) in canon_kmers.into_iter().zip(ref_occurances).enumerate() {
-//             let pos = pos as u32;
-//             if kmer != N_KMER && ref_count <= threshold {
-//                 kmer_positions.entry(kmer).or_insert_with(|| Vec::with_capacity(2)).push(pos);
-//                 rare_kmers += 1;
-//                 if pos >= next_nonoverl_pos {
-//                     next_nonoverl_pos = pos + u32::from(k);
-//                     nonoverl_kmers += 1;
-//                 }
-//             }
-//         }
-//         Self {
-//             contig_id, seq, k, kmer_positions,
-//             rare_kmers, nonoverl_kmers,
-//         }
-//     }
-
-//     /// Compares `self` v `othr` and writes to a CSV stream `f`.
-//     /// First three columns: contig1, contig2, strand.
-//     ///
-//     /// Next, four groups of two columns of type `inters/size1,size2   dist`, where distance
-//     /// is calculated as `1 - jaccard_index`.
-//     /// Four groups correspond to sets of k-mers; multisets of k-mers; LCS; and non-overlapping LCS.
-//     fn compare<W: Write>(&self, othr: &Self, contigs: &ContigNames, f: &mut W) -> io::Result<()> {
-//         log::debug!("Compare {} & {}", contigs.get_name(self.contig_id), contigs.get_name(othr.contig_id));
-//         write!(f, "{}\t{}\t", contigs.get_name(self.contig_id), contigs.get_name(othr.contig_id))?;
-//         let (set_inters, mset_inters) = multiset_intersection(&self.kmer_positions, &othr.kmer_positions);
-
-//         let fw_matches = find_kmer_matches(&self.kmer_positions, &othr.kmer_positions,
-//             min(self.rare_kmers, othr.rare_kmers) as usize);
-//         let fw_lcs = lcskpp(&fw_matches, usize::from(self.k)).path;
-//         let len2 = othr.seq.len() as u32;
-//         let mut rv_matches: Vec<_> = fw_matches.iter().rev().map(|(pos1, pos2)| (*pos1, len2 - 1 - *pos2)).collect();
-//         rv_matches.sort_unstable();
-//         let rv_lcs = lcskpp(&rv_matches, usize::from(self.k)).path;
-
-//         let lcs = if fw_lcs.len() >= rv_lcs.len() {
-//             write!(f, "+")?;
-//             improve_lcs(&fw_matches, &fw_lcs)
-//         } else {
-//             write!(f, "-")?;
-//             improve_lcs(&rv_matches, &rv_lcs)
-//         };
-//         let nonoverl_lcs = nonoverl_lcs_size(&lcs, u32::from(self.k));
-
-//         write_dist(f, set_inters, self.kmer_positions.len() as u32, othr.kmer_positions.len() as u32)?;
-//         write_dist(f, mset_inters, self.rare_kmers, othr.rare_kmers)?;
-//         write_dist(f, lcs.len() as u32, self.rare_kmers, othr.rare_kmers)?;
-//         write_dist(f, nonoverl_lcs, self.nonoverl_kmers, othr.nonoverl_kmers)?;
-//         writeln!(f)
-//     }
-// }
-
-// /// Calculates the size of the set and multiset intersection.
-// /// `counts*`: key = canonical k-mer, value = number of k-mer occurances in the contig sequence.
-// fn multiset_intersection(positions1: &IntMap<u64, Vec<u32>>, positions2: &IntMap<u64, Vec<u32>>) -> (u32, u32) {
-//     let mut set_inters = 0;
-//     let mut mset_inters = 0;
-//     for (kmer, kmer_pos1) in positions1.iter() {
-//         if let Some(kmer_pos2) = positions2.get(kmer) {
-//             set_inters += 1;
-//             mset_inters += min(kmer_pos1.len(), kmer_pos2.len()) as u32;
-//         }
-//     }
-//     (set_inters, mset_inters)
-// }
-
-// /// Write to f: `inters/size1,size2  jaccard_distance`.
-// fn write_dist<W: Write>(f: &mut W, inters: u32, size1: u32, size2: u32) -> io::Result<()> {
-//     assert!(inters <= min(size1, size2));
-//     let dist = 1.0 - f64::from(inters) / f64::from(size1 + size2 - inters);
-//     write!(f, "\t{}/{},{}\t{:.8}", inters, size1, size2, dist)
-// }
-
-/// Finds all matching positions between two sets.
-/// `positions*`: key = canonical k-mer, value = k-mer positions.
-fn find_matches(
-        ixs1: &MinimIxs,
-        ixs2: &MinimIxs,
-        start_capacity: usize,
-) -> Vec<(u32, u32)> {
-    let mut matches = Vec::with_capacity(start_capacity);
-    for (minim, minim_ixs1) in ixs1.iter() {
-        if let Some(minim_ixs2) = ixs2.get(minim) {
-            matches.extend(minim_ixs1.iter()
-                .flat_map(move |&ix1| minim_ixs2.iter().map(move |&ix2| (ix1, ix2))));
-        }
-    }
-    matches.sort_unstable();
-    matches
-}
-
-/// LCSk++ finds an approximate LCS solution.
-/// This function improves found LCS by greedily adding matches where possible.
-fn improve_lcs(matches: &[(u32, u32)], path: &[usize]) -> Vec<(u32, u32)> {
-    let mut possible_pos1 = 0;
-    let mut possible_pos2 = 0;
-    let mut last_ix = 0;
-    let mut lcs = Vec::new();
-    for &ix in path {
-        let (new_pos1, new_pos2) = matches[ix];
-        for &(pos1, pos2) in matches[last_ix..ix].iter() {
-            if pos1 >= possible_pos1 && pos2 >= possible_pos2 && pos1 < new_pos1 && pos2 < new_pos2 {
-                lcs.push((pos1, pos2));
-                possible_pos1 = pos1 + 1;
-                possible_pos2 = pos2 + 1;
+/// Calculates all pairwise distances between all sequences, writes alignments to PAF file,
+/// and returns condensed distance matrix (see `kodama` crate).
+pub fn calculate_all_distances(
+    names_seqs: &[(String, Vec<u8>)],
+    mut paf_writer: impl Write,
+    penalties: &Penalties,
+    threads: u16,
+) -> io::Result<Vec<f64>> {
+    if threads == 1 {
+        let n = names_seqs.len();
+        let mut distances = Vec::with_capacity(n * (n - 1) / 2);
+        let aligner = Aligner::new(penalties);
+        for (i, (name1, seq1)) in names_seqs.iter().enumerate() {
+            for (name2, seq2) in names_seqs[i + 1..].iter() {
+                let (cigar, score) = aligner.align(seq1, seq2);
+                assert_eq!(seq1.len() as u32, cigar.ref_len());
+                assert_eq!(seq2.len() as u32, cigar.query_len());
+                let divergence = write_paf(&mut paf_writer, name2, name1, score, &cigar)?;
+                distances.push(divergence);
             }
         }
-        last_ix = ix;
+        Ok(distances)
+    } else {
+        unimplemented!("Multi-thread seq. distance cannot be calculated yet.")
     }
-
-    for &(pos1, pos2) in matches[last_ix..].iter() {
-        if pos1 >= possible_pos1 && pos2 >= possible_pos2 {
-            lcs.push((pos1, pos2));
-            possible_pos1 = pos1 + 1;
-            possible_pos2 = pos2 + 1;
-        }
-    }
-    lcs
 }
 
-// pub fn find_differences<W, I>(
-//     f: &mut W,
-//     contigs: &ContigNames,
-//     ref_seqs: &[Vec<u8>],
-//     kmer_counts: &KmerCounts,
-//     rare_threshold: KmerCount,
-//     pairs: I,
-// ) -> io::Result<()>
-// where W: Write,
-//       I: Iterator<Item = (ContigId, ContigId)>,
-// {
-//     writeln!(f, "# k: {}", kmer_counts.k())?;
-//     writeln!(f, "# threshold: {}", rare_threshold)?;
-//     write!(f, "contig1\tcontig2\tstrand\tsets\tset_dist\tmultisets\tmultiset_dist\t")?;
-//     writeln!(f, "lcs\tlcs_dist\tnonoverl_lcs\tnonoverl_lcs_dist")?;
-//     let init_fn = |contig_id| {
-//         move || ContigKmers::new(contig_id, &ref_seqs[contig_id.ix()], kmer_counts, rare_threshold)
-//     };
-//     let contig_kmers: Vec<_> = (0..contigs.len()).map(|_| OnceCell::new()).collect();
-//     for (contig1, contig2) in pairs {
-//         let contig_kmers1 = contig_kmers[contig1.ix()].get_or_init(init_fn(contig1));
-//         let contig_kmers2 = contig_kmers[contig2.ix()].get_or_init(init_fn(contig2));
-//         contig_kmers1.compare(contig_kmers2, contigs, f)?;
-//     }
-//     Ok(())
-// }
+/// Writes the alignment to PAF file and returns sequence divergence.
+fn write_paf(
+    writer: &mut impl Write,
+    qname: &str,
+    rname: &str,
+    score: i32,
+    cigar: &Cigar,
+) -> io::Result<f64>
+{
+    let qlen = cigar.query_len();
+    let rlen = cigar.ref_len();
+    write!(writer, "{qname}\t{qlen}\t0\t{qlen}\t+\t{rname}\t{rlen}\t0\t{rlen}\t")?;
+
+    let mut nmatches = 0;
+    let mut total_size = 0;
+    for item in cigar.iter() {
+        total_size += item.len();
+        if item.operation() == Operation::Equal {
+            nmatches += item.len();
+        }
+    }
+    let edit_dist = total_size - nmatches;
+    let diverg = f64::from(edit_dist) / f64::from(total_size);
+    writeln!(writer, "{nmatches}\t{total_size}\t60\tNM:i:{edit_dist}\tAS:i:{score}\tdv:f:{diverg:.7}\tcg:Z:{cigar}")?;
+    Ok(diverg)
+}

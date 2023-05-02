@@ -66,7 +66,7 @@ impl Default for Args {
             output: None,
 
             interleaved: false,
-            threads: 4,
+            threads: 8,
             force: false,
             strobealign: PathBuf::from("strobealign"),
             samtools: PathBuf::from("samtools"),
