@@ -13,10 +13,12 @@ use crate::{
     err::{Error, validate_param},
     seq::{
         ContigSet,
-        kmers::{self, Minimizer},
+        kmers::{self, Kmer},
         fastx::{RecordExt, FastxRead},
     },
 };
+
+pub type Minimizer = u64;
 
 pub struct Params {
     /// Recruit reads using k-mers of size `minimizer_k` that have the minimial hash across `minimizer_w`
@@ -43,8 +45,8 @@ impl Default for Params {
 
 impl Params {
     pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(0 < self.minimizer_k && self.minimizer_k <= kmers::MAX_MINIMIZER_K,
-            "Minimizer kmer-size must be within [1, {}]", kmers::MAX_MINIMIZER_K);
+        validate_param!(0 < self.minimizer_k && self.minimizer_k <= Minimizer::MAX_KMER_SIZE,
+            "Minimizer kmer-size must be within [1, {}]", Minimizer::MAX_KMER_SIZE);
         validate_param!(1 < self.minimizer_w && self.minimizer_w <= kmers::MAX_MINIMIZER_W,
             "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
         validate_param!(self.matches_frac > 0.0 && self.matches_frac <= 1.0,

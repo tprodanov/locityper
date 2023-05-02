@@ -15,7 +15,7 @@ use crate::{
     err::{Error, validate_param},
     seq::{
         Interval, ContigNames,
-        kmers::{MAX_KMER, JfKmerGetter},
+        kmers::{JfKmerGetter, Kmer},
     },
     ext,
 };
@@ -51,8 +51,8 @@ impl Args {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
-        validate_param!(self.kmer_size % 2 == 1 && self.kmer_size <= MAX_KMER,
-            "k-mer size ({}) must be odd, and at most {}", self.kmer_size, MAX_KMER);
+        validate_param!(self.kmer_size % 2 == 1 && self.kmer_size <= u64::MAX_KMER_SIZE,
+            "k-mer size ({}) must be odd, and at most {}", self.kmer_size, u64::MAX_KMER_SIZE);
         Ok(self)
     }
 }
