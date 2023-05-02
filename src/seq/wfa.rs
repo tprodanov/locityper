@@ -74,27 +74,27 @@ impl Aligner {
         ) };
         assert_eq!(status, 0, "WFA alignment failed");
         let c_cigar = unsafe { (*self.0).cigar };
-        let cigar = unsafe { convert_cigar(c_cigar) };
+        let cigar = convert_cigar(c_cigar);
         let score = unsafe { (*c_cigar).score };
         (cigar, score)
     }
 }
 
-unsafe fn convert_cigar(cigar: *mut cwfa::cigar_t) -> Cigar {
+fn convert_cigar(cigar: *const cwfa::cigar_t) -> Cigar {
     let mut res = Cigar::new();
-    let begin_offset = (*cigar).begin_offset as isize;
-    let end_offset = (*cigar).end_offset as isize;
+    let begin_offset = usize::try_from(unsafe { (*cigar).begin_offset }).unwrap();
+    let end_offset = usize::try_from(unsafe { (*cigar).end_offset }).unwrap();
 
     if begin_offset >= end_offset {
         return res;
     }
 
-    let operations = (*cigar).operations;
+    let operations = unsafe { (*cigar).operations };
     // Index into c-array.
-    let mut last_op = *operations.offset(begin_offset) as u8;
+    let mut last_op = unsafe { *operations.add(begin_offset) } as u8;
     let mut last_len = 1;
     for i in begin_offset + 1..end_offset {
-        let curr_op = *operations.offset(i) as u8;
+        let curr_op = unsafe { *operations.add(i) } as u8;
         if last_op == curr_op {
             last_len += 1;
         } else {
