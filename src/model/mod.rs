@@ -13,6 +13,8 @@ use crate::{
 pub struct Params {
     /// Boundary size: ignore left- and right-most `boundary_size` bp.
     pub boundary_size: u32,
+    /// Read depth likelihood contribution, relative to read alignment likelihood.
+    pub depth_contrib: f64,
     /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
     pub prob_diff: f64,
     /// Unmapped reads receive this penalty.
@@ -29,6 +31,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             boundary_size: 200,
+            depth_contrib: 2.0,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-10.0),
             rare_kmer: 3.0,
@@ -41,6 +44,8 @@ impl Params {
     pub fn validate(&mut self) -> Result<(), Error> {
         validate_param!(!self.prob_diff.is_nan() && self.prob_diff.is_finite(),
             "Unexpected probability difference ({:.4}) value", self.prob_diff);
+        validate_param!(self.depth_contrib > 0.0,
+            "Depth contribution ({}) must be positive", self.depth_contrib);
         self.prob_diff = self.prob_diff.abs();
         if self.prob_diff < 1.0 {
             log::warn!("Note that probability difference ({}) is in log-10 space", Ln::to_log10(self.prob_diff));

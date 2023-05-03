@@ -24,6 +24,9 @@ pub struct ReadAssignment {
     /// Read depth distribution at each window (length: `contig_windows.total_windows()`).
     depth_distrs: Vec<DistrBox>,
 
+    /// Read depth contribution, relative to read alignment likelihoods.
+    depth_contrib: f64,
+
     /// A vector of possible read alignments to the vector of contigs (length: n_reads).
     read_windows: Vec<ReadWindows>,
 
@@ -83,6 +86,7 @@ impl ReadAssignment {
             read_assgn: vec![0; read_ixs.len() - 1],
             likelihood: f64::NEG_INFINITY,
             depth_distrs: contig_windows.get_distributions(cached_distrs),
+            depth_contrib: params.depth_contrib,
             contig_windows, read_windows, read_ixs, non_trivial_reads,
         }
     }
@@ -266,6 +270,7 @@ impl ReadAssignment {
     /// calculates the difference between the new and the old ln-probabilities.
     /// Positive value means that the likelihood will improve.
     /// Does not actually update the read depth.
+    /// Does not account for read depth contribution.
     fn atomic_depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
         if depth_change == 0 {
             0.0
@@ -302,8 +307,8 @@ impl ReadAssignment {
         } else { 1 };
 
         debug_assert_eq!(c1 + c2 + c3 + c4, 0);
-        self.atomic_depth_lik_diff(w1, c1) + self.atomic_depth_lik_diff(w2, c2)
-            + self.atomic_depth_lik_diff(w3, c3) + self.atomic_depth_lik_diff(w4, c4)
+        self.depth_contrib * (self.atomic_depth_lik_diff(w1, c1) + self.atomic_depth_lik_diff(w2, c2)
+            + self.atomic_depth_lik_diff(w3, c3) + self.atomic_depth_lik_diff(w4, c4))
     }
 
     /// Recalculates total model likelihood, and returns separately
@@ -313,7 +318,8 @@ impl ReadAssignment {
         let depth_lik = self.depth_distrs.iter()
             .zip(&self.depth)
             .map(|(distr, &depth)| distr.ln_pmf(depth))
-            .sum();
+            .sum::<f64>()
+            * self.depth_contrib;
         let aln_lik = self.read_ixs.iter().zip(&self.read_assgn)
             .map(|(&start_ix, &assgn)| self.read_windows[start_ix + assgn as usize].ln_prob())
             .sum();
@@ -326,7 +332,13 @@ impl ReadAssignment {
         &self.contig_windows
     }
 
+    /// Read depth contribution, relative to read alignment contribution.
+    pub fn depth_contrib(&self) -> f64 {
+        self.depth_contrib
+    }
+
     /// Returns read depth distribution for the window.
+    /// WARN: Need to account for `self.depth_contrib()`.
     pub fn depth_distr(&self, window: usize) -> &DistrBox {
         &self.depth_distrs[window]
     }
@@ -347,7 +359,7 @@ impl ReadAssignment {
             for (j, &weight) in weights.iter().enumerate() {
                 let w = j + wshift;
                 let depth = self.depth[w];
-                let log10_prob = Ln::to_log10(self.depth_distrs[w].ln_pmf(depth));
+                let log10_prob = Ln::to_log10(self.depth_contrib * self.depth_distrs[w].ln_pmf(depth));
                 writeln!(f, "{}{}\t{}\t{:.3}\t{:.4}", curr_prefix, j + 1, depth, log10_prob, weight)?;
                 sum_depth_lik += log10_prob;
             }

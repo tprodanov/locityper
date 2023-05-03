@@ -147,6 +147,9 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
         {EMPTY}  Please see README for information on the file content.",
         "-S, --solvers".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
+        {EMPTY}  read alignment likelihoods [{:.1}].",
+        "-C, --dp-contrib".green(), "FLOAT".yellow(), defaults.assgn_params.depth_contrib);
     println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
         {EMPTY}  the best alignment [{:.1}].",
         "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(), Ln::to_log10(defaults.assgn_params.prob_diff));
@@ -203,6 +206,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
             Short('S') | Long("solvers") => args.solvers = Some(parser.value()?.parse()?),
+            Short('C') | Long("dp-contrib") | Long("depth-contrib") | Long("dp-contribution")
+                => args.assgn_params.depth_contrib = parser.value()?.parse()?,
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),

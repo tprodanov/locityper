@@ -103,12 +103,13 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
         model.add_constr(&format!("R{:x}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
     }
 
+    let depth_contrib = assignments.depth_contrib();
     let mut depth_vars = Vec::new();
     for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
         let depth_distr = assignments.depth_distr(w);
         let (trivial_reads, non_trivial_reads) = window_depth[w];
         if non_trivial_reads == 0 {
-            objective.add_constant(depth_distr.ln_pmf(trivial_reads));
+            objective.add_constant(depth_contrib * depth_distr.ln_pmf(trivial_reads));
             continue;
         }
 
@@ -120,7 +121,7 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
             if depth_inc > 0 {
                 depth_constr0.add_term(-f64::from(depth_inc), var);
             }
-            objective.add_term(depth_distr.ln_pmf(depth), var);
+            objective.add_term(depth_contrib * depth_distr.ln_pmf(depth), var);
         }
         model.add_constr(&format!("D{:x}_base", w), c!( (&depth_vars).grb_sum() == 1 ))?;
         model.add_constr(&format!("D{:x}_eq", w), c!( depth_constr0 == 0 ))?;
