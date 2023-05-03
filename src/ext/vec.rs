@@ -1,6 +1,6 @@
 use std::{
     fmt::{self, Write},
-    ops::{Add, Sub},
+    ops::{Add, Sub, Range, Index},
 };
 
 /// Static methods extending slices.
@@ -270,9 +270,28 @@ impl<T> Tuples<T> {
     pub fn iter(&self) -> std::slice::ChunksExact<'_, T> {
         self.data.chunks_exact(self.tup_len)
     }
+
+    pub fn iter_range(&self, ixs: Range<usize>) -> std::slice::ChunksExact<'_, T> {
+        self.data[ixs.start * self.tup_len..ixs.end * self.tup_len].chunks_exact(self.tup_len)
+    }
 }
 
 impl<T: Copy> Tuples<T> {
+    fn init_combinations(&mut self, v: &[T], subtuple: &mut [T], depth: usize, start_ix: usize) {
+        let rem = self.tup_len.checked_sub(depth + 1).unwrap();
+        if rem == 0 {
+            for &el in &v[start_ix..] {
+                self.data.extend_from_slice(subtuple);
+                self.data.push(el);
+            }
+        } else {
+            for (i, &el) in v[start_ix..v.len() - rem].iter().enumerate() {
+                subtuple[depth] = el;
+                self.init_combinations(v, subtuple, depth + 1, start_ix + i + 1);
+            }
+        }
+    }
+
     fn init_repl_combinations(&mut self, v: &[T], subtuple: &mut [T], depth: usize, start_ix: usize) {
         if depth + 1 == self.tup_len {
             for &el in &v[start_ix..] {
@@ -287,12 +306,35 @@ impl<T: Copy> Tuples<T> {
         }
     }
 
-    /// Stores all tuples of size `tup_len`, constructed from vector `v` through all combinations with replacement.
+    /// Stores all tuples of size `tup_len`, constructed from vector `v` through all combinations *without* replacement.
+    pub fn combinations(v: &[T], tup_len: usize) -> Self {
+        assert!(!v.is_empty(), "Cannot construct combinations on an empty vector or empty tuple size");
+        let count = usize::try_from(count_combinations(v.len() as u64, tup_len as u64)).unwrap();
+        assert!(count < 10_000_000, "Number of possible tuples ({}) is too great", count);
+        let mut res = Tuples::with_capacity(tup_len, count);
+        if count == 0 {
+            return res;
+        }
+
+        let mut subtuple = vec![v[0]; tup_len - 1];
+        if tup_len == 1 {
+            res.data.extend_from_slice(v);
+        } else {
+            res.init_combinations(v, &mut subtuple, 0, 0);
+        }
+        assert_eq!(res.len(), count);
+        res
+    }
+
+    /// Stores all tuples of size `tup_len`, constructed from vector `v` through all combinations *with* replacement.
     pub fn repl_combinations(v: &[T], tup_len: usize) -> Self {
         assert!(!v.is_empty(), "Cannot construct combinations on an empty vector or empty tuple size");
         let count = usize::try_from(count_repl_combinations(v.len() as u64, tup_len as u64)).unwrap();
         assert!(count < 10_000_000, "Number of possible tuples ({}) is too great", count);
         let mut res = Tuples::with_capacity(tup_len, count);
+        if count == 0 {
+            return res;
+        }
 
         let mut subtuple = vec![v[0]; tup_len - 1];
         if tup_len == 1 {
@@ -305,7 +347,7 @@ impl<T: Copy> Tuples<T> {
     }
 }
 
-impl<T> std::ops::Index<usize> for Tuples<T> {
+impl<T> Index<usize> for Tuples<T> {
     type Output = [T];
 
     fn index(&self, index: usize) -> &[T] {

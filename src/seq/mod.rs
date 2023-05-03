@@ -65,3 +65,37 @@ pub fn n_runs(seq: &[u8]) -> Vec<(u32, u32)> {
     }
     runs
 }
+
+/// Sequence with its name.
+#[derive(Clone)]
+pub struct NamedSeq {
+    name: String,
+    seq: Vec<u8>,
+}
+
+impl NamedSeq {
+    /// Constructs new named sequence.
+    pub fn new(name: String, seq: Vec<u8>) -> Self {
+        Self { name, seq }
+    }
+
+    /// Returns reference to the name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns reference to the sequence.
+    pub fn seq(&self) -> &[u8] {
+        &self.seq
+    }
+
+    /// Returns mutable sequence reference.
+    pub fn seq_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.seq
+    }
+
+    /// Consumes this object and returns owned sequence.
+    pub fn take_seq(self) -> Vec<u8> {
+        self.seq
+    }
+}

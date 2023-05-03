@@ -7,6 +7,7 @@ use htslib::bcf::{
     record::{Record, GenotypeAllele},
 };
 use crate::Error;
+use super::NamedSeq;
 
 /// Formats variant as `chrom:pos`.
 fn format_var(var: &Record, header: &HeaderView) -> String {
@@ -23,7 +24,7 @@ fn format_var(var: &Record, header: &HeaderView) -> String {
 pub fn reconstruct_sequences(
     ref_start: u32, ref_seq: &[u8], ref_name: &Option<String>,
     header: &HeaderView, recs: &[Record],
-) -> Result<Vec<(String, Vec<u8>)>, Error>
+) -> Result<Vec<NamedSeq>, Error>
 {
     const PLOIDY: usize = 2;
     let ref_end = ref_start + ref_seq.len() as u32;
@@ -32,7 +33,7 @@ pub fn reconstruct_sequences(
     let mut res = Vec::new();
     if let Some(name) = ref_name.as_ref() {
         haplotype_names.insert(name.clone());
-        res.push((name.clone(), ref_seq.to_vec()));
+        res.push(NamedSeq::new(name.clone(), ref_seq.to_vec()));
     }
     let capacity = ref_seq.len() * 3 / 2;
     let sample_names = header.samples();
@@ -43,7 +44,7 @@ pub fn reconstruct_sequences(
             if !haplotype_names.insert(name.clone()) {
                 return Err(Error::InvalidData(format!("Haplotype name {} is not unique", name)));
             }
-            res.push((name, Vec::with_capacity(capacity)));
+            res.push(NamedSeq::new(name, Vec::with_capacity(capacity)));
         }
     }
 
@@ -84,11 +85,11 @@ pub fn reconstruct_sequences(
                 _ => {}
             }
             for haplotype in 0..PLOIDY {
-                let curr_pair = &mut res[shift + PLOIDY * sample_id + haplotype];
-                curr_pair.1.extend_from_slice(seq_between_vars);
+                let mut_seq = res[shift + PLOIDY * sample_id + haplotype].seq_mut();
+                mut_seq.extend_from_slice(seq_between_vars);
                 match gt[haplotype] {
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) =>
-                        curr_pair.1.extend_from_slice(alleles[allele_ix as usize]),
+                        mut_seq.extend_from_slice(alleles[allele_ix as usize]),
                     _ => return Err(Error::InvalidData(format!(
                         "Variant {} is missing genotype for sample {}", format_var(var, header),
                         from_utf8(&sample_names[sample_id]).unwrap()))),
@@ -99,7 +100,7 @@ pub fn reconstruct_sequences(
     }
     let suffix_seq = &ref_seq[(ref_pos - ref_start) as usize..];
     for i in shift..res.len() {
-        res[i].1.extend_from_slice(suffix_seq);
+        res[i].seq_mut().extend_from_slice(suffix_seq);
     }
     Ok(res)
 }

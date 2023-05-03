@@ -23,7 +23,7 @@ use crate::{
         vec::{VecExt, F64Ext, IterExt},
     },
     seq::{
-        self, NamedInterval, ContigNames,
+        self, NamedInterval, ContigNames, NamedSeq,
         kmers::JfKmerGetter,
         wfa::Penalties,
         dist,
@@ -311,8 +311,7 @@ fn find_best_boundary(
 fn write_locus(
     locus_dir: &Path,
     locus: &NamedInterval,
-    ref_name: &Option<String>,
-    seqs: Vec<(String, Vec<u8>)>,
+    entries: Vec<NamedSeq>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<(), Error>
@@ -324,22 +323,18 @@ fn write_locus(
 
     let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
     let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
-    for (name, seq) in seqs.iter() {
-        if Some(name) == ref_name.as_ref() {
-            seq::write_fasta(&mut fasta_writer, format!("{} {}", name, locus.interval()).as_bytes(), seq)?;
-        } else {
-            seq::write_fasta(&mut fasta_writer, name.as_bytes(), seq)?;
-        }
+    for entry in entries.iter() {
+        seq::write_fasta(&mut fasta_writer, entry.name().as_bytes(), entry.seq())?;
     }
     fasta_writer.flush()?;
     std::mem::drop(fasta_writer);
 
-    log::info!("    [{}] Calculating distance between haplotypes", locus.name());
+    log::info!("    [{}] Calculating haplotypes divergence", locus.name());
     let paf_writer = ext::sys::create_gzip(&locus_dir.join(paths::LOCUS_PAF))?;
-    dist::calculate_all_distances(&seqs, paf_writer, &args.penalties, args.threads)?;
+    dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)?;
 
     log::info!("    [{}] Counting k-mers", locus.name());
-    let seqs = seqs.into_iter().map(|(_name, seq)| seq).collect();
+    let seqs = entries.into_iter().map(NamedSeq::take_seq).collect();
     let kmer_counts = kmer_getter.fetch(seqs)?;
     let mut kmers_writer = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_writer)?;
@@ -423,12 +418,12 @@ where R: Read + Seek,
         fs::remove_dir_all(&dir)?;
     }
     ext::sys::mkdir(&dir)?;
-    log::debug!("    [{}] Reconstructing haplotypes", new_locus.name());
+    log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
         vcf_file.header(), &vcf_recs)?;
     // TODO: Check on Ns within sequences + filter very similar sequences.
-    write_locus(&dir, &new_locus, &args.ref_name, seqs, kmer_getter, &args)?;
+    write_locus(&dir, &new_locus, seqs, kmer_getter, &args)?;
     Ok(true)
 }
 

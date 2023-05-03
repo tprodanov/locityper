@@ -3,7 +3,6 @@ use std::{
     ffi::c_char,
 };
 use crate::{
-    err::{Error, validate_param},
     seq::cigar::{Cigar, CigarItem, Operation},
 };
 
@@ -15,6 +14,7 @@ mod cwfa {
     include!(concat!(env!("OUT_DIR"), "/bindings_wfa.rs"));
 }
 
+#[derive(Clone)]
 pub struct Penalties {
     pub mismatch: u32,
     pub gap_opening: u32,
