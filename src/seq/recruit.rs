@@ -12,7 +12,6 @@ use smallvec::{smallvec, SmallVec};
 use crate::{
     err::{Error, validate_param},
     seq::{
-        ContigSet,
         kmers::{self, Kmer},
         fastx::{RecordExt, FastxRead},
     },
@@ -125,41 +124,43 @@ pub struct Targets {
 }
 
 impl Targets {
-    pub fn new<'a>(sets: impl Iterator<Item = &'a ContigSet>, params: &Params) -> Self {
-        log::info!("Generating recruitment targets");
-        let mut minim_to_loci = MinimToLoci::default();
-        let mut buffer = Vec::new();
-
-        let mut n_seqs = 0;
-        let mut locus_ix: u16 = 0;
-        for contig_set in sets {
-            for contig_id in contig_set.contigs().ids() {
-                buffer.clear();
-                kmers::minimizers(contig_set.get_seq(contig_id), params.minimizer_k, params.minimizer_w, &mut buffer);
-                for &minimizer in buffer.iter() {
-                    match minim_to_loci.entry(minimizer) {
-                        Entry::Occupied(entry) => {
-                            let loci_ixs = entry.into_mut();
-                            if *loci_ixs.last().unwrap() != locus_ix {
-                                loci_ixs.push(locus_ix);
-                            }
-                        }
-                        Entry::Vacant(entry) => { entry.insert(smallvec![locus_ix]); }
-                    }
-                }
-            }
-            locus_ix = locus_ix.checked_add(1)
-                .expect(formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
-            n_seqs += contig_set.len();
-        }
-        let n_loci = locus_ix;
-        log::info!("Collected {} minimizers across {} loci and {} sequences", minim_to_loci.len(), n_loci, n_seqs);
+    /// Creates empty recruitment targets.
+    pub fn new(params: &Params) -> Self {
         Self {
-            minim_to_loci, n_loci,
+            minim_to_loci: MinimToLoci::default(),
+            n_loci: 0,
             minimizer_k: params.minimizer_k,
             minimizer_w: params.minimizer_w,
             matches_frac: params.matches_frac,
         }
+    }
+
+    /// Adds a set of sequences from the same target.
+    pub fn add<'a>(&mut self, seqs: impl Iterator<Item = &'a [u8]>) {
+        let mut buffer = Vec::new();
+        let locus_ix = self.n_loci;
+        for seq in seqs {
+            buffer.clear();
+            kmers::minimizers(seq, self.minimizer_k, self.minimizer_w, &mut buffer);
+            for &minimizer in buffer.iter() {
+                match self.minim_to_loci.entry(minimizer) {
+                    Entry::Occupied(entry) => {
+                        let loci_ixs = entry.into_mut();
+                        if *loci_ixs.last().unwrap() != locus_ix {
+                            loci_ixs.push(locus_ix);
+                        }
+                    }
+                    Entry::Vacant(entry) => { entry.insert(smallvec![locus_ix]); }
+                }
+            }
+        }
+        self.n_loci = self.n_loci.checked_add(1)
+            .expect(formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
+    }
+
+    /// Returns the total number of minimizers in the set.
+    pub fn total_minimizers(&self) -> usize {
+        self.minim_to_loci.len()
     }
 
     /// Record a specific single- or paired-read to one or more loci.
@@ -246,6 +247,7 @@ impl Targets {
         chunk_size: usize,
     ) -> io::Result<()>
     {
+        assert_ne!(self.n_loci, 0, "Cannot recruit to zero loci");
         assert_eq!(writers.len(), self.n_loci as usize, "Unexpected number of writers");
         if threads <= 1 {
             // if threads == 2 {

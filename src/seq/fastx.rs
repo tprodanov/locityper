@@ -1,9 +1,14 @@
 use std::{
-    io::{self, BufRead},
     fmt,
+    io::{self, BufRead},
     cmp::min,
+    path::Path,
 };
-use crate::seq::kmers::{self, Kmer};
+use crate::ext;
+use super::{
+    NamedSeq,
+    kmers::{self, Kmer},
+};
 
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
@@ -170,6 +175,12 @@ pub struct Reader<R: BufRead> {
     buffer: Vec<u8>,
 }
 
+impl Reader<Box<dyn BufRead + Send>> {
+    pub fn from_path(path: &Path) -> io::Result<Self> {
+        Self::new(ext::sys::open(path)?)
+    }
+}
+
 impl<R: BufRead> Reader<R> {
     pub fn new(mut stream: R) -> io::Result<Self> {
         let mut buffer = Vec::new();
@@ -225,6 +236,18 @@ impl<R: BufRead> Reader<R> {
         self.buffer.clear();
         read_line(&mut self.stream, &mut self.buffer)?;
         Ok(true)
+    }
+}
+
+impl<R: BufRead + Send> Reader<R> {
+    /// Reads all sequences into memory.
+    pub fn read_all(&mut self) -> io::Result<Vec<NamedSeq>> {
+        let mut record = Record::default();
+        let mut records = Vec::new();
+        while self.read_next(&mut record)? {
+            records.push(NamedSeq::new(record.name_only().into_owned(), record.seq().to_owned()));
+        }
+        Ok(records)
     }
 }
 

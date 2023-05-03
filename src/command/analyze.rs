@@ -15,8 +15,8 @@ use crate::{
     math::Ln,
     seq::{
         recruit, fastx,
+        ContigSet, NamedSeq,
         kmers::Kmer,
-        ContigSet,
     },
     bg::{BgDistr, JsonSer},
     ext,
@@ -347,26 +347,36 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
         log::info!("Skipping read recruitment");
         return Ok(());
     }
-    if filt_loci.len() < loci.len() {
-        log::info!("Skipping read recruitment to {} loci", loci.len() - filt_loci.len());
+    let n_filt_loci = filt_loci.len();
+    if n_filt_loci < loci.len() {
+        log::info!("Skipping read recruitment to {} loci", loci.len() - n_filt_loci);
     }
 
-    let targets = recruit::Targets::new(filt_loci.iter().map(|locus| &locus.set), &args.recr_params);
-    let writers: Vec<_> = filt_loci.iter()
-        .map(|locus| ext::sys::create_gzip(&locus.tmp_reads_filename))
-        .collect::<Result<_, _>>()?;
+    log::info!("Generating recruitment targets");
+    let mut targets = recruit::Targets::new(&args.recr_params);
+    let mut writers = Vec::with_capacity(n_filt_loci);
+    let mut total_seqs = 0;
+    for locus in filt_loci.iter() {
+        let mut fasta_reader = fastx::Reader::from_path(&locus.db_locus_dir.join(paths::LOCUS_FASTA_ALL))?;
+        let locus_all_seqs = fasta_reader.read_all()?;
+        total_seqs += locus_all_seqs.len();
+        targets.add(locus_all_seqs.iter().map(NamedSeq::seq));
+        writers.push(ext::sys::create_gzip(&locus.tmp_reads_filename)?);
+    }
+    log::info!("Collected {} minimizers across {} loci and {} sequences", targets.total_minimizers(),
+        n_filt_loci, total_seqs);
 
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
-        let reader = fastx::Reader::new(ext::sys::open(&args.input[0])?)?;
+        let reader = fastx::Reader::from_path(&args.input[0])?;
         targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     } else if args.interleaved {
-        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(ext::sys::open(&args.input[0])?)?);
+        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
         targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     } else {
         let reader = fastx::PairedEndReaders::new(
-            fastx::Reader::new(ext::sys::open(&args.input[0])?)?,
-            fastx::Reader::new(ext::sys::open(&args.input[1])?)?);
+            fastx::Reader::from_path(&args.input[0])?,
+            fastx::Reader::from_path(&args.input[1])?);
         targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
     }
     for locus in filt_loci.iter() {

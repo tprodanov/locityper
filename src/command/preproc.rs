@@ -322,15 +322,15 @@ fn set_strobealign_stdin(
 
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
-        let reader = fastx::Reader::new(ext::sys::open(&args.input[0])?)?;
+        let reader = fastx::Reader::from_path(&args.input[0])?;
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     } else if args.interleaved {
-        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::new(ext::sys::open(&args.input[0])?)?);
+        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     } else {
         let reader = fastx::PairedEndReaders::new(
-            fastx::Reader::new(ext::sys::open(&args.input[0])?)?,
-            fastx::Reader::new(ext::sys::open(&args.input[1])?)?);
+            fastx::Reader::from_path(&args.input[0])?,
+            fastx::Reader::from_path(&args.input[1])?);
         Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
     }
 }
