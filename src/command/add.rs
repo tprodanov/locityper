@@ -353,10 +353,10 @@ fn cluster_haplotypes(
     // This is done to cut as little as needed.
     let dendrogram = kodama::linkage(&mut divergences, n, kodama::Method::Complete);
     let mut clusters_nwk = Vec::with_capacity(total_clusters);
-    // Smallest index across all members of a cluster.
-    let mut first_member = Vec::with_capacity(total_clusters);
+    // Cluster representatives.
+    let mut cluster_repr = Vec::with_capacity(total_clusters);
     clusters_nwk.extend(entries.iter().map(|entry| entry.name().to_owned()));
-    first_member.extend(0..n);
+    cluster_repr.extend(0..n);
 
     let steps = dendrogram.steps();
     for step in steps.iter() {
@@ -364,7 +364,9 @@ fn cluster_haplotypes(
         let j = step.cluster2;
         clusters_nwk.push(format!("({}:{dist},{}:{dist})", &clusters_nwk[i], &clusters_nwk[j],
             dist = 0.5 * step.dissimilarity));
-        first_member.push(first_member[i].min(first_member[j]));
+        let size1 = if i < n { 1 } else { steps[i - n].size };
+        let size2 = if j < n { 1 } else { steps[j - n].size };
+        cluster_repr.push(cluster_repr[if size1 >= size2 { i } else { j }]);
     }
     assert_eq!(clusters_nwk.len(), total_clusters);
     writeln!(nwk_writer, "{};", clusters_nwk.last().unwrap())?;
@@ -377,7 +379,7 @@ fn cluster_haplotypes(
         } else {
             let step = &steps[i - n];
             if step.dissimilarity <= thresh {
-                keep_seqs[first_member[i]] = true;
+                keep_seqs[cluster_repr[i]] = true;
             } else {
                 queue.push(step.cluster1);
                 queue.push(step.cluster2);
