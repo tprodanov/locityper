@@ -335,7 +335,8 @@ impl ReadAssignment {
 
     /// Write read depth to a CSV file in the following format (tab-separated):
     /// General lines:  `prefix  contig(1|2)  window     depth     depth_lik  weight`.
-    /// Last line:      `prefix  summary      #unmapped  read_lik  depth_lik  sum_lik`.
+    /// Last line:      `prefix  summary      unm/total  read_lik  depth_lik  sum_lik`.
+    /// `unm/total`: number of unmapped reads and total number of reads.
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
         // log10-likelihood of read depth.
         let mut sum_depth_lik = 0.0;
@@ -353,7 +354,8 @@ impl ReadAssignment {
         }
 
         let total_lik = Ln::to_log10(self.likelihood);
-        writeln!(f, "{}\tsummary\t{}\t{:.4}\t{:.4}\t{:.4}", prefix, self.depth[UNMAPPED_WINDOW as usize],
+        writeln!(f, "{}\tsummary\t{}/{}\t{:.4}\t{:.4}\t{:.4}", prefix,
+            self.depth[UNMAPPED_WINDOW as usize], self.read_assgn.len(),
             total_lik - sum_depth_lik, sum_depth_lik, total_lik)
     }
 

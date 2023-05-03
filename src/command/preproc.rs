@@ -72,7 +72,7 @@ impl Default for Args {
             samtools: PathBuf::from("samtools"),
 
             n_reads: parse_int(DEF_N_READS).unwrap(),
-            subsampling_rate: 0.25,
+            subsampling_rate: 0.1,
             subsampling_seed: None,
             params: BgParams::default(),
         }
@@ -443,8 +443,7 @@ fn estimate_bg_from_reads(
 
     let bam_filename2 = out_dir.join("to_bg.bam");
     let contig0 = ContigId::new(0);
-    let interval = Interval::full_contig(Arc::clone(contig_set.contigs()), contig0);
-    log::info!("Mapping reads to non-duplicated region {}", interval);
+    log::info!("Mapping reads to non-duplicated region");
     run_strobealign(args, &bg_fasta_filename, &bam_filename2, true)?;
 
     log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename1));
@@ -476,6 +475,7 @@ fn estimate_bg_from_reads(
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
+    let interval = Interval::full_contig(Arc::clone(contig_set.contigs()), contig0);
     let depth_distr = ReadDepth::estimate(records2.iter(), &interval, contig_set.get_seq(contig0),
         contig_set.kmer_counts(), &err_prof, max_insert_size, &params.depth, args.subsampling_rate);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
@@ -526,6 +526,7 @@ fn estimate_bg_from_alns(
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+    let timer = Instant::now();
     let args = parse_args(argv)?.validate()?;
     let out_dir = create_out_dir(&args)?;
 
@@ -549,6 +550,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     };
     let mut bg_file = ext::sys::create_gzip(&out_dir.join(paths::SAMPLE_PARAMS))?;
     bg_distr.save().write_pretty(&mut bg_file, 4)?;
-    log::info!("Success!");
+    log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }
