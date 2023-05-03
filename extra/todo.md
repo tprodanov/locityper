@@ -1,3 +1,3 @@
 - Filter set of haplotypes based on gaps in read depth.
 - Cluster sequences in advance and keep only cluster centers.
-- Run WFA2 on the sequences (see https://github.com/smarco/WFA2-lib#-23-rust-bindings).
+- Remove `bio` dependency.

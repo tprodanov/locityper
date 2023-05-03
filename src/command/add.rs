@@ -1,6 +1,6 @@
 use std::{
     cmp::max,
-    io::{BufRead, Read, Seek, Write},
+    io::{self, BufRead, Read, Seek, Write},
     fs::{self, File},
     sync::Arc,
     process::Command,
@@ -35,7 +35,6 @@ struct Args {
     database: Option<PathBuf>,
     reference: Option<PathBuf>,
     variants: Option<PathBuf>,
-
     loci: Vec<String>,
     bed_files: Vec<PathBuf>,
 
@@ -44,7 +43,10 @@ struct Args {
     moving_window: u32,
 
     penalties: Penalties,
+    max_divergence: f64,
+
     threads: u16,
+    force: bool,
     jellyfish: PathBuf,
     bwa: Vec<PathBuf>,
 }
@@ -55,7 +57,6 @@ impl Default for Args {
             database: None,
             reference: None,
             variants: None,
-
             loci: Vec::new(),
             bed_files: Vec::new(),
 
@@ -64,7 +65,10 @@ impl Default for Args {
             moving_window: 400,
 
             penalties: Default::default(),
+            max_divergence: 0.0001,
+
             threads: 8,
+            force: false,
             jellyfish: PathBuf::from("jellyfish"),
             bwa: vec![PathBuf::from("bwa"), PathBuf::from("bwa-mem2")],
         }
@@ -94,8 +98,8 @@ impl Args {
 }
 
 fn print_help() {
-    const KEY: usize = 15;
-    const VAL: usize = 4;
+    const KEY: usize = 16;
+    const VAL: usize = 5;
     const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
@@ -132,17 +136,21 @@ fn print_help() {
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.moving_window);
 
-    println!("\n{}", "Sequence filtering parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}]",
+    println!("\n{}", "Haplotype clustering parameters:".bold());
+    println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
         "-M, --mismatch".green(), "INT".yellow(), defaults.penalties.mismatch);
-    println!("    {:KEY$} {:VAL$}  Gap open penalty [{}]",
+    println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
         "-O, --gap-open".green(), "INT".yellow(), defaults.penalties.gap_opening);
-    println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}]",
+    println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
         "-E, --gap-extend".green(), "INT".yellow(), defaults.penalties.gap_extension);
+    println!("    {:KEY$} {:VAL$}  Sequence divergence threshold, used for haplotypes clustering [{}].",
+        "-D, --divergence".green(), "FLOAT".yellow(), defaults.max_divergence);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
+    println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
+        "-F, --force".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
     println!("    {:KEY$} {:VAL$}  One or more BWA executable, each used for haplotypes indexing.\n\
@@ -179,8 +187,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.penalties.gap_opening = parser.value()?.parse()?,
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.penalties.gap_extension = parser.value()?.parse()?,
+            Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
+            Short('F') | Long("force") => args.force = true,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
             Long("bwa") => args.bwa = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
 
@@ -308,7 +318,77 @@ fn find_best_boundary(
     }))
 }
 
-fn write_locus(
+/// Check haplotypes:
+/// - warn if there are any Ns in the sequences,
+/// - warn if sequence divergence is too high.
+fn check_haplotypes(tag: &str, entries: &[NamedSeq], mut divergences: impl Iterator<Item = f64>) {
+    for (i, entry1) in entries.iter().enumerate() {
+        if entry1.seq().contains(&b'N') {
+            log::warn!("    Locus {}, haplotype {} contains Ns!", tag, entry1.name());
+        }
+        for entry2 in entries[i + 1..].iter() {
+            let diverg = divergences.next().unwrap();
+            if diverg >= 0.2 {
+                log::warn!("    Locus {}, haplotypes {} and {} have high divergence ({:.5})",
+                    tag, entry1.name(), entry2.name(), diverg);
+            }
+        }
+    }
+}
+
+/// Cluster haplotypes using `kodama` crate
+/// (which, in turn, is based on this paper https://arxiv.org/pdf/1109.2378.pdf).
+///
+/// Clusters with divergence not exceeding the threshold are joined.
+/// Returns boolean vector: does the sequence remain after mergin?
+fn cluster_haplotypes(
+    mut nwk_writer: impl Write,
+    entries: &[NamedSeq],
+    mut divergences: Vec<f64>,
+    thresh: f64,
+) -> io::Result<Vec<bool>> {
+    let n = entries.len();
+    let total_clusters = 2 * n - 1;
+    // Use Complete method, meaning that we track maximal distance between two points between two clusters.
+    // This is done to cut as little as needed.
+    let dendrogram = kodama::linkage(&mut divergences, n, kodama::Method::Complete);
+    let mut clusters_nwk = Vec::with_capacity(total_clusters);
+    // Smallest index across all members of a cluster.
+    let mut first_member = Vec::with_capacity(total_clusters);
+    clusters_nwk.extend(entries.iter().map(|entry| entry.name().to_owned()));
+    first_member.extend(0..n);
+
+    let steps = dendrogram.steps();
+    for step in steps.iter() {
+        let i = step.cluster1;
+        let j = step.cluster2;
+        clusters_nwk.push(format!("({}:{dist},{}:{dist})", &clusters_nwk[i], &clusters_nwk[j],
+            dist = 0.5 * step.dissimilarity));
+        first_member.push(first_member[i].min(first_member[j]));
+    }
+    assert_eq!(clusters_nwk.len(), total_clusters);
+    writeln!(nwk_writer, "{};", clusters_nwk.last().unwrap())?;
+
+    let mut queue = vec![total_clusters - 1];
+    let mut keep_seqs = vec![false; n];
+    while let Some(i) = queue.pop() {
+        if i < n {
+            keep_seqs[i] = true;
+        } else {
+            let step = &steps[i - n];
+            if step.dissimilarity <= thresh {
+                keep_seqs[first_member[i]] = true;
+            } else {
+                queue.push(step.cluster1);
+                queue.push(step.cluster2);
+            }
+        }
+    }
+    Ok(keep_seqs)
+}
+
+/// Process haplotypes: write FASTA, PAF, kmers files, cluster sequences.
+fn process_haplotypes(
     locus_dir: &Path,
     locus: &NamedInterval,
     entries: Vec<NamedSeq>,
@@ -316,33 +396,49 @@ fn write_locus(
     args: &Args,
 ) -> Result<(), Error>
 {
-    log::info!("    [{}] Writing haplotypes to {}/", locus.name(), ext::fmt::path(locus_dir));
+    let tag = locus.name();
+    log::info!("    [{}] Writing haplotypes to {}/", tag, ext::fmt::path(locus_dir));
     let mut bed_writer = File::create(locus_dir.join(paths::LOCUS_BED))?;
     writeln!(bed_writer, "{}", locus.bed_fmt())?;
     std::mem::drop(bed_writer);
 
-    let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
-    let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
-    for entry in entries.iter() {
-        seq::write_fasta(&mut fasta_writer, entry.name().as_bytes(), entry.seq())?;
-    }
-    fasta_writer.flush()?;
-    std::mem::drop(fasta_writer);
-
-    log::info!("    [{}] Calculating haplotypes divergence", locus.name());
+    log::info!("    [{}] Calculating haplotype divergence", tag);
     let paf_writer = ext::sys::create_gzip(&locus_dir.join(paths::LOCUS_PAF))?;
-    dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)?;
+    let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)?;
+    check_haplotypes(tag, &entries, divergences.iter().copied());
 
-    log::info!("    [{}] Counting k-mers", locus.name());
-    let seqs = entries.into_iter().map(NamedSeq::take_seq).collect();
-    let kmer_counts = kmer_getter.fetch(seqs)?;
+    log::info!("    [{}] Clustering haploypes", tag);
+    let nwk_writer = io::BufWriter::new(File::create(&locus_dir.join(paths::LOCUS_DENDROGRAM))?);
+    let keep_seqs = cluster_haplotypes(nwk_writer, &entries, divergences, args.max_divergence)?;
+    let n_filtered = keep_seqs.iter().fold(0, |sum, &keep| sum + usize::from(keep));
+    if n_filtered == entries.len() {
+        log::info!("        Keep all sequences after clustering");
+    } else {
+        log::info!("        Discard {} sequences after clustering", entries.len() - n_filtered);
+    }
+
+    let filt_fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
+    let mut filt_fasta_writer = ext::sys::create_gzip(&filt_fasta_filename)?;
+    let mut all_fasta_writer = ext::sys::create_gzip(&locus_dir.join(paths::LOCUS_FASTA_ALL))?;
+    let mut filt_seqs = Vec::with_capacity(n_filtered);
+    for (&keep, entry) in keep_seqs.iter().zip(entries.into_iter()) {
+        seq::write_fasta(&mut all_fasta_writer, entry.name().as_bytes(), entry.seq())?;
+        if keep {
+            seq::write_fasta(&mut filt_fasta_writer, entry.name().as_bytes(), entry.seq())?;
+            filt_seqs.push(entry.take_seq());
+        }
+    }
+    std::mem::drop((filt_fasta_writer, all_fasta_writer));
+
+    log::info!("    [{}] Counting k-mers", tag);
+    let kmer_counts = kmer_getter.fetch(filt_seqs)?;
     let mut kmers_writer = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_writer)?;
 
-    log::info!("    [{}] Indexing haplotypes", locus.name());
+    log::info!("    [{}] Indexing haplotypes", tag);
     for bwa in args.bwa.iter() {
         let mut bwa_command = Command::new(bwa);
-        bwa_command.arg("index").arg(&fasta_filename);
+        bwa_command.arg("index").arg(&filt_fasta_filename);
         log::debug!("        {}", ext::fmt::command(&bwa_command));
         let bwa_output = bwa_command.output()?;
         if !bwa_output.status.success() {
@@ -414,16 +510,20 @@ where R: Read + Seek,
 
     let dir = loci_dir.join(new_locus.name());
     if dir.exists() {
-        log::warn!("    Clearing directory {}", ext::fmt::path(&dir));
-        fs::remove_dir_all(&dir)?;
+        if args.force {
+            log::warn!("    Clearing directory {}", ext::fmt::path(&dir));
+            fs::remove_dir_all(&dir)?;
+        } else {
+            log::warn!("    Skipping directory {}", ext::fmt::path(&dir));
+            return Ok(true);
+        }
     }
     ext::sys::mkdir(&dir)?;
     log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
         vcf_file.header(), &vcf_recs)?;
-    // TODO: Check on Ns within sequences + filter very similar sequences.
-    write_locus(&dir, &new_locus, seqs, kmer_getter, &args)?;
+    process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?;
     Ok(true)
 }
 
@@ -449,9 +549,14 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let loci_dir = db_path.join(paths::LOCI_DIR);
     ext::sys::mkdir(&loci_dir)?;
+    let mut n_successes = 0;
     for locus in loci.iter() {
-        add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?;
+        n_successes += u32::from(add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?);
     }
-    log::info!("Success!");
+    if n_successes > 0 {
+        log::info!("Success!");
+    } else {
+        log::error!("Could not add any loci.");
+    }
     Ok(())
 }
