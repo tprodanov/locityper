@@ -6,21 +6,19 @@ suppressMessages(library(dplyr, quietly = T))
 pdf(NULL)
 
 parser <- argparse::ArgumentParser(description = 'Draw read assignment.')
-parser$add_argument('sol', metavar = '<file>',
+parser$add_argument('sol', metavar = 'FILE',
     help = 'Input CSV file with solutions.')
-parser$add_argument('-g', '--genotype', metavar = '<str>',
-    help = paste('Genotype to draw.',
+parser$add_argument('-g', '--genotype', metavar = 'STR',
+    help = paste('Genotype to draw (through a comma).',
     'Required, unless there is only one genotype in the solution.'))
-parser$add_argument('-s', '--stage', metavar = '<int>',
+parser$add_argument('-s', '--stage', metavar = 'INT', type = 'integer',
     help = 'Draw this stage. Default: stage with highest likelihood.')
-parser$add_argument('-d', '--depth', metavar = '<float>', type = 'double',
+parser$add_argument('-d', '--depth', metavar = 'FLOAT', type = 'double',
     help = 'Read depth limit (inferred by default).')
-parser$add_argument('-l', '--lik', metavar = '<float>', type = 'double',
+parser$add_argument('-l', '--lik', metavar = 'FLOAT', type = 'double',
     help = 'Likelihood limit (inferred by default).')
-parser$add_argument('-o', '--out', metavar = '<file>', required = T,
+parser$add_argument('-o', '--out', metavar = 'FILE', required = T,
     help = 'Output plot file (PNG, PDF, etc.)')
-args <- parser$parse_args(c('/home/timofey/Data/proj/HPRC/MUC5AC/exper2/HG00621/loci/MUC5AC/assignments.csv.gz',
-        '-g', 'HG00621.1,HG00621.2', '-o', '~/Downloads/1.png'))
 args <- parser$parse_args()
 
 # Select appropriate solution from the whole dataframe.
