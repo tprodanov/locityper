@@ -121,12 +121,15 @@ fn pair_orientation(record: &Record) -> bool {
     (flag & 0x10) == (flag & 0x20)
 }
 
+/// Allow read-pair orientation, if at least 5% pairs support it.
+const ORIENT_THRESH: f64 = 0.05;
+
 /// Negative Binomial insert size.
 #[derive(Debug, Clone)]
 pub struct InsertDistr {
     max_size: u32,
-    /// Log-probabilities of (FR/RF) orientation, and of (RR/FF) orientation.
-    orient_probs: [f64; 2],
+    /// Are different read-pair orientation allowed? (FR/RF v. RR/FF)
+    orient_allowed: [bool; 2],
     distr: Option<LinearCache<NBinom>>,
 }
 
@@ -137,7 +140,7 @@ impl InsertDistr {
     pub fn undefined() -> Self {
         Self {
             max_size: 0,
-            orient_probs: [f64::NAN, f64::NAN],
+            orient_allowed: [false; 2],
             distr: None,
         }
     }
@@ -163,15 +166,18 @@ impl InsertDistr {
                 orient_counts[pair_orientation(first) as usize] += 1;
             }
         }
+
+        // First: FR/RF, Second: FF/RR.
         let total = (orient_counts[0] + orient_counts[1]) as f64;
+        let orient_frac = [orient_counts[0] as f64 / total, orient_counts[1] as f64 / total];
+        let orient_allowed = [orient_frac[0] >= ORIENT_THRESH, orient_frac[1] >= ORIENT_THRESH];
         log::info!("    Analyzed {} read pairs", total);
-        log::info!("    FR/RF: {} ({:.3}%)   FF/RR: {} ({:.3}%)",
-            orient_counts[0], 100.0 * orient_counts[0] as f64 / total,
-            orient_counts[1], 100.0 * orient_counts[1] as f64 / total);
-        // Use ln1p in order to fix 0-probabilities in case of low number of reads.
-        let orient_probs = [
-            (orient_counts[0] as f64).ln_1p() - total.ln_1p(),
-            (orient_counts[1] as f64).ln_1p() - total.ln_1p()];
+        for i in 0..2 {
+            log::info!("    {}: {:8} ({:.3}%),  {}",
+                if i == 0 { "FR/RF" } else { "FF/RR" },
+                orient_counts[i], orient_frac[i],
+                if orient_allowed[i] { "allowed" } else { "forbidden" });
+        }
 
         VecExt::sort(&mut insert_sizes);
         let max_size = params.ins_quantile_mult * F64Ext::quantile_sorted(&insert_sizes, params.ins_quantile);
@@ -186,17 +192,17 @@ impl InsertDistr {
         log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", mean, var.sqrt());
         log::info!("    Treat reads with insert size > {} as unpaired", max_size);
         Ok(Self {
-            max_size, orient_probs,
+            max_size, orient_allowed,
             distr: Some(NBinom::estimate(mean, var).cached(max_size as usize + 1)),
         })
     }
 
     /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
     pub fn ln_prob(&self, sz: u32, same_orient: bool) -> f64 {
-        if sz > self.max_size {
-            f64::NEG_INFINITY
+        if sz <= self.max_size && self.orient_allowed[usize::from(same_orient)] {
+            self.distr.as_ref().unwrap().ln_pmf(sz)
         } else {
-            self.distr.as_ref().unwrap().ln_pmf(sz) + self.orient_probs[same_orient as usize]
+            f64::NEG_INFINITY
         }
     }
 
@@ -216,8 +222,8 @@ impl JsonSer for InsertDistr {
         if let Some(distr) = &self.distr {
             json::object!{
                 max_size: self.max_size,
-                fr_prob: self.orient_probs[0],
-                ff_prob: self.orient_probs[1],
+                fr_allowed: self.orient_allowed[0],
+                ff_allowed: self.orient_allowed[1],
                 n: distr.distr().n(),
                 p: distr.distr().p(),
             }
@@ -233,11 +239,10 @@ impl JsonSer for InsertDistr {
         if max_size == 0 {
             return Ok(Self::undefined());
         }
-        json_get!(obj -> n (as_f64), p (as_f64), fr_prob (as_f64), ff_prob (as_f64));
-        let orient_probs = [fr_prob, ff_prob];
+        json_get!(obj -> n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
         Ok(Self {
             max_size: u32::try_from(max_size).unwrap_or(u32::MAX / 2),
-            orient_probs,
+            orient_allowed: [fr_allowed, ff_allowed],
             distr: Some(NBinom::new(n, p).cached(max_size)),
         })
     }
