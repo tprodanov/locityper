@@ -18,7 +18,7 @@ parser$add_argument('-d', '--depth', metavar = 'FLOAT', type = 'double',
 parser$add_argument('-l', '--lik', metavar = 'FLOAT', type = 'double',
     help = 'Likelihood limit (inferred by default).')
 parser$add_argument('-o', '--out', metavar = 'FILE', required = T,
-    help = 'Output plot file (PNG, PDF, etc.)')
+    help = 'Output plot file (PNG, PDF, etc.). Literal {} is replaced with the genotype.')
 args <- parser$parse_args()
 
 # Select appropriate solution from the whole dataframe.
@@ -140,6 +140,7 @@ ggplot(sol) +
         axis.text.y.right = element_text(hjust = 1),
         axis.ticks.y = element_blank(),
     )
-ggsave(args$out, width = 9, height = 6, dpi = 400, scale = 1.2)
 
+out_filename <- gsub('{}', args$genotype, args$out, fixed = T)
+ggsave(out_filename, width = 9, height = 6, dpi = 400, scale = 1.2)
 warnings()

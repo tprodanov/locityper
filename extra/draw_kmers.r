@@ -19,9 +19,7 @@ parser$add_argument('-f', '--max-freq', metavar = 'INT', default = 10, type = 'i
 parser$add_argument('--no-canon', action = 'store_false', dest = 'canon',
     help = 'Do not canonize k-mers (forward and reverse-compl will not match).')
 parser$add_argument('-o', '--out', metavar = 'FILE', required = T,
-    help = 'Output plot file (PNG, PDF, etc.)')
-args <- parser$parse_args(c('~/Data/proj/HPRC/MUC5AC/exper2/db/loci/MUC5AC/all_haplotypes.fa.gz',
-        '-n', 'HG00621.1,HG00621.2', '-o', '~/Downloads/1.png'))
+    help = 'Output plot file (PNG, PDF, etc.). Literal {} is replaced with --names STR.')
 args <- parser$parse_args()
 
 ###################
@@ -95,4 +93,6 @@ ggplot(kmer_pairs) +
         legend.position = 'bottom',
         legend.key.height = unit(0.8, 'lines'),
     )
-ggsave(args$out, width = 8, height = 8.7, dpi = 400)
+
+out_filename <- gsub('{}', args$names, args$out, fixed = T)
+ggsave(out_filename, width = 8, height = 8.7, dpi = 400)
