@@ -22,7 +22,7 @@ use crate::{
     ext,
     model::{
         Params as AssgnParams,
-        locs::PrelimAlignments,
+        locs::{self, PrelimAlignments},
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
     },
@@ -45,6 +45,7 @@ struct Args {
     bwa: Option<PathBuf>,
     samtools: PathBuf,
     seed: Option<u64>,
+    debug: bool,
 
     recr_params: recruit::Params,
     assgn_params: AssgnParams,
@@ -66,6 +67,7 @@ impl Default for Args {
             bwa: None,
             samtools: PathBuf::from("samtools"),
             seed: None,
+            debug: false,
 
             recr_params: Default::default(),
             assgn_params: Default::default(),
@@ -171,8 +173,10 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
         {EMPTY}  input and product version.",
         "-s, --seed".green(), "INT".yellow());
+    println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
+        "    --debug".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  BWA executable. Default: {} or {}.",
-        "   --bwa".green(), "EXE".yellow(), BWA2.underline(), BWA1.underline());
+        "    --bwa".green(), "EXE".yellow(), BWA2.underline(), BWA1.underline());
     println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
         "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
 
@@ -227,6 +231,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
+            Long("debug") => args.debug = true,
             Long("bwa") => args.bwa = Some(parser.value()?.parse()?),
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
@@ -447,8 +452,17 @@ fn analyze_locus(
     log::info!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let mut bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
-    let mut locs = PrelimAlignments::from_records(bam_reader.records(), Arc::clone(&contigs),
-        bg_distr.error_profile(), &args.assgn_params, ())?;
+
+    let records = bam_reader.records();
+    let err_prof = bg_distr.error_profile();
+    let mut locs = if args.debug {
+        let mut reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
+        writeln!(reads_writer, "{}", locs::CSV_HEADER)?;
+        PrelimAlignments::from_records(records, Arc::clone(&contigs), err_prof, &args.assgn_params, &mut reads_writer)?
+    } else {
+        PrelimAlignments::from_records(records, Arc::clone(&contigs), err_prof, &args.assgn_params, ())?
+    };
+
     let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
 
@@ -461,10 +475,10 @@ fn analyze_locus(
         params: args.assgn_params.clone(),
         contigs: Arc::clone(&contigs),
         cached_distrs: Arc::clone(&cached_distrs),
+        debug: args.debug,
         all_alns, contig_windows, tuples,
     };
-    let dbg_prefix = locus.out_dir.join("assignments.");
-    scheme::solve(data, lik_writer, &dbg_prefix, &mut rng, args.threads)
+    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {

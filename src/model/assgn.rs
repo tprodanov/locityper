@@ -371,9 +371,11 @@ impl ReadAssignment {
             total_lik - sum_depth_lik, sum_depth_lik, total_lik)
     }
 
+    pub(crate) const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\twindow1\twindow2\tlik\tselected";
+
     /// Write reads and their assignments to a CSV file in the following format (tab-separated):
-    /// `prefix  read_hash  aln1  aln2  w1  w2  prob  selected`
-    pub fn write_reads(&self, f: &mut impl io::Write, prefix: &str, all_alns: &AllPairAlignments) -> io::Result<()> {
+    /// `prefix  read_hash  aln1  aln2  w1  w2  log10-prob  selected`
+    pub fn write_alns(&self, f: &mut impl io::Write, prefix: &str, all_alns: &AllPairAlignments) -> io::Result<()> {
         assert_eq!(all_alns.len() + 1, self.read_ixs.len());
         for (rp, paired_alns) in all_alns.iter().enumerate() {
             let hash = paired_alns.name_hash();
@@ -395,7 +397,8 @@ impl ReadAssignment {
                         TwoIntervals::Second(aln2) => write!(f, "*\t{}\t", aln2),
                     }?;
                 }
-                writeln!(f, "{}\t{}\t{:.3}\t{}", w1, w2, curr_windows.ln_prob(), (i == curr_ix) as u8)?;
+                let prob = Ln::to_log10(curr_windows.ln_prob());
+                writeln!(f, "{}\t{}\t{:.3}\t{}", w1, w2, prob, if i == curr_ix { 'T' } else { 'F' })?;
             }
         }
         Ok(())

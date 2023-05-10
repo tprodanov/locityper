@@ -149,13 +149,15 @@ pub struct Data {
     pub cached_distrs: Arc<CachedDepthDistrs>,
     pub tuples: Tuples<ContigId>,
     pub params: Params,
+    pub debug: bool,
 }
 
 fn solve_single_thread(
     data: Data,
     lik_writer: impl Write,
-    mut dbg_writer: impl Write,
-    rng: &mut XoshiroRng
+    mut depth_writer: impl Write,
+    mut aln_writer: impl Write,
+    rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
     let total_tuples = data.tuples.len();
@@ -170,7 +172,11 @@ fn solve_single_thread(
             let lik = solver.solve(&mut assgn, rng)?;
             let contigs_str = data.contigs.get_names(data.tuples[ix].iter().copied());
             if stage.write {
-                assgn.write_depth(&mut dbg_writer, &format!("{}\t{}", stage_ix + 1, contigs_str))?;
+                let prefix = format!("{}\t{}", stage_ix + 1, contigs_str);
+                assgn.write_depth(&mut depth_writer, &prefix)?;
+                if data.debug {
+                    assgn.write_alns(&mut aln_writer, &prefix, &data.all_alns)?;
+                }
             }
             helper.update(ix, contigs_str, lik)?;
         }
@@ -183,8 +189,8 @@ fn solve_single_thread(
 /// Creates `threads` debug files for writing read assignments, and returns their file names.
 /// If `has_dbg_output` is false, returns a vector of `threads` sink objects + an empty vector of names.
 fn create_debug_files(
-    dbg_prefix: &Path,
-    threads: usize,
+    prefix: &Path,
+    threads: u16,
     has_dbg_output: bool,
 ) -> io::Result<(Vec<Box<dyn Write + Send>>, Vec<PathBuf>)>
 {
@@ -192,47 +198,57 @@ fn create_debug_files(
         return Ok(((0..threads).map(|_| Box::new(io::sink()) as Box<dyn Write + Send>).collect(), vec![]));
     }
     let filenames: Vec<_> = (0..threads).map(|i| if i == 0 {
-        ext::sys::path_append(dbg_prefix, "csv.gz")
+        ext::sys::path_append(prefix, "csv.gz")
     } else {
-        ext::sys::path_append(dbg_prefix, format!("{}.csv.gz", i))
+        ext::sys::path_append(prefix, format!("{}.csv.gz", i))
     }).collect();
 
-    let mut writers = Vec::with_capacity(threads);
+    let mut writers = Vec::with_capacity(usize::from(threads));
     for filename in filenames.iter() {
         // Using `for` instead of `collect`, as it becomes hard to cast Box and process Errors at the same time.
         writers.push(Box::new(ext::sys::create_gzip(filename)?) as Box<dyn Write + Send>);
     }
-    writeln!(writers[0], "stage\tgenotype\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
     Ok((writers, filenames))
+}
+
+/// Merge output files if there is debug output and more than one thread.
+fn merge_dbg_files(filenames: &[PathBuf]) -> io::Result<()> {
+    if filenames.len() > 1 {
+        // By this point, all depth_writers should be already dropped.
+        let mut file1 = std::fs::OpenOptions::new().append(true).open(&filenames[0])?;
+        ext::sys::concat_files(filenames[1..].iter(), &mut file1)?;
+        filenames[1..].iter().map(std::fs::remove_file).collect::<io::Result<()>>()?;
+    }
+    Ok(())
 }
 
 pub fn solve(
     data: Data,
     lik_writer: impl Write,
-    dbg_prefix: &Path,
+    locus_dir: &Path,
     rng: &mut XoshiroRng,
     threads: u16,
 ) -> Result<(), Error>
 {
     log::info!("    [{}] Genotyping complex locus in {} stages and {} threads across {} possible tuples",
         data.contigs.tag(), data.scheme.len(), threads, data.tuples.len());
-    let (mut dbg_writers, dbg_filenames) = create_debug_files(dbg_prefix, usize::from(threads),
-        data.scheme.has_dbg_output())?;
+    let has_dbg_output = data.scheme.has_dbg_output();
+    let (mut depth_writers, depth_filenames) = create_debug_files(
+        &locus_dir.join("depth."), threads, has_dbg_output)?;
+    writeln!(depth_writers[0], "stage\tgenotype\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
+
+    let (mut aln_writers, aln_filenames) = create_debug_files(
+        &locus_dir.join("alns."), threads, has_dbg_output && data.debug)?;
+    writeln!(aln_writers[0], "stage\tgenotype\t{}", ReadAssignment::ALNS_CSV_HEADER)?;
 
     if threads == 1 {
-        solve_single_thread(data, lik_writer, dbg_writers.pop().unwrap(), rng)?;
+        solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
     } else {
-        let main_worker = MainWorker::new(Arc::new(data), rng, threads, dbg_writers);
+        let main_worker = MainWorker::new(Arc::new(data), rng, threads, depth_writers, aln_writers);
         main_worker.run(lik_writer)?;
     }
-
-    // Merge output files if there is debug output and more than one thread.
-    if dbg_filenames.len() > 1 {
-        // By this point, all dbg_writers should be already dropped.
-        let mut file1 = std::fs::OpenOptions::new().append(true).open(&dbg_filenames[0])?;
-        ext::sys::concat_files(dbg_filenames[1..].iter(), &mut file1)?;
-        dbg_filenames[1..].iter().map(std::fs::remove_file).collect::<io::Result<()>>()?;
-    }
+    merge_dbg_files(&depth_filenames)?;
+    merge_dbg_files(&aln_filenames)?;
     Ok(())
 }
 
@@ -253,16 +269,17 @@ impl MainWorker {
         data: Arc<Data>,
         rng: &mut XoshiroRng,
         threads: u16,
-        dbg_writers: Vec<impl Write + Send + 'static>
+        depth_writers: Vec<impl Write + Send + 'static>,
+        aln_writers: Vec<impl Write + Send + 'static>,
     ) -> Self
     {
         let n_workers = usize::from(threads);
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
-        debug_assert_eq!(n_workers, dbg_writers.len());
+        debug_assert!(n_workers == depth_writers.len() && n_workers == aln_writers.len());
 
-        for dbg_writer in dbg_writers.into_iter() {
+        for (depth_writer, aln_writer) in depth_writers.into_iter().zip(aln_writers.into_iter()) {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
@@ -270,7 +287,7 @@ impl MainWorker {
                 rng: rng.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
-                dbg_writer,
+                depth_writer, aln_writer,
             };
             rng.jump();
             senders.push(task_sender);
@@ -329,15 +346,16 @@ impl MainWorker {
     }
 }
 
-struct Worker<W> {
+struct Worker<W, U> {
     data: Arc<Data>,
     rng: XoshiroRng,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
-    dbg_writer: W,
+    depth_writer: W,
+    aln_writer: U,
 }
 
-impl<W: Write> Worker<W> {
+impl<W: Write, U: Write> Worker<W, U> {
     fn run(mut self) -> Result<(), Error> {
         // Block thread and wait for the shipment.
         while let Ok((stage_ix, task)) = self.receiver.recv() {
@@ -357,8 +375,11 @@ impl<W: Write> Worker<W> {
                 let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
                 let lik = solver.solve(&mut assgn, &mut self.rng)?;
                 if stage.write {
-                    let contigs_str = contigs.get_names(tuples[ix].iter().copied());
-                    assgn.write_depth(&mut self.dbg_writer, &format!("{}\t{}", stage_ix + 1, contigs_str))?;
+                    let prefix = format!("{}\t{}", stage_ix + 1, contigs.get_names(tuples[ix].iter().copied()));
+                    assgn.write_depth(&mut self.depth_writer, &prefix)?;
+                    if self.data.debug {
+                        assgn.write_alns(&mut self.aln_writer, &prefix, all_alns)?;
+                    }
                 }
 
                 if let Err(_) = self.sender.send((ix, lik)) {

@@ -69,14 +69,14 @@ subtitle <- paste(sprintf('Reads: %s / %s (unmapped / total).',
 
 # Select scale limits.
 
-LIK_AXIS_MULT <- 2
-
 max_depth <- if (is.null(args$depth)) { max(sol$depth) } else { args$depth }
 min_lik <- if (is.null(args$lik)) { min(sol$lik) * 1.00001 } else { -abs(args$lik) }
 
 depth_breaks <- scales::breaks_extended(3)(c(0, max_depth))
 lik_breaks <- scales::breaks_extended(3)(c(min_lik, 0))
-breaks <- c(LIK_AXIS_MULT * lik_breaks, depth_breaks)
+
+lik_axis_mult <- -0.5 * (max_depth / min_lik)
+breaks <- c(lik_axis_mult * lik_breaks, depth_breaks)
 labels_left <- c(rep('', length(lik_breaks)), depth_breaks)
 labels_right <- c(lik_breaks, rep('', length(depth_breaks)))
 
@@ -102,7 +102,7 @@ ggplot(sol) +
     geom_bar(aes(window, pmin(depth, max_depth), fill = pmax(lik, min_lik)),
         stat = 'identity', width = 1) +
     # Likelihood points.
-    geom_point(aes(window, LIK_AXIS_MULT * pmax(lik, min_lik)),
+    geom_point(aes(window, lik_axis_mult * pmax(lik, min_lik)),
         size = 0.5, color = main_color) +
 
     facet_wrap(~ contig, ncol = 1, strip.position = 'top') +
@@ -110,7 +110,7 @@ ggplot(sol) +
     scale_x_continuous('Window', expand = expansion(mult = 0.005)) +
     scale_y_continuous('Read depth',
         expand = expansion(mult = 0.02),
-        limits = c(LIK_AXIS_MULT * min_lik, max_depth),
+        limits = c(lik_axis_mult * min_lik, max_depth),
         breaks = breaks,
         labels = labels_left,
         
