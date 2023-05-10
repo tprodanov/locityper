@@ -32,7 +32,7 @@ fn seq_to_2bit(seq: &[u8]) -> Vec<u8> {
         b'G' => 0b10,
         b'T' => 0b11,
         b'N' => N_CODE,
-        _ => panic!("Unexpected nucleotide {}", nt as char),
+        _ => panic!("Unexpected nucleotide {}", char::from(nt)),
     }).collect()
 }
 

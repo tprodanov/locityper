@@ -102,8 +102,9 @@ fn print_help() {
     let defaults = Args::default();
     println!("{}", "Adds complex locus/loci to the database.".yellow());
 
-    println!("\n{} {} add -d db -r ref.fa -v vars.vcf.gz -l/-L loci [arguments]",
-        "Usage:".bold(), super::PKG_NAME);
+    println!("\n{}", "Usage:".bold());
+    println!("    {} add -d db -r ref.fa -v vars.vcf.gz -l/-L loci [arguments]", super::PKG_NAME);
+    // println!("    {} add -d db -s seqs.fa=name [arguments]", super::PKG_NAME);
 
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory (initialized with {}).",
@@ -111,8 +112,12 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  PanGenie input VCF file. Encodes variation across pangenome samples.\n\
-        {EMPTY}  Must be compressed and indexed with `tabix`.",
-        "-v, --vcf".green(), "FILE".yellow());
+        {EMPTY}  Must be compressed and indexed with {}.",
+        "-v, --vcf".green(), "FILE".yellow(), "tabix".underline());
+    // println!("    {:KEY$} {:VAL$}  Fasta file with haplotype sequences\n
+    //     {EMPTY}  Mutually exclusive with {}, {}, {}, {} and {}.",
+    //     "-s, --seqs".green(), "FILE".yellow(),
+    //     "-r".green(), "-v".green(), "-l".green(), "-L".green(), )
 
     println!("\n{}", "Complex loci coordinates:".bold());
     println!("    {:KEY$} {:VAL$}  Complex locus coordinates. Multiple loci are allowed.\n\

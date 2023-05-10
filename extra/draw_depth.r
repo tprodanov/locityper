@@ -99,7 +99,7 @@ ggplot(sol) +
     # 0-line.
     geom_hline(yintercept = 0, color = main_color) +
     # Read depth bars.
-    geom_bar(aes(window, pmin(depth, max_depth), fill = lik),
+    geom_bar(aes(window, pmin(depth, max_depth), fill = pmax(lik, min_lik)),
         stat = 'identity', width = 1) +
     # Likelihood points.
     geom_point(aes(window, LIK_AXIS_MULT * pmax(lik, min_lik)),
@@ -133,6 +133,7 @@ ggplot(sol) +
 
         legend.position = 'bottom',
         legend.box.margin = margin(t = -10, b = -5),
+        legend.key.height = unit(0.8, 'lines'),
         panel.grid.minor = element_blank(),
 
         axis.title.x = element_text(margin = margin(t = 0)),

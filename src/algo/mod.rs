@@ -17,7 +17,7 @@ pub fn parse_int<T: std::convert::TryFrom<u64>>(s: &str) -> Result<T, String> {
         Some(b'M') | Some(b'm') => (0, 1_000_000),
         Some(b'K') | Some(b'k') => (0, 1000),
         Some(c @ b'0' ..= b'9') => (u64::from(c - b'0'), 10),
-        Some(c) => return Err(format!("Cannot parse string {:?} to int, unexpected last symbol '{}'", s, c as char)),
+        Some(c) => return Err(format!("Cannot parse string {:?} to int, unexpected last symbol '{}'", s, char::from(c))),
     };
 
     let mut was_digit = mult == 10;
@@ -29,7 +29,7 @@ pub fn parse_int<T: std::convert::TryFrom<u64>>(s: &str) -> Result<T, String> {
                 mult *= 10;
             },
             b',' | b'_' => was_digit = false,
-            c => return Err(format!("Cannot parse string {:?} to int, unexpected symbol '{}'", s, c as char)),
+            c => return Err(format!("Cannot parse string {:?} to int, unexpected symbol '{}'", s, char::from(c))),
         }
     }
 

@@ -116,8 +116,7 @@ fn convert_cigar(cigar: *const cwfa::cigar_t) -> Cigar {
 /// Convert char into operation, replacing M with X.
 fn op_from_char(ch: u8) -> Operation {
     match ch {
-        b'M' => Operation::Equal,
-        b'=' => Operation::Equal,
+        b'M' | b'=' => Operation::Equal,
         b'X' => Operation::Diff,
         b'I' => Operation::Ins,
         b'D' => Operation::Del,

@@ -111,7 +111,7 @@ pub fn reconstruct_sequences(
 
     let n_keep = keep_seq.iter().fold(0, |acc, &keep| acc + usize::from(keep));
     if n_keep < seqs.len() {
-        log::warn!("    Leave out {} sequences", seqs.len() - n_keep);
+        log::warn!("        Leave out {} sequences", seqs.len() - n_keep);
         Ok(
             keep_seq.into_iter().zip(seqs.into_iter())
                 .filter_map(|(keep, seq)| if keep { Some(seq) } else { None })

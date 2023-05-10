@@ -17,22 +17,22 @@ const HIGHS_NAME: &'static str = "HiGHS";
 #[derive(Clone)]
 pub struct HighsSolver {
     /// Solver type: possible values are `choose`, `simplex` and `ipm`.
-    solver_type: String,
+    mode: String,
 }
 
 impl Default for HighsSolver {
     fn default() -> Self {
         Self {
-            solver_type: "simplex".to_owned(),
+            mode: "simplex".to_owned(),
         }
     }
 }
 
 impl HighsSolver {
-    pub fn set_type(&mut self, solver_type: &str) -> &mut Self {
-        assert!(solver_type == "choose" || solver_type == "simplex" || solver_type == "ipm",
-            "Unknown {} solver type `{}`", HIGHS_NAME, solver_type);
-        self.solver_type = solver_type.to_owned();
+    pub fn set_type(&mut self, mode: &str) -> &mut Self {
+        assert!(mode == "choose" || mode == "simplex" || mode == "ipm",
+            "Unknown {} solver type `{}`", HIGHS_NAME, mode);
+        self.mode = mode.to_owned();
         self
     }
 
@@ -123,7 +123,7 @@ impl super::Solver for HighsSolver {
         let mut model = problem.optimise(Sense::Maximise);
         model.set_option("parallel", "off");
         model.set_option("presolve", "on");
-        model.set_option("solver", &self.solver_type as &str);
+        model.set_option("solver", &self.mode as &str);
         model.make_quiet();
 
         let solved_model = model.solve();
@@ -151,14 +151,14 @@ impl super::Solver for HighsSolver {
 
 impl super::SetParams for HighsSolver {
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> solver_type (as_str));
-        self.set_type(solver_type);
+        json_get!(obj -> mode (as_str));
+        self.set_type(mode);
         Ok(())
     }
 }
 
 impl fmt::Display for HighsSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}-{}", HIGHS_NAME, self.solver_type)
+        write!(f, "{}-{}", HIGHS_NAME, self.mode)
     }
 }

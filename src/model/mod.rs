@@ -31,7 +31,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             boundary_size: 200,
-            depth_contrib: 1.0,
+            depth_contrib: 2.0,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-10.0),
             rare_kmer: 3.0,
