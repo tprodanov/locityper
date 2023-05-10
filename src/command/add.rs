@@ -38,7 +38,8 @@ struct Args {
     loci: Vec<String>,
     bed_files: Vec<PathBuf>,
 
-    ref_name: Option<String>,
+    ref_name: String,
+    leave_out: FnvHashSet<String>,
     max_expansion: u32,
     moving_window: u32,
 
@@ -60,7 +61,8 @@ impl Default for Args {
             loci: Vec::new(),
             bed_files: Vec::new(),
 
-            ref_name: Some("REF".to_owned()),
+            ref_name: "REF".to_owned(),
+            leave_out: Default::default(),
             max_expansion: 4000,
             moving_window: 400,
 
@@ -82,11 +84,6 @@ impl Args {
         validate_param!(self.variants.is_some(), "Variants VCF file is not provided (see -v/--vcf)");
         validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
             "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
-
-        match self.ref_name.as_ref().map(|s| s as &str) {
-            Some("NONE") | Some("None") | Some("none") => self.ref_name = None,
-            _ => {},
-        }
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         self.bwa = self.bwa.into_iter().filter_map(|path| ext::sys::find_exe(path).ok()).collect();
@@ -127,14 +124,15 @@ fn print_help() {
         "-L, --loci-bed".green(), "FILE".yellow());
 
     println!("\n{}", "Haplotype extraction parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Reference genome name [{}].\n\
-        {EMPTY}  Use `NONE` to ignore reference locus sequence.",
-        "-g, --genome".green(), "STR".yellow(), defaults.ref_name.as_ref().unwrap());
+    println!("    {:KEY$} {:VAL$}  Reference genome name [{}].",
+        "-g, --genome".green(), "STR".yellow(), defaults.ref_name);
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
         "-e, --expand".green(), "INT".yellow(), "INT".yellow(), defaults.max_expansion);
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.moving_window);
+    println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
+        "    --leave-out".green(), "STR+".yellow());
 
     println!("\n{}", "Haplotype clustering parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
@@ -178,7 +176,15 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.loci = parser.values()?.map(ValueExt::string).collect::<Result<Vec<_>, _>>()?,
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
 
-            Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
+            Short('g') | Long("genome") => args.ref_name = parser.value()?.parse()?,
+            Long("leave-out") | Long("leaveout") => {
+                for val in parser.values()? {
+                    args.leave_out.insert(val.parse()?);
+                }
+                if args.leave_out.is_empty() {
+                    return Err(lexopt::Error::MissingValue { option: Some("leave-out".to_owned()) });
+                }
+            }
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
 
@@ -192,7 +198,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
-            Long("bwa") => args.bwa = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
+            Long("bwa") => args.bwa = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -399,7 +405,7 @@ fn process_haplotypes(
 ) -> Result<(), Error>
 {
     let tag = locus.name();
-    log::info!("    [{}] Writing haplotypes to {}/", tag, ext::fmt::path(locus_dir));
+    log::info!("    [{}] Writing {} haplotypes to {}/", tag, entries.len(), ext::fmt::path(locus_dir));
     let mut bed_writer = File::create(locus_dir.join(paths::LOCUS_BED))?;
     writeln!(bed_writer, "{}", locus.bed_fmt())?;
     std::mem::drop(bed_writer);
@@ -524,7 +530,7 @@ where R: Read + Seek,
     log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
     let seqs = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
-        vcf_file.header(), &vcf_recs)?;
+        vcf_file.header(), &vcf_recs, &args.leave_out)?;
     process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?;
     Ok(true)
 }

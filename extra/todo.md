@@ -1,3 +1,3 @@
 - Filter set of haplotypes based on gaps in read depth.
-- Cluster sequences in advance and keep only cluster centers.
 - Remove `bio` dependency.
+- `add`: allow FASTA input, add `--leaveout` argument.

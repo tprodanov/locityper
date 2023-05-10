@@ -223,7 +223,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     while let Some(arg) = parser.next()? {
         match arg {
             Short('i') | Long("input") =>
-                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
+                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
                 args.alns = Some(parser.value()?.parse()?),
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),

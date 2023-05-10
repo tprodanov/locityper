@@ -19,22 +19,26 @@ fn format_var(var: &Record, header: &HeaderView) -> String {
 }
 
 /// Reconstructs sample sequences by adding variants to the reference sequence.
-/// Returns Vector of pairs `(name, sequence)`. Reference sequence is added if `ref_name` is not None.
-/// All names must be unique.
+/// Returns Vector of pairs `(name, sequence)`.
 pub fn reconstruct_sequences(
-    ref_start: u32, ref_seq: &[u8], ref_name: &Option<String>,
-    header: &HeaderView, recs: &[Record],
+    ref_start: u32,
+    ref_seq: &[u8],
+    ref_name: &str,
+    header: &HeaderView,
+    recs: &[Record],
+    leave_out: &FnvHashSet<String>,
 ) -> Result<Vec<NamedSeq>, Error>
 {
     const PLOIDY: usize = 2;
     let ref_end = ref_start + ref_seq.len() as u32;
     let n_samples = header.sample_count() as usize;
     let mut haplotype_names = FnvHashSet::with_capacity_and_hasher(1 + n_samples * PLOIDY, Default::default());
-    let mut res = Vec::new();
-    if let Some(name) = ref_name.as_ref() {
-        haplotype_names.insert(name.clone());
-        res.push(NamedSeq::new(name.clone(), ref_seq.to_vec()));
-    }
+    haplotype_names.insert(ref_name.to_owned());
+
+    let mut seqs = vec![NamedSeq::new(ref_name.to_owned(), ref_seq.to_vec())];
+    // Boolean vector, do we keep the sequence according to `leave_out`?
+    let mut keep_seq = vec![leave_out.is_empty() || !leave_out.contains(ref_name)];
+
     let capacity = ref_seq.len() * 3 / 2;
     let sample_names = header.samples();
     for sample in sample_names.iter() {
@@ -44,11 +48,11 @@ pub fn reconstruct_sequences(
             if !haplotype_names.insert(name.clone()) {
                 return Err(Error::InvalidData(format!("Haplotype name {} is not unique", name)));
             }
-            res.push(NamedSeq::new(name, Vec::with_capacity(capacity)));
+            keep_seq.push(leave_out.is_empty() || (!leave_out.contains(sample) && !leave_out.contains(&name)));
+            seqs.push(NamedSeq::new(name, Vec::with_capacity(capacity)));
         }
     }
 
-    let shift = ref_name.is_some() as usize;
     let mut ref_pos = ref_start;
     for var in recs.iter() {
         let alleles = var.alleles();
@@ -70,7 +74,9 @@ pub fn reconstruct_sequences(
         for sample_id in 0..n_samples {
             let gt = gts.get(sample_id);
             if gt.len() != PLOIDY {
-                return Err(Error::InvalidData(format!("")))
+                return Err(Error::InvalidData(format!("Variant {} in sample {} has ploidy {} (expected {})",
+                    format_var(var, header), from_utf8(&sample_names[sample_id]).unwrap(),
+                    gt.len(), PLOIDY)));
             }
             // Check only last allele in the genotype, as only last allele has phasing marking,
             // (see https://docs.rs/rust-htslib/latest/rust_htslib/bcf/record/struct.Genotypes.html).
@@ -85,7 +91,7 @@ pub fn reconstruct_sequences(
                 _ => {}
             }
             for haplotype in 0..PLOIDY {
-                let mut_seq = res[shift + PLOIDY * sample_id + haplotype].seq_mut();
+                let mut_seq = seqs[PLOIDY * sample_id + haplotype + 1].seq_mut();
                 mut_seq.extend_from_slice(seq_between_vars);
                 match gt[haplotype] {
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) =>
@@ -99,8 +105,19 @@ pub fn reconstruct_sequences(
         ref_pos = var_end;
     }
     let suffix_seq = &ref_seq[(ref_pos - ref_start) as usize..];
-    for i in shift..res.len() {
-        res[i].seq_mut().extend_from_slice(suffix_seq);
+    for entry in seqs[1..].iter_mut() {
+        entry.seq_mut().extend_from_slice(suffix_seq);
     }
-    Ok(res)
+
+    let n_keep = keep_seq.iter().fold(0, |acc, &keep| acc + usize::from(keep));
+    if n_keep < seqs.len() {
+        log::warn!("    Leave out {} sequences", seqs.len() - n_keep);
+        Ok(
+            keep_seq.into_iter().zip(seqs.into_iter())
+                .filter_map(|(keep, seq)| if keep { Some(seq) } else { None })
+                .collect()
+        )
+    } else {
+        Ok(seqs)
+    }
 }

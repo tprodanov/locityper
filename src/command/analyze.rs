@@ -189,11 +189,13 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     while let Some(arg) = parser.next()? {
         match arg {
             Short('i') | Long("input") =>
-                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?,
+                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Long("subset-loci") => {
-                args.subset_loci.extend(parser.values()?.map(|s| s.parse()).collect::<Result<Vec<_>, _>>()?);
+                for val in parser.values()? {
+                    args.subset_loci.insert(val.parse()?);
+                }
                 if args.subset_loci.is_empty() {
                     return Err(lexopt::Error::MissingValue { option: Some("subset-loci".to_owned()) });
                 }
