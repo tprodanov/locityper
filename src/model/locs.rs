@@ -85,13 +85,13 @@ impl MateAln {
 
 impl fmt::Debug for MateAln {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "MateAln[{:?}, {:?}, prob={:.2}]", self.read_end, self.interval, self.ln_prob)
+        write!(f, "MateAln[{:?}, {:?}, prob={:.2}]", self.read_end, self.interval, Ln::to_log10(self.ln_prob))
     }
 }
 
 impl fmt::Display for MateAln {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "MateAln[{}, {}, prob={:.2}]", self.read_end, self.interval, self.ln_prob)
+        write!(f, "MateAln[{}, {}, prob={:.2}]", self.read_end, self.interval, Ln::to_log10(self.ln_prob))
     }
 }
 
@@ -175,7 +175,7 @@ impl PrelimAlignments {
             self.contigs.tag(), n_reads, if insert_distr.is_paired_end() { "read pairs" } else { "reads" });
         let mut res = AllPairAlignments::with_capacity(n_reads);
         for (&name_hash, alns) in self.alns.iter_mut() {
-            // log::debug!("Read {}", name_hash);
+            // log::debug!("Read {:X}", name_hash);
             // Sort alignments first by contig id, then by read-end.
             alns.sort_unstable_by_key(MateAln::sort_key);
             let pair_alns = identify_pair_alignments(name_hash, alns, insert_distr, ln_ncontigs, params);
@@ -202,6 +202,7 @@ fn extend_pair_alignments(
     let alns1_empty = alns1.is_empty();
     if !alns1_empty {
         buffer.clear();
+        // Buffer stores best probabilities for each read2.
         buffer.resize(alns2.len(), f64::NEG_INFINITY);
     }
 
@@ -219,14 +220,17 @@ fn extend_pair_alignments(
             }
         }
 
+        // Add unpaired read1, if needed.
         let prob = aln1.ln_prob + params.unmapped_penalty;
         if prob >= thresh_prob && prob + params.prob_diff >= best_prob1 {
             new_alns.push(PairAlignment::new(TwoIntervals::First(aln1.interval.clone()), prob));
         }
     }
 
+    // Add unpaired read2, if needed.
     for (j, aln2) in alns2.iter().enumerate() {
         let prob = aln2.ln_prob + params.unmapped_penalty;
+        // Check on `alns1_empty`, as if they are empty, buffer was not cleaned.
         if prob >= thresh_prob && (alns1_empty || prob + params.prob_diff >= buffer[j]) {
             new_alns.push(PairAlignment::new(TwoIntervals::Second(aln2.interval.clone()), prob));
         }
@@ -263,11 +267,14 @@ fn identify_pair_alignments(
     // Probability of both mates unmapped = unmapped_penalty^2.
     let mut unmapped_prob = 2.0 * params.unmapped_penalty;
     // Normalization factor for all pair-end alignment probabilities.
-    // Unmapped probability is multiplied by the number of contigs because there should be an unmapped
-    // possibility for every contig, but we do not store them explicitely.
+    // For normalization, unmapped probability is multiplied by the number of contigs because there is an unmapped
+    // possibility for every contig, which we do not store explicitely.
+    //
+    // Unmapped probability is not multiplied by ln_ncontigs, it is just for normalization.
     let norm_fct = Ln::map_sum_init(&pair_alns, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
     unmapped_prob -= norm_fct;
-    // log::debug!("    {} pair-end alignments. Unmapped prob: {:.2}", pair_alns.len(), unmapped_prob);
+    // log::debug!("    {} pair-end alignments. Unmapped prob: {:.2}, norm_fct: {:.2}",
+    //     pair_alns.len(), Ln::to_log10(unmapped_prob), Ln::to_log10(norm_fct));
     for aln in pair_alns.iter_mut() {
         aln.ln_prob -= norm_fct;
         // log::debug!("        {}", aln);

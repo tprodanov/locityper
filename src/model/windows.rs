@@ -16,16 +16,18 @@ use super::{
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
-/// First window in `MultiContigWindows` represents an unmapped window.
+/// First window represents unmapped reads.
 pub(crate) const UNMAPPED_WINDOW: u32 = 0;
-/// First contig will have windows starting from index 1.
-pub(crate) const INIT_WSHIFT: u32 = 1;
+/// Second window represents reads alignments within the boundary.
+pub(crate) const BOUNDARY_WINDOW: u32 = 1;
+/// Regular windows have indices starting with 2.
+pub(crate) const REG_WINDOW_SHIFT: u32 = 2;
 
 /// Alignment of a read pair to a specific contig windows.
 pub struct ReadWindows {
     /// Index in the list of read-pair alignments.
     ix: u32,
-    /// Window for each read-end (UNMAPPED_WINDOW if unmapped).
+    /// Window for each read-end.
     windows: (u32, u32),
     /// ln-probability of this location.
     ln_prob: f64,
@@ -37,7 +39,6 @@ impl ReadWindows {
     }
 
     /// Returns two windows, to which the read pair is aligned.
-    /// If unmapped, one of the values if UNMAPPED_WINDOW.
     pub fn windows(&self) -> (u32, u32) {
         self.windows
     }
@@ -147,7 +148,7 @@ impl ContigWindows {
 pub struct MultiContigWindows {
     by_contig: Vec<ContigWindows>,
     cns: Vec<u8>,
-    /// `ln(by_contig.len())`.
+    /// `ln(sum(cns))`.
     ln_ploidy: f64,
     /// Start index for each contig id (length: n-contigs + 1).
     /// Contig with index `i` will have windows between `wshifts[i]..wshifts[i + 1]`.
@@ -161,7 +162,7 @@ impl MultiContigWindows {
         let mut by_contig = Vec::<ContigWindows>::with_capacity(n);
         let mut cns = Vec::<u8>::with_capacity(n);
         let mut wshifts = Vec::with_capacity(n + 1);
-        let mut curr_wshift = INIT_WSHIFT;
+        let mut curr_wshift = REG_WINDOW_SHIFT;
         wshifts.push(curr_wshift);
 
         for &id in contig_ids.iter() {
@@ -249,41 +250,37 @@ impl MultiContigWindows {
 
             let (start_ix, palns) = pair_alns.contig_alns(contig_id);
             for (aln_ix, paln) in (start_ix..).zip(palns) {
-                let windows = match paln.intervals() {
-                    TwoIntervals::Both(interval1, interval2) => {
+                let w1 = match paln.intervals() {
+                    TwoIntervals::Both(interval1, _) | TwoIntervals::First(interval1) => {
                         let middle1 = interval1.middle();
+                        if start <= middle1 && middle1 < end {
+                            wshift + (middle1 - start) / self.window
+                        } else {
+                            BOUNDARY_WINDOW
+                        }
+                    }
+                    TwoIntervals::Second(_) => UNMAPPED_WINDOW,
+                };
+                let w2 = match paln.intervals() {
+                    TwoIntervals::Both(_, interval2) | TwoIntervals::Second(interval2) => {
                         let middle2 = interval2.middle();
-                        if middle1 < start || middle1 >= end || middle2 < start || middle2 >= end {
-                            None
+                        if start <= middle2 && middle2 < end {
+                            wshift + (middle2 - start) / self.window
                         } else {
-                            Some((wshift + (middle1 - start) / self.window, wshift + (middle2 - start) / self.window))
+                            BOUNDARY_WINDOW
                         }
-                    },
-                    TwoIntervals::First(interval1) => {
-                        let middle1 = interval1.middle();
-                        if middle1 < start || middle1 >= end {
-                            None
-                        } else {
-                            Some((wshift + (middle1 - start) / self.window, UNMAPPED_WINDOW))
-                        }
-                    },
-                    TwoIntervals::Second(interval2) => {
-                        let middle2 = interval2.middle();
-                        if middle2 < start || middle2 >= end {
-                            None
-                        } else {
-                            Some((UNMAPPED_WINDOW, wshift + (middle2 - start) / self.window))
-                        }
-                    },
+                    }
+                    TwoIntervals::First(_) => UNMAPPED_WINDOW,
                 };
 
                 let ln_prob = paln.ln_prob();
-                if let Some(windows) = windows {
+                if w1 >= REG_WINDOW_SHIFT || w2 >= REG_WINDOW_SHIFT {
                     if ln_prob >= thresh_prob {
                         thresh_prob = thresh_prob.max(ln_prob - prob_diff);
-                        out_alns.push(ReadWindows::new(aln_ix as u32, windows, ln_prob));
+                        out_alns.push(ReadWindows::new(aln_ix as u32, (w1, w2), ln_prob));
                     }
                 } else {
+                    // If the read is out of bounds, we will reduce the penalty to be unmapped.
                     unmapped_prob = Ln::add(unmapped_prob, paln.ln_prob());
                 }
             }
@@ -305,9 +302,11 @@ impl MultiContigWindows {
     }
 
     pub(crate) fn get_distributions(&self, cached_distrs: &CachedDepthDistrs) -> Vec<DistrBox> {
-        const _: () = assert!(UNMAPPED_WINDOW == 0 && INIT_WSHIFT == 1, "Constants were changed!");
+        const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
+            "Constants were changed!");
         let mut distrs: Vec<DistrBox> = Vec::with_capacity(self.total_windows() as usize);
         distrs.push(Box::new(cached_distrs.unmapped_distr()));
+        distrs.push(Box::new(cached_distrs.boundary_distr()));
 
         for (curr_contig, &contig_cn) in self.by_contig.iter().zip(&self.cns) {
             for (&gc_content, &weight) in curr_contig.window_gcs.iter().zip(&curr_contig.window_weights) {

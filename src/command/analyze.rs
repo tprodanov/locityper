@@ -468,6 +468,9 @@ fn analyze_locus(
 
     let contig_ids: Vec<_> = contigs.ids().collect();
     let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
+    // let mut tuples = ext::vec::Tuples::new(2);
+    // tuples.push(&[contigs.get_id("HG00733.1"), contigs.get_id("HG00735.1")]);
+    // tuples.push(&[contigs.get_id("HG00673.1"), contigs.get_id("HG02080.1")]);
 
     let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     let data = scheme::Data {

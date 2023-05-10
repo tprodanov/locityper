@@ -7,7 +7,7 @@ use rand::Rng;
 use crate::{
     Error,
     model::{
-        windows::UNMAPPED_WINDOW,
+        windows::REG_WINDOW_SHIFT,
         assgn::ReadAssignment,
     },
     bg::ser::json_get,
@@ -89,7 +89,7 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
             let (w1, w2) = loc.windows();
             let inc = if w1 == w2 { 2 } else { 1 };
             for &w in &[w1, w2] {
-                if w == UNMAPPED_WINDOW {
+                if w < REG_WINDOW_SHIFT {
                     window_depth[w as usize].0 += inc;
                 } else {
                     window_depth[w as usize].1 += inc;

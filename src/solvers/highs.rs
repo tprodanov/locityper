@@ -3,7 +3,7 @@ use highs::{RowProblem, Col, Sense, HighsModelStatus as Status};
 use crate::{
     Error,
     model::{
-        windows::UNMAPPED_WINDOW,
+        windows::REG_WINDOW_SHIFT,
         assgn::ReadAssignment,
     },
     ext::vec::F64Ext,
@@ -62,7 +62,7 @@ impl HighsSolver {
                 let (w1, w2) = loc.windows();
                 let inc = if w1 == w2 { 2 } else { 1 };
                 for &w in &[w1, w2] {
-                    if w == UNMAPPED_WINDOW {
+                    if w < REG_WINDOW_SHIFT {
                         window_depth[w as usize].0 += inc;
                     } else {
                         window_depth[w as usize].1 += inc;

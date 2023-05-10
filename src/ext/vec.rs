@@ -345,6 +345,11 @@ impl<T: Copy> Tuples<T> {
         assert_eq!(res.len(), count);
         res
     }
+
+    pub fn push(&mut self, v: &[T]) {
+        assert_eq!(v.len(), self.tup_len);
+        self.data.extend_from_slice(v);
+    }
 }
 
 impl<T> Index<usize> for Tuples<T> {

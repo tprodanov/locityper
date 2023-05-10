@@ -95,6 +95,11 @@ impl CachedDepthDistrs {
         AlwaysOneDistr
     }
 
+    /// Returns a pointer to boundary distribution (`AlwaysOneDistr`).
+    pub fn boundary_distr(&self) -> AlwaysOneDistr {
+        AlwaysOneDistr
+    }
+
     /// Returns read depth distribution in regular windows at GC-content and contig CN.
     pub fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<NBinom>> {
         self.cached[usize::from(gc_content)].get_or_init(||

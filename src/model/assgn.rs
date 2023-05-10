@@ -7,7 +7,7 @@ use crate::{
 };
 use super::{
     locs::{AllPairAlignments, TwoIntervals},
-    windows::{UNMAPPED_WINDOW, ReadWindows, MultiContigWindows},
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadWindows, MultiContigWindows},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
@@ -346,9 +346,9 @@ impl ReadAssignment {
     pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tdepth\tlik\tweight";
 
     /// Write read depth to a CSV file in the following format (tab-separated):
-    /// General lines:  `prefix  contig(1|2)  window     depth     depth_lik  weight`.
-    /// Last line:      `prefix  summary      unm/total  read_lik  depth_lik  sum_lik`.
-    /// `unm/total`: number of unmapped reads and total number of reads.
+    /// General lines:  `prefix  contig(1|2)  window  depth     depth_lik  weight`.
+    /// Last line:      `prefix  summary      a,b,c   read_lik  depth_lik  sum_lik`.
+    /// where `a`: number of unmapped reads, `b`: number of reads within boundary, `c`: total number of reads.
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
         // log10-likelihood of read depth.
         let mut sum_depth_lik = 0.0;
@@ -366,8 +366,8 @@ impl ReadAssignment {
         }
 
         let total_lik = Ln::to_log10(self.likelihood);
-        writeln!(f, "{}\tsummary\t{}/{}\t{:.4}\t{:.4}\t{:.4}", prefix,
-            self.depth[UNMAPPED_WINDOW as usize], self.read_assgn.len(),
+        writeln!(f, "{}\tsummary\t{},{},{}\t{:.4}\t{:.4}\t{:.4}", prefix,
+            self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize], self.read_assgn.len(),
             total_lik - sum_depth_lik, sum_depth_lik, total_lik)
     }
 
@@ -388,7 +388,7 @@ impl ReadAssignment {
 
                 let curr_windows = &self.read_windows[i];
                 let (w1, w2) = curr_windows.windows();
-                if w1 == UNMAPPED_WINDOW && w2 == UNMAPPED_WINDOW {
+                if w1 < REG_WINDOW_SHIFT && w2 < REG_WINDOW_SHIFT {
                     write!(f, "*\t*\t")?;
                 } else {
                     match paired_alns.ith_aln(curr_windows.ix() as usize).intervals() {
