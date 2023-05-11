@@ -361,7 +361,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     let bg_dir = out_dir.join(paths::BG_DIR);
     let params_path = bg_dir.join(paths::PREPROC_PARAMS);
     if bg_dir.exists() {
-        if args.force {
+        if args.force || !bg_dir.join(paths::BG_DISTR).exists() {
             log::warn!("Clearing output directory {}", ext::fmt::path(&bg_dir));
             fs::remove_dir_all(&bg_dir)?;
         } else if args.params.need_rerun(&params_path) {

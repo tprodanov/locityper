@@ -364,8 +364,8 @@ fn write_summary(
         let mean = if n > 0 { F64Ext::mean(&depth[i..j]) } else { f64::NAN };
         let var = if n > 1 { F64Ext::variance(&depth[i..j], Some(mean)) } else { f64::NAN };
         write!(dbg_writer, "{gc}\t{n}\t{mean:.5}\t{var:.5}\t")?;
-        write!(dbg_writer, "{:.5}\t{:.5}", loess_means[gc], loess_vars[gc])?;
-        write!(dbg_writer, "{:.5}\t{:.5}", blurred_means[gc], blurred_vars[gc])?;
+        write!(dbg_writer, "{:.5}\t{:.5}\t", loess_means[gc], loess_vars[gc])?;
+        write!(dbg_writer, "{:.5}\t{:.5}\t", blurred_means[gc], blurred_vars[gc])?;
         writeln!(dbg_writer, "{}\t{}", distrs[gc].n(), distrs[gc].p())?;
     }
     Ok(())
