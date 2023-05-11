@@ -1,10 +1,10 @@
 use std::{
     sync::Arc,
     io::{self, Write},
-    fmt, mem,
+    fmt,
 };
 use htslib::bam;
-use nohash::IntMap;
+use nohash::IntSet;
 use crate::{
     Error,
     seq::{
@@ -62,13 +62,19 @@ pub(crate) struct MateAln {
 
 impl MateAln {
     /// Creates a new alignment extension from a htslib `Record`.
-    fn from_record(record: &bam::Record, contigs: Arc<ContigNames>, err_prof: &ErrorProfile) -> Self {
+    fn from_record(
+        record: &bam::Record,
+        contigs: Arc<ContigNames>,
+        err_prof: &ErrorProfile,
+        read_end: ReadEnd,
+    ) -> Self
+    {
         let aln = Alignment::from_record(record, contigs);
         Self {
             strand: aln.strand(),
             ln_prob: err_prof.ln_prob(aln.cigar()),
             interval: aln.take_interval(),
-            read_end: ReadEnd::from_record(record),
+            read_end,
         }
     }
 
@@ -83,23 +89,81 @@ impl MateAln {
     }
 }
 
-impl fmt::Debug for MateAln {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "MateAln[{:?}, {:?}, prob={:.2}]", self.read_end, self.interval, Ln::to_log10(self.ln_prob))
+
+struct FilteredReader<'a, R: bam::Read> {
+    reader: R,
+    record: bam::Record,
+    has_more: bool,
+    contigs: Arc<ContigNames>,
+    err_prof: &'a ErrorProfile,
+    thresh_prob: f64,
+}
+
+impl<'a, R: bam::Read> FilteredReader<'a, R> {
+    fn new(
+        mut reader: R,
+        contigs: Arc<ContigNames>,
+        err_prof: &'a ErrorProfile,
+        thresh_prob: f64
+    ) -> Result<Self, Error> {
+        let mut record = bam::Record::new();
+        Ok(FilteredReader {
+            // Reader would return None if there are no more records.
+            has_more: reader.read(&mut record).transpose()?.is_some(),
+            reader, record, contigs, err_prof, thresh_prob,
+        })
+    }
+
+    /// Starting with `self.record` (already loaded), reads all alignments,
+    /// corresponding to this read and current read end.
+    /// Basically, the function continue to read until the next primary alignment is found,
+    /// which is saved to `self.record`.
+    ///
+    /// Function adds all alignments with probability over the threshold to `alns` and returns name hash.
+    fn read_mate_alns(
+        &mut self,
+        read_end: ReadEnd,
+        alns: &mut Vec<MateAln>,
+        dbg_writer: &mut impl Write,
+    ) -> Result<u64, Error>
+    {
+        assert!(self.has_more, "Cannot read any more records from a BAM file.");
+        let name_hash = fnv1a(self.record.qname());
+        if self.record.is_unmapped() {
+            writeln!(dbg_writer, "{:X}\t{}\t*\tNA", name_hash, read_end)?;
+            // Read the next record, and return false if there are no more records left.
+            self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
+            return Ok(name_hash);
+        }
+
+        loop {
+            let mate_aln = MateAln::from_record(
+                &self.record, Arc::clone(&self.contigs), self.err_prof, read_end);
+            writeln!(dbg_writer, "{:X}\t{}\t{}\t{:.2}",
+                name_hash, read_end, mate_aln.interval, Ln::to_log10(mate_aln.ln_prob))?;
+            if mate_aln.ln_prob >= self.thresh_prob {
+                alns.push(mate_aln);
+            }
+
+            if self.reader.read(&mut self.record).transpose()?.is_none() {
+                self.has_more = false;
+                return Ok(name_hash);
+            }
+            // Next primary record or unmapped read. Either way, it will be a new read or new read end.
+            if !self.record.is_secondary() {
+                return Ok(name_hash);
+            }
+            assert_eq!(fnv1a(self.record.qname()), name_hash,
+                "Read {} first alignment is not primary", String::from_utf8_lossy(self.record.qname()));
+        }
     }
 }
 
-impl fmt::Display for MateAln {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "MateAln[{}, {}, prob={:.2}]", self.read_end, self.interval, Ln::to_log10(self.ln_prob))
-    }
-}
-
-/// Preliminary, unpaired, read alignments.
-/// Keys: read name hash, values: all alignments for the read pair.
+/// Preliminary read alignments, where read mates are not yet connected.
 pub(crate) struct PrelimAlignments {
     contigs: Arc<ContigNames>,
-    alns: IntMap<u64, Vec<MateAln>>,
+    /// Pairs: read name hash, all alignments for the read pair.
+    all_alns: Vec<(u64, Vec<MateAln>)>,
 }
 
 impl PrelimAlignments {
@@ -108,77 +172,73 @@ impl PrelimAlignments {
     /// Only store read pairs where at least one read-end alignment
     /// (i)  has probability over `unmapped_penalty` AND
     /// (ii) middle of the alignment lies within an inner region of any contig (beyond the boundary region).
-    pub(crate) fn from_records(
-        records: bam::Records<impl bam::Read>,
-        contigs: Arc<ContigNames>,
+    pub(crate) fn load(
+        reader: impl bam::Read,
+        is_paired_end: bool,
+        contigs: &Arc<ContigNames>,
         err_prof: &ErrorProfile,
         params: &super::Params,
-        mut dbg_writer: impl DbgWrite,
+        mut dbg_writer: impl Write,
     ) -> Result<Self, Error>
     {
-        log::info!("[{}] Reading read alignments, alignment ln-probability threshold = {:.1}",
-            contigs.tag(), Ln::to_log10(params.unmapped_penalty));
-        let mut alns = IntMap::default();
-        let mut curr_hash = 0;
-        let mut curr_alns = Vec::new();
-        let mut read_fits = false;
-        let max_ends: Vec<_> = contigs.lengths().iter().map(|len| len.saturating_sub(params.boundary_size)).collect();
+        let thresh_prob = params.unmapped_penalty - params.prob_diff;
+        log::info!("[{}] Reading read alignments, alignment likelihood threshold = {:.1}",
+            contigs.tag(), Ln::to_log10(thresh_prob));
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), err_prof, thresh_prob)?;
+        let left_boundary = params.boundary_size;
+        let right_boundaries: Vec<_> = contigs.lengths().iter()
+            .map(|len| len.saturating_sub(left_boundary)).collect();
+        let mut all_alns = Vec::new();
 
-        for record in records {
-            let record = record?;
-            if record.is_unmapped() {
-                continue;
+        let mut hashes = IntSet::default();
+        while reader.has_more {
+            let read_name = String::from_utf8_lossy(reader.record.qname()).into_owned();
+            write!(dbg_writer, "{}=", read_name)?;
+            let mut alns = Vec::new();
+            let name_hash = reader.read_mate_alns(ReadEnd::First, &mut alns, &mut dbg_writer)?;
+            if !hashes.insert(name_hash) {
+                log::warn!("Read {} produced hash collision ({:X}). \
+                    If many such messages, reads appear in an unordered fashion, will lead to errors",
+                    read_name, name_hash);
             }
 
-            let hash = fnv1a(record.qname());
-            if hash != curr_hash {
-                if read_fits {
-                    dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len())?;
-                    // Assert must not be removed, or converted into debug_assert!
-                    assert!(alns.insert(curr_hash, mem::replace(&mut curr_alns, Vec::new())).is_none(),
-                        "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
-                } else if !curr_alns.is_empty() {
-                    dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len())?;
-                    curr_alns.clear();
+            if is_paired_end {
+                let name_hash2 = reader.read_mate_alns(ReadEnd::Second, &mut alns, &mut dbg_writer)?;
+                if name_hash != name_hash2 {
+                    return Err(Error::InvalidData(format!("Read {} with hash {:X} does not have a second read end",
+                        read_name, name_hash)));
                 }
-                curr_hash = hash;
-                read_fits = false;
             }
 
-            let mate_aln = MateAln::from_record(&record, Arc::clone(&contigs), err_prof);
-            dbg_writer.write_mate_aln(if curr_alns.is_empty() { record.qname() } else { &[] }, hash, &mate_aln)?;
-            if !read_fits && mate_aln.ln_prob > params.unmapped_penalty {
-                let interval = &mate_aln.interval;
-                let middle = interval.middle();
-                read_fits = middle >= params.boundary_size && middle < max_ends[interval.contig_id().ix()];
+            let any_central = alns.iter().any(|aln| {
+                let middle = aln.interval.middle();
+                left_boundary <= middle && middle <= right_boundaries[aln.interval.contig_id().ix()]
+            });
+            if any_central {
+                writeln!(dbg_writer, "{:X}\tsave\t{} alns", name_hash, alns.len())?;
+                all_alns.push((name_hash, alns));
+            } else {
+                writeln!(dbg_writer, "{:X}\tignore\t{} alns", name_hash, alns.len())?;
             }
-            curr_alns.push(mate_aln);
         }
-
-        if read_fits {
-            dbg_writer.finalize_mate_alns(curr_hash, true, curr_alns.len())?;
-            // Assert must not be removed, or converted into debug_assert!
-            assert!(alns.insert(curr_hash, curr_alns).is_none(),
-                "Read pair alignments are separated by another read pair (see hash {})", curr_hash);
-        } else if !curr_alns.is_empty() {
-            dbg_writer.finalize_mate_alns(curr_hash, false, curr_alns.len())?;
-        }
-
-        Ok(Self { contigs, alns })
+        Ok(Self {
+            contigs: Arc::clone(&contigs),
+            all_alns
+        })
     }
 
     /// Find paired-end alignment locations for each contig.
     pub fn identify_locations(&mut self, insert_distr: &InsertDistr, params: &super::Params) -> AllPairAlignments {
-        let n_reads = self.alns.len();
+        let n_reads = self.all_alns.len();
         let ln_ncontigs = (self.contigs.len() as f64).ln();
         log::info!("    [{}] Identify paired alignment location and probabilities ({} {})",
             self.contigs.tag(), n_reads, if insert_distr.is_paired_end() { "read pairs" } else { "reads" });
         let mut res = AllPairAlignments::with_capacity(n_reads);
-        for (&name_hash, alns) in self.alns.iter_mut() {
+        for (name_hash, alns) in self.all_alns.iter_mut() {
             // log::debug!("Read {:X}", name_hash);
             // Sort alignments first by contig id, then by read-end.
             alns.sort_unstable_by_key(MateAln::sort_key);
-            let pair_alns = identify_pair_alignments(name_hash, alns, insert_distr, ln_ncontigs, params);
+            let pair_alns = identify_pair_alignments(*name_hash, alns, insert_distr, ln_ncontigs, params);
             res.push(pair_alns);
         }
         res

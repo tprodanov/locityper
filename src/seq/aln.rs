@@ -87,15 +87,18 @@ impl ReadEnd {
 
 impl fmt::Debug for ReadEnd {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        match self {
+            ReadEnd::First => write!(f, "Mate1"),
+            ReadEnd::Second => write!(f, "Mate2"),
+        }
     }
 }
 
 impl fmt::Display for ReadEnd {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ReadEnd::First => write!(f, "Mate1"),
-            ReadEnd::Second => write!(f, "Mate2"),
+            ReadEnd::First => write!(f, "1"),
+            ReadEnd::Second => write!(f, "2"),
         }
     }
 }
@@ -117,7 +120,9 @@ pub struct Alignment {
 impl Alignment {
     /// Creates a new Alignment from the record.
     pub fn from_record(record: &Record, contigs: Arc<ContigNames>) -> Self {
-        let cigar = Cigar::infer_ext_cigar_md(record, ());
+        let cigar = Cigar::from_raw(record.raw_cigar()); // Cigar::infer_ext_cigar_md(record, ());
+        assert!(cigar.is_extended(), "Record {} does not have an extended CIGAR",
+            String::from_utf8_lossy(record.qname()));
         let contig_id = ContigId::new(record.tid());
         let start = u32::try_from(record.pos()).unwrap();
         let ref_interval = if cigar.is_empty() {

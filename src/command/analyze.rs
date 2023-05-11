@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, Write},
     process::{Command, Stdio},
-    cmp::max,
+    cmp::{min, max},
     path::{Path, PathBuf},
     time::Instant,
     sync::Arc,
@@ -28,7 +28,7 @@ use crate::{
     },
     solvers::scheme,
 };
-use htslib::bam::{self, Read as BamRead};
+use htslib::bam;
 use super::paths;
 
 struct Args {
@@ -42,7 +42,7 @@ struct Args {
     interleaved: bool,
     threads: u16,
     force: bool,
-    bwa: Option<PathBuf>,
+    strobealign: PathBuf,
     samtools: PathBuf,
     seed: Option<u64>,
     debug: bool,
@@ -64,7 +64,7 @@ impl Default for Args {
             interleaved: false,
             threads: 8,
             force: false,
-            bwa: None,
+            strobealign: PathBuf::from("strobealign"),
             samtools: PathBuf::from("samtools"),
             seed: None,
             debug: false,
@@ -91,21 +91,18 @@ impl Args {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
-        self.bwa = if let Some(bwa) = self.bwa {
-            Some(ext::sys::find_exe(bwa)?)
-        } else {
-            Some(ext::sys::find_exe(BWA2).or_else(|_| ext::sys::find_exe(BWA1))?)
-        };
+        self.strobealign = ext::sys::find_exe(self.strobealign)?;
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
         self.assgn_params.validate()?;
         Ok(self)
     }
-}
 
-const BWA2: &'static str = "bwa-mem2";
-const BWA1: &'static str = "bwa";
+    fn is_paired_end(&self) -> bool {
+        self.input.len() == 2 || self.interleaved
+    }
+}
 
 fn print_help() {
     const KEY: usize = 18;
@@ -175,8 +172,8 @@ fn print_help() {
         "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  BWA executable. Default: {} or {}.",
-        "    --bwa".green(), "EXE".yellow(), BWA2.underline(), BWA1.underline());
+    println!("    {:KEY$} {:VAL$}  Strobealign executable. [{}].",
+        "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
     println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
         "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
 
@@ -232,7 +229,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('F') | Long("force") => args.force = true,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
             Long("debug") => args.debug = true,
-            Long("bwa") => args.bwa = Some(parser.value()?.parse()?),
+            Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -403,30 +400,39 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
         return Ok(());
     }
 
+    let in_fasta = locus.db_locus_dir.join(paths::LOCUS_FASTA);
+    log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
+    // Output at most this number of alignments per read.
+    let n_locs = min(30000, locus.set.len() * 30).to_string();
     let start = Instant::now();
-    let mut bwa_cmd = Command::new(args.bwa.as_ref().unwrap());
-    bwa_cmd.args(&["mem",
-        "-aYPp", // Output all alignments, use soft clipping, skip pairing, interleaved input.
-        "-c", "65535", // No filtering on common minimizers.
-        "-v", "1", // Reduce the number of messages.
+    let mut strobealign_cmd = Command::new(&args.strobealign);
+    strobealign_cmd.args(&[
+        "--no-progress",
+        // NOTE: Provide single input FASTQ, and do not use --interleaved option.
+        // This is because Strobealign starts to connect read pairs in multiple ways,
+        // which produces too large output, and takes a lot of time.
+        "-M", &n_locs,   // Try as many secondary locations as possible.
+        "-N", &n_locs,   // Output as many secondary alignments as possible.
+        "-S", "0.5",     // Try candidate sites with score >= 0.2 * best score.
+        "-f", "0",       // Do not discard repetitive minimizers.
+        "-k", "15",      // Use smaller minimizers to get more matches.
+        // TODO: Use -r MEAN_READ_LEN
         "-t", &args.threads.to_string()])
-        .arg(locus.db_locus_dir.join(paths::LOCUS_FASTA)) // Input fasta.
+        .arg(&in_fasta) // Input fasta.
         .arg(&locus.reads_filename) // Input FASTQ.
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut bwa_child = bwa_cmd.spawn()?;
-    let bwa_stdout = bwa_child.stdout.take().unwrap();
+    let mut child = strobealign_cmd.spawn()?;
+    let child_stdout = child.stdout.take().unwrap();
 
     let mut samtools_cmd = Command::new(&args.samtools);
-    samtools_cmd.args(&["view",
-        // Output BAM, exclude unmapped reads.
-        "-bF4"])
+    samtools_cmd.args(&["view", "-b"]) // Output BAM.
         .arg("-o").arg(&locus.tmp_aln_filename)
-        .stdin(Stdio::from(bwa_stdout));
+        .stdin(Stdio::from(child_stdout));
 
-    log::debug!("    {} | {}", ext::fmt::command(&bwa_cmd), ext::fmt::command(&samtools_cmd));
+    log::debug!("    {} | {}", ext::fmt::command(&strobealign_cmd), ext::fmt::command(&samtools_cmd));
     let samtools_output = samtools_cmd.output()?;
-    let bwa_output = bwa_child.wait_with_output()?;
+    let bwa_output = child.wait_with_output()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     if !bwa_output.status.success() {
         return Err(Error::SubprocessFail(bwa_output));
@@ -450,17 +456,17 @@ fn analyze_locus(
     map_reads(locus, &args)?;
 
     log::info!("    [{}] Calculating read alignment probabilities", locus.set.tag());
-    let mut bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
+    let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let records = bam_reader.records();
     let err_prof = bg_distr.error_profile();
+    let is_paired = args.is_paired_end();
     let mut locs = if args.debug {
         let mut reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         writeln!(reads_writer, "{}", locs::CSV_HEADER)?;
-        PrelimAlignments::from_records(records, Arc::clone(&contigs), err_prof, &args.assgn_params, &mut reads_writer)?
+        PrelimAlignments::load(bam_reader, is_paired, contigs, err_prof, &args.assgn_params, reads_writer)?
     } else {
-        PrelimAlignments::from_records(records, Arc::clone(&contigs), err_prof, &args.assgn_params, ())?
+        PrelimAlignments::load(bam_reader, is_paired, contigs, err_prof, &args.assgn_params, io::sink())?
     };
 
     let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);

@@ -51,9 +51,10 @@ sol <- filter(sol, contig != 'summary') |>
 
 # Create title and subtitle.
 
-unm_total <- as.numeric(unlist(strsplit(summary_info$window, '/', fixed = T)))
-unmapped <- unm_total[1]
-total_reads <- unm_total[2]
+reads_info <- as.numeric(unlist(strsplit(summary_info$window, ',', fixed = T)))
+unmapped <- reads_info[1]
+boundary <- reads_info[2]
+total_reads <- reads_info[3]
 alns_lik <- summary_info$depth
 depth_lik <- summary_info$lik
 total_lik <- summary_info$weight
@@ -61,11 +62,12 @@ total_lik <- summary_info$weight
 comma_int <- scales::label_comma(accuracy = 1)
 comma_prec2 <- scales::label_comma(accuracy = 0.01, style_positive = 'plus')
 title <- sub(',', ', ', args$genotype)
-subtitle <- paste(sprintf('Reads: %s / %s (unmapped / total).',
-        comma_int(unmapped), comma_int(total_reads)),
+subtitle <- paste(
+    sprintf('Reads: %s,  Unmapped: %s,  On boundary: %s.',
+        comma_int(total_reads), comma_int(unmapped), comma_int(boundary)),
     sprintf('log10-likelihood: %s  =  %s (alns)   %s (depth)',
         comma_prec2(total_lik), comma_prec2(alns_lik), comma_prec2(depth_lik)),
-    sep = '   ')
+    sep = '\n')
 
 # Select scale limits.
 

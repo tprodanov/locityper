@@ -232,6 +232,11 @@ impl Cigar {
         self.tuples.shrink_to_fit()
     }
 
+    /// Returns true if the CIGAR does not contain M operation.
+    pub fn is_extended(&self) -> bool {
+        self.tuples.iter().all(|item| item.op != Operation::Match)
+    }
+
     /// Infer extended CIGAR from a region with already known reference sequence
     /// (`ref_seq`, shifted by `ref_seq_shift`).
     pub fn infer_ext_cigar(rec: &record::Record, ref_seq: &[u8], ref_seq_shift: u32) -> Cigar {
