@@ -22,5 +22,7 @@ pub const LOCUS_PAF: &'static str = "all_haplotypes.paf.gz";
 /// Dendrogram is stored in `database/loci/<locus_name>/all_haplotypes.nwk`.
 pub const LOCUS_DENDROGRAM: &'static str = "all_haplotypes.nwk";
 
-/// Sample parameters, estimated from the background regions, are stored in `output/bg/params.gz`.
-pub const SAMPLE_PARAMS: &'static str = "params.gz";
+/// Preprocessing parameters are stored in `output/bg/params.json`.
+pub const PREPROC_PARAMS: &'static str = "params.json";
+/// Background distributions are stored in `output/bg/distr.gz`.
+pub const BG_DISTR: &'static str = "distr.gz";

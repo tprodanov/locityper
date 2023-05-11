@@ -18,8 +18,6 @@ pub struct Params {
     /// Background read depth parameters.
     pub depth: ReadDepthParams,
 
-    /// Minimal mapping quality.
-    pub min_mapq: u8,
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
     pub max_clipping: f64,
@@ -38,7 +36,6 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             depth: Default::default(),
-            min_mapq: 20,
             max_clipping: 0.02,
             ins_quantile: 0.99,
             ins_quantile_mult: 3.0,

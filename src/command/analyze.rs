@@ -496,7 +496,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
 
-    let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::SAMPLE_PARAMS))?);
+    let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
     let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr));

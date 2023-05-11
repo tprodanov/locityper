@@ -27,13 +27,86 @@ use crate::{
         fastx::{self, FastxRead},
     },
     bg::{
-        BgDistr, JsonSer, Params as BgParams,
+        self, BgDistr,
         insertsz::{ReadMateGrouping, InsertDistr},
         err_prof::ErrorProfile,
         depth::ReadDepth,
+        ser::{JsonSer, json_get},
     },
 };
 use super::paths;
+
+const DEF_N_READS: &'static str = "500k";
+
+#[derive(PartialEq)]
+struct Params {
+    n_reads: usize,
+    min_mapq: u8,
+    subsampling_rate: f64,
+    subsampling_seed: Option<u64>,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            n_reads: parse_int(DEF_N_READS).unwrap(),
+            min_mapq: 20,
+            subsampling_rate: 0.25,
+            subsampling_seed: None,
+        }
+    }
+}
+
+impl Params {
+    fn validate(&mut self) -> Result<(), Error> {
+        validate_param!(self.n_reads > 0, "Cannot estimate background distributions from 0 reads.");
+        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
+            "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
+        if self.subsampling_rate > 0.99 {
+            self.subsampling_rate = 1.0;
+        }
+        Ok(())
+    }
+
+    /// Loads parameters from the previous run. If the parameters do not match, or cannot be loaded, returns true.
+    fn need_rerun(&self, path: &Path) -> bool {
+        if !path.exists() {
+            log::warn!("Cannot find old parameters at {}", ext::fmt::path(path));
+            return true;
+        }
+        let old_params = match ext::sys::load_json(&path)
+                .map_err(|e| Error::from(e))
+                .and_then(|json| Params::load(&json)) {
+            Err(_) => {
+                log::warn!("Cannot load old parameters from {}", ext::fmt::path(path));
+                return true;
+            }
+            Ok(val) => val,
+        };
+        if &old_params != self {
+            log::warn!("Parameters has changed");
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl JsonSer for Params {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            n_reads: self.n_reads,
+            min_mapq: self.min_mapq,
+            subsampling_rate: self.subsampling_rate,
+            subsampling_seed: self.subsampling_seed,
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        json_get!(obj -> n_reads (as_usize), min_mapq (as_u8), subsampling_rate (as_f64), subsampling_seed? (as_u64));
+        Ok(Self { n_reads, min_mapq, subsampling_rate, subsampling_seed })
+    }
+}
 
 struct Args {
     input: Vec<PathBuf>,
@@ -47,14 +120,11 @@ struct Args {
     force: bool,
     strobealign: PathBuf,
     samtools: PathBuf,
+    debug: bool,
 
-    n_reads: usize,
-    subsampling_rate: f64,
-    subsampling_seed: Option<u64>,
-    params: BgParams,
+    params: Params,
+    bg_params: bg::Params,
 }
-
-const DEF_N_READS: &'static str = "500k";
 
 impl Default for Args {
     fn default() -> Self {
@@ -68,13 +138,12 @@ impl Default for Args {
             interleaved: false,
             threads: 8,
             force: false,
+            debug: false,
             strobealign: PathBuf::from("strobealign"),
             samtools: PathBuf::from("samtools"),
 
-            n_reads: parse_int(DEF_N_READS).unwrap(),
-            subsampling_rate: 0.1,
-            subsampling_seed: None,
-            params: BgParams::default(),
+            params: Params::default(),
+            bg_params: bg::Params::default(),
         }
     }
 }
@@ -97,15 +166,12 @@ impl Args {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
-        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
-            "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
-        if self.subsampling_rate > 0.99 {
-            self.subsampling_rate = 1.0;
-        }
 
-        self.params.validate()?;
         self.strobealign = ext::sys::find_exe(self.strobealign)?;
         self.samtools = ext::sys::find_exe(self.samtools)?;
+
+        self.params.validate()?;
+        self.bg_params.validate()?;
         Ok(self)
     }
 }
@@ -151,50 +217,50 @@ fn print_help(extended: bool) {
         println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
             "WARNING".red(), "--force".red(), "-n".green(), "-q".green(), width = KEY + VAL + 1);
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
-            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.max_clipping);
+            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.max_clipping);
         println!("    {:KEY$} {}\n\
             {EMPTY}  Max allowed insert size is calculated as {} multiplied by\n\
             {EMPTY}  the {}-th insert size quantile [{}, {}].",
             "-I, --ins-quantile".green(), "FLOAT FLOAT".yellow(),
-            "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.params.ins_quantile_mult, defaults.params.ins_quantile);
+            "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.bg_params.ins_quantile_mult, defaults.bg_params.ins_quantile);
         println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
             {EMPTY}  read mappings missed due to higher error rate [{}].",
-            "-m, --err-mult".green(), "FLOAT".yellow(), defaults.params.err_rate_mult);
+            "-m, --err-mult".green(), "FLOAT".yellow(), defaults.bg_params.err_rate_mult);
 
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
-            "-p, --ploidy".green(), "INT".yellow(), defaults.params.depth.ploidy);
+            "-p, --ploidy".green(), "INT".yellow(), defaults.bg_params.depth.ploidy);
         println!("    {:KEY$} {:VAL$}\n\
             {EMPTY}  Subsample input reads by a factor of {} [{}]\n\
             {EMPTY}  Use all reads for {} or if alignment file ({}) is provided.\n\
             {EMPTY}  Second value sets the subsampling seed (optional).",
-            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(), defaults.subsampling_rate,
+            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(), defaults.params.subsampling_rate,
             "-s 1".green(), "-a".green());
         println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
-            "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_size);
+            "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.window_size);
         println!("    {:KEY$} {:VAL$}  Extend window by {} bp to both sides in order to calculate\n\
             {EMPTY}  GC-content and average k-mer frequency [{}].",
-            "    --window-padd".green(), "INT".yellow(), "INT".yellow(), defaults.params.depth.window_padding);
+            "    --window-padd".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.window_padding);
         println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region.\n\
             {EMPTY}  Must not be smaller than {} [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
-            defaults.params.depth.boundary_size);
+            defaults.bg_params.depth.boundary_size);
         println!("    {:KEY$} {:VAL$}  Ignore reads with alignment likelihood under 10^{} [{:.1}]",
             "    --min-aln-lik".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-            Ln::to_log10(defaults.params.depth.min_aln_prob));
+            Ln::to_log10(defaults.bg_params.depth.min_aln_prob));
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
-            "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.params.depth.max_kmer_freq);
+            "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
             {EMPTY}  each GC-content [{}]. Smaller values lead to less robust estimates,\n\
             {EMPTY}  larger values - to similar estimates across different GC-contents.",
-            "    --frac-windows".green(), "FLOAT".yellow(), defaults.params.depth.frac_windows);
+            "    --frac-windows".green(), "FLOAT".yellow(), defaults.bg_params.depth.frac_windows);
         println!("    {:KEY$} {}\n\
             {EMPTY}  Read depth estimates are blured for windows with extreme GC-content\n\
             {EMPTY}  (less than {} windows with smaller/larger GC). There, read depth\n\
             {EMPTY}  is set to the last non-extreme depth, while variance is increased\n\
             {EMPTY}  by a {} factor for each addition GC value [{} {}].",
             "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
-            defaults.params.depth.min_tail_obs, defaults.params.depth.tail_var_mult);
+            defaults.bg_params.depth.min_tail_obs, defaults.bg_params.depth.tail_var_mult);
     }
 
     println!("\n{}", "Execution parameters:".bold());
@@ -202,6 +268,8 @@ fn print_help(extended: bool) {
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
+        "    --debug".green(), super::flag());
     if extended {
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
@@ -230,39 +298,41 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
 
-            Short('n') | Long("n-reads") => args.n_reads = parser.value()?.parse_with(parse_int)?,
+            Short('n') | Long("n-reads") => args.params.n_reads = parser.value()?.parse_with(parse_int)?,
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
-            Short('c') | Long("max-clip") | Long("max-clipping") => args.params.max_clipping = parser.value()?.parse()?,
+            Short('c') | Long("max-clip") | Long("max-clipping") =>
+                args.bg_params.max_clipping = parser.value()?.parse()?,
             Short('I') | Long("ins-quant") | Long("ins-quantile") => {
-                args.params.ins_quantile_mult = parser.value()?.parse()?;
-                args.params.ins_quantile = parser.value()?.parse()?;
+                args.bg_params.ins_quantile_mult = parser.value()?.parse()?;
+                args.bg_params.ins_quantile = parser.value()?.parse()?;
             }
             Short('m') | Long("err-mult") | Long("err-multiplier") =>
-                args.params.err_rate_mult = parser.value()?.parse()?,
+                args.bg_params.err_rate_mult = parser.value()?.parse()?,
 
-            Short('p') | Long("ploidy") => args.params.depth.ploidy = parser.value()?.parse()?,
+            Short('p') | Long("ploidy") => args.bg_params.depth.ploidy = parser.value()?.parse()?,
             Short('s') | Long("subsample") => {
                 let mut values = parser.values()?;
-                args.subsampling_rate = values.next()
+                args.params.subsampling_rate = values.next()
                     .ok_or_else(|| lexopt::Error::MissingValue { option: Some("subsample".to_owned()) })?
                     .parse()?;
-                args.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
+                args.params.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
             }
-            Short('w') | Long("window") => args.params.depth.window_size = parser.value()?.parse()?,
-            Long("window-padd") | Long("window-padding") => args.params.depth.window_padding = parser.value()?.parse()?,
-            Long("boundary") => args.params.depth.boundary_size = parser.value()?.parse()?,
-            Long("min-aln-lik") => args.params.depth.min_aln_prob = Ln::from_log10(parser.value()?.parse()?),
-            Long("kmer-freq") | Long("kmer-frequency") => args.params.depth.max_kmer_freq = parser.value()?.parse()?,
+            Short('w') | Long("window") => args.bg_params.depth.window_size = parser.value()?.parse()?,
+            Long("window-padd") | Long("window-padding") => args.bg_params.depth.window_padding = parser.value()?.parse()?,
+            Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse()?,
+            Long("min-aln-lik") => args.bg_params.depth.min_aln_prob = Ln::from_log10(parser.value()?.parse()?),
+            Long("kmer-freq") | Long("kmer-frequency") => args.bg_params.depth.max_kmer_freq = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
-                args.params.depth.frac_windows = parser.value()?.parse()?,
+                args.bg_params.depth.frac_windows = parser.value()?.parse()?,
             Long("blur-extreme") => {
-                args.params.depth.min_tail_obs = parser.value()?.parse()?;
-                args.params.depth.tail_var_mult = parser.value()?.parse()?;
+                args.bg_params.depth.min_tail_obs = parser.value()?.parse()?;
+                args.bg_params.depth.tail_var_mult = parser.value()?.parse()?;
             }
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
+            Long("debug") => args.debug = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
@@ -289,11 +359,20 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     ext::sys::mkdir(out_dir)?;
 
     let bg_dir = out_dir.join(paths::BG_DIR);
-    if bg_dir.exists() && args.force {
-        log::warn!("Clearing output directory {}", ext::fmt::path(&bg_dir));
-        fs::remove_dir_all(&bg_dir)?;
+    let params_path = bg_dir.join(paths::PREPROC_PARAMS);
+    if bg_dir.exists() {
+        if args.force {
+            log::warn!("Clearing output directory {}", ext::fmt::path(&bg_dir));
+            fs::remove_dir_all(&bg_dir)?;
+        } else if args.params.need_rerun(&params_path) {
+            log::error!("Please rerun with -F/--force");
+            std::process::exit(1);
+        }
     }
     ext::sys::mkdir(&bg_dir)?;
+
+    let mut params_file = io::BufWriter::new(fs::File::open(&params_path)?);
+    args.params.save().write_pretty(&mut params_file, 4)?;
     Ok(bg_dir)
 }
 
@@ -305,9 +384,9 @@ fn set_strobealign_stdin(
 {
     fn create_job(args: &Args, to_bg: bool, child_stdin: ChildStdin, mut reader: impl FastxRead + 'static,
     ) -> impl FnOnce() -> Result<(), io::Error> + 'static {
-        let n_reads = args.n_reads;
-        let subsampling_rate = args.subsampling_rate;
-        let subsampling_seed = args.subsampling_seed.clone();
+        let n_reads = args.params.n_reads;
+        let subsampling_rate = args.params.subsampling_rate;
+        let subsampling_seed = args.params.subsampling_seed.clone();
         let mut writer = io::BufWriter::new(child_stdin);
         move || {
             match to_bg {
@@ -352,17 +431,17 @@ fn create_samtools_command(args: &Args, stdin: Stdio, out_file: &Path) -> Comman
 
 fn first_step_str(args: &Args, to_bg: bool) -> String {
     let mut s = String::new();
-    if to_bg && args.subsampling_rate == 1.0 {
+    if to_bg && args.params.subsampling_rate == 1.0 {
         return s;
     }
 
     if to_bg {
-        write!(s, "_subsample_ --rate {}", args.subsampling_rate).unwrap();
-        if let Some(seed) = args.subsampling_seed {
+        write!(s, "_subsample_ --rate {}", args.params.subsampling_rate).unwrap();
+        if let Some(seed) = args.params.subsampling_seed {
             write!(s, " --seed {}", seed).unwrap();
         }
     } else {
-        write!(s, "_head_ --n-reads {}", args.n_reads).unwrap();
+        write!(s, "_head_ --n-reads {}", args.params.n_reads).unwrap();
     }
     write!(s, " -i {}", ext::fmt::path(&args.input[0])).unwrap();
     if args.input.len() > 1 {
@@ -374,7 +453,7 @@ fn first_step_str(args: &Args, to_bg: bool) -> String {
 
 /// Run strobealign for the input WGS reads.
 /// If `to_bg` is true, reads are mapped to a single background region. If needed, subsampling is performed.
-/// If `to_bg` is false, first `args.n_reads` reads are mapped to the whole genome.
+/// If `to_bg` is false, first `args.params.n_reads` reads are mapped to the whole genome.
 // fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
 fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
     let tmp_bam = out_bam.with_extension("tmp.bam");
@@ -393,7 +472,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
         "-f", "0.001", // Discard more minimizers to speed up alignment
         "-t", &args.threads.to_string()]) // Specify the number of threads.
         .stdout(Stdio::piped());
-    if to_bg && args.subsampling_rate == 1.0 {
+    if to_bg && args.params.subsampling_rate == 1.0 {
         // Provide input files as they are.
         if args.interleaved {
             strobealign.arg("--interleaved");
@@ -448,16 +527,17 @@ fn estimate_bg_from_reads(
 
     log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename1));
     let mut bam_reader1 = bam::Reader::from_path(&bam_filename1)?;
-    let params = &args.params;
+    let min_mapq = args.params.min_mapq;
+    let bg_params = &args.bg_params;
     let records1: Vec<BamRecord> = bam_reader1.records()
         .filter(|res: &Result<BamRecord, _>| match res {
-            Ok(record) => record.mapq() >= params.min_mapq && cigar::clipping_rate(record) <= params.max_clipping,
+            Ok(record) => record.mapq() >= min_mapq && cigar::clipping_rate(record) <= bg_params.max_clipping,
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
     let insert_distr = if args.input.len() > 1 || args.interleaved {
         let pairings = ReadMateGrouping::from_unsorted_bam(records1.iter(), Some(records1.len()));
-        InsertDistr::estimate(&pairings, params)?
+        InsertDistr::estimate(&pairings, bg_params)?
     } else {
         // Single-end input.
         InsertDistr::undefined()
@@ -465,19 +545,19 @@ fn estimate_bg_from_reads(
 
     let max_insert_size = i64::from(insert_distr.max_size());
     let err_prof = ErrorProfile::estimate(records1.iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
-        max_insert_size, params);
+        max_insert_size, bg_params);
 
     log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename2));
     let mut bam_reader2 = bam::Reader::from_path(&bam_filename2)?;
     let records2: Vec<BamRecord> = bam_reader2.records()
         .filter(|res: &Result<BamRecord, _>| match res {
-            Ok(record) => record.mapq() >= params.min_mapq,
+            Ok(record) => record.mapq() >= min_mapq,
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
     let interval = Interval::full_contig(Arc::clone(contig_set.contigs()), contig0);
     let depth_distr = ReadDepth::estimate(records2.iter(), &interval, contig_set.get_seq(contig0),
-        contig_set.kmer_counts(), &err_prof, max_insert_size, &params.depth, args.subsampling_rate);
+        contig_set.kmer_counts(), &err_prof, max_insert_size, &bg_params.depth, args.params.subsampling_rate);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -505,23 +585,24 @@ fn estimate_bg_from_alns(
     log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
     let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
     bam_reader.set_reference(ref_fasta_filename)?;
-    let params = &args.params;
+    let bg_params = &args.bg_params;
     bam_reader.fetch((bg_interval.contig_name(), i64::from(bg_interval.start()), i64::from(bg_interval.end())))?;
     let records: Vec<BamRecord> = bam_reader.records()
         .filter(|res: &Result<BamRecord, _>| match res {
-            Ok(record) => record.mapq() >= params.min_mapq && cigar::clipping_rate(record) <= params.max_clipping,
+            Ok(record) => record.mapq() >= args.params.min_mapq
+                && cigar::clipping_rate(record) <= bg_params.max_clipping,
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
     let pairings = ReadMateGrouping::from_mixed_bam(&records)?;
 
-    let insert_distr = InsertDistr::estimate(&pairings, params)?;
+    let insert_distr = InsertDistr::estimate(&pairings, bg_params)?;
     let seq_shift = bg_interval.start();
     let max_insert_size = i64::from(insert_distr.max_size());
     let err_prof = ErrorProfile::estimate(records.iter(),
-        |record| cigar::Cigar::infer_ext_cigar(record, &bg_seq, seq_shift), max_insert_size, params);
+        |record| cigar::Cigar::infer_ext_cigar(record, &bg_seq, seq_shift), max_insert_size, bg_params);
     let depth_distr = ReadDepth::estimate(records.iter(), &bg_interval, &bg_seq, bg_contig_set.kmer_counts(), &err_prof,
-        max_insert_size, &params.depth, 1.0);
+        max_insert_size, &bg_params.depth, 1.0);
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -548,7 +629,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     } else {
         estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &contig_set)?
     };
-    let mut bg_file = ext::sys::create_gzip(&out_dir.join(paths::SAMPLE_PARAMS))?;
+    let mut bg_file = ext::sys::create_gzip(&out_dir.join(paths::BG_DISTR))?;
     bg_distr.save().write_pretty(&mut bg_file, 4)?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
