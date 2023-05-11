@@ -1,7 +1,7 @@
 use std::{
-    sync::Arc,
-    io::{self, Write},
     fmt,
+    sync::Arc,
+    io::Write,
 };
 use htslib::bam;
 use nohash::IntSet;
@@ -18,35 +18,6 @@ use crate::{
     algo::{fnv1a, bisect},
     math::Ln,
 };
-
-/// Write debug information about read locations.
-pub(crate) trait DbgWrite {
-    /// Write single-mate alignment.
-    fn write_mate_aln(&mut self, qname: &[u8], hash: u64, aln: &MateAln) -> io::Result<()>;
-
-    /// Save/ignore `count` mate alignments for read `hash`.
-    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize) -> io::Result<()>;
-}
-
-impl DbgWrite for () {
-    fn write_mate_aln(&mut self, _qname: &[u8], _hash: u64, _aln: &MateAln) -> io::Result<()> { Ok(()) }
-    fn finalize_mate_alns(&mut self, _hash: u64, _save: bool, _count: usize,) -> io::Result<()> { Ok(()) }
-}
-
-impl<W: io::Write> DbgWrite for &mut W {
-    fn write_mate_aln(&mut self, qname: &[u8], hash: u64, aln: &MateAln) -> io::Result<()> {
-        write!(self, "{:X}", hash)?;
-        if !qname.is_empty() {
-            write!(self, "=")?;
-            self.write_all(qname)?;
-        }
-        writeln!(self, "\t{}\t{}\t{:.3}", aln.read_end.as_u16() + 1, aln.interval, Ln::to_log10(aln.ln_prob))
-    }
-
-    fn finalize_mate_alns(&mut self, hash: u64, save: bool, count: usize) -> io::Result<()> {
-        writeln!(self, "{:X}\t{}\t{} alns", hash, if save { "save" } else { "ignore" }, count)
-    }
-}
 
 pub(crate) const CSV_HEADER: &'static str = "read_hash\tread_end\tinterval\tlik";
 
@@ -88,7 +59,6 @@ impl MateAln {
         (self.interval.contig_id().get() << 1) | (self.read_end.as_u16())
     }
 }
-
 
 struct FilteredReader<'a, R: bam::Read> {
     reader: R,

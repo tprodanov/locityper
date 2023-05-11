@@ -121,8 +121,8 @@ impl Alignment {
     /// Creates a new Alignment from the record.
     pub fn from_record(record: &Record, contigs: Arc<ContigNames>) -> Self {
         let cigar = Cigar::from_raw(record.raw_cigar()); // Cigar::infer_ext_cigar_md(record, ());
-        assert!(cigar.is_extended(), "Record {} does not have an extended CIGAR",
-            String::from_utf8_lossy(record.qname()));
+        // assert!(cigar.is_extended(), "Record {} does not have an extended CIGAR",
+        //     String::from_utf8_lossy(record.qname()));
         let contig_id = ContigId::new(record.tid());
         let start = u32::try_from(record.pos()).unwrap();
         let ref_interval = if cigar.is_empty() {

@@ -3,7 +3,10 @@ use std::{
 };
 use once_cell::sync::OnceCell;
 use crate::{
-    math::distr::{DiscretePmf, WithQuantile, Mixure, NBinom, Uniform, LinearCache},
+    math::{
+        Ln,
+        distr::{DiscretePmf, WithQuantile, NBinom, Uniform, LinearCache},
+    },
     bg::{self,
         depth::GC_BINS,
     },
@@ -26,14 +29,14 @@ impl DiscretePmf for AlwaysOneDistr {
 ///
 /// Not really a distribution, sum probability will be < 1.
 #[derive(Clone, Debug)]
-struct RepeatedDistr<T> {
-    inner: T,
+struct RepeatedDistr<D> {
+    inner: D,
     count: u8,
 }
 
-impl<T: DiscretePmf + 'static> RepeatedDistr<T> {
+impl<D: DiscretePmf + 'static> RepeatedDistr<D> {
     /// Returns a box to either `inner` (if count is 1), or to `RepeatedDistr` if count > 1.
-    fn new_box(inner: T, count: u8) -> DistrBox {
+    fn new_box(inner: D, count: u8) -> DistrBox {
         assert_ne!(count, 0, "Count cannot be 0.");
         if count == 1 {
             Box::new(inner)
@@ -43,12 +46,40 @@ impl<T: DiscretePmf + 'static> RepeatedDistr<T> {
     }
 }
 
-impl<T: DiscretePmf> DiscretePmf for RepeatedDistr<T> {
+impl<D: DiscretePmf> DiscretePmf for RepeatedDistr<D> {
     fn ln_pmf(&self, k: u32) -> f64 {
         let count = u32::from(self.count);
         let div = k / count;
         let rem = k % count;
         f64::from(rem) * self.inner.ln_pmf(div + 1) + f64::from(count - rem) * self.inner.ln_pmf(div)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WeightedDistr {
+    ln_probs: Vec<f64>,
+}
+
+impl WeightedDistr {
+    /// Creates a new distribution from all cached values in the `cached` distribution, raising them in the power of
+    /// `weight` (ln-probabilities are multiplied by weight).
+    ///
+    /// Values out of the cache range are ignored.
+    fn new(cached: &LinearCache<impl DiscretePmf>, weight: f64) -> Self {
+        let mut ln_probs: Vec<_> = (0..cached.cache_size() as u32)
+            .map(|k| cached.ln_pmf(k) * weight)
+            .collect();
+        let norm_fct = Ln::sum(&ln_probs);
+        assert!(norm_fct.is_finite(), "Cannot normalize by an infinite factor.");
+        ln_probs.iter_mut().for_each(|v| *v -= norm_fct);
+        Self { ln_probs }
+    }
+}
+
+impl DiscretePmf for WeightedDistr {
+    fn ln_pmf(&self, k: u32) -> f64 {
+        // This will produce an error if `k` is too large. This is intended behaviour.
+        self.ln_probs[k as usize]
     }
 }
 
@@ -109,23 +140,22 @@ impl CachedDepthDistrs {
                 .cached(CACHE_SIZE)))
     }
 
-    /// Returns depth bound for the given GC-content and contig CN (see `DEPTH_BOUND_QUANTILE`).
-    pub fn uniform_size(&self, gc_content: u8) -> u32 {
+    /// Returns depth bound for the given GC-content and contig CN (see `UNIFSIZE_QUANTILE`).
+    fn uniform_size(&self, gc_content: u8) -> u32 {
         *self.unif_size[usize::from(gc_content)].get_or_init(||
             (UNIFSIZE_MULT * self.regular_distr(gc_content).quantile(UNIFSIZE_QUANTILE)) as u32)
     }
 
     /// Returns a box to either `RepeatedDistr`, `NBinom`, `Uniform`, or `Mixure<NBinom, Uniform>`,
     /// depending on the CN and `nbinom_weight`.
-    pub fn get_distribution(&self, gc_content: u8, cn: u8, nbinom_weight: f64) -> DistrBox {
-        if nbinom_weight < 0.00001 {
+    pub fn get_distribution(&self, gc_content: u8, cn: u8, weight: f64) -> DistrBox {
+        if weight < 0.00001 {
             RepeatedDistr::new_box(Uniform::new(0, self.uniform_size(gc_content)), cn)
-        } else if nbinom_weight > 0.99999 {
+        } else if weight > 0.99999 {
             RepeatedDistr::new_box(Arc::clone(&self.regular_distr(gc_content)), cn)
         } else {
-            let mixure = Mixure::new(Arc::clone(&self.regular_distr(gc_content)), nbinom_weight,
-                Uniform::new(0, self.uniform_size(gc_content)));
-            RepeatedDistr::new_box(mixure, cn)
+            let wdistr = WeightedDistr::new(self.regular_distr(gc_content), weight);
+            RepeatedDistr::new_box(wdistr, cn)
         }
     }
 }
