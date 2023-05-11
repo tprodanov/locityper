@@ -371,7 +371,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     }
     ext::sys::mkdir(&bg_dir)?;
 
-    let mut params_file = io::BufWriter::new(fs::File::open(&params_path)?);
+    let mut params_file = io::BufWriter::new(fs::File::create(&params_path)?);
     args.params.save().write_pretty(&mut params_file, 4)?;
     Ok(bg_dir)
 }
@@ -511,8 +511,8 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
 /// Map reads to the genome and to the background genome to estimate background distributions based solely on WGS reads.
 fn estimate_bg_from_reads(
     args: &Args,
-    bg_fasta_filename: &Path,
     out_dir: &Path,
+    bg_fasta_filename: &Path,
     contig_set: &ContigSet,
 ) -> Result<BgDistr, Error>
 {
@@ -525,6 +525,7 @@ fn estimate_bg_from_reads(
     log::info!("Mapping reads to non-duplicated region");
     run_strobealign(args, &bg_fasta_filename, &bam_filename2, true)?;
 
+    let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename1));
     let mut bam_reader1 = bam::Reader::from_path(&bam_filename1)?;
     let min_mapq = args.params.min_mapq;
@@ -557,7 +558,8 @@ fn estimate_bg_from_reads(
         .collect::<Result<_, _>>()?;
     let interval = Interval::full_contig(Arc::clone(contig_set.contigs()), contig0);
     let depth_distr = ReadDepth::estimate(records2.iter(), &interval, contig_set.get_seq(contig0),
-        contig_set.kmer_counts(), &err_prof, max_insert_size, &bg_params.depth, args.params.subsampling_rate);
+        contig_set.kmer_counts(), &err_prof, max_insert_size, &bg_params.depth,
+        args.params.subsampling_rate, opt_out_dir)?;
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -565,6 +567,7 @@ fn estimate_bg_from_reads(
 fn estimate_bg_from_alns(
     bam_filename: &Path,
     args: &Args,
+    out_dir: &Path,
     bg_fasta_filename: &Path,
     bg_contig_set: &ContigSet,
     bg_interval_name: &str,
@@ -596,13 +599,14 @@ fn estimate_bg_from_alns(
         .collect::<Result<_, _>>()?;
     let pairings = ReadMateGrouping::from_mixed_bam(&records)?;
 
+    let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     let insert_distr = InsertDistr::estimate(&pairings, bg_params)?;
     let seq_shift = bg_interval.start();
     let max_insert_size = i64::from(insert_distr.max_size());
     let err_prof = ErrorProfile::estimate(records.iter(),
         |record| cigar::Cigar::infer_ext_cigar(record, &bg_seq, seq_shift), max_insert_size, bg_params);
     let depth_distr = ReadDepth::estimate(records.iter(), &bg_interval, &bg_seq, bg_contig_set.kmer_counts(), &err_prof,
-        max_insert_size, &bg_params.depth, 1.0);
+        max_insert_size, &bg_params.depth, 1.0, opt_out_dir)?;
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -625,9 +629,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         "First contig in {:?} does not have a valid description", bg_fasta_filename)))?;
 
     let bg_distr = if let Some(alns_filename) = args.alns.as_ref() {
-        estimate_bg_from_alns(alns_filename, &args, &bg_fasta_filename, &contig_set, bg_interval_name)?
+        estimate_bg_from_alns(alns_filename, &args, &out_dir, &bg_fasta_filename, &contig_set, bg_interval_name)?
     } else {
-        estimate_bg_from_reads(&args, &bg_fasta_filename, &out_dir, &contig_set)?
+        estimate_bg_from_reads(&args, &out_dir, &bg_fasta_filename, &contig_set)?
     };
     let mut bg_file = ext::sys::create_gzip(&out_dir.join(paths::BG_DISTR))?;
     bg_distr.save().write_pretty(&mut bg_file, 4)?;

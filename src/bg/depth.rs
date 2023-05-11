@@ -1,3 +1,7 @@
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 use htslib::bam::{
     Record,
     ext::BamRecordExtensions,
@@ -9,7 +13,10 @@ use crate::{
         kmers::KmerCounts,
     },
     algo::{bisect, loess::Loess},
-    ext::vec::{VecExt, F64Ext},
+    ext::{
+        self,
+        vec::{VecExt, F64Ext},
+    },
     math::{
         Ln,
         distr::{NBinom, WithMoments},
@@ -102,14 +109,17 @@ fn count_reads<'a>(
 ///
 /// All windows must have the same length! (is not checked)
 ///
-/// Modifies input `windows` variable, and returns GC-content for each window.
+/// Consumes windows, and returns a new vector of selected windows + a vector of GC-content values for each window.
 fn filter_windows(
-    windows: &mut Vec<WindowCounts>,
+    windows: Vec<WindowCounts>,
     seq_shift: u32,
     ref_seq: &[u8],
     kmer_counts_coll: &KmerCounts,
     params: &ReadDepthParams,
-) -> Vec<f64> {
+    mut dbg_writer: impl Write,
+) -> io::Result<(Vec<WindowCounts>, Vec<f64>)>
+{
+    writeln!(dbg_writer, "start\tgc\tkmer_freq\tkeep\tdepth1\tdepth2")?;
     log::debug!("    Total windows:   {:7}", windows.len());
     let mut have_ns = 0;
     let mut have_common_kmers = 0;
@@ -119,29 +129,39 @@ fn filter_windows(
     let window_padding = params.window_padding;
     let neigh_len = (windows[0].len() + 2 * window_padding) as usize;
     let neigh_kmers = neigh_len + 1 - k as usize;
-    let thresh_sum = params.max_kmer_freq * neigh_kmers as f64;
+    let norm_fct = 1.0 / (neigh_kmers as f64);
 
+    let mut sel_windows = Vec::with_capacity(windows.len());
     let mut gc_contents = Vec::with_capacity(windows.len());
-    windows.retain(|window| {
+    for window in windows.into_iter() {
         let start_ix = (window.start - window_padding - seq_shift) as usize;
         let window_seq = &ref_seq[start_ix..start_ix + neigh_len];
+        let mut keep = true;
+        let mut mean_kmer_freq = f64::NAN;
+        let mut gc_content = f64::NAN;
         if seq::has_n(window_seq) {
             have_ns += 1;
-            return false;
-        }
-        let sum_kmer_freq = kmer_counts[start_ix..start_ix + neigh_kmers].iter().copied().map(f64::from).sum::<f64>();
-        if sum_kmer_freq > thresh_sum {
-            have_common_kmers += 1;
-            false
+            keep = false
         } else {
-            gc_contents.push(seq::gc_content(window_seq));
-            true
+            mean_kmer_freq = norm_fct * kmer_counts[start_ix..start_ix + neigh_kmers]
+                .iter().copied().map(f64::from).sum::<f64>();
+            gc_content = seq::gc_content(window_seq);
+            if mean_kmer_freq > params.max_kmer_freq {
+                have_common_kmers += 1;
+                keep = false;
+            }
         }
-    });
-    assert_eq!(gc_contents.len(), windows.len());
+
+        writeln!(dbg_writer, "{}\t{:.1}\t{:.1}\t{}\t{}\t{}", window.start, gc_content, mean_kmer_freq,
+            if keep { 'T' } else { 'F' }, window.depth1, window.depth2)?;
+        if keep {
+            sel_windows.push(window);
+            gc_contents.push(gc_content);
+        }
+    }
     log::debug!("    Remove {} windows with Ns, {} windows with common k-mers", have_ns, have_common_kmers);
-    log::debug!("    After filtering: {:7}", windows.len());
-    gc_contents
+    log::debug!("    After filtering: {:7}", sel_windows.len());
+    Ok((sel_windows, gc_contents))
 }
 
 /// In total, GC-content falls into 101 bins (0..=100).
@@ -172,15 +192,14 @@ fn find_gc_bins(gc_contents: &[f64]) -> Vec<(usize, usize)> {
 ///
 /// Variance: use LOESS with frac = 1, where observations are all GC-content values with at least 10 observations.
 /// Y values are read depth variance in each particular GC-content bin.
-fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u32], frac_windows: f64)
+fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[f64], frac_windows: f64)
     -> (Vec<f64>, Vec<f64>)
 {
     const VAR_MIN_WINDOWS: usize = 10;
     let n = depth.len();
     let m = gc_bins.len();
-    let depth_f: Vec<f64> = depth.iter().copied().map(Into::into).collect();
     let xout: Vec<f64> = (0..u32::try_from(m).unwrap()).map(Into::into).collect();
-    let means = Loess::new(frac_windows, 1).set_xout(xout.clone()).calculate(&gc_contents, &depth_f);
+    let means = Loess::new(frac_windows, 1).set_xout(xout.clone()).calculate(&gc_contents, &depth);
 
     let mut x = Vec::with_capacity(m);
     let mut y = Vec::with_capacity(m);
@@ -189,7 +208,7 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u3
     for (gc, &(i, j)) in gc_bins.iter().enumerate() {
         if j - i >= VAR_MIN_WINDOWS {
             x.push(gc as f64);
-            y.push(F64Ext::variance(&depth_f[i..j], None));
+            y.push(F64Ext::variance(&depth[i..j], None));
             w.push((j - i) as f64 / n as f64);
         }
     }
@@ -201,8 +220,10 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[u3
 /// to well estimate read depth mean and value.
 ///
 /// To counter this, find GC-content values such that to the left of it there are < min_obs observations.
-/// Fill unavailable values with the last available mean, and with the double of the last available variance.
-fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, usize)], params: &ReadDepthParams) {
+/// Fill unavailable values according to read depth parameter value `tail_var_mult`.
+fn blur_boundary_values(means: &[f64], vars: &[f64], gc_bins: &[(usize, usize)], params: &ReadDepthParams
+) -> (Vec<f64>, Vec<f64>)
+{
     let min_obs = params.min_tail_obs;
     let n = gc_bins.len();
     let m = gc_bins[gc_bins.len() - 1].1;
@@ -215,14 +236,19 @@ fn blur_boundary_values(means: &mut [f64], vars: &mut [f64], gc_bins: &[(usize, 
     log::debug!("    Few windows (< {}) with GC-content < {} or > {}, bluring distributions",
         min_obs, left_ix, right_ix);
 
+    let mut blurred_means = means.to_vec();
+    let mut blurred_vars = vars.to_vec();
     for i in 0..left_ix {
-        means[i] = means[left_ix];
-        vars[i] = (vars[left_ix] * (1.0 + (left_ix - i) as f64 * params.tail_var_mult)).max(vars[i]);
+        blurred_means[i] = means[left_ix];
+        let mult = 1.0 + (left_ix - i) as f64 * params.tail_var_mult;
+        blurred_vars[i] = (mult * vars[left_ix]).max(vars[i]);
     }
     for i in right_ix + 1..n {
-        means[i] = means[right_ix];
-        vars[i] = (vars[right_ix].max(vars[i]) * (1.0 + (i - right_ix) as f64 * params.tail_var_mult)).max(vars[i]);
+        blurred_means[i] = means[right_ix];
+        let mult = 1.0 + (i - right_ix) as f64 * params.tail_var_mult;
+        blurred_vars[i] = (mult * vars[right_ix]).max(vars[i]);
     }
+    (blurred_means, blurred_vars)
 }
 
 /// Read depth parameters.
@@ -267,7 +293,7 @@ pub struct ReadDepthParams {
     /// Repeat the same procedure for GC-content values > R.
     pub min_tail_obs: usize,
 
-    /// See `min_tail_obs`. Default: 0.05.
+    /// See `min_tail_obs`. Default: 0.02.
     pub tail_var_mult: f64,
 }
 
@@ -283,7 +309,7 @@ impl Default for ReadDepthParams {
 
             frac_windows: 0.1,
             min_tail_obs: 100,
-            tail_var_mult: 0.05,
+            tail_var_mult: 0.02,
         }
     }
 }
@@ -320,6 +346,31 @@ impl ReadDepthParams {
     }
 }
 
+fn write_summary(
+    gc_bins: &[(usize, usize)],
+    depth: &[f64],
+    loess_means: &[f64],
+    loess_vars: &[f64],
+    blurred_means: &[f64],
+    blurred_vars: &[f64],
+    distrs: &[NBinom],
+    mut dbg_writer: impl Write,
+) -> io::Result<()>
+{
+    writeln!(dbg_writer, "gc\tnwindows\tmean\tvar\tloess_mean\tloess_var\
+        \tblurred_mean\tblurred_var\tnbinom_n\tnbinom_p")?;
+    for (gc, &(i, j)) in gc_bins.iter().enumerate() {
+        let n = j - i;
+        let mean = if n > 0 { F64Ext::mean(&depth[i..j]) } else { f64::NAN };
+        let var = if n > 1 { F64Ext::variance(&depth[i..j], Some(mean)) } else { f64::NAN };
+        write!(dbg_writer, "{gc}\t{n}\t{mean:.5}\t{var:.5}\t")?;
+        write!(dbg_writer, "{:.5}\t{:.5}", loess_means[gc], loess_vars[gc])?;
+        write!(dbg_writer, "{:.5}\t{:.5}", blurred_means[gc], blurred_vars[gc])?;
+        writeln!(dbg_writer, "{}\t{}", distrs[gc].n(), distrs[gc].p())?;
+    }
+    Ok(())
+}
+
 /// Background read depth distributions for each GC-content value.
 #[derive(Clone)]
 pub struct ReadDepth {
@@ -336,6 +387,8 @@ pub struct ReadDepth {
 impl ReadDepth {
     /// Estimates read depth from primary alignments, mapped to the `interval` with sequence `ref_seq`.
     /// Ignore reads with alignment probability < `params.a` and with insert size > `max_insert_size`.
+    ///
+    /// Write debug information if `out_dir` is Some.
     pub fn estimate<'a>(
         records: impl Iterator<Item = &'a Record>,
         interval: &Interval,
@@ -345,37 +398,50 @@ impl ReadDepth {
         max_insert_size: i64,
         params: &ReadDepthParams,
         subsampling_rate: f64,
-    ) -> Self {
+        out_dir: Option<&Path>,
+    ) -> io::Result<Self>
+    {
         log::info!("Estimating read depth (ploidy {}, subsampling rate {})", params.ploidy, subsampling_rate);
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
 
-        let mut windows = count_reads(records, interval, ref_seq, params, err_prof, max_insert_size);
-        let gc_contents = filter_windows(&mut windows, interval.start(), &ref_seq, &kmer_counts, params);
+        let windows = count_reads(records, interval, ref_seq, params, err_prof, max_insert_size);
+        let (windows, gc_contents) = if let Some(dir) = out_dir {
+            let dbg_writer = ext::sys::create_gzip(&dir.join("counts.csv.gz"))?;
+            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, params, dbg_writer)?
+        } else {
+            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, params, io::sink())?
+        };
         assert!(windows.len() > 0, "ReadDepth: no applicable windows!");
 
         let ixs = VecExt::argsort(&gc_contents);
         let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
-        let depth1: Vec<u32> = ixs.iter().map(|&i| windows[i].depth1).collect();
 
-        let (mut means, mut variances) = predict_mean_var(&gc_contents, &gc_bins, &depth1, params.frac_windows);
-        blur_boundary_values(&mut means, &mut variances, &gc_bins, params);
+        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth1)).collect();
+        let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
+        let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
 
         let nbinom_mul = 1.0 / (subsampling_rate * f64::from(params.ploidy));
-        let distributions: Vec<_> = means.into_iter().zip(variances)
-            .map(|(m, v)| NBinom::estimate(m, v.max(m * 1.00001)).mul(nbinom_mul))
+        let distributions: Vec<_> = blurred_means.iter().zip(blurred_vars.iter())
+            .map(|(&m, &v)| NBinom::estimate(m, v.max(m * 1.00001)).mul(nbinom_mul))
             .collect();
         const GC_VAL: usize = 40;
         log::info!("    Read depth:  mean = {:.2},  st.dev. = {:.2}   \
             (Ploidy 1, first mates, GC-content {}, {} bp windows)",
             distributions[GC_VAL].mean(), distributions[GC_VAL].variance().sqrt(), GC_VAL, params.window_size);
-        Self {
+
+        if let Some(dir) = out_dir {
+            let dbg_writer = ext::sys::create_gzip(&dir.join("depth.csv.gz"))?;
+            write_summary(&gc_bins, &depth, &loess_means, &loess_vars, &blurred_means, &blurred_vars, &distributions,
+                dbg_writer)?;
+        }
+        Ok(Self {
             ploidy: params.ploidy,
             window_size: params.window_size,
             window_padding: params.window_padding,
             distributions,
-        }
+        })
     }
 
     /// Returns window size.
