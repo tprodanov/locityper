@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    io::{Read, Seek},
+    io::{self, Read, Write, Seek},
     cmp::max,
     sync::Arc,
     process::Command,
@@ -175,10 +175,10 @@ fn extract_bg_region<R: Read + Seek>(
     let seq = region.fetch_seq(fasta)?;
     let bg_dir = db_path.join(paths::BG_DIR);
     ext::sys::mkdir(&bg_dir)?;
-    let bg_fasta_filename = bg_dir.join(paths::BG_FASTA);
-    log::info!("Writing background region {} to {}", region, ext::fmt::path(&bg_fasta_filename));
-    let mut fasta_writer = ext::sys::create_gzip(&bg_fasta_filename)?;
-    crate::seq::write_fasta(&mut fasta_writer, format!("bg {}", region).as_bytes(), &seq)?;
+    let bed_filename = bg_dir.join(paths::BG_BED);
+    let mut bed_writer = io::BufWriter::new(fs::File::create(bed_filename)?);
+    writeln!(bed_writer, "{}", region.bed_fmt())?;
+    std::mem::drop(bed_writer);
 
     log::info!("Calculating k-mer counts on the background region.");
     let kmer_counts = kmer_getter.fetch_one(seq)?;

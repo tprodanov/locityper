@@ -3,7 +3,6 @@ use std::{
     io::{self, BufRead, Read, Seek, Write},
     fs::{self, File},
     sync::Arc,
-    process::Command,
     path::{Path, PathBuf},
 };
 use fnv::FnvHashSet;
@@ -49,7 +48,6 @@ struct Args {
     threads: u16,
     force: bool,
     jellyfish: PathBuf,
-    bwa: Vec<PathBuf>,
 }
 
 impl Default for Args {
@@ -72,7 +70,6 @@ impl Default for Args {
             threads: 8,
             force: false,
             jellyfish: PathBuf::from("jellyfish"),
-            bwa: vec![PathBuf::from("bwa"), PathBuf::from("bwa-mem2")],
         }
     }
 }
@@ -86,8 +83,6 @@ impl Args {
             "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
-        self.bwa = self.bwa.into_iter().filter_map(|path| ext::sys::find_exe(path).ok()).collect();
-        validate_param!(!self.bwa.is_empty(), "No BWA executables found");
         // Make window size odd.
         self.moving_window += 1 - self.moving_window % 2;
         Ok(self)
@@ -156,10 +151,6 @@ fn print_help() {
         "-F, --force".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
-    println!("    {:KEY$} {:VAL$}  One or more BWA executable, each used for haplotypes indexing.\n\
-        {EMPTY}  Default: try both {} and {}.",
-        "    --bwa".green(), "EXE+".yellow(),
-        defaults.bwa[0].display().to_string().underline(), defaults.bwa[1].display().to_string().underline());
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -203,7 +194,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
-            Long("bwa") => args.bwa = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -447,17 +437,6 @@ fn process_haplotypes(
     let kmer_counts = kmer_getter.fetch(filt_seqs)?;
     let mut kmers_writer = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_writer)?;
-
-    log::info!("    [{}] Indexing haplotypes", tag);
-    for bwa in args.bwa.iter() {
-        let mut bwa_command = Command::new(bwa);
-        bwa_command.arg("index").arg(&filt_fasta_filename);
-        log::debug!("        {}", ext::fmt::command(&bwa_command));
-        let bwa_output = bwa_command.output()?;
-        if !bwa_output.status.success() {
-            return Err(Error::SubprocessFail(bwa_output));
-        }
-    }
     Ok(())
 }
 

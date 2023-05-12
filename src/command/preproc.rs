@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
     process::{Stdio, Command, ChildStdin},
     time::Instant,
-    sync::Arc,
     thread,
 };
 use colored::Colorize;
@@ -20,10 +19,10 @@ use htslib::bam::{
 use crate::{
     err::{Error, validate_param},
     math::Ln,
-    algo::parse_int,
     ext,
     seq::{
-        cigar, ContigNames, ContigSet, ContigId, Interval,
+        cigar, ContigNames, Interval,
+        kmers::KmerCounts,
         fastx::{self, FastxRead},
     },
     bg::{
@@ -36,11 +35,7 @@ use crate::{
 };
 use super::paths;
 
-const DEF_N_READS: &'static str = "500k";
-
-#[derive(PartialEq)]
 struct Params {
-    n_reads: usize,
     min_mapq: u8,
     subsampling_rate: f64,
     subsampling_seed: Option<u64>,
@@ -49,9 +44,8 @@ struct Params {
 impl Default for Params {
     fn default() -> Self {
         Self {
-            n_reads: parse_int(DEF_N_READS).unwrap(),
             min_mapq: 20,
-            subsampling_rate: 0.25,
+            subsampling_rate: 0.1,
             subsampling_seed: None,
         }
     }
@@ -59,7 +53,6 @@ impl Default for Params {
 
 impl Params {
     fn validate(&mut self) -> Result<(), Error> {
-        validate_param!(self.n_reads > 0, "Cannot estimate background distributions from 0 reads.");
         validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
             "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
         if self.subsampling_rate > 0.99 {
@@ -83,10 +76,13 @@ impl Params {
             }
             Ok(val) => val,
         };
-        if &old_params != self {
+        if self.min_mapq != old_params.min_mapq || self.subsampling_rate != old_params.subsampling_rate {
             log::warn!("Parameters has changed");
             true
         } else {
+            if self.subsampling_seed != old_params.subsampling_seed {
+                log::warn!("Subsampling seed has changed");
+            }
             false
         }
     }
@@ -95,7 +91,6 @@ impl Params {
 impl JsonSer for Params {
     fn save(&self) -> json::JsonValue {
         json::object!{
-            n_reads: self.n_reads,
             min_mapq: self.min_mapq,
             subsampling_rate: self.subsampling_rate,
             subsampling_seed: self.subsampling_seed,
@@ -103,8 +98,8 @@ impl JsonSer for Params {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> n_reads (as_usize), min_mapq (as_u8), subsampling_rate (as_f64), subsampling_seed? (as_u64));
-        Ok(Self { n_reads, min_mapq, subsampling_rate, subsampling_seed })
+        json_get!(obj -> min_mapq (as_u8), subsampling_rate (as_f64), subsampling_seed? (as_u64));
+        Ok(Self { min_mapq, subsampling_rate, subsampling_seed })
     }
 }
 
@@ -174,6 +169,10 @@ impl Args {
         self.bg_params.validate()?;
         Ok(self)
     }
+
+    fn is_paired_end(&self) -> bool {
+        self.input.len() == 2 || self.interleaved
+    }
 }
 
 fn print_help(extended: bool) {
@@ -209,13 +208,8 @@ fn print_help(extended: bool) {
 
     if extended {
         println!("\n{}", "Insert size and error profile estimation:".bold());
-        println!("    {:KEY$} {:VAL$}  Use first {} reads (or read pairs)\n\
-            {EMPTY} to estimate profiles [{}].",
-            "-n, --n-reads".green(), "INT".yellow(), "INT".yellow(), DEF_N_READS);
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
             "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
-        println!("    {:width$}  Please rerun with {}, if {} or {} values have changed.",
-            "WARNING".red(), "--force".red(), "-n".green(), "-q".green(), width = KEY + VAL + 1);
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
             "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.max_clipping);
         println!("    {:KEY$} {}\n\
@@ -298,7 +292,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
 
-            Short('n') | Long("n-reads") => args.params.n_reads = parser.value()?.parse_with(parse_int)?,
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") =>
                 args.bg_params.max_clipping = parser.value()?.parse()?,
@@ -378,70 +371,41 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
 
 fn set_strobealign_stdin(
     args: &Args,
-    to_bg: bool,
     child_stdin: ChildStdin,
 ) -> Result<thread::JoinHandle<Result<(), io::Error>>, Error>
 {
-    fn create_job(args: &Args, to_bg: bool, child_stdin: ChildStdin, mut reader: impl FastxRead + 'static,
+    fn create_job(args: &Args, mut writer: impl io::Write + 'static, mut reader: impl FastxRead + 'static,
     ) -> impl FnOnce() -> Result<(), io::Error> + 'static {
-        let n_reads = args.params.n_reads;
         let subsampling_rate = args.params.subsampling_rate;
         let subsampling_seed = args.params.subsampling_seed.clone();
-        let mut writer = io::BufWriter::new(child_stdin);
-        move || {
-            match to_bg {
-                true => {
-                    let mut rng = ext::rand::init_rng(subsampling_seed);
-                    reader.subsample(&mut writer, subsampling_rate, &mut rng)
-                }
-                false => reader.write_next_n(&mut writer, n_reads).map(|_| ()),
-            }
-        }
+        move || reader.subsample(&mut writer, subsampling_rate, &mut ext::rand::init_rng(subsampling_seed))
     }
 
+    let writer = io::BufWriter::new(child_stdin);
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::from_path(&args.input[0])?;
-        Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
+        Ok(thread::spawn(create_job(args, writer, reader)))
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
-        Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
+        Ok(thread::spawn(create_job(args, writer, reader)))
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::from_path(&args.input[0])?,
             fastx::Reader::from_path(&args.input[1])?);
-        Ok(thread::spawn(create_job(args, to_bg, child_stdin, reader)))
+        Ok(thread::spawn(create_job(args, writer, reader)))
     }
 }
 
-fn create_samtools_command(args: &Args, stdin: Stdio, out_file: &Path) -> Command {
-    let mut cmd = Command::new(&args.samtools);
-    // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
-    cmd.args(&["view",
-            "--bam", // Output BAM.
-            // Ignore reads where any of the mates is unmapped,
-            // + ignore secondary & supplementary alignments + ignore failed checks.
-            "--excl-flags", "3852",
-            "--min-MQ", &args.params.min_mapq.to_string()
-            ])
-        .arg("-o").arg(out_file)
-        .stdin(stdin);
-    cmd
-}
-
-fn first_step_str(args: &Args, to_bg: bool) -> String {
+fn first_step_str(args: &Args) -> String {
     let mut s = String::new();
-    if to_bg && args.params.subsampling_rate == 1.0 {
+    if args.params.subsampling_rate == 1.0 {
         return s;
     }
 
-    if to_bg {
-        write!(s, "_subsample_ --rate {}", args.params.subsampling_rate).unwrap();
-        if let Some(seed) = args.params.subsampling_seed {
-            write!(s, " --seed {}", seed).unwrap();
-        }
-    } else {
-        write!(s, "_head_ --n-reads {}", args.params.n_reads).unwrap();
+    write!(s, "_subsample_ --rate {}", args.params.subsampling_rate).unwrap();
+    if let Some(seed) = args.params.subsampling_seed {
+        write!(s, " --seed {}", seed).unwrap();
     }
     write!(s, " -i {}", ext::fmt::path(&args.input[0])).unwrap();
     if args.input.len() > 1 {
@@ -451,15 +415,10 @@ fn first_step_str(args: &Args, to_bg: bool) -> String {
     s
 }
 
-/// Run strobealign for the input WGS reads.
-/// If `to_bg` is true, reads are mapped to a single background region. If needed, subsampling is performed.
-/// If `to_bg` is false, first `args.params.n_reads` reads are mapped to the whole genome.
-// fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
-fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool) -> Result<(), Error> {
+/// Map reads to the whole reference genome, and then take only reads mapped to the corresponding BED file.
+/// Subsample reads if the corresponding rate is less than 1.
+fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam: &Path) -> Result<(), Error> {
     let tmp_bam = out_bam.with_extension("tmp.bam");
-    if tmp_bam.exists() {
-        fs::remove_file(&tmp_bam)?;
-    }
     if out_bam.exists() {
         log::warn!("    BAM file {} exists, skipping read mapping", ext::fmt::path(out_bam));
         return Ok(());
@@ -472,26 +431,38 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
         "-f", "0.001", // Discard more minimizers to speed up alignment
         "-t", &args.threads.to_string()]) // Specify the number of threads.
         .stdout(Stdio::piped());
-    if to_bg && args.params.subsampling_rate == 1.0 {
+    if args.params.subsampling_rate == 1.0 {
         // Provide input files as they are.
         if args.interleaved {
             strobealign.arg("--interleaved");
         }
         strobealign.arg(&ref_filename).args(&args.input);
     } else {
+        if args.is_paired_end() {
+            strobealign.arg("--interleaved");
+        }
         // Subsample or take first N records from the input files, and pass them through stdin.
-        strobealign.arg("--interleaved").arg(&ref_filename).arg("-").stdin(Stdio::piped());
+        strobealign.arg(&ref_filename).arg("-").stdin(Stdio::piped());
     }
     let mut strobealign_child = strobealign.spawn()?;
     let strobealign_stdin = strobealign_child.stdin.take();
     let strobealign_stdout = strobealign_child.stdout.take();
     let mut guard = ext::sys::ChildGuard::new(strobealign_child);
+    let handle = strobealign_stdin.map(|stdin| set_strobealign_stdin(args, stdin)).transpose()?;
 
-    let handle = strobealign_stdin.map(|stdin| set_strobealign_stdin(args, to_bg, stdin)).transpose()?;
-    let mut samtools = create_samtools_command(args, Stdio::from(strobealign_stdout.unwrap()), &tmp_bam);
-    log::debug!("    {}{} | {}", first_step_str(&args, to_bg), ext::fmt::command(&strobealign),
-        ext::fmt::command(&samtools));
-
+    let mut samtools = Command::new(&args.samtools);
+    // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
+    samtools.args(&["view",
+            "-b", // Output BAM.
+            // Ignore reads where any of the mates is unmapped,
+            // + ignore secondary & supplementary alignments + ignore failed checks.
+            "-F3852",
+            "-q", &args.params.min_mapq.to_string(),
+            ])
+        .arg("-L").arg(&bed_target)
+        .arg("-o").arg(&tmp_bam)
+        .stdin(Stdio::from(strobealign_stdout.unwrap()));
+    log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&strobealign), ext::fmt::command(&samtools));
     let output = samtools.output()?;
     log::debug!("");
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
@@ -512,32 +483,26 @@ fn run_strobealign(args: &Args, ref_filename: &Path, out_bam: &Path, to_bg: bool
 fn estimate_bg_from_reads(
     args: &Args,
     out_dir: &Path,
-    bg_fasta_filename: &Path,
-    contig_set: &ContigSet,
+    data: &RefData,
 ) -> Result<BgDistr, Error>
 {
-    let bam_filename1 = out_dir.join("to_ref.bam");
-    log::info!("Mapping reads to the whole reference");
-    run_strobealign(args, args.reference.as_ref().unwrap(), &bam_filename1, false)?;
-
-    let bam_filename2 = out_dir.join("to_bg.bam");
-    let contig0 = ContigId::new(0);
-    log::info!("Mapping reads to non-duplicated region");
-    run_strobealign(args, &bg_fasta_filename, &bam_filename2, true)?;
+    let bam_filename = out_dir.join("aln.bam");
+    log::info!("Mapping reads to the reference");
+    run_strobealign(args, &data.ref_filename, &data.bed_filename, &bam_filename)?;
 
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
-    log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename1));
-    let mut bam_reader1 = bam::Reader::from_path(&bam_filename1)?;
+    log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
+    let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
     let min_mapq = args.params.min_mapq;
     let bg_params = &args.bg_params;
-    let records1: Vec<BamRecord> = bam_reader1.records()
+    let records: Vec<BamRecord> = bam_reader.records()
         .filter(|res: &Result<BamRecord, _>| match res {
             Ok(record) => record.mapq() >= min_mapq && cigar::clipping_rate(record) <= bg_params.max_clipping,
             Err(_) => true,
         })
         .collect::<Result<_, _>>()?;
-    let insert_distr = if args.input.len() > 1 || args.interleaved {
-        let pairings = ReadMateGrouping::from_unsorted_bam(records1.iter(), Some(records1.len()));
+    let insert_distr = if args.is_paired_end() {
+        let pairings = ReadMateGrouping::from_unsorted_bam(records.iter(), Some(records.len()));
         InsertDistr::estimate(&pairings, bg_params)?
     } else {
         // Single-end input.
@@ -545,21 +510,10 @@ fn estimate_bg_from_reads(
     };
 
     let max_insert_size = i64::from(insert_distr.max_size());
-    let err_prof = ErrorProfile::estimate(records1.iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
+    let err_prof = ErrorProfile::estimate(records.iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
         max_insert_size, bg_params);
-
-    log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename2));
-    let mut bam_reader2 = bam::Reader::from_path(&bam_filename2)?;
-    let records2: Vec<BamRecord> = bam_reader2.records()
-        .filter(|res: &Result<BamRecord, _>| match res {
-            Ok(record) => record.mapq() >= min_mapq,
-            Err(_) => true,
-        })
-        .collect::<Result<_, _>>()?;
-    let interval = Interval::full_contig(Arc::clone(contig_set.contigs()), contig0);
-    let depth_distr = ReadDepth::estimate(records2.iter(), &interval, contig_set.get_seq(contig0),
-        contig_set.kmer_counts(), &err_prof, max_insert_size, &bg_params.depth,
-        args.params.subsampling_rate, opt_out_dir)?;
+    let depth_distr = ReadDepth::estimate(records.iter(), &data.interval, &data.sequence, &data.kmer_counts,
+        &err_prof, max_insert_size, &bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -568,28 +522,15 @@ fn estimate_bg_from_alns(
     bam_filename: &Path,
     args: &Args,
     out_dir: &Path,
-    bg_fasta_filename: &Path,
-    bg_contig_set: &ContigSet,
-    bg_interval_name: &str,
+    data: &RefData,
 ) -> Result<BgDistr, Error>
 {
-    log::debug!("Comparing reference sequence");
-    let ref_fasta_filename = args.reference.as_ref().unwrap();
-    let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("reference", ref_fasta_filename)?;
-    let bg_interval = Interval::parse(bg_interval_name, &ref_contigs)?;
-    let ref_seq = bg_interval.fetch_seq(&mut ref_fasta)?;
-    let bg_seq = bg_contig_set.get_seq(ContigId::new(0));
-    if ref_seq != bg_seq {
-        return Err(Error::InvalidInput(format!(
-            "Fasta file {} contains interval {}, but it has different sequence than the background fasta file {}",
-            ext::fmt::path(ref_fasta_filename), bg_interval_name, ext::fmt::path(bg_fasta_filename))));
-    }
-
     log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
     let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
-    bam_reader.set_reference(ref_fasta_filename)?;
+    bam_reader.set_reference(&data.ref_filename)?;
     let bg_params = &args.bg_params;
-    bam_reader.fetch((bg_interval.contig_name(), i64::from(bg_interval.start()), i64::from(bg_interval.end())))?;
+    let interval = &data.interval;
+    bam_reader.fetch((interval.contig_name(), i64::from(interval.start()), i64::from(interval.end())))?;
     let records: Vec<BamRecord> = bam_reader.records()
         .filter(|res: &Result<BamRecord, _>| match res {
             Ok(record) => record.mapq() >= args.params.min_mapq
@@ -601,13 +542,43 @@ fn estimate_bg_from_alns(
 
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     let insert_distr = InsertDistr::estimate(&pairings, bg_params)?;
-    let seq_shift = bg_interval.start();
+    let seq_shift = interval.start();
     let max_insert_size = i64::from(insert_distr.max_size());
     let err_prof = ErrorProfile::estimate(records.iter(),
-        |record| cigar::Cigar::infer_ext_cigar(record, &bg_seq, seq_shift), max_insert_size, bg_params);
-    let depth_distr = ReadDepth::estimate(records.iter(), &bg_interval, &bg_seq, bg_contig_set.kmer_counts(), &err_prof,
+        |record| cigar::Cigar::infer_ext_cigar(record, &data.sequence, seq_shift), max_insert_size, bg_params);
+    let depth_distr = ReadDepth::estimate(records.iter(), &interval, &data.sequence, &data.kmer_counts, &err_prof,
         max_insert_size, &bg_params.depth, 1.0, opt_out_dir)?;
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+}
+
+struct RefData {
+    ref_filename: PathBuf,
+    bed_filename: PathBuf,
+    interval: Interval,
+    sequence: Vec<u8>,
+    kmer_counts: KmerCounts,
+}
+
+impl RefData {
+    fn new(ref_filename: PathBuf, db_path: &Path) -> Result<Self, Error> {
+        let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
+
+        // Load and parse background region coordinates.
+        let bed_filename = db_path.join(paths::BG_BED);
+        let bed_contents = fs::read_to_string(&bed_filename)?;
+        let bg_intervals: Vec<_> = bed_contents.split('\n')
+            .filter(|s| !s.starts_with('#') && s.contains('\t')).collect();
+        if bg_intervals.len() != 1 {
+            return Err(Error::InvalidData(format!("Incorrect number of regions in {}", ext::fmt::path(&bed_filename))));
+        }
+        let interval = Interval::parse_bed(&mut bg_intervals[0].split('\t'), &ref_contigs)?;
+        let sequence = interval.fetch_seq(&mut ref_fasta)?;
+
+        // Load k-mer counts for the background region.
+        let kmers_filename = db_path.join(paths::KMERS);
+        let kmer_counts = KmerCounts::load(ext::sys::open(&kmers_filename)?, &[interval.len()])?;
+        Ok(Self { ref_filename, bed_filename, interval, sequence, kmer_counts })
+    }
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -616,25 +587,16 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let out_dir = create_out_dir(&args)?;
 
     log::info!("Loading background non-duplicated region into memory");
-    let db_path = args.database.as_ref().unwrap();
-    let db_bg_dir = db_path.join(paths::BG_DIR);
-    let bg_fasta_filename = db_bg_dir.join(paths::BG_FASTA);
-    let kmers_filename = db_bg_dir.join(paths::KMERS);
-    let mut descriptions = Vec::with_capacity(1);
-    let contig_set = ContigSet::load("bg", &bg_fasta_filename, &kmers_filename, &mut descriptions)?;
-    if contig_set.len() != 1 {
-        return Err(Error::InvalidData(format!("File {:?} contains more than one region", bg_fasta_filename)));
-    }
-    let bg_interval_name = descriptions[0].as_ref().ok_or_else(|| Error::InvalidData(format!(
-        "First contig in {:?} does not have a valid description", bg_fasta_filename)))?;
+    let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
+    let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
 
     let bg_distr = if let Some(alns_filename) = args.alns.as_ref() {
-        estimate_bg_from_alns(alns_filename, &args, &out_dir, &bg_fasta_filename, &contig_set, bg_interval_name)?
+        estimate_bg_from_alns(alns_filename, &args, &out_dir, &ref_data)?
     } else {
-        estimate_bg_from_reads(&args, &out_dir, &bg_fasta_filename, &contig_set)?
+        estimate_bg_from_reads(&args, &out_dir, &ref_data)?
     };
-    let mut bg_file = ext::sys::create_gzip(&out_dir.join(paths::BG_DISTR))?;
-    bg_distr.save().write_pretty(&mut bg_file, 4)?;
+    let mut distr_file = ext::sys::create_gzip(&out_dir.join(paths::BG_DISTR))?;
+    bg_distr.save().write_pretty(&mut distr_file, 4)?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }

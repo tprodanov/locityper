@@ -209,7 +209,7 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[f6
         if j - i >= VAR_MIN_WINDOWS {
             x.push(gc as f64);
             y.push(F64Ext::variance(&depth[i..j], None));
-            w.push((j - i) as f64 / n as f64);
+            w.push(((j - i) as f64 / n as f64).sqrt());
         }
     }
     let vars = Loess::new(1.0, 1).set_xout(xout).calculate_weighted(&x, &y, &w);
@@ -305,9 +305,9 @@ impl Default for ReadDepthParams {
             window_padding: 100,
             boundary_size: 1000,
             max_kmer_freq: 1.2,
-            min_aln_prob: Ln::from_log10(-10.0),
+            min_aln_prob: Ln::from_log10(-5.0),
 
-            frac_windows: 0.1,
+            frac_windows: 0.5,
             min_tail_obs: 100,
             tail_var_mult: 0.02,
         }
@@ -426,10 +426,12 @@ impl ReadDepth {
         let distributions: Vec<_> = blurred_means.iter().zip(blurred_vars.iter())
             .map(|(&m, &v)| NBinom::estimate(m, v.max(m * 1.00001)).mul(nbinom_mul))
             .collect();
+
         const GC_VAL: usize = 40;
-        log::info!("    Read depth:  mean = {:.2},  st.dev. = {:.2}   \
-            (Ploidy 1, first mates, GC-content {}, {} bp windows)",
-            distributions[GC_VAL].mean(), distributions[GC_VAL].variance().sqrt(), GC_VAL, params.window_size);
+        let is_paired_end = max_insert_size > 0;
+        let logging_distr = distributions[GC_VAL].mul(f64::from(params.ploidy) * if is_paired_end { 2.0 } else { 1.0 });
+        log::info!("    Read depth mean = {:.2},  variance: {:.2}  (per {} bp window at GC-content {})",
+            logging_distr.mean(), logging_distr.variance(), params.window_size, GC_VAL);
 
         if let Some(dir) = out_dir {
             let dbg_writer = ext::sys::create_gzip(&dir.join("depth.csv.gz"))?;
