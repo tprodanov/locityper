@@ -1,13 +1,14 @@
 //! Preprocess WGS dataset.
 
 use std::{
-    fs, io,
+    fs, io, thread,
     fmt::Write as FmtWrite,
     cmp::max,
     path::{Path, PathBuf},
     process::{Stdio, Command, ChildStdin},
     time::Instant,
-    thread,
+    ops::Deref,
+    sync::Arc,
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
@@ -21,13 +22,15 @@ use crate::{
     math::Ln,
     ext,
     seq::{
-        cigar, ContigNames, Interval,
+        ContigNames, Interval,
         kmers::KmerCounts,
         fastx::{self, FastxRead},
+        cigar::{self, Cigar},
+        aln::{Alignment, LightAlignment, ReadEnd},
     },
     bg::{
         self, BgDistr,
-        insertsz::{ReadMateGrouping, InsertDistr},
+        insertsz::{self, InsertDistr},
         err_prof::ErrorProfile,
         depth::ReadDepth,
         ser::{JsonSer, json_get},
@@ -35,6 +38,12 @@ use crate::{
 };
 use super::paths;
 
+/// Min. alignment probability is raised to the power of 2.5, in order to accomodate for two
+/// read ends + insert size probability.
+const PAIRED_THRESH_POW: f64 = 2.5;
+
+/// Parameters, that need to be saved between preprocessing executions.
+/// On a new run, rerun is recommended if the parameters have changed.
 struct Params {
     min_mapq: u8,
     subsampling_rate: f64,
@@ -117,6 +126,12 @@ struct Args {
     samtools: PathBuf,
     debug: bool,
 
+    /// When calculating insert size distributions and read error profiles,
+    /// ignore reads with `clipping > max_clipping * read_len`.
+    pub max_clipping: f64,
+    /// Do not use reads with alignment probability < `min_aln_prob` (ln-space) for read depth calculation.
+    min_aln_prob: f64,
+
     params: Params,
     bg_params: bg::Params,
 }
@@ -136,6 +151,9 @@ impl Default for Args {
             debug: false,
             strobealign: PathBuf::from("strobealign"),
             samtools: PathBuf::from("samtools"),
+
+            max_clipping: 0.02,
+            min_aln_prob: Ln::from_log10(-2.5),
 
             params: Params::default(),
             bg_params: bg::Params::default(),
@@ -164,6 +182,11 @@ impl Args {
 
         self.strobealign = ext::sys::find_exe(self.strobealign)?;
         self.samtools = ext::sys::find_exe(self.samtools)?;
+
+        validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
+            "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
+        validate_param!(self.min_aln_prob < 0.0,
+            "Minimum alignment probability ({:.5}) must be under 0.", Ln::to_log10(self.min_aln_prob));
 
         self.params.validate()?;
         self.bg_params.validate()?;
@@ -211,12 +234,13 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
             "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
-            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.max_clipping);
+            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.max_clipping);
         println!("    {:KEY$} {}\n\
             {EMPTY}  Max allowed insert size is calculated as {} multiplied by\n\
             {EMPTY}  the {}-th insert size quantile [{}, {}].",
             "-I, --ins-quantile".green(), "FLOAT FLOAT".yellow(),
-            "FLOAT_1".yellow(), "FLOAT_2".yellow(), defaults.bg_params.ins_quantile_mult, defaults.bg_params.ins_quantile);
+            "FLOAT_1".yellow(), "FLOAT_2".yellow(),
+            defaults.bg_params.ins_quantile_mult, defaults.bg_params.ins_quantile);
         println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
             {EMPTY}  read mappings missed due to higher error rate [{}].",
             "-m, --err-mult".green(), "FLOAT".yellow(), defaults.bg_params.err_rate_mult);
@@ -239,9 +263,10 @@ fn print_help(extended: bool) {
             {EMPTY}  Must not be smaller than {} [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
             defaults.bg_params.depth.boundary_size);
-        println!("    {:KEY$} {:VAL$}  Ignore reads with alignment likelihood under 10^{} [{:.1}]",
+        println!("    {:KEY$} {:VAL$}  Ignore reads with alignment likelihood under 10^{} [{:.1}].\
+            {EMPTY}  Paired-end threshold is further raised to the power of {:.1}.",
             "    --min-aln-lik".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-            Ln::to_log10(defaults.bg_params.depth.min_aln_prob));
+            Ln::to_log10(defaults.min_aln_prob), PAIRED_THRESH_POW);
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
             "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
@@ -293,8 +318,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
 
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
-            Short('c') | Long("max-clip") | Long("max-clipping") =>
-                args.bg_params.max_clipping = parser.value()?.parse()?,
+            Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
             Short('I') | Long("ins-quant") | Long("ins-quantile") => {
                 args.bg_params.ins_quantile_mult = parser.value()?.parse()?;
                 args.bg_params.ins_quantile = parser.value()?.parse()?;
@@ -313,7 +337,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('w') | Long("window") => args.bg_params.depth.window_size = parser.value()?.parse()?,
             Long("window-padd") | Long("window-padding") => args.bg_params.depth.window_padding = parser.value()?.parse()?,
             Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse()?,
-            Long("min-aln-lik") => args.bg_params.depth.min_aln_prob = Ln::from_log10(parser.value()?.parse()?),
+            Long("min-aln-lik") => args.min_aln_prob = Ln::from_log10(parser.value()?.parse()?),
             Long("kmer-freq") | Long("kmer-frequency") => args.bg_params.depth.max_kmer_freq = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
                 args.bg_params.depth.frac_windows = parser.value()?.parse()?,
@@ -479,42 +503,127 @@ fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam:
     Ok(())
 }
 
+/// Loads records and converts them to Alignments.
+/// All returned alignments are primary, have MAPQ over the `args.min_mapq`,
+/// and clipping under the threshold `argsbg_params.max_clipping`.
+///
+/// Second returned argument is true if records are paired-end.
+///
+/// Alignment probabilities are not set.
+fn load_alns(
+    reader: &mut bam::Reader,
+    cigar_getter: impl Fn(&bam::Record) -> Cigar,
+    contigs: &Arc<ContigNames>,
+    args: &Args
+) -> Result<(Vec<Alignment>, bool), Error>
+{
+    let min_mapq = args.params.min_mapq;
+    let max_clipping = args.max_clipping;
+    let mut paired_counts = [0_u64, 0];
+
+    let mut alns = Vec::new();
+    let mut record = bam::Record::new();
+    while let Some(()) = reader.read(&mut record).transpose()? {
+        if record.flags() & 3844 == 0 && record.mapq() >= min_mapq && cigar::clipping_rate(&record) <= max_clipping {
+            let cigar = cigar_getter(&record);
+            alns.push(Alignment::new(&record, cigar, ReadEnd::from_record(&record), Arc::clone(contigs), f64::NAN));
+            paired_counts[usize::from(record.is_paired())] += 1;
+        }
+    }
+    if paired_counts[0] > 0 && paired_counts[1] > 0 {
+        return Err(Error::InvalidData(format!("BAM file contains both paired and unpaired reads")));
+    }
+    if alns.is_empty() {
+        return Err(Error::InvalidData(format!("BAM file contains no reads in the target region")));
+    }
+    Ok((alns, paired_counts[1] > 0))
+}
+
+fn estimate_bg_from_paired(
+    alns: Vec<Alignment>,
+    args: &Args,
+    opt_out_dir: Option<&Path>,
+    data: &RefData,
+) -> Result<BgDistr, Error>
+{
+    // Group reads into pairs, and estimate insert size from them.
+    let pair_ixs = insertsz::group_mates(&alns)?;
+    let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params)?;
+
+    // Estimate error profile from read pairs with appropriate insert size.
+    let max_insert_size = insert_distr.max_size();
+    let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
+    for &(i, j) in pair_ixs.iter() {
+        let first = &alns[i];
+        let second = &alns[j];
+        if first.insert_size(second.deref()) <= max_insert_size {
+            errprof_alns.push(first);
+            errprof_alns.push(second);
+        }
+    }
+    let err_prof = ErrorProfile::estimate(errprof_alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
+
+    // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
+    let mut depth_alns: Vec<&LightAlignment> = Vec::with_capacity(errprof_alns.len());
+    let thresh_prob = PAIRED_THRESH_POW * args.min_aln_prob;
+    for chunk in errprof_alns.chunks_exact(2) {
+        let first = chunk[0];
+        let second = chunk[1];
+        let prob = err_prof.ln_prob(first.cigar()) + err_prof.ln_prob(second.cigar())
+            + first.insert_size_prob(second.deref(), &insert_distr);
+        if prob >= thresh_prob {
+            depth_alns.push(first.deref());
+            depth_alns.push(second.deref());
+        }
+    }
+    let depth_distr = ReadDepth::estimate(depth_alns.into_iter(), &data.interval, &data.sequence, &data.kmer_counts,
+        &args.bg_params.depth, args.params.subsampling_rate, true, opt_out_dir)?;
+    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+}
+
+fn estimate_bg_from_unpaired(
+    alns: Vec<Alignment>,
+    args: &Args,
+    opt_out_dir: Option<&Path>,
+    data: &RefData,
+) -> Result<BgDistr, Error>
+{
+    let insert_distr = InsertDistr::undefined();
+    let err_prof = ErrorProfile::estimate(alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
+    let filt_alns = alns.iter()
+        .filter(|aln| err_prof.ln_prob(aln.cigar()) >= args.min_aln_prob)
+        .map(Deref::deref);
+    let depth_distr = ReadDepth::estimate(filt_alns, &data.interval, &data.sequence, &data.kmer_counts,
+        &args.bg_params.depth, args.params.subsampling_rate, false, opt_out_dir)?;
+    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+}
+
 /// Map reads to the genome and to the background genome to estimate background distributions based solely on WGS reads.
-fn estimate_bg_from_reads(
+fn estimate_bg_distrs(
     args: &Args,
     out_dir: &Path,
     data: &RefData,
 ) -> Result<BgDistr, Error>
 {
-    let bam_filename = out_dir.join("aln.bam");
-    log::info!("Mapping reads to the reference");
-    run_strobealign(args, &data.ref_filename, &data.bed_filename, &bam_filename)?;
-
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
-    log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
-    let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-    let min_mapq = args.params.min_mapq;
-    let bg_params = &args.bg_params;
-    let records: Vec<BamRecord> = bam_reader.records()
-        .filter(|res: &Result<BamRecord, _>| match res {
-            Ok(record) => record.mapq() >= min_mapq && cigar::clipping_rate(record) <= bg_params.max_clipping,
-            Err(_) => true,
-        })
-        .collect::<Result<_, _>>()?;
-    let insert_distr = if args.is_paired_end() {
-        let pairings = ReadMateGrouping::from_unsorted_bam(&records);
-        InsertDistr::estimate(&pairings, bg_params)?
-    } else {
-        // Single-end input.
-        InsertDistr::undefined()
-    };
+    let (alns, is_paired_end) = if let Some(alns_filename) = args.alns.as_ref() {
 
-    let max_insert_size = i64::from(insert_distr.max_size());
-    let err_prof = ErrorProfile::estimate(records.iter(), |record| cigar::Cigar::from_raw(record.raw_cigar()),
-        max_insert_size, bg_params);
-    let depth_distr = ReadDepth::estimate(records.iter(), &data.interval, &data.sequence, &data.kmer_counts,
-        &err_prof, max_insert_size, &bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
-    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+    } else {
+        let bam_filename = out_dir.join("aln.bam");
+        log::info!("Mapping reads to the reference");
+        run_strobealign(args, &data.ref_filename, &data.bed_filename, &bam_filename)?;
+
+        log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
+        let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
+        load_alns(&mut bam_reader, Cigar::from_raw, &data.ref_contigs, args)?
+    };
+    assert_eq!(is_paired_end, args.is_paired_end());
+
+    if is_paired_end {
+        estimate_bg_from_paired(alns, args, opt_out_dir, data)
+    } else {
+        estimate_bg_from_unpaired(alns, args, opt_out_dir, data)
+    }
 }
 
 /// Estimate background distributions based on WGS read mappings to the genome.
@@ -525,34 +634,36 @@ fn estimate_bg_from_alns(
     data: &RefData,
 ) -> Result<BgDistr, Error>
 {
-    log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
-    let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
-    bam_reader.set_reference(&data.ref_filename)?;
-    let bg_params = &args.bg_params;
-    let interval = &data.interval;
-    bam_reader.fetch((interval.contig_name(), i64::from(interval.start()), i64::from(interval.end())))?;
-    let records: Vec<BamRecord> = bam_reader.records()
-        .filter(|res: &Result<BamRecord, _>| match res {
-            Ok(record) => record.mapq() >= args.params.min_mapq
-                && cigar::clipping_rate(record) <= bg_params.max_clipping,
-            Err(_) => true,
-        })
-        .collect::<Result<_, _>>()?;
-    let pairings = ReadMateGrouping::from_mixed_bam(&records)?;
+    unimplemented!()
+    // log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
+    // let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
+    // bam_reader.set_reference(&data.ref_filename)?;
+    // let bg_params = &args.bg_params;
+    // let interval = &data.interval;
+    // bam_reader.fetch((interval.contig_name(), i64::from(interval.start()), i64::from(interval.end())))?;
+    // let records: Vec<BamRecord> = bam_reader.records()
+    //     .filter(|res: &Result<BamRecord, _>| match res {
+    //         Ok(record) => record.mapq() >= args.params.min_mapq
+    //             && cigar::clipping_rate(record) <= bg_params.max_clipping,
+    //         Err(_) => true,
+    //     })
+    //     .collect::<Result<_, _>>()?;
+    // let pairings = ReadMateGrouping::from_mixed_bam(&records)?;
 
-    let opt_out_dir = if args.debug { Some(out_dir) } else { None };
-    let insert_distr = InsertDistr::estimate(&pairings, bg_params)?;
-    let seq_shift = interval.start();
-    let max_insert_size = i64::from(insert_distr.max_size());
-    let err_prof = ErrorProfile::estimate(records.iter(),
-        |record| cigar::Cigar::infer_ext_cigar(record, &data.sequence, seq_shift), max_insert_size, bg_params);
-    let depth_distr = ReadDepth::estimate(records.iter(), &interval, &data.sequence, &data.kmer_counts, &err_prof,
-        max_insert_size, &bg_params.depth, 1.0, opt_out_dir)?;
-    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+    // let opt_out_dir = if args.debug { Some(out_dir) } else { None };
+    // let insert_distr = InsertDistr::estimate(&pairings, bg_params)?;
+    // let seq_shift = interval.start();
+    // let max_insert_size = i64::from(insert_distr.max_size());
+    // let err_prof = ErrorProfile::estimate(records.iter(),
+    //     |record| cigar::Cigar::infer_ext_cigar(record, &data.sequence, seq_shift), max_insert_size, bg_params);
+    // let depth_distr = ReadDepth::estimate(records.iter(), &interval, &data.sequence, &data.kmer_counts, &err_prof,
+    //     max_insert_size, &bg_params.depth, 1.0, opt_out_dir)?;
+    // Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
 struct RefData {
     ref_filename: PathBuf,
+    ref_contigs: Arc<ContigNames>,
     bed_filename: PathBuf,
     interval: Interval,
     sequence: Vec<u8>,
@@ -577,7 +688,7 @@ impl RefData {
         // Load k-mer counts for the background region.
         let kmers_filename = db_path.join(paths::KMERS);
         let kmer_counts = KmerCounts::load(ext::sys::open(&kmers_filename)?, &[interval.len()])?;
-        Ok(Self { ref_filename, bed_filename, interval, sequence, kmer_counts })
+        Ok(Self { ref_filename, ref_contigs, bed_filename, interval, sequence, kmer_counts })
     }
 }
 

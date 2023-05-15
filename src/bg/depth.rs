@@ -11,6 +11,7 @@ use crate::{
         self, Interval,
         cigar::Cigar,
         kmers::KmerCounts,
+        aln::LightAlignment,
     },
     algo::{bisect, loess::Loess},
     ext::{
@@ -39,41 +40,28 @@ pub trait DepthDistr {
 struct WindowCounts {
     start: u32,
     end: u32,
-    depth1: u32,
-    depth2: u32,
+    depth: [u32; 2],
 }
 
 impl WindowCounts {
     fn new(start: u32, end: u32) -> Self {
         WindowCounts {
             start, end,
-            depth1: 0,
-            depth2: 0,
+            depth: [0, 0],
         }
     }
 
     fn len(&self) -> u32 {
         self.end - self.start
     }
-
-    fn add_read(&mut self, record: &Record) {
-        if record.is_last_in_template() {
-            self.depth2 += 1;
-        } else {
-            self.depth1 += 1;
-        }
-    }
 }
 
 /// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.boundary_size`
 /// and ~ `interval.end() - params.boundary_size`.
 fn count_reads<'a>(
-    records: impl Iterator<Item = &'a Record>,
+    alignments: impl Iterator<Item = &'a LightAlignment>,
     interval: &Interval,
-    ref_seq: &[u8],
     params: &ReadDepthParams,
-    err_prof: &ErrorProfile,
-    max_insert_size: i64,
 ) -> Vec<WindowCounts> {
     assert!(interval.len() >= params.window_size + 2 * params.boundary_size, "Input interval is too short!");
     let n_windows = (f64::from(interval.len() - 2 * params.boundary_size) / f64::from(params.window_size))
@@ -86,18 +74,11 @@ fn count_reads<'a>(
         .map(|i| WindowCounts::new(start + i * params.window_size, start + (i + 1) * params.window_size))
         .collect();
 
-    for record in records {
-        if super::read_unpaired_or_proper_pair(record, max_insert_size) {
-            let aln_start = record.reference_start();
-            let aln_end = record.reference_end();
-            let middle = (aln_start + aln_end) as u32 / 2;
-            if start <= middle && middle < end {
-                let cigar = Cigar::infer_ext_cigar(record, ref_seq, interval_start);
-                if err_prof.ln_prob(&cigar) >= params.min_aln_prob {
-                    let ix = (middle - start) / params.window_size;
-                    windows[ix as usize].add_read(record);
-                }
-            }
+    for aln in alignments {
+        let middle = aln.interval().middle();
+        if start <= middle && middle < end {
+            let ix = (middle - start) / params.window_size;
+            windows[ix as usize].depth[aln.read_end().ix()] += 1;
         }
     }
     windows
@@ -153,7 +134,7 @@ fn filter_windows(
         }
 
         writeln!(dbg_writer, "{}\t{:.1}\t{:.1}\t{}\t{}\t{}", window.start, gc_content, mean_kmer_freq,
-            if keep { 'T' } else { 'F' }, window.depth1, window.depth2)?;
+            if keep { 'T' } else { 'F' }, window.depth[0], window.depth[1])?;
         if keep {
             sel_windows.push(window);
             gc_contents.push(gc_content);
@@ -273,9 +254,6 @@ pub struct ReadDepthParams {
     /// Default: 1.2.
     pub max_kmer_freq: f64,
 
-    /// Do not use reads with alignment probability < `min_aln_prob` (ln-space) for read depth calculation.
-    pub min_aln_prob: f64,
-
     /// When calculating read depth averages for various GC-content values, use `frac_windows` fraction
     /// across all windows. For example, if frac_windows is 0.1 (default),
     /// use 10% of all observations with the most similar GC-content values.
@@ -305,7 +283,6 @@ impl Default for ReadDepthParams {
             window_padding: 100,
             boundary_size: 1000,
             max_kmer_freq: 1.2,
-            min_aln_prob: Ln::from_log10(-5.0),
 
             frac_windows: 0.5,
             min_tail_obs: 100,
@@ -329,8 +306,6 @@ impl ReadDepthParams {
             "Maximum k-mer frequency ({}) must be at least 1", self.max_kmer_freq);
         validate_param!(0.0 < self.frac_windows && self.frac_windows <= 1.0,
             "Fraction of windows ({}) must be within (0, 1]", self.frac_windows);
-        validate_param!(self.min_aln_prob < 0.0,
-            "Minimum alignment probability ({:.5}) must be under 0.", Ln::to_log10(self.min_aln_prob));
 
         if self.min_tail_obs < 100 {
             log::warn!("Number of windows with extreme GC-content ({}) is too small, consider using a larger value",
@@ -390,14 +365,13 @@ impl ReadDepth {
     ///
     /// Write debug information if `out_dir` is Some.
     pub fn estimate<'a>(
-        records: impl Iterator<Item = &'a Record>,
+        alignments: impl Iterator<Item = &'a LightAlignment>,
         interval: &Interval,
         ref_seq: &[u8],
         kmer_counts: &KmerCounts,
-        err_prof: &ErrorProfile,
-        max_insert_size: i64,
         params: &ReadDepthParams,
         subsampling_rate: f64,
+        is_paired_end: bool,
         out_dir: Option<&Path>,
     ) -> io::Result<Self>
     {
@@ -405,7 +379,7 @@ impl ReadDepth {
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
 
-        let windows = count_reads(records, interval, ref_seq, params, err_prof, max_insert_size);
+        let windows = count_reads(alignments, interval, params);
         let (windows, gc_contents) = if let Some(dir) = out_dir {
             let dbg_writer = ext::sys::create_gzip(&dir.join("counts.csv.gz"))?;
             filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, params, dbg_writer)?
@@ -418,7 +392,7 @@ impl ReadDepth {
         let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
 
-        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth1)).collect();
+        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth[0])).collect();
         let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
         let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
 
@@ -428,7 +402,6 @@ impl ReadDepth {
             .collect();
 
         const GC_VAL: usize = 40;
-        let is_paired_end = max_insert_size > 0;
         let logging_distr = distributions[GC_VAL].mul(f64::from(params.ploidy) * if is_paired_end { 2.0 } else { 1.0 });
         log::info!("    Read depth mean = {:.2},  variance: {:.2}  (per {} bp window at GC-content {})",
             logging_distr.mean(), logging_distr.variance(), params.window_size, GC_VAL);

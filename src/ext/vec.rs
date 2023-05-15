@@ -256,6 +256,12 @@ impl<T> Tuples<T> {
         }
     }
 
+    pub fn from_vec(data: Vec<T>, tup_len: usize) -> Self {
+        assert!(data.len() % tup_len == 0, "Vector length ({}) does not divide tuple length ({})",
+            data.len(), tup_len);
+        Self { data, tup_len }
+    }
+
     /// Returns the number of tuples in the set.
     pub fn len(&self) -> usize {
         self.data.len() / self.tup_len
@@ -271,8 +277,14 @@ impl<T> Tuples<T> {
         self.data.chunks_exact(self.tup_len)
     }
 
+    /// Iterates over tuples with indices `i..j`.
     pub fn iter_range(&self, ixs: Range<usize>) -> std::slice::ChunksExact<'_, T> {
         self.data[ixs.start * self.tup_len..ixs.end * self.tup_len].chunks_exact(self.tup_len)
+    }
+
+    /// Returns iterator over all tuple contents consecutively, same as chaining all tuples.
+    pub fn iter_inner(&self) -> std::slice::Iter<'_, T> {
+        self.data.iter()
     }
 }
 

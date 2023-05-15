@@ -5,7 +5,7 @@ pub mod ser;
 
 use htslib::bam::Record;
 use crate::err::{Error, validate_param};
-use {
+pub use {
     depth::{ReadDepth, ReadDepthParams},
     insertsz::InsertDistr,
     err_prof::ErrorProfile,
@@ -17,10 +17,6 @@ pub use ser::JsonSer;
 pub struct Params {
     /// Background read depth parameters.
     pub depth: ReadDepthParams,
-
-    /// When calculating insert size distributions and read error profiles,
-    /// ignore reads with `clipping > max_clipping * read_len`.
-    pub max_clipping: f64,
 
     // Calculate max insert size from input reads as `<ins_quantile_mult> * <ins_quantile>-th insert size quantile`.
     // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
@@ -36,7 +32,6 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             depth: Default::default(),
-            max_clipping: 0.02,
             ins_quantile: 0.99,
             ins_quantile_mult: 3.0,
             err_rate_mult: 1.2,
@@ -47,8 +42,6 @@ impl Default for Params {
 impl Params {
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
-            "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
         validate_param!(0.5 <= self.ins_quantile && self.ins_quantile <= 1.0,
             "Insert size quantile ({:.5}) must be within [0.5, 1]", self.ins_quantile);
         validate_param!(self.ins_quantile_mult >= 1.0,

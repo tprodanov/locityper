@@ -122,29 +122,18 @@ pub struct ErrorProfile {
 }
 
 impl ErrorProfile {
-    /// Create error profile from the iterator over records.
-    pub fn estimate<'a, I, F>(
-        records: I,
-        cigar_getter: F,
-        max_insert_size: i64,
-        params: &super::Params,
+    /// Create error profile from the iterator over CIGARs (with extended operations X/=).
+    pub fn estimate<'a>(
+        cigars: impl Iterator<Item = &'a Cigar>,
+        err_rate_mult: f64,
     ) -> ErrorProfile
-    where I: Iterator<Item = &'a Record>,
-          F: Fn(&Record) -> Cigar,
     {
         log::info!("Estimating read error profiles");
-        let mut n_reads = 0;
         let mut prof_builder = OpCounts::<u64>::default();
-        for record in records {
-            if super::read_unpaired_or_proper_pair(record, max_insert_size) {
-                n_reads += 1;
-                // NOTE: Need to check if the record is completely within the region.
-                let cigar = cigar_getter(record);
-                prof_builder += &OpCounts::<u32>::calculate(&cigar);
-            }
+        for cigar in cigars {
+            prof_builder += &OpCounts::<u32>::calculate(cigar);
         }
-        log::info!("    Used {} reads", n_reads);
-        prof_builder.get_profile(params.err_rate_mult)
+        prof_builder.get_profile(err_rate_mult)
     }
 
     /// Returns alignment ln-probability.

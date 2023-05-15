@@ -5,7 +5,7 @@ use std::{
     cmp::min,
     ops::Index,
 };
-use htslib::bam::record;
+use htslib::bam::{record, Record};
 use crate::ext::vec::VecOrNone;
 
 /// Subset of CIGAR operations.
@@ -166,9 +166,9 @@ impl Cigar {
         Cigar::default()
     }
 
-    pub fn from_raw(raw_cigar: &[u32]) -> Cigar {
+    pub fn from_raw(record: &Record) -> Cigar {
         let mut res = Cigar::new();
-        for &val in raw_cigar.iter() {
+        for &val in record.raw_cigar().iter() {
             res.push(CigarItem::from_u32(val));
         }
         res

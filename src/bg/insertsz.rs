@@ -1,5 +1,6 @@
 //! Traits and structures related to insert size (distance between read mates).
 
+use std::ops::Deref;
 use htslib::bam::record::Record;
 use fnv::FnvHashMap;
 use crate::{
@@ -8,107 +9,26 @@ use crate::{
     ext::vec::{VecExt, F64Ext},
     bg::ser::{JsonSer, json_get},
     math::distr::{DiscretePmf, NBinom, LinearCache},
+    seq::aln::Alignment,
 };
 
-/// Group read in pairs.
+/// Group read alignments in pairs, and returns indices of the pair in the original vector.
 /// Only full pairs (both mates are present in some specific region) are stored.
-pub struct ReadMateGrouping<'a> {
-    pairs: Vec<(&'a Record, &'a Record)>,
-}
-
-/// Read is paired and is first mate.
-const FIRST_AND_PAIRED: u16 = 65;
-/// Read is unmapped, mate is unmapped, or alignment is secondary or supplementary, or does not pass some checks.
-const BAD_READ: u16 = 3852;
-
-/// If possible, puts a next possible first mate to `rec1`, and returns true.
-/// Input `rec1` can also be used, if it is appropriate.
-fn next_first_mate<'a>(rec1: &mut &'a Record, records: &mut impl Iterator<Item = &'a Record>) -> bool {
-    // No flags from `BAD_READ`, all flags from `FIRST_AND_PAIRED`.
-    if (rec1.flags() & (BAD_READ | FIRST_AND_PAIRED)) == FIRST_AND_PAIRED {
-        return true;
-    }
-    while let Some(rec) = records.next() {
-        if (rec.flags() & (BAD_READ | FIRST_AND_PAIRED)) == FIRST_AND_PAIRED {
-            *rec1 = rec;
-            return true;
+///
+/// Input: vector of primary alignments.
+/// There can be at most one first and one second mate for each name.
+pub fn group_mates<'a>(alns: &'a [Alignment]) -> Result<Vec<(usize, usize)>, Error> {
+    let mut pairs: FnvHashMap<&'a [u8], [Option<usize>; 2]> =
+        FnvHashMap::with_capacity_and_hasher(alns.len() / 2, Default::default());
+    for (i, aln) in alns.iter().enumerate() {
+        let ix = aln.read_end().ix();
+        // Insert alignment and return Error, if there already was an alignment there.
+        if pairs.entry(aln.name()).or_default()[ix].replace(i).is_some() {
+            return Err(Error::InvalidData(format!("Read {} has several {} mates",
+                aln.name_utf8(), if ix == 0 { "first" } else { "second" })));
         }
     }
-    false
-}
-
-impl<'a> ReadMateGrouping<'a> {
-    /// Group read mates from an unsorted BAM file, possibly filtered.
-    /// This means that consecutive reads are either from the same mate,
-    /// or one of the mates is missing (because it was discarded previously).
-    ///
-    /// Panics, if some of the reads are supplementary/secondary, or any of the mates are unmapped.
-    pub fn from_unsorted_bam(records: &'a [Record]) -> Self {
-        assert!(records.is_empty(), "Cannot estimate insert size from 0 reads.");
-        let mut pairs = Vec::with_capacity(records.len() / 2);
-        let mut records = records.iter();
-
-        let mut rec1 = records.next().unwrap();
-        loop {
-            if !next_first_mate(&mut rec1, &mut records) {
-                break;
-            }
-            let rec2 = match records.next() {
-                Some(rec) => rec,
-                None => break,
-            };
-            assert_eq!(rec2.flags() & BAD_READ, 0,
-                "ReadMateGrouping failed: read {} has flag {}", String::from_utf8_lossy(rec2.qname()), rec2.flags());
-            if rec2.is_last_in_template() && rec1.qname() == rec2.qname() {
-                pairs.push((rec1, rec2));
-                match records.next() {
-                    Some(rec) => rec1 = rec,
-                    None => break,
-                }
-            } else {
-                rec1 = rec2;
-            }
-        }
-        Self { pairs }
-    }
-
-    /// Groups read mates into mates.
-    /// Input: vector of reads, where read mates do not necessarily go together.
-    pub fn from_mixed_bam(records: &'a [Record]) -> Result<Self, Error> {
-        let mut pairs: FnvHashMap<&'a [u8], [Option<&'a Record>; 2]> = FnvHashMap::with_capacity_and_hasher(
-            records.len() / 2, Default::default());
-        let mut all_paired = true;
-        for record in records {
-            // Record must be primary, paired, both mates are mapped.
-            // 1 on RHS: record is paired.
-            if (record.flags() & 3853) == 1 {
-                let ix = usize::from(record.is_last_in_template());
-                // Insert record and return Error, if there already was a record there.
-                if let Some(old_rec) = pairs.entry(record.qname()).or_default()[ix].replace(record) {
-                    return Err(Error::InvalidData(format!("Read {} has several {} mates",
-                        String::from_utf8_lossy(old_rec.qname()), if ix == 0 { "first" } else { "second" })));
-                }
-            } else {
-                all_paired &= record.is_paired();
-            }
-        }
-        if !pairs.is_empty() && !all_paired {
-            return Err(Error::InvalidData("Input BAM file contains both paired and unpaired records.".to_owned()));
-        }
-        Ok(Self {
-            pairs: pairs.into_values()
-                .filter_map(|[rec1, rec2]| rec1.zip(rec2))
-                .collect()
-        })
-    }
-
-    pub fn len(&self) -> usize {
-        self.pairs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pairs.is_empty()
-    }
+    Ok(pairs.into_values().filter_map(|[opt_i, opt_j]| opt_i.zip(opt_j)).collect())
 }
 
 /// Returns true if FF/RR orientation, false if FR/RF.
@@ -131,7 +51,7 @@ pub struct InsertDistr {
 }
 
 /// Counts reads with insert size over 1Mb as certainly unpaired.
-const MAX_REASONABLE_INSERT: f64 = 1e6;
+const MAX_REASONABLE_INSERT: u32 = 1_000_000;
 
 impl InsertDistr {
     pub fn undefined() -> Self {
@@ -146,21 +66,27 @@ impl InsertDistr {
     ///
     // Calculate max insert size from input reads as `<quantile_mult> * <quantile>-th insert size quantile`.
     // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
-    pub fn estimate<'a>(read_pairs: &ReadMateGrouping<'a>, params: &super::Params) -> Result<Self, Error> {
-        if read_pairs.is_empty() {
-            log::error!("No paired reads, skipping insert size distribution");
-            return Ok(Self::undefined());
-        } else if read_pairs.len() < 1000 {
+    pub fn estimate(
+        alignments: &[Alignment],
+        pair_ixs: &[(usize, usize)],
+        params: &super::Params,
+    ) -> Result<Self, Error>
+    {
+        if pair_ixs.is_empty() {
+            return Err(Error::InvalidData("BAM records are supposed to be paired!".to_owned()));
+        } else if pair_ixs.len() < 1000 {
             return Err(Error::InvalidData("Not enough paired reads to calculate insert size distribution".to_owned()));
         }
         log::info!("Estimating insert size distribution");
         let mut insert_sizes = Vec::<f64>::new();
         let mut orient_counts = [0_u64; 2];
-        for (first, second) in read_pairs.pairs.iter() {
-            let insert_size = first.insert_size().abs() as f64;
-            if first.tid() == second.tid() && insert_size < MAX_REASONABLE_INSERT {
-                insert_sizes.push(insert_size);
-                orient_counts[pair_orientation(first) as usize] += 1;
+        for (i, j) in pair_ixs.iter() {
+            let first = &alignments[*i].deref();
+            let second = &alignments[*j].deref();
+            let insert_size = first.insert_size(second);
+            if insert_size < MAX_REASONABLE_INSERT {
+                insert_sizes.push(f64::from(insert_size));
+                orient_counts[usize::from(first.pair_orientation(second))] += 1;
             }
         }
 

@@ -9,7 +9,7 @@ use crate::{
     Error,
     seq::{
         Interval, ContigId, ContigNames,
-        aln::{Alignment, ReadEnd},
+        aln::{LightAlignment, ReadEnd},
         cigar::Cigar,
     },
     bg::{
@@ -55,7 +55,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     fn read_mate_alns(
         &mut self,
         read_end: ReadEnd,
-        alns: &mut Vec<Alignment>,
+        alns: &mut Vec<LightAlignment>,
         dbg_writer: &mut impl Write,
     ) -> Result<u64, Error>
     {
@@ -69,12 +69,13 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         loop {
-            let cigar = Cigar::from_raw(self.record.raw_cigar());
-            let mate_aln = Alignment::from_record(
-                &self.record, &cigar, read_end, Arc::clone(&self.contigs), self.err_prof);
+            let cigar = Cigar::from_raw(&self.record);
+            let mate_prob = self.err_prof.ln_prob(&cigar);
+            let mate_aln = LightAlignment::new(
+                &self.record, &cigar, read_end, Arc::clone(&self.contigs), mate_prob);
             writeln!(dbg_writer, "{:X}\t{}\t{}\t{:.2}",
-                name_hash, read_end, mate_aln.interval(), Ln::to_log10(mate_aln.ln_prob()))?;
-            if mate_aln.ln_prob() >= self.thresh_prob {
+                name_hash, read_end, mate_aln.interval(), Ln::to_log10(mate_prob))?;
+            if mate_prob >= self.thresh_prob {
                 alns.push(mate_aln);
             }
 
@@ -96,7 +97,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 pub(crate) struct PrelimAlignments {
     contigs: Arc<ContigNames>,
     /// Pairs: read name hash, all alignments for the read pair.
-    all_alns: Vec<(u64, Vec<Alignment>)>,
+    all_alns: Vec<(u64, Vec<LightAlignment>)>,
 }
 
 impl PrelimAlignments {
@@ -170,7 +171,7 @@ impl PrelimAlignments {
         for (name_hash, alns) in self.all_alns.iter_mut() {
             // log::debug!("Read {:X}", name_hash);
             // Sort alignments first by contig id, then by read-end.
-            alns.sort_unstable_by_key(Alignment::sort_key);
+            alns.sort_unstable_by_key(LightAlignment::sort_key);
             let pair_alns = identify_pair_alignments(*name_hash, alns, insert_distr, ln_ncontigs, params);
             res.push(pair_alns);
         }
@@ -186,8 +187,8 @@ const BISECT_RIGHT_STEP: usize = 4;
 fn extend_pair_alignments(
     new_alns: &mut Vec<PairAlignment>,
     buffer: &mut Vec<f64>,
-    alns1: &[Alignment],
-    alns2: &[Alignment],
+    alns1: &[LightAlignment],
+    alns2: &[LightAlignment],
     insert_distr: &InsertDistr,
     params: &super::Params,
 ) {
@@ -231,7 +232,7 @@ fn extend_pair_alignments(
 /// For a single read pair, combine all single-mate alignments across all contigs.
 fn identify_pair_alignments(
     name_hash: u64,
-    alns: &[Alignment],
+    alns: &[LightAlignment],
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
@@ -281,7 +282,7 @@ pub(crate) enum TwoIntervals {
     // None,
 }
 
-/// Alignment of the read pair. At most one of two alignments may be missing!
+/// LightAlignment of the read pair. At most one of two alignments may be missing!
 /// If present, both alignments must map to the same contig and be relatively close to each other.
 #[derive(Clone)]
 pub struct PairAlignment {
