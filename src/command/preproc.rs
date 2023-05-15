@@ -187,6 +187,10 @@ impl Args {
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
         validate_param!(self.min_aln_prob < 0.0,
             "Minimum alignment probability ({:.5}) must be under 0.", Ln::to_log10(self.min_aln_prob));
+        if self.alns.is_some() {
+            self.params.subsampling_rate = 1.0;
+            self.params.subsampling_seed = None;
+        }
 
         self.params.validate()?;
         self.bg_params.validate()?;
@@ -507,12 +511,14 @@ fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam:
 /// All returned alignments are primary, have MAPQ over the `args.min_mapq`,
 /// and clipping under the threshold `argsbg_params.max_clipping`.
 ///
+/// Ignore reads, for which `cigar_getter` returns None.
+///
 /// Second returned argument is true if records are paired-end.
 ///
 /// Alignment probabilities are not set.
 fn load_alns(
-    reader: &mut bam::Reader,
-    cigar_getter: impl Fn(&bam::Record) -> Cigar,
+    reader: &mut impl bam::Read,
+    cigar_getter: impl Fn(&bam::Record) -> Option<Cigar>,
     contigs: &Arc<ContigNames>,
     args: &Args
 ) -> Result<(Vec<Alignment>, bool), Error>
@@ -525,9 +531,10 @@ fn load_alns(
     let mut record = bam::Record::new();
     while let Some(()) = reader.read(&mut record).transpose()? {
         if record.flags() & 3844 == 0 && record.mapq() >= min_mapq && cigar::clipping_rate(&record) <= max_clipping {
-            let cigar = cigar_getter(&record);
-            alns.push(Alignment::new(&record, cigar, ReadEnd::from_record(&record), Arc::clone(contigs), f64::NAN));
-            paired_counts[usize::from(record.is_paired())] += 1;
+            if let Some(cigar) = cigar_getter(&record) {
+                alns.push(Alignment::new(&record, cigar, ReadEnd::from_record(&record), Arc::clone(contigs), f64::NAN));
+                paired_counts[usize::from(record.is_paired())] += 1;
+            }
         }
     }
     if paired_counts[0] > 0 && paired_counts[1] > 0 {
@@ -607,7 +614,15 @@ fn estimate_bg_distrs(
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     let (alns, is_paired_end) = if let Some(alns_filename) = args.alns.as_ref() {
-
+        log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
+        let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
+        bam_reader.set_reference(&data.ref_filename)?;
+        let interval = &data.interval;
+        let interval_start = interval.start();
+        let ref_seq = &data.sequence;
+        bam_reader.fetch((interval.contig_name(), i64::from(interval_start), i64::from(interval.end())))?;
+        load_alns(&mut bam_reader, |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
+            &data.ref_contigs, args)?
     } else {
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
@@ -615,50 +630,15 @@ fn estimate_bg_distrs(
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-        load_alns(&mut bam_reader, Cigar::from_raw, &data.ref_contigs, args)?
+        load_alns(&mut bam_reader, |record| Some(Cigar::from_raw(record)), &data.ref_contigs, args)?
     };
-    assert_eq!(is_paired_end, args.is_paired_end());
+    assert!(args.alns.is_some() || (is_paired_end == args.is_paired_end()));
 
     if is_paired_end {
         estimate_bg_from_paired(alns, args, opt_out_dir, data)
     } else {
         estimate_bg_from_unpaired(alns, args, opt_out_dir, data)
     }
-}
-
-/// Estimate background distributions based on WGS read mappings to the genome.
-fn estimate_bg_from_alns(
-    bam_filename: &Path,
-    args: &Args,
-    out_dir: &Path,
-    data: &RefData,
-) -> Result<BgDistr, Error>
-{
-    unimplemented!()
-    // log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
-    // let mut bam_reader = bam::IndexedReader::from_path(bam_filename)?;
-    // bam_reader.set_reference(&data.ref_filename)?;
-    // let bg_params = &args.bg_params;
-    // let interval = &data.interval;
-    // bam_reader.fetch((interval.contig_name(), i64::from(interval.start()), i64::from(interval.end())))?;
-    // let records: Vec<BamRecord> = bam_reader.records()
-    //     .filter(|res: &Result<BamRecord, _>| match res {
-    //         Ok(record) => record.mapq() >= args.params.min_mapq
-    //             && cigar::clipping_rate(record) <= bg_params.max_clipping,
-    //         Err(_) => true,
-    //     })
-    //     .collect::<Result<_, _>>()?;
-    // let pairings = ReadMateGrouping::from_mixed_bam(&records)?;
-
-    // let opt_out_dir = if args.debug { Some(out_dir) } else { None };
-    // let insert_distr = InsertDistr::estimate(&pairings, bg_params)?;
-    // let seq_shift = interval.start();
-    // let max_insert_size = i64::from(insert_distr.max_size());
-    // let err_prof = ErrorProfile::estimate(records.iter(),
-    //     |record| cigar::Cigar::infer_ext_cigar(record, &data.sequence, seq_shift), max_insert_size, bg_params);
-    // let depth_distr = ReadDepth::estimate(records.iter(), &interval, &data.sequence, &data.kmer_counts, &err_prof,
-    //     max_insert_size, &bg_params.depth, 1.0, opt_out_dir)?;
-    // Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
 struct RefData {
@@ -701,11 +681,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
     let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
 
-    let bg_distr = if let Some(alns_filename) = args.alns.as_ref() {
-        estimate_bg_from_alns(alns_filename, &args, &out_dir, &ref_data)?
-    } else {
-        estimate_bg_from_reads(&args, &out_dir, &ref_data)?
-    };
+    let bg_distr = estimate_bg_distrs(&args, &out_dir, &ref_data)?;
     let mut distr_file = ext::sys::create_gzip(&out_dir.join(paths::BG_DISTR))?;
     bg_distr.save().write_pretty(&mut distr_file, 4)?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));

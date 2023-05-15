@@ -239,7 +239,9 @@ impl Cigar {
 
     /// Infer extended CIGAR from a region with already known reference sequence
     /// (`ref_seq`, shifted by `ref_seq_shift`).
-    pub fn infer_ext_cigar(rec: &record::Record, ref_seq: &[u8], ref_seq_shift: u32) -> Cigar {
+    ///
+    /// If the record goes outside of the reference sequence, return None.
+    pub fn infer_ext_cigar(rec: &record::Record, ref_seq: &[u8], ref_seq_shift: u32) -> Option<Cigar> {
         let ref_seq_end = ref_seq_shift + ref_seq.len() as u32;
         let ref_start = u32::try_from(rec.pos()).unwrap();
         let query_seq = rec.seq();
@@ -254,7 +256,7 @@ impl Cigar {
 
             if ref_start + cigar.rlen < ref_seq_shift || ref_start + cigar.rlen + item.len >= ref_seq_end {
                 // Read goes beyond the boundary of the reference sequence, try to infer extended CIGAR using MD tag.
-                return Self::infer_ext_cigar_md(rec, ());
+                return None;
             }
 
             let ref_shift = (ref_start + cigar.rlen - ref_seq_shift) as usize;
@@ -278,7 +280,7 @@ impl Cigar {
             assert_eq!(cigar.qlen, in_query_len,
                 "Failed to convert CIGAR for read {:?}", String::from_utf8_lossy(rec.qname()));
         }
-        cigar
+        Some(cigar)
     }
 
     /// Create an extended CIGAR from short CIGAR and MD string. Returns Cigar.
