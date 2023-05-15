@@ -2,14 +2,15 @@ use std::{
     fmt,
     sync::Arc,
 };
-use htslib::bam::{
-    Record,
-    ext::BamRecordExtensions,
-};
+use htslib::bam::Record;
 use crate::{
     seq::{
         Interval, ContigId, ContigNames,
         cigar::Cigar,
+    },
+    bg::{
+        err_prof::ErrorProfile,
+        insertsz::InsertDistr,
     },
 };
 
@@ -103,75 +104,77 @@ impl fmt::Display for ReadEnd {
     }
 }
 
-/// In total, there can be only two read ends.
-pub const READ_ENDS: usize = 2;
+/// Returns reference interval for the alignment. Panics if the record is unmapped.
+pub fn ref_interval(record: &Record, cigar: &Cigar, contigs: Arc<ContigNames>) -> Interval {
+    assert!(!record.is_unmapped(),
+        "Cannot get alignment interval for an unmapped record {}", String::from_utf8_lossy(record.qname()));
+    let contig_id = ContigId::new(record.tid());
+    let start = u32::try_from(record.pos()).unwrap();
+    Interval::new(contigs, contig_id, start, start + cigar.ref_len())
+}
 
-/// Read alignment.
-/// Stores reference interval, strand, extended CIGAR and read-end information.
-/// Does not store read name.
-#[derive(Clone)]
+/// Alignment location, strand, read-end, and alignment ln-probability.
+/// CIGAR is not stored for now, can be added later, if needed.
 pub struct Alignment {
-    ref_interval: Interval,
+    interval: Interval,
     strand: Strand,
-    /// Extended CIGAR with X/= instead of M.
-    cigar: Cigar,
+    read_end: ReadEnd,
+    ln_prob: f64,
 }
 
 impl Alignment {
-    /// Creates a new Alignment from the record.
-    pub fn from_record(record: &Record, contigs: Arc<ContigNames>) -> Self {
-        let cigar = Cigar::from_raw(record.raw_cigar()); // Cigar::infer_ext_cigar_md(record, ());
-        // assert!(cigar.is_extended(), "Record {} does not have an extended CIGAR",
-        //     String::from_utf8_lossy(record.qname()));
-        let contig_id = ContigId::new(record.tid());
-        let start = u32::try_from(record.pos()).unwrap();
-        let ref_interval = if cigar.is_empty() {
-            assert!(record.is_unmapped(), "Read is mapped, but has empty CIGAR!");
-            Interval::new_empty(contigs, contig_id, start)
-        } else {
-            Interval::new(contigs, contig_id, start, start + cigar.ref_len())
-        };
-        debug_assert_eq!(cigar.ref_len() as i64, record.reference_end() - record.pos());
+    /// Creates a new alignment extension from a htslib `Record`.
+    pub fn from_record(
+        record: &Record,
+        cigar: &Cigar,
+        read_end: ReadEnd,
+        contigs: Arc<ContigNames>,
+        err_prof: &ErrorProfile,
+    ) -> Self
+    {
         Self {
-            ref_interval, cigar,
+            ln_prob: err_prof.ln_prob(cigar),
             strand: Strand::from_record(record),
+            interval: ref_interval(record, cigar, contigs),
+            read_end,
         }
     }
 
-    /// Returns reference interval.
-    pub fn ref_interval(&self) -> &Interval {
-        &self.ref_interval
-    }
-
-    /// Consumes alignments and returns reference interval.
-    pub fn take_interval(self) -> Interval {
-        self.ref_interval
-    }
-
-    /// Returns contig id of the alignment.
+    /// Get contig id of the alignment.
     pub fn contig_id(&self) -> ContigId {
-        self.ref_interval.contig_id()
+        self.interval.contig_id()
     }
 
-    /// Returns extended alignment CIGAR.
-    pub fn cigar(&self) -> &Cigar {
-        &self.cigar
+    /// Reference interval, to which the record is aligned.
+    pub fn interval(&self) -> &Interval {
+        &self.interval
     }
 
-    /// Returns alignment strand.
+    /// Read end of the alignment.
     pub fn strand(&self) -> Strand {
         self.strand
     }
-}
 
-impl fmt::Debug for Alignment {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Aln({:?}:{:?}, {:?})", self.ref_interval, self.strand, self.cigar)
+    /// Read end of the alignment.
+    pub fn read_end(&self) -> ReadEnd {
+        self.read_end
     }
-}
 
-impl fmt::Display for Alignment {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Aln({}:{}, {})", self.ref_interval, self.strand, self.cigar)
+    /// Ln-probability of the alignment.
+    pub fn ln_prob(&self) -> f64 {
+        self.ln_prob
+    }
+
+    /// Returns sorted key: first sort by contig id, then by read end.
+    pub fn sort_key(&self) -> u16 {
+        // Total number of contigs is checked in `ContigNames::new`.
+        (self.interval.contig_id().get() << 1) | (self.read_end.as_u16())
+    }
+
+    /// Returns probability of two alignments: probability of first * probability of second * insert size probability.
+    pub fn paired_prob(&self, mate: &Alignment, insert_distr: &InsertDistr) -> f64 {
+        let insert_size = self.interval.furthest_distance(&mate.interval)
+            .expect("Alignments must be on the same contig");
+        self.ln_prob + mate.ln_prob + insert_distr.ln_prob(insert_size, self.strand == mate.strand)
     }
 }

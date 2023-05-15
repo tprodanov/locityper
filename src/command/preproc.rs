@@ -502,7 +502,7 @@ fn estimate_bg_from_reads(
         })
         .collect::<Result<_, _>>()?;
     let insert_distr = if args.is_paired_end() {
-        let pairings = ReadMateGrouping::from_unsorted_bam(records.iter(), Some(records.len()));
+        let pairings = ReadMateGrouping::from_unsorted_bam(&records);
         InsertDistr::estimate(&pairings, bg_params)?
     } else {
         // Single-end input.

@@ -9,7 +9,8 @@ use crate::{
     Error,
     seq::{
         Interval, ContigId, ContigNames,
-        aln::{Strand, ReadEnd, Alignment},
+        aln::{Alignment, ReadEnd},
+        cigar::Cigar,
     },
     bg::{
         err_prof::ErrorProfile,
@@ -20,45 +21,6 @@ use crate::{
 };
 
 pub(crate) const CSV_HEADER: &'static str = "read_hash\tread_end\tinterval\tlik";
-
-/// Single mate alignment: store alignment location, strand, read-end, and alignment ln-probability.
-#[derive(Clone)]
-pub(crate) struct MateAln {
-    interval: Interval,
-    strand: Strand,
-    read_end: ReadEnd,
-    /// Log-probability of the alignment.
-    ln_prob: f64,
-}
-
-impl MateAln {
-    /// Creates a new alignment extension from a htslib `Record`.
-    fn from_record(
-        record: &bam::Record,
-        contigs: Arc<ContigNames>,
-        err_prof: &ErrorProfile,
-        read_end: ReadEnd,
-    ) -> Self
-    {
-        let aln = Alignment::from_record(record, contigs);
-        Self {
-            strand: aln.strand(),
-            ln_prob: err_prof.ln_prob(aln.cigar()),
-            interval: aln.take_interval(),
-            read_end,
-        }
-    }
-
-    /// Get contig id of the alignment.
-    fn contig_id(&self) -> ContigId {
-        self.interval.contig_id()
-    }
-
-    /// Returns sorted key: first sort by contig id, then by read end.
-    fn sort_key(&self) -> u16 {
-        (self.interval.contig_id().get() << 1) | (self.read_end.as_u16())
-    }
-}
 
 struct FilteredReader<'a, R: bam::Read> {
     reader: R,
@@ -93,7 +55,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     fn read_mate_alns(
         &mut self,
         read_end: ReadEnd,
-        alns: &mut Vec<MateAln>,
+        alns: &mut Vec<Alignment>,
         dbg_writer: &mut impl Write,
     ) -> Result<u64, Error>
     {
@@ -107,11 +69,12 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         loop {
-            let mate_aln = MateAln::from_record(
-                &self.record, Arc::clone(&self.contigs), self.err_prof, read_end);
+            let cigar = Cigar::from_raw(self.record.raw_cigar());
+            let mate_aln = Alignment::from_record(
+                &self.record, &cigar, read_end, Arc::clone(&self.contigs), self.err_prof);
             writeln!(dbg_writer, "{:X}\t{}\t{}\t{:.2}",
-                name_hash, read_end, mate_aln.interval, Ln::to_log10(mate_aln.ln_prob))?;
-            if mate_aln.ln_prob >= self.thresh_prob {
+                name_hash, read_end, mate_aln.interval(), Ln::to_log10(mate_aln.ln_prob()))?;
+            if mate_aln.ln_prob() >= self.thresh_prob {
                 alns.push(mate_aln);
             }
 
@@ -133,7 +96,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 pub(crate) struct PrelimAlignments {
     contigs: Arc<ContigNames>,
     /// Pairs: read name hash, all alignments for the read pair.
-    all_alns: Vec<(u64, Vec<MateAln>)>,
+    all_alns: Vec<(u64, Vec<Alignment>)>,
 }
 
 impl PrelimAlignments {
@@ -181,8 +144,8 @@ impl PrelimAlignments {
             }
 
             let any_central = alns.iter().any(|aln| {
-                let middle = aln.interval.middle();
-                left_boundary <= middle && middle <= right_boundaries[aln.interval.contig_id().ix()]
+                let middle = aln.interval().middle();
+                left_boundary <= middle && middle <= right_boundaries[aln.contig_id().ix()]
             });
             if any_central {
                 writeln!(dbg_writer, "{:X}\tsave\t{} alns", name_hash, alns.len())?;
@@ -207,7 +170,7 @@ impl PrelimAlignments {
         for (name_hash, alns) in self.all_alns.iter_mut() {
             // log::debug!("Read {:X}", name_hash);
             // Sort alignments first by contig id, then by read-end.
-            alns.sort_unstable_by_key(MateAln::sort_key);
+            alns.sort_unstable_by_key(Alignment::sort_key);
             let pair_alns = identify_pair_alignments(*name_hash, alns, insert_distr, ln_ncontigs, params);
             res.push(pair_alns);
         }
@@ -223,8 +186,8 @@ const BISECT_RIGHT_STEP: usize = 4;
 fn extend_pair_alignments(
     new_alns: &mut Vec<PairAlignment>,
     buffer: &mut Vec<f64>,
-    alns1: &[MateAln],
-    alns2: &[MateAln],
+    alns1: &[Alignment],
+    alns2: &[Alignment],
     insert_distr: &InsertDistr,
     params: &super::Params,
 ) {
@@ -239,30 +202,28 @@ fn extend_pair_alignments(
     for aln1 in alns1.iter() {
         let mut best_prob1 = f64::NEG_INFINITY;
         for (j, aln2) in alns2.iter().enumerate() {
-            let insert_size = aln1.interval.furthest_distance(&aln2.interval)
-                .expect("Alignments must be on the same contig");
-            let prob = aln1.ln_prob + aln2.ln_prob + insert_distr.ln_prob(insert_size, aln1.strand == aln2.strand);
+            let prob = aln1.paired_prob(aln2, insert_distr);
             if prob >= thresh_prob {
                 best_prob1 = best_prob1.max(prob);
                 buffer[j] = buffer[j].max(prob);
                 new_alns.push(PairAlignment::new(
-                    TwoIntervals::Both(aln1.interval.clone(), aln2.interval.clone()), prob));
+                    TwoIntervals::Both(aln1.interval().clone(), aln2.interval().clone()), prob));
             }
         }
 
         // Add unpaired read1, if needed.
-        let prob = aln1.ln_prob + params.unmapped_penalty;
+        let prob = aln1.ln_prob() + params.unmapped_penalty;
         if prob >= thresh_prob && prob + params.prob_diff >= best_prob1 {
-            new_alns.push(PairAlignment::new(TwoIntervals::First(aln1.interval.clone()), prob));
+            new_alns.push(PairAlignment::new(TwoIntervals::First(aln1.interval().clone()), prob));
         }
     }
 
     // Add unpaired read2, if needed.
     for (j, aln2) in alns2.iter().enumerate() {
-        let prob = aln2.ln_prob + params.unmapped_penalty;
+        let prob = aln2.ln_prob() + params.unmapped_penalty;
         // Check on `alns1_empty`, as if they are empty, buffer was not cleaned.
         if prob >= thresh_prob && (alns1_empty || prob + params.prob_diff >= buffer[j]) {
-            new_alns.push(PairAlignment::new(TwoIntervals::Second(aln2.interval.clone()), prob));
+            new_alns.push(PairAlignment::new(TwoIntervals::Second(aln2.interval().clone()), prob));
         }
     }
 }
@@ -270,7 +231,7 @@ fn extend_pair_alignments(
 /// For a single read pair, combine all single-mate alignments across all contigs.
 fn identify_pair_alignments(
     name_hash: u64,
-    alns: &[MateAln],
+    alns: &[Alignment],
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
@@ -286,7 +247,7 @@ fn identify_pair_alignments(
         // sort_key1: current sort key for first mates, sort_key2: current sort key for second mates.
         let sort_key1 = contig_id.get() << 1;
         let sort_key2 = sort_key1 | 1;
-        let j = if alns[i].read_end == ReadEnd::First {
+        let j = if alns[i].read_end() == ReadEnd::First {
             bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key1), i, n, BISECT_RIGHT_STEP)
         } else { i };
         let k = bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key2), j, n, BISECT_RIGHT_STEP);

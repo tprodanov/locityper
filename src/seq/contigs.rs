@@ -75,8 +75,9 @@ impl ContigNames {
             lengths.push(length);
         }
 
-        assert!(names.len() < (std::u16::MAX as usize - 1) / 2,
-            "Cannot supports {} contigs, maximum number is {}", names.len(), (std::u16::MAX as usize - 1) / 2);
+        const MAX_CONTIGS: usize = (std::u16::MAX as usize - 1) / 2;
+        assert!(names.len() < MAX_CONTIGS,
+            "Cannot supports {} contigs, maximum number is {}", names.len(), MAX_CONTIGS);
 
         names.shrink_to_fit();
         lengths.shrink_to_fit();

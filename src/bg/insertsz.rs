@@ -43,15 +43,12 @@ impl<'a> ReadMateGrouping<'a> {
     /// or one of the mates is missing (because it was discarded previously).
     ///
     /// Panics, if some of the reads are supplementary/secondary, or any of the mates are unmapped.
-    pub fn from_unsorted_bam(mut records: impl Iterator<Item = &'a Record>, max_reads: Option<usize>) -> Self {
-        let mut rec1 = match records.next() {
-            Some(rec) => rec,
-            None => return Self {
-                pairs: Vec::new(),
-            },
-        };
+    pub fn from_unsorted_bam(records: &'a [Record]) -> Self {
+        assert!(records.is_empty(), "Cannot estimate insert size from 0 reads.");
+        let mut pairs = Vec::with_capacity(records.len() / 2);
+        let mut records = records.iter();
 
-        let mut pairs = if let Some(n) = max_reads { Vec::with_capacity(n / 2) } else { Vec::new() };
+        let mut rec1 = records.next().unwrap();
         loop {
             if !next_first_mate(&mut rec1, &mut records) {
                 break;
@@ -151,7 +148,7 @@ impl InsertDistr {
     // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
     pub fn estimate<'a>(read_pairs: &ReadMateGrouping<'a>, params: &super::Params) -> Result<Self, Error> {
         if read_pairs.is_empty() {
-            log::info!("No paired reads, skipping insert size distribution");
+            log::error!("No paired reads, skipping insert size distribution");
             return Ok(Self::undefined());
         } else if read_pairs.len() < 1000 {
             return Err(Error::InvalidData("Not enough paired reads to calculate insert size distribution".to_owned()));
