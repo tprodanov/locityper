@@ -54,6 +54,11 @@ impl NBinom {
         LinearCache::new(self, cache_size)
     }
 
+    /// Returns the mode of the distribution: value, which produces the highest probability.
+    pub fn mode(&self) -> u32 {
+        ((self.n - 1.0) * (1.0 - self.p) / self.p).floor().max(0.0) as u32
+    }
+
     pub fn n(&self) -> f64 {
         self.n
     }

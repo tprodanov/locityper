@@ -31,27 +31,24 @@ pub fn group_mates<'a>(alns: &'a [Alignment]) -> Result<Vec<(usize, usize)>, Err
     Ok(pairs.into_values().filter_map(|[opt_i, opt_j]| opt_i.zip(opt_j)).collect())
 }
 
-/// Returns true if FF/RR orientation, false if FR/RF.
-#[inline]
-fn pair_orientation(record: &Record) -> bool {
-    let flag = record.flags();
-    (flag & 0x10) == (flag & 0x20)
-}
-
 /// Allow read-pair orientation, if at least 5% pairs support it.
 const ORIENT_THRESH: f64 = 0.05;
 
-/// Negative Binomial insert size.
+/// Insert size distribution.
 #[derive(Debug, Clone)]
 pub struct InsertDistr {
+    /// Maximum allowed insert size. Higher values wil automatically produce -inf.
     max_size: u32,
     /// Are different read-pair orientation allowed? (FR/RF v. RR/FF)
     orient_allowed: [bool; 2],
+    /// Cached insert size distribution.
     distr: Option<LinearCache<NBinom>>,
+    /// Highest insert size ln-probability, achievable at this distribution.
+    mode_prob: f64,
 }
 
-/// Counts reads with insert size over 1Mb as certainly unpaired.
-const MAX_REASONABLE_INSERT: u32 = 1_000_000;
+/// Counts reads with insert size over 500 kb as certainly unpaired.
+const MAX_REASONABLE_INSERT: u32 = 500_000;
 
 impl InsertDistr {
     pub fn undefined() -> Self {
@@ -59,6 +56,7 @@ impl InsertDistr {
             max_size: 0,
             orient_allowed: [false; 2],
             distr: None,
+            mode_prob: f64::NAN,
         }
     }
 
@@ -114,9 +112,12 @@ impl InsertDistr {
         let var = F64Ext::variance(lim_insert_sizes, Some(mean)).max(1.000001 * mean);
         log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", mean, var.sqrt());
         log::info!("    Treat reads with insert size > {} as unpaired", max_size);
+        let distr = NBinom::estimate(mean, var).cached(max_size as usize + 1);
+        let mode_prob = distr.ln_pmf(distr.inner().mode());
+
         Ok(Self {
-            max_size, orient_allowed,
-            distr: Some(NBinom::estimate(mean, var).cached(max_size as usize + 1)),
+            max_size, orient_allowed, mode_prob,
+            distr: Some(distr),
         })
     }
 
@@ -129,7 +130,7 @@ impl InsertDistr {
         }
     }
 
-    /// Maximum insert size. Over this size, all pairs are deemed unpaired.
+    /// Maximum insert size. Over this size, all pairs are considered unpaired.
     pub fn max_size(&self) -> u32 {
         self.max_size
     }
@@ -137,6 +138,11 @@ impl InsertDistr {
     /// Returns true if the reads are paired-end, false if single-end.
     pub fn is_paired_end(&self) -> bool {
         self.distr.is_some()
+    }
+
+    /// Maximum achievable insert size ln-probability.
+    pub fn mode_prob(&self) -> f64 {
+        self.mode_prob
     }
 }
 
@@ -147,8 +153,8 @@ impl JsonSer for InsertDistr {
                 max_size: self.max_size,
                 fr_allowed: self.orient_allowed[0],
                 ff_allowed: self.orient_allowed[1],
-                n: distr.distr().n(),
-                p: distr.distr().p(),
+                n: distr.inner().n(),
+                p: distr.inner().p(),
             }
         } else {
             json::object!{
@@ -163,10 +169,13 @@ impl JsonSer for InsertDistr {
             return Ok(Self::undefined());
         }
         json_get!(obj -> n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
+        let distr = NBinom::new(n, p).cached(max_size + 1);
+        let mode_prob = distr.ln_pmf(distr.inner().mode());
         Ok(Self {
             max_size: u32::try_from(max_size).unwrap_or(u32::MAX / 2),
             orient_allowed: [fr_allowed, ff_allowed],
-            distr: Some(NBinom::new(n, p).cached(max_size)),
+            distr: Some(distr),
+            mode_prob,
         })
     }
 }

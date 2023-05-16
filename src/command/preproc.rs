@@ -38,10 +38,6 @@ use crate::{
 };
 use super::paths;
 
-/// Min. alignment probability is raised to the power of 2.5, in order to accomodate for two
-/// read ends + insert size probability.
-const PAIRED_THRESH_POW: f64 = 2.5;
-
 /// Parameters, that need to be saved between preprocessing executions.
 /// On a new run, rerun is recommended if the parameters have changed.
 struct Params {
@@ -153,7 +149,7 @@ impl Default for Args {
             samtools: PathBuf::from("samtools"),
 
             max_clipping: 0.02,
-            min_aln_prob: Ln::from_log10(-2.5),
+            min_aln_prob: Ln::from_log10(-3.0),
 
             params: Params::default(),
             bg_params: bg::Params::default(),
@@ -267,10 +263,8 @@ fn print_help(extended: bool) {
             {EMPTY}  Must not be smaller than {} [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
             defaults.bg_params.depth.boundary_size);
-        println!("    {:KEY$} {:VAL$}  Ignore reads with alignment likelihood under 10^{} [{:.1}].\
-            {EMPTY}  Paired-end threshold is further raised to the power of {:.1}.",
-            "    --min-aln-lik".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-            Ln::to_log10(defaults.min_aln_prob), PAIRED_THRESH_POW);
+        println!("    {:KEY$} {:VAL$}  Single-end alignment likelihood threshold in log10-space [{:.1}].",
+            "    --min-aln-lik".green(), "FLOAT".yellow(), Ln::to_log10(defaults.min_aln_prob));
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
             "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
@@ -385,7 +379,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
         if args.force || !bg_dir.join(paths::BG_DISTR).exists() {
             log::warn!("Clearing output directory {}", ext::fmt::path(&bg_dir));
             fs::remove_dir_all(&bg_dir)?;
-        } else if args.params.need_rerun(&params_path) {
+        } else if args.alns.is_none() && args.params.need_rerun(&params_path) {
             log::error!("Please rerun with -F/--force");
             std::process::exit(1);
         }
@@ -572,7 +566,8 @@ fn estimate_bg_from_paired(
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
     let mut depth_alns: Vec<&LightAlignment> = Vec::with_capacity(errprof_alns.len());
-    let thresh_prob = PAIRED_THRESH_POW * args.min_aln_prob;
+    let thresh_prob = 2.0 * args.min_aln_prob + insert_distr.mode_prob();
+    log::info!("    Using paired-end alignment likelihood threshold {:.2}", Ln::to_log10(thresh_prob));
     for chunk in errprof_alns.chunks_exact(2) {
         let first = chunk[0];
         let second = chunk[1];
