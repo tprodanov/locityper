@@ -359,6 +359,24 @@ pub struct ReadDepth {
     distributions: Vec<NBinom>,
 }
 
+/// Estimate read depth distributions based on observed mean and variance,
+/// as well on the subsampling rate and ploidy.
+///
+/// Output distributions are calculated for ploidy 1 and first read ends.
+fn estimate_nbinoms(means: &[f64], vars: &[f64], rate: f64, ploidy: f64) -> Vec<NBinom> {
+    means.iter().zip(vars).map(|(&m, &v)| {
+        // Variance must be bigger than the mean.
+        let v = v.max(m * 1.000001);
+        // See here https://math.stackexchange.com/questions/4700260,
+        // estimating Negative Binomial parameters from Binomial subsampling.
+        let n = m * m / (v - m);
+        let p = m * rate / (v - m + m * rate);
+        // Divide `n` by ploidy, as we want to output haploid read depth parameters.
+        // Here, ploidy does not participate in subsampling, and therefore, does not need to be accounted above.
+        NBinom::new(n / ploidy, p)
+    }).collect()
+}
+
 impl ReadDepth {
     /// Estimates read depth from primary alignments, mapped to the `interval` with sequence `ref_seq`.
     /// Ignore reads with alignment probability < `params.a` and with insert size > `max_insert_size`.
@@ -395,14 +413,11 @@ impl ReadDepth {
         let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth[0])).collect();
         let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
         let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
-
-        let nbinom_mul = 1.0 / (subsampling_rate * f64::from(params.ploidy));
-        let distributions: Vec<_> = blurred_means.iter().zip(blurred_vars.iter())
-            .map(|(&m, &v)| NBinom::estimate(m, v.max(m * 1.00001)).mul(nbinom_mul))
-            .collect();
+        let ploidy = f64::from(params.ploidy);
+        let distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy);
 
         const GC_VAL: usize = 40;
-        let logging_distr = distributions[GC_VAL].mul(f64::from(params.ploidy) * if is_paired_end { 2.0 } else { 1.0 });
+        let logging_distr = distributions[GC_VAL].mul(ploidy * if is_paired_end { 2.0 } else { 1.0 });
         log::info!("    Read depth mean = {:.2},  variance: {:.2}  (per {} bp window at GC-content {})",
             logging_distr.mean(), logging_distr.variance(), params.window_size, GC_VAL);
 
