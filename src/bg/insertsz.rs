@@ -1,7 +1,6 @@
 //! Traits and structures related to insert size (distance between read mates).
 
 use std::ops::Deref;
-use htslib::bam::record::Record;
 use fnv::FnvHashMap;
 use crate::{
     Error,

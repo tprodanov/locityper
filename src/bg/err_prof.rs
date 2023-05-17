@@ -2,7 +2,6 @@ use std::{
     ops::{Add, AddAssign},
     fmt,
 };
-use htslib::bam::Record;
 use crate::{
     Error,
     seq::cigar::{Operation, Cigar, RAW_OPERATIONS},

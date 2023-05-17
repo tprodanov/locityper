@@ -3,7 +3,6 @@ pub mod insertsz;
 pub mod depth;
 pub mod ser;
 
-use htslib::bam::Record;
 use crate::err::{Error, validate_param};
 pub use {
     depth::{ReadDepth, ReadDepthParams},
@@ -50,18 +49,6 @@ impl Params {
             "Error rate multiplier ({:.5}) should not be too low", self.err_rate_mult);
         self.depth.validate()
     }
-}
-
-/// Returns true for reads alignments that are
-/// - Primary and pass all checks,
-/// - Are unpaired, OR
-/// - Are paired and within an appropriate insert size.
-fn read_unpaired_or_proper_pair(record: &Record, max_insert_size: i64) -> bool {
-    (record.flags() & 3844) == 0
-        && (!record.is_paired()
-            || (!record.is_mate_unmapped()
-                && record.tid() == record.mtid()
-                && record.insert_size().abs() <= max_insert_size))
 }
 
 /// Various background distributions, including

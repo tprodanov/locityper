@@ -12,11 +12,7 @@ use std::{
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
-use htslib::bam::{
-    self,
-    Read as BamRead,
-    record::Record as BamRecord,
-};
+use htslib::bam;
 use crate::{
     err::{Error, validate_param},
     math::Ln,

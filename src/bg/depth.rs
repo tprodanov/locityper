@@ -2,14 +2,9 @@ use std::{
     io::{self, Write},
     path::Path,
 };
-use htslib::bam::{
-    Record,
-    ext::BamRecordExtensions,
-};
 use crate::{
     seq::{
         self, Interval,
-        cigar::Cigar,
         kmers::KmerCounts,
         aln::LightAlignment,
     },
@@ -19,13 +14,11 @@ use crate::{
         vec::{VecExt, F64Ext},
     },
     math::{
-        Ln,
         distr::{NBinom, WithMoments},
     },
     err::{Error, validate_param},
 };
 use super::{
-    err_prof::ErrorProfile,
     ser::{JsonSer, parse_f64_arr, json_get},
 };
 
