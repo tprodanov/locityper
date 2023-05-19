@@ -545,7 +545,7 @@ fn estimate_bg_from_paired(
 {
     // Group reads into pairs, and estimate insert size from them.
     let pair_ixs = insertsz::group_mates(&alns)?;
-    let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params)?;
+    let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params, opt_out_dir)?;
 
     // Estimate error profile from read pairs with appropriate insert size.
     let max_insert_size = insert_distr.max_size();

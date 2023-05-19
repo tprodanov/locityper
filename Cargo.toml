@@ -30,6 +30,8 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 fnv = { version = "1", default-features = false, features = ["std"] }
 smallvec = { version = "1", default-features = false }
 kodama = { version = "0.3", default-features = false }
+argmin = { version = "0.8", default-features = false }
+argmin-math = { version = "0.3", default-features = false, features = ["vec"] }
 
 [build-dependencies]
 bindgen = { version = "0.65", default-features = false, features = ["runtime"] }

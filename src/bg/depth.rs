@@ -14,7 +14,10 @@ use crate::{
         vec::{VecExt, F64Ext},
     },
     math::{
-        distr::{NBinom, WithMoments},
+        distr::{
+            WithMoments,
+            nbinom::{NBinom, RegularizedEstimator},
+        },
     },
     err::{Error, validate_param},
 };
@@ -356,17 +359,15 @@ pub struct ReadDepth {
 /// as well on the subsampling rate and ploidy.
 ///
 /// Output distributions are calculated for ploidy 1 and first read ends.
+///
+/// Although it is possible to estimate n & p directly, sometimes $p$ becomes close to 1 and $n$ grows very large.
+/// Due to this, we perform L1-regularization on $n$, and estimate parameters numerically using Nelder-Mead algorithm.
 fn estimate_nbinoms(means: &[f64], vars: &[f64], rate: f64, ploidy: f64) -> Vec<NBinom> {
+    let mut estimator = RegularizedEstimator::default();
+    estimator.set_subsampling_rate(rate).set_lambda(1e-5);
+
     means.iter().zip(vars).map(|(&m, &v)| {
-        // Variance must be bigger than the mean.
-        let v = v.max(m * 1.000001);
-        // See here https://math.stackexchange.com/questions/4700260,
-        // estimating Negative Binomial parameters from Binomial subsampling.
-        let n = m * m / (v - m);
-        let p = m * rate / (v - m + m * rate);
-        // Divide `n` by ploidy, as we want to output haploid read depth parameters.
-        // Here, ploidy does not participate in subsampling, and therefore, does not need to be accounted above.
-        NBinom::new(n / ploidy, p)
+        estimator.estimate(m, v).mul(1.0 / ploidy)
     }).collect()
 }
 

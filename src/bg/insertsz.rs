@@ -1,13 +1,21 @@
 //! Traits and structures related to insert size (distance between read mates).
 
-use std::ops::Deref;
+use std::{
+    path::Path,
+    ops::Deref,
+    io::Write,
+};
 use fnv::FnvHashMap;
+use nohash::IntMap;
 use crate::{
     Error,
     algo::bisect,
-    ext::vec::{VecExt, F64Ext},
+    ext::{self, vec::{VecExt, F64Ext}},
     bg::ser::{JsonSer, json_get},
-    math::distr::{DiscretePmf, NBinom, LinearCache},
+    math::distr::{
+        DiscretePmf, LinearCache, WithMoments,
+        nbinom::{NBinom, RegularizedEstimator},
+    },
     seq::aln::Alignment,
 };
 
@@ -61,12 +69,15 @@ impl InsertDistr {
 
     /// Creates the Neg. Binom. insert size distribution from an iterator of insert sizes.
     ///
-    // Calculate max insert size from input reads as `<quantile_mult> * <quantile>-th insert size quantile`.
-    // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
+    /// Calculate max insert size from input reads as `<quantile_mult> * <quantile>-th insert size quantile`.
+    /// This is needed to remove read mates that were mapped to the same chromosome but very far apart.
+    ///
+    /// Write debug information if `out_dir` is Some.
     pub fn estimate(
         alignments: &[Alignment],
         pair_ixs: &[(usize, usize)],
         params: &super::Params,
+        out_dir: Option<&Path>,
     ) -> Result<Self, Error>
     {
         if pair_ixs.is_empty() {
@@ -77,13 +88,27 @@ impl InsertDistr {
         log::info!("Estimating insert size distribution");
         let mut insert_sizes = Vec::<f64>::new();
         let mut orient_counts = [0_u64; 2];
+        let mut histogram = IntMap::<u32, u32>::default();
         for (i, j) in pair_ixs.iter() {
             let first = &alignments[*i].deref();
             let second = &alignments[*j].deref();
             let insert_size = first.insert_size(second);
             if insert_size < MAX_REASONABLE_INSERT {
                 insert_sizes.push(f64::from(insert_size));
+                histogram.entry(insert_size)
+                    .and_modify(|counter| *counter = counter.saturating_add(1))
+                    .or_insert(1);
                 orient_counts[usize::from(first.pair_orientation(second))] += 1;
+            }
+        }
+
+        if let Some(dir) = out_dir {
+            let mut dbg_writer = ext::sys::create_gzip(&dir.join("insert_sizes.csv.gz"))?;
+            writeln!(dbg_writer, "size\tcount")?;
+            let mut histogram: Vec<(u32, u32)> = histogram.into_iter().collect();
+            histogram.sort_unstable();
+            for (size, count) in histogram.into_iter() {
+                writeln!(dbg_writer, "{}\t{}", size, count)?;
             }
         }
 
@@ -108,10 +133,10 @@ impl InsertDistr {
 
         let mean = F64Ext::mean(lim_insert_sizes);
         // Increase variance, if less-equal than mean.
-        let var = F64Ext::variance(lim_insert_sizes, Some(mean)).max(1.000001 * mean);
-        log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", mean, var.sqrt());
+        let var = F64Ext::variance(lim_insert_sizes, Some(mean));
+        let distr = RegularizedEstimator::default().estimate(mean, var).cached(max_size as usize + 1);
+        log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", distr.mean(), distr.variance().sqrt());
         log::info!("    Treat reads with insert size > {} as unpaired", max_size);
-        let distr = NBinom::estimate(mean, var).cached(max_size as usize + 1);
         let mode_prob = distr.ln_pmf(distr.inner().mode());
 
         Ok(Self {
