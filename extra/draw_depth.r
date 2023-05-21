@@ -89,15 +89,16 @@ fill_colors <- rev(c('#355070', '#6D597A', '#B56576', '#E56B6F'))
 main_color <- tail(fill_colors, n = 1)
 fill_rescale <- -c(seq(min_lik, -1, length.out = length(fill_colors)), 0) /
     min_lik + 1
+nwindows <- max(sol$window)
 
 ggplot(sol) +
     # Window weights behind likelihoods.
     geom_rect(aes(xmin = window - 0.5, xmax = window + 0.5,
-        ymin = -Inf, ymax = 0, fill = weight), alpha = 0.3) +
+        ymin = -Inf, ymax = 0, fill = weight)) +
     scale_fill_gradientn('Window weight', limits = c(0, 1),
-        colors = c('black', 'white')) +
+        colors = c('#ff000055', '#ffffff00')) +
     new_scale('fill') +
-    
+
     # 0-line.
     geom_hline(yintercept = 0, color = main_color) +
     # Read depth bars.
@@ -109,13 +110,18 @@ ggplot(sol) +
 
     facet_wrap(~ contig, ncol = 1, strip.position = 'top') +
     ggtitle(title, subtitle) +
-    scale_x_continuous('Window', expand = expansion(mult = 0.005)) +
+    scale_x_continuous('Window',
+        expand = expansion(mult = 0.005),
+        breaks = seq(0, nwindows, 100),
+        minor_breaks = seq(0, nwindows, 10),
+        ) +
     scale_y_continuous('Read depth',
         expand = expansion(mult = 0.02),
         limits = c(lik_axis_mult * min_lik, max_depth),
         breaks = breaks,
+        minor_breaks = NULL,
         labels = labels_left,
-        
+
         sec.axis = dup_axis(
             name = 'Depth log10-likelihood',
             labels = labels_right,
@@ -125,6 +131,7 @@ ggplot(sol) +
         values = fill_rescale,
         limits = c(min_lik, 0),
         breaks = lik_breaks,
+        minor_breaks = NULL,
         expand = expansion(mult = 0.02)) +
     theme_bw() +
     theme(
@@ -136,7 +143,8 @@ ggplot(sol) +
         legend.position = 'bottom',
         legend.box.margin = margin(t = -10, b = -5),
         legend.key.height = unit(0.8, 'lines'),
-        panel.grid.minor = element_blank(),
+        panel.grid.minor = element_line(linetype = 'dashed'),
+        panel.background = element_rect(fill = NA),
 
         axis.title.x = element_text(margin = margin(t = 0)),
         axis.title.y.right = element_text(margin = margin(l = 7)),

@@ -320,4 +320,9 @@ impl MultiContigWindows {
     pub(crate) fn get_weights(&self, i: usize) -> &[f64] {
         &self.by_contig[i].window_weights
     }
+
+    /// Returns all GC-contents for i-th contig.
+    pub(crate) fn get_gc_contents(&self, i: usize) -> &[u8] {
+        &self.by_contig[i].window_gcs
+    }
 }

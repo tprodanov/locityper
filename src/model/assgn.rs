@@ -343,11 +343,11 @@ impl ReadAssignment {
         &self.depth_distrs[window]
     }
 
-    pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tdepth\tlik\tweight";
+    pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tgc\tdepth\tlik\tweight";
 
     /// Write read depth to a CSV file in the following format (tab-separated):
-    /// General lines:  `prefix  contig(1|2)  window  depth     depth_lik  weight`.
-    /// Last line:      `prefix  summary      a,b,c   read_lik  depth_lik  sum_lik`.
+    /// General lines:  `prefix  contig(1|2)  window  gc  depth     depth_lik  weight`.
+    /// Last line:      `prefix  summary      a,b,c   NA  read_lik  depth_lik  sum_lik`.
     /// where `a`: number of unmapped reads, `b`: number of reads within boundary, `c`: total number of reads.
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
         // log10-likelihood of read depth.
@@ -356,17 +356,19 @@ impl ReadAssignment {
             let curr_prefix = format!("{}\t{}\t", prefix, i + 1);
             let wshift = self.contig_windows.get_wshift(i) as usize;
             let weights = self.contig_windows.get_weights(i);
-            for (j, &weight) in weights.iter().enumerate() {
+            let gcs = self.contig_windows.get_gc_contents(i);
+            for (j, (&weight, &gc)) in weights.iter().zip(gcs).enumerate() {
                 let w = j + wshift;
                 let depth = self.depth[w];
-                let log10_prob = Ln::to_log10(self.depth_contrib * self.depth_distrs[w].ln_pmf(depth));
-                writeln!(f, "{}{}\t{}\t{:.3}\t{:.4}", curr_prefix, j + 1, depth, log10_prob, weight)?;
+                let log10_prob = Ln::to_log10(self.depth_distrs[w].ln_pmf(depth));
+                writeln!(f, "{}{}\t{}\t{}\t{:.3}\t{:.4}", curr_prefix, j + 1, gc, depth, log10_prob, weight)?;
                 sum_depth_lik += log10_prob;
             }
         }
 
+        sum_depth_lik *= self.depth_contrib;
         let total_lik = Ln::to_log10(self.likelihood);
-        writeln!(f, "{}\tsummary\t{},{},{}\t{:.4}\t{:.4}\t{:.4}", prefix,
+        writeln!(f, "{}\tsummary\t{},{},{}\tNA\t{:.4}\t{:.4}\t{:.4}", prefix,
             self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize], self.read_assgn.len(),
             total_lik - sum_depth_lik, sum_depth_lik, total_lik)
     }
