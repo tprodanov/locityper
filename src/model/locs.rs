@@ -179,6 +179,13 @@ impl PrelimAlignments {
     }
 }
 
+/// Returns ln-probability, assigned to the unmapped read mate pair.
+/// Is equal to two unmapped penalties (both mates unmapped) + insert size penalty.
+#[inline]
+fn unmapped_pair_prob(unmapped_penalty: f64, insert_penalty: f64) -> f64 {
+    2.0 * unmapped_penalty + insert_penalty
+}
+
 // Assume that there are at most 4 alignments of the to the same contig.
 // (not critical, if this assumption fails).
 const BISECT_RIGHT_STEP: usize = 4;
@@ -192,7 +199,8 @@ fn extend_pair_alignments(
     insert_distr: &InsertDistr,
     params: &super::Params,
 ) {
-    let thresh_prob = 2.0 * params.unmapped_penalty - params.prob_diff;
+    let insert_penalty = insert_distr.mode_prob();
+    let thresh_prob = unmapped_pair_prob(params.unmapped_penalty, insert_penalty) - params.prob_diff;
     let alns1_empty = alns1.is_empty();
     if !alns1_empty {
         buffer.clear();
@@ -213,7 +221,7 @@ fn extend_pair_alignments(
         }
 
         // Add unpaired read1, if needed.
-        let prob = aln1.ln_prob() + params.unmapped_penalty;
+        let prob = aln1.ln_prob() + params.unmapped_penalty + insert_penalty;
         if prob >= thresh_prob && prob + params.prob_diff >= best_prob1 {
             new_alns.push(PairAlignment::new(TwoIntervals::First(aln1.interval().clone()), prob));
         }
@@ -221,7 +229,7 @@ fn extend_pair_alignments(
 
     // Add unpaired read2, if needed.
     for (j, aln2) in alns2.iter().enumerate() {
-        let prob = aln2.ln_prob() + params.unmapped_penalty;
+        let prob = aln2.ln_prob() + params.unmapped_penalty + insert_penalty;
         // Check on `alns1_empty`, as if they are empty, buffer was not cleaned.
         if prob >= thresh_prob && (alns1_empty || prob + params.prob_diff >= buffer[j]) {
             new_alns.push(PairAlignment::new(TwoIntervals::Second(aln2.interval().clone()), prob));
@@ -256,8 +264,8 @@ fn identify_pair_alignments(
         i = k;
     }
 
-    // Probability of both mates unmapped = unmapped_penalty^2.
-    let mut unmapped_prob = 2.0 * params.unmapped_penalty;
+    // Probability of both mates unmapped.
+    let mut unmapped_prob = unmapped_pair_prob(params.unmapped_penalty, insert_distr.mode_prob());
     // Normalization factor for all pair-end alignment probabilities.
     // For normalization, unmapped probability is multiplied by the number of contigs because there is an unmapped
     // possibility for every contig, which we do not store explicitely.
