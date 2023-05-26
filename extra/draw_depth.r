@@ -17,6 +17,8 @@ parser$add_argument('-d', '--depth', metavar = 'FLOAT', type = 'double',
     help = 'Read depth limit (inferred by default).')
 parser$add_argument('-l', '--lik', metavar = 'FLOAT', type = 'double',
     help = 'Likelihood limit (inferred by default).')
+parser$add_argument('--no-lik', action = 'store_true',
+    help = 'Do not draw likelihood axis.')
 parser$add_argument('-o', '--out', metavar = 'FILE', required = T,
     help = 'Output plot file (PNG, PDF, etc.). Literal {} is replaced with the genotype.')
 args <- parser$parse_args()
@@ -71,8 +73,9 @@ subtitle <- paste(
 
 # Select scale limits.
 
-max_depth <- if (is.null(args$depth)) { max(sol$depth) } else { args$depth }
-min_lik <- if (is.null(args$lik)) { min(sol$lik) * 1.00001 } else { -abs(args$lik) }
+no_lik <- args$no_lik
+max_depth <- (if (is.null(args$depth)) { max(sol$depth) } else { args$depth }) * 1.01
+min_lik <- (if (is.null(args$lik)) { min(sol$lik) * 1.00001 } else { -abs(args$lik) }) * 1.01
 
 depth_breaks <- scales::breaks_extended(3)(c(0, max_depth))
 lik_breaks <- scales::breaks_extended(3)(c(min_lik, 0))
@@ -81,6 +84,7 @@ lik_axis_mult <- -0.5 * (max_depth / min_lik)
 breaks <- c(lik_axis_mult * lik_breaks, depth_breaks)
 labels_left <- c(rep('', length(lik_breaks)), depth_breaks)
 labels_right <- c(lik_breaks, rep('', length(depth_breaks)))
+ylim <- if (no_lik) { c(0, max_depth) } else { c(lik_axis_mult * min_lik, max_depth) }
 
 # Drawing and saving.
 
@@ -94,7 +98,9 @@ nwindows <- max(sol$window)
 ggplot(sol) +
     # Window weights behind likelihoods.
     geom_rect(aes(xmin = window - 0.5, xmax = window + 0.5,
-        ymin = -Inf, ymax = 0, fill = weight)) +
+        ymin = ifelse(no_lik, 0, -Inf),
+        ymax = ifelse(no_lik, Inf, 0),
+        fill = weight)) +
     scale_fill_gradientn('Window weight', limits = c(0, 1),
         colors = c('#ff000055', '#ffffff00')) +
     new_scale('fill') +
@@ -105,8 +111,12 @@ ggplot(sol) +
     geom_bar(aes(window, pmin(depth, max_depth), fill = pmax(lik, min_lik)),
         stat = 'identity', width = 1) +
     # Likelihood points.
-    geom_point(aes(window, lik_axis_mult * pmax(lik, min_lik)),
-        size = 0.5, color = main_color) +
+    (if (no_lik) {
+        list()
+    } else {
+        geom_point(aes(window, lik_axis_mult * pmax(lik, min_lik)),
+          size = 0.5, color = main_color)
+    }) +
 
     facet_wrap(~ contig, ncol = 1, strip.position = 'top') +
     ggtitle(title, subtitle) +
@@ -116,23 +126,26 @@ ggplot(sol) +
         minor_breaks = seq(0, nwindows, 10),
         ) +
     scale_y_continuous('Read depth',
-        expand = expansion(mult = 0.02),
-        limits = c(lik_axis_mult * min_lik, max_depth),
+        expand = c(0, 0),
+        limits = ylim,
         breaks = breaks,
         minor_breaks = NULL,
         labels = labels_left,
 
-        sec.axis = dup_axis(
+        sec.axis = (if (no_lik) {
+            waiver()
+        } else {
+            dup_axis(
             name = 'Depth log10-likelihood',
-            labels = labels_right,
-        )) +
+            labels = labels_right)
+        })) +
     scale_fill_gradientn('Depth log10-likelihood',
         colors = c(fill_colors, main_color),
         values = fill_rescale,
         limits = c(min_lik, 0),
         breaks = lik_breaks,
         minor_breaks = NULL,
-        expand = expansion(mult = 0.02)) +
+        expand = c(0, 0)) +
     theme_bw() +
     theme(
         strip.background = element_rect(fill = 'gray95', color = NA),
