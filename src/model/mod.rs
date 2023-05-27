@@ -28,6 +28,10 @@ pub struct Params {
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
     pub tweak: u32,
+    /// Average across `tweak_count` random tweakings for each genotype and solver.
+    /// Averaging function is ln-generalized mean with power `tweak_hoelder_p`.
+    pub tweak_count: u16,
+    pub tweak_hoelder_p: f64,
 }
 
 impl Default for Params {
@@ -39,7 +43,10 @@ impl Default for Params {
             unmapped_penalty: Ln::from_log10(-10.0),
             rare_kmer: 3.0,
             semicommon_kmer: 5.0,
+
             tweak: 70,
+            tweak_count: 5,
+            tweak_hoelder_p: 0.0,
         }
     }
 }

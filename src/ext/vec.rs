@@ -2,6 +2,7 @@ use std::{
     fmt::{self, Write},
     ops::{Add, Sub, Range, Index},
 };
+use crate::math::Ln;
 
 /// Static methods extending slices.
 pub struct VecExt;
@@ -59,7 +60,27 @@ impl F64Ext {
     pub fn mean<T>(a: &[T]) -> f64
     where T: Into<f64> + Copy,
     {
-        a.iter().fold(0.0_f64, |acc, &v| acc + v.into()) / a.len() as f64
+        a.iter().copied().map(T::into).sum::<f64>() / a.len() as f64
+    }
+
+    /// Calculates geometric mean.
+    pub fn geom_mean(a: &[f64]) -> f64 {
+        (a.iter().copied().map(f64::ln).sum::<f64>() / a.len() as f64).exp()
+    }
+
+    /// Generalized (Hölder) mean (-Inf -> min, -1 -> harmonic, 0 -> geometric, 1 -> mean, 2 -> sq.mean, Inf -> max).
+    /// Input and output values are in ln-space.
+    pub fn generalized_ln_mean(p: f64) -> Box<dyn Fn(&[f64]) -> f64> {
+        if p < -100.0 {
+            Box::new(Self::min)
+        } else if p.abs() < 1e-8 {
+            // ln-geometric mean.
+            Box::new(|a| a.iter().copied().sum::<f64>() / a.len() as f64)
+        } else if p > 100.0 {
+            Box::new(Self::max)
+        } else {
+            Box::new(move |a| Ln::map_sum(a, |x| x * p) / a.len() as f64 / p)
+        }
     }
 
     /// Calculate sample variance.

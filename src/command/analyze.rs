@@ -161,8 +161,15 @@ fn print_help() {
         {EMPTY}  Windows with values equal to {} [{}] receive half weight.",
         "    --rare-kmer".green(), "FLOAT FLOAT".yellow(), "FLOAT_1".yellow(), defaults.assgn_params.rare_kmer,
         "FLOAT_2".yellow(), defaults.assgn_params.semicommon_kmer);
+    println!("{}", "    Random tweaking:".bold());
     println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
         "    --tweak".green(), "INT".yellow(), "INT".yellow(), defaults.assgn_params.tweak);
+    println!("    {:KEY$} {:VAL$}  Average across this number of random tweaking\n\
+        {EMPTY}  for each genotype and each solver [{}].",
+        "    --tw-count".green(), "INT".yellow(), defaults.assgn_params.tweak_count);
+    println!("    {:KEY$} {:VAL$}  Genotype likelihoods for random tweakings are averaged\n\
+        {EMPTY}  using generalized mean with this power [{:.0}].",
+        "    --tw-aver".green(), "FLOAT".yellow(), defaults.assgn_params.tweak_hoelder_p);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
