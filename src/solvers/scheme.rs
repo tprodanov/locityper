@@ -163,12 +163,14 @@ fn solve_single_thread(
     let total_tuples = data.tuples.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_tuples)?;
     let mut rem_ixs = (0..total_tuples).collect();
+
     for (stage_ix, stage) in data.scheme.iter().enumerate() {
         helper.start_stage(stage_ix, &mut rem_ixs);
         let solver = &stage.solver;
         for &ix in rem_ixs.iter() {
             let mcontig_windows = MultiContigWindows::new(&data.tuples[ix], &data.contig_windows);
             let mut assgn = ReadAssignment::new(mcontig_windows, &data.all_alns, &data.cached_distrs, &data.params);
+            assgn.define_read_windows(data.params.tweak, rng);
             let lik = solver.solve(&mut assgn, rng)?;
             let contigs_str = data.contigs.get_names(data.tuples[ix].iter().copied());
             if stage.write {
@@ -373,6 +375,7 @@ impl<W: Write, U: Write> Worker<W, U> {
             for ix in task.into_iter() {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
                 let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
+                assgn.define_read_windows(params.tweak, &mut self.rng);
                 let lik = solver.solve(&mut assgn, &mut self.rng)?;
                 if stage.write {
                     let prefix = format!("{}\t{}", stage_ix + 1, contigs.get_names(tuples[ix].iter().copied()));

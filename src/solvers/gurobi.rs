@@ -60,9 +60,9 @@ fn set_assignments(
 }
 
 fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error> {
-    let env = Env::new("")?;
-    let mut model = Model::with_env("", &env)?;
-    model.set_param(parameter::IntParam::OutputFlag, 0)?;
+    let mut env = Env::empty()?;
+    env.set(parameter::IntParam::OutputFlag, 0)?;
+    let mut model = Model::with_env("", &env.start()?)?;
     model.set_param(parameter::IntParam::Threads, 1)?;
 
     let total_windows = assignments.contig_windows().total_windows() as usize;

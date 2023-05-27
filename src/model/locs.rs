@@ -119,7 +119,7 @@ impl PrelimAlignments {
         log::info!("[{}] Reading read alignments, alignment likelihood threshold = {:.1}",
             contigs.tag(), Ln::to_log10(thresh_prob));
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), err_prof, thresh_prob)?;
-        let left_boundary = params.boundary_size;
+        let left_boundary = params.boundary_size - params.tweak;
         let right_boundaries: Vec<_> = contigs.lengths().iter()
             .map(|len| len.saturating_sub(left_boundary)).collect();
         let mut all_alns = Vec::new();
@@ -288,6 +288,24 @@ pub(crate) enum TwoIntervals {
     First(Interval),
     Second(Interval),
     // None,
+}
+
+impl TwoIntervals {
+    /// Returns the middle of the first alignment.
+    pub fn middle1(&self) -> Option<u32> {
+        match self {
+            TwoIntervals::Both(interval1, _) | TwoIntervals::First(interval1) => Some(interval1.middle()),
+            TwoIntervals::Second(_) => None,
+        }
+    }
+
+    /// Returns the middle of the second alignment.
+    pub fn middle2(&self) -> Option<u32> {
+        match self {
+            TwoIntervals::Both(_, interval2) | TwoIntervals::Second(interval2) => Some(interval2.middle()),
+            TwoIntervals::First(_) => None,
+        }
+    }
 }
 
 /// LightAlignment of the read pair. At most one of two alignments may be missing!

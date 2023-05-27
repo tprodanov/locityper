@@ -2,8 +2,8 @@ use std::{
     cmp::min,
     fmt::Write,
 };
+use rand::Rng;
 use crate::{
-    math::Ln,
     ext::vec::F64Ext,
     bg::depth::ReadDepth,
     seq::{
@@ -12,7 +12,7 @@ use crate::{
     },
 };
 use super::{
-    locs::{TwoIntervals, ReadPairAlignments},
+    locs::{ReadPairAlignments, PairAlignment},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
@@ -23,19 +23,71 @@ pub(crate) const BOUNDARY_WINDOW: u32 = 1;
 /// Regular windows have indices starting with 2.
 pub(crate) const REG_WINDOW_SHIFT: u32 = 2;
 
-/// Alignment of a read pair to a specific contig windows.
+/// Alignment of a read pair to a specific multi-contig windows.
 pub struct ReadWindows {
     /// Index in the list of read-pair alignments.
-    ix: u32,
-    /// Window for each read-end.
-    windows: (u32, u32),
+    aln_ix: u32,
     /// ln-probability of this location.
     ln_prob: f64,
+    /// Index of the contig (within multi-contig windows).
+    contig_ix: Option<u8>,
+    /// Middle of the first read end.
+    middle1: Option<u32>,
+    /// Middle of the second read end.
+    middle2: Option<u32>,
+    ///Window for each read-end. Due to random tweaking, may change from iteration to iteration.
+    windows: (u32, u32),
 }
 
 impl ReadWindows {
-    fn new(ix: u32, windows: (u32, u32), ln_prob: f64) -> Self {
-        Self { ix, windows, ln_prob }
+    fn new(aln_ix: u32, contig_ix: u8, paln: &PairAlignment) -> Self {
+        Self {
+            aln_ix,
+            contig_ix: Some(contig_ix),
+            middle1: paln.intervals().middle1(),
+            middle2: paln.intervals().middle2(),
+            ln_prob: paln.ln_prob(),
+            windows: (UNMAPPED_WINDOW, UNMAPPED_WINDOW),
+        }
+    }
+
+    fn both_unmapped(ln_prob: f64) -> Self {
+        Self {
+            aln_ix: u32::MAX,
+            contig_ix: None,
+            middle1: None,
+            middle2: None,
+            ln_prob,
+            windows: (UNMAPPED_WINDOW, UNMAPPED_WINDOW),
+        }
+    }
+
+    pub fn define_windows_determ(&mut self, mcontigs: &MultiContigWindows) {
+        if let Some(i) = self.contig_ix {
+            let contig = &mcontigs.by_contig[i as usize];
+            let shift = mcontigs.wshifts[i as usize];
+            let w1 = self.middle1.map(|middle| contig.get_window(middle, shift)).unwrap_or(UNMAPPED_WINDOW);
+            let w2 = self.middle2.map(|middle| contig.get_window(middle, shift)).unwrap_or(UNMAPPED_WINDOW);
+            self.windows = (w1, w2);
+        }
+    }
+
+    pub fn define_windows_random(&mut self, mcontigs: &MultiContigWindows, tweak: u32, rng: &mut impl Rng) {
+        if let Some(i) = self.contig_ix {
+            let contig = &mcontigs.by_contig[i as usize];
+            let shift = mcontigs.wshifts[i as usize];
+            let r = rng.next_u64();
+            let r1 = (r >> 32) as u32;
+            let r2 = r as u32;
+
+            let w1 = self.middle1
+                .map(|middle| contig.get_window(middle + (r1 % (2 * tweak + 1)).saturating_sub(tweak), shift))
+                .unwrap_or(UNMAPPED_WINDOW);
+            let w2 = self.middle2
+                .map(|middle| contig.get_window(middle + (r2 % (2 * tweak + 1)).saturating_sub(tweak), shift))
+                .unwrap_or(UNMAPPED_WINDOW);
+            self.windows = (w1, w2);
+        }
     }
 
     /// Returns two windows, to which the read pair is aligned.
@@ -49,8 +101,8 @@ impl ReadWindows {
     }
 
     /// Index of the read-pair alignment across all alignments for the read pair.
-    pub(crate) fn ix(&self) -> u32 {
-        self.ix
+    pub(crate) fn aln_ix(&self) -> u32 {
+        self.aln_ix
     }
 }
 
@@ -80,9 +132,9 @@ fn sech_weight(x: f64, c1: f64, c2: f64) -> f64 {
 pub struct ContigWindows {
     contig_id: ContigId,
     window: u32,
-    /// Start of the windows within contig (ignoring boundary).
+    /// Start of the windows within contig (after discarding boundary).
     start: u32,
-    /// End of the windows within contig (ignoring boundary). `end - start` divides window size.
+    /// End of the windows within contig (after discarding boundary). `end - start` divides window size.
     end: u32,
     /// GC-content for each window within contig.
     window_gcs: Vec<u8>,
@@ -142,6 +194,19 @@ impl ContigWindows {
     pub fn n_windows(&self) -> u32 {
         self.window_gcs.len() as u32
     }
+
+    pub fn window_size(&self) -> u32 {
+        self.window
+    }
+
+    /// Returns read window within the contig based on the read middle.
+    fn get_window(&self, read_middle: u32, shift: u32) -> u32 {
+        if self.start <= read_middle && read_middle < self.end {
+            shift + (read_middle - self.start) / self.window
+        } else {
+            BOUNDARY_WINDOW
+        }
+    }
 }
 
 /// Stores the contigs and windows corresponding to the windows.
@@ -176,6 +241,7 @@ impl MultiContigWindows {
             by_contig.push(curr_contig);
             cns.push(1);
         }
+        assert!(by_contig.len() < 256, "Multi-contig collection cannot contain more than 256 entries");
         Self {
             ln_ploidy: (n as f64).ln(),
             window: by_contig[0].window,
@@ -240,48 +306,17 @@ impl MultiContigWindows {
     ) -> usize {
         let start_len = out_alns.len();
         // Probability of being unmapped to any of the contigs.
-        let mut unmapped_prob = pair_alns.unmapped_prob() + self.ln_ploidy;
+        let unmapped_prob = pair_alns.unmapped_prob() + self.ln_ploidy;
         // Current threshold, is updated during the for-loop.
         let mut thresh_prob = unmapped_prob - prob_diff;
         for (i, contig_id) in self.ids().enumerate() {
-            let wshift = self.wshifts[i];
-            let start = self.by_contig[i].start;
-            let end = self.by_contig[i].end;
-
+            let contig_ix = u8::try_from(i).unwrap();
             let (start_ix, palns) = pair_alns.contig_alns(contig_id);
             for (aln_ix, paln) in (start_ix..).zip(palns) {
-                let w1 = match paln.intervals() {
-                    TwoIntervals::Both(interval1, _) | TwoIntervals::First(interval1) => {
-                        let middle1 = interval1.middle();
-                        if start <= middle1 && middle1 < end {
-                            wshift + (middle1 - start) / self.window
-                        } else {
-                            BOUNDARY_WINDOW
-                        }
-                    }
-                    TwoIntervals::Second(_) => UNMAPPED_WINDOW,
-                };
-                let w2 = match paln.intervals() {
-                    TwoIntervals::Both(_, interval2) | TwoIntervals::Second(interval2) => {
-                        let middle2 = interval2.middle();
-                        if start <= middle2 && middle2 < end {
-                            wshift + (middle2 - start) / self.window
-                        } else {
-                            BOUNDARY_WINDOW
-                        }
-                    }
-                    TwoIntervals::First(_) => UNMAPPED_WINDOW,
-                };
-
                 let ln_prob = paln.ln_prob();
-                if w1 >= REG_WINDOW_SHIFT || w2 >= REG_WINDOW_SHIFT {
-                    if ln_prob >= thresh_prob {
-                        thresh_prob = thresh_prob.max(ln_prob - prob_diff);
-                        out_alns.push(ReadWindows::new(aln_ix as u32, (w1, w2), ln_prob));
-                    }
-                } else {
-                    // If the read is out of bounds, we will reduce the penalty to be unmapped.
-                    unmapped_prob = Ln::add(unmapped_prob, paln.ln_prob());
+                if ln_prob >= thresh_prob {
+                    thresh_prob = thresh_prob.max(ln_prob - prob_diff);
+                    out_alns.push(ReadWindows::new(aln_ix as u32, contig_ix, paln));
                 }
             }
         }
@@ -296,7 +331,7 @@ impl MultiContigWindows {
             }
         }
         if unmapped_prob >= thresh_prob {
-            out_alns.push(ReadWindows::new(u32::MAX, (UNMAPPED_WINDOW, UNMAPPED_WINDOW), unmapped_prob));
+            out_alns.push(ReadWindows::both_unmapped(unmapped_prob));
         }
         out_alns.len() - start_len
     }

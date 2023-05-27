@@ -27,7 +27,7 @@ pub struct ReadAssignment {
     /// Read depth contribution, relative to read alignment likelihoods.
     depth_contrib: f64,
 
-    /// A vector of possible read alignments to the vector of contigs (length: n_reads).
+    /// A vector of possible read alignments to the vector of contigs.
     read_windows: Vec<ReadWindows>,
 
     /// Store the start of the read-pair alignments in the `read_windows` vector.
@@ -71,14 +71,6 @@ impl ReadAssignment {
             if nw > 1 {
                 non_trivial_reads.push(rp);
             }
-
-            // TODO: Do not store reads with only one possible alignment.
-            // if nw > 1 {
-            //     assert!(nw <= usize::from(u16::MAX), "Read pair {} has too many alignment locations ({})", rp, nw);
-            //     ix += nw;
-            //     non_trivial_reads.push(rp);
-            // }
-            // read_ixs.push(ix);
         }
 
         Self {
@@ -89,6 +81,16 @@ impl ReadAssignment {
             depth_contrib: params.depth_contrib,
             contig_windows, read_windows, read_ixs, non_trivial_reads,
         }
+    }
+
+    /// Define read windows by randomly moving read middle by at most `tweak` bp to either side.
+    pub fn define_read_windows(&mut self, tweak: u32, rng: &mut impl Rng) {
+        if tweak == 0 {
+            self.read_windows.iter_mut().for_each(|rw| rw.define_windows_determ(&self.contig_windows));
+        } else {
+            self.read_windows.iter_mut().for_each(|rw| rw.define_windows_random(&self.contig_windows, tweak, rng));
+        }
+        self.likelihood = f64::NEG_INFINITY;
     }
 
     /// Try to initialize read assignments and return total likelihood.
@@ -393,7 +395,7 @@ impl ReadAssignment {
                 if w1 < REG_WINDOW_SHIFT && w2 < REG_WINDOW_SHIFT {
                     write!(f, "*\t*\t")?;
                 } else {
-                    match paired_alns.ith_aln(curr_windows.ix() as usize).intervals() {
+                    match paired_alns.ith_aln(curr_windows.aln_ix() as usize).intervals() {
                         TwoIntervals::Both(aln1, aln2) => write!(f, "{}\t{}\t", aln1, aln2),
                         TwoIntervals::First(aln1) => write!(f, "{}\t*\t", aln1),
                         TwoIntervals::Second(aln2) => write!(f, "*\t{}\t", aln2),

@@ -161,6 +161,8 @@ fn print_help() {
         {EMPTY}  Windows with values equal to {} [{}] receive half weight.",
         "    --rare-kmer".green(), "FLOAT FLOAT".yellow(), "FLOAT_1".yellow(), defaults.assgn_params.rare_kmer,
         "FLOAT_2".yellow(), defaults.assgn_params.semicommon_kmer);
+    println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
+        "    --tweak".green(), "INT".yellow(), "INT".yellow(), defaults.assgn_params.tweak);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -223,6 +225,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     .ok_or_else(|| lexopt::Error::MissingValue { option: Some("rare-kmer".to_owned()) })?
                     .parse()?;
             }
+            Long("tweak") => args.assgn_params.tweak = parser.value()?.parse()?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,

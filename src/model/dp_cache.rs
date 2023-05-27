@@ -93,6 +93,8 @@ const CACHE_SIZE: usize = 256;
 
 pub(super) type DistrBox = Box<dyn DiscretePmf>;
 
+type RegularDistr = NBinom;
+
 /// Store cached depth distbrutions.
 #[derive(Clone)]
 pub struct CachedDepthDistrs {
@@ -102,7 +104,7 @@ pub struct CachedDepthDistrs {
     mul_coef: f64,
 
     /// Cached read depth distributions in windows with few common k-mers (one for each GC-content).
-    cached: [OnceCell<Arc<LinearCache<NBinom>>>; GC_BINS],
+    cached: [OnceCell<Arc<LinearCache<RegularDistr>>>; GC_BINS],
     /// Uniform distribution size (one for each GC-content).
     unif_size: [OnceCell<u32>; GC_BINS],
 }
@@ -111,7 +113,7 @@ impl CachedDepthDistrs {
     /// Create a set of cached depth distributions.
     /// Assume that there are `mul_coef` as much reads, as in the background distribution.
     pub fn new(bg_distr: &bg::BgDistr) -> Self {
-        const NBINOM_CELL: OnceCell<Arc<LinearCache<NBinom>>> = OnceCell::new();
+        const NBINOM_CELL: OnceCell<Arc<LinearCache<RegularDistr>>> = OnceCell::new();
         const U32_CELL: OnceCell<u32> = OnceCell::new();
         Self {
             bg_depth: bg_distr.depth().clone(),
@@ -131,19 +133,24 @@ impl CachedDepthDistrs {
         AlwaysOneDistr
     }
 
+    fn regular_nbinom(&self, gc_content: u8) -> NBinom {
+        self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef)
+    }
+
     /// Returns read depth distribution in regular windows at GC-content and contig CN.
-    pub fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<NBinom>> {
-        self.cached[usize::from(gc_content)].get_or_init(||
-            Arc::new(self.bg_depth
-                .depth_distribution(gc_content)
-                .mul(self.mul_coef)
-                .cached(CACHE_SIZE)))
+    pub fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
+        self.cached[usize::from(gc_content)].get_or_init(|| {
+            let null = self.regular_nbinom(gc_content);
+            // let alt = vec![null.mul(0.01), null.mul(2.0)];
+            // let bayes = BayesCalc::new(null, alt);
+            Arc::new(LinearCache::new(null, CACHE_SIZE))
+        })
     }
 
     /// Returns depth bound for the given GC-content and contig CN (see `UNIFSIZE_QUANTILE`).
     fn uniform_size(&self, gc_content: u8) -> u32 {
         *self.unif_size[usize::from(gc_content)].get_or_init(||
-            (UNIFSIZE_MULT * self.regular_distr(gc_content).quantile(UNIFSIZE_QUANTILE)) as u32)
+            (UNIFSIZE_MULT * self.regular_nbinom(gc_content).quantile(UNIFSIZE_QUANTILE)) as u32)
     }
 
     /// Returns a box to either `RepeatedDistr`, `NBinom`, `Uniform`, or `Mixure<NBinom, Uniform>`,
