@@ -168,7 +168,8 @@ fn print_help() {
         {EMPTY}  for each genotype and each solver [{}].",
         "    --tw-count".green(), "INT".yellow(), defaults.assgn_params.tweak_count);
     println!("    {:KEY$} {:VAL$}  Genotype likelihoods for random tweakings are averaged\n\
-        {EMPTY}  using generalized mean with this power [{:.0}].",
+        {EMPTY}  using generalized mean with this power [{:.0}].\n\
+        {EMPTY}  -inf -> min, 0 -> geom.mean, 1 -> arithm.mean, inf -> max, etc.",
         "    --tw-aver".green(), "FLOAT".yellow(), defaults.assgn_params.tweak_hoelder_p);
 
     println!("\n{}", "Execution parameters:".bold());
@@ -233,6 +234,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     .parse()?;
             }
             Long("tweak") => args.assgn_params.tweak = parser.value()?.parse()?,
+            Long("tw-count") => args.assgn_params.tweak_count = parser.value()?.parse()?,
+            Long("tw-aver") => args.assgn_params.tweak_hoelder_p = parser.value()?.parse()?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -481,6 +484,13 @@ fn analyze_locus(
 
     let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
+    if args.debug || scheme.has_dbg_output() {
+        let mut windows_writer = ext::sys::create_gzip(&locus.out_dir.join("windows.bed.gz"))?;
+        writeln!(windows_writer, "#{}", ContigWindows::BED_HEADER)?;
+        for curr_windows in contig_windows.iter() {
+            curr_windows.write_to(&mut windows_writer, &contigs)?;
+        }
+    }
 
     let contig_ids: Vec<_> = contigs.ids().collect();
     let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));

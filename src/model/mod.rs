@@ -54,8 +54,6 @@ impl Default for Params {
 impl Params {
     pub fn validate(&mut self) -> Result<(), Error> {
         validate_param!(self.boundary_size > 0, "Boundary size ({}) cannot be zero.", self.boundary_size);
-        validate_param!(self.tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
-            self.boundary_size, self.tweak);
         validate_param!(!self.prob_diff.is_nan() && self.prob_diff.is_finite(),
             "Unexpected probability difference ({:.4}) value", self.prob_diff);
         validate_param!(self.depth_contrib > 0.0,
@@ -70,6 +68,14 @@ impl Params {
             self.rare_kmer);
         validate_param!(self.rare_kmer < self.semicommon_kmer,
             "k-mer frequency thresholds ({:.4}, {:.4}) are non-increasing", self.rare_kmer, self.semicommon_kmer);
+
+        validate_param!(self.tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
+            self.boundary_size, self.tweak);
+        if self.tweak == 0 {
+            self.tweak_count = 0;
+        } else {
+            validate_param!(self.tweak_count > 0, "Number of tweak randomizations must be at least 1");
+        }
         Ok(())
     }
 }

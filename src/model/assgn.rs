@@ -6,10 +6,40 @@ use crate::{
     math::Ln,
 };
 use super::{
-    locs::{AllPairAlignments, TwoIntervals},
-    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadWindows, MultiContigWindows},
+    locs::AllPairAlignments,
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadWindows, MultiContigWindows},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
+
+/// Count how many times each alignment was selected for a read.
+#[derive(Default)]
+pub struct SelectedCounter {
+    buffer: Vec<u16>,
+    total_count: u16,
+}
+
+impl SelectedCounter {
+    /// Resets counts and updates buffer length to the new read assignment.
+    pub fn reset(&mut self, assgn: &ReadAssignment) {
+        self.buffer.clear();
+        self.buffer.resize(assgn.total_possible_alns(), 0);
+        self.total_count = 0;
+    }
+
+    /// Increments selected counts.
+    pub fn update(&mut self, assgn: &ReadAssignment) {
+        self.total_count += 1;
+        for (&read_ix, &read_assgn) in assgn.read_ixs.iter().zip(&assgn.read_assgn) {
+            self.buffer[read_ix + usize::from(read_assgn)] += 1;
+        }
+    }
+
+    /// Returns iterator over fractions (how many times each location was selected / number of iterations).
+    pub fn fractions(&self) -> impl Iterator<Item = f64> + '_ {
+        let mult = 1.0 / f64::from(self.total_count);
+        self.buffer.iter().map(move |&count| mult * f64::from(count))
+    }
+}
 
 /// Read assignment to a vector of contigs and the corresponding likelihoods.
 pub struct ReadAssignment {
@@ -188,6 +218,11 @@ impl ReadAssignment {
         &self.read_windows[self.read_ixs[rp]..self.read_ixs[rp + 1]]
     }
 
+    /// Returns the total possible number of read alignments accross all read pairs.
+    pub fn total_possible_alns(&self) -> usize {
+        self.read_windows.len()
+    }
+
     /// Iterates over possible read reassignments, and adds likelihood differences to the vector `buffer`.
     /// This way, buffer is extended by `n` floats,
     /// where `n` is the total number of possible locations for the read pair.
@@ -345,66 +380,29 @@ impl ReadAssignment {
         &self.depth_distrs[window]
     }
 
-    pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tgc\tdepth\tlik\tweight";
+    pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tdepth\tlik";
 
     /// Write read depth to a CSV file in the following format (tab-separated):
-    /// General lines:  `prefix  contig(1|2)  window  gc  depth     depth_lik  weight`.
-    /// Last line:      `prefix  summary      a,b,c   NA  read_lik  depth_lik  sum_lik`.
-    /// where `a`: number of unmapped reads, `b`: number of reads within boundary, `c`: total number of reads.
+    /// General lines:  `prefix  contig(1|2)  window  depth     depth_lik`.
+    /// Last line:      `prefix  summary      key=value key=value ...`. (key-value pairs separated by space).
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
         // log10-likelihood of read depth.
         let mut sum_depth_lik = 0.0;
         for i in 0..self.contig_windows.n_contigs() {
-            let curr_prefix = format!("{}\t{}\t", prefix, i + 1);
             let wshift = self.contig_windows.get_wshift(i) as usize;
-            let weights = self.contig_windows.get_weights(i);
-            let gcs = self.contig_windows.get_gc_contents(i);
-            for (j, (&weight, &gc)) in weights.iter().zip(gcs).enumerate() {
-                let w = j + wshift;
+            let wshift_end = self.contig_windows.get_wshift(i + 1) as usize;
+            for w in wshift..wshift_end {
                 let depth = self.depth[w];
                 let log10_prob = Ln::to_log10(self.depth_distrs[w].ln_pmf(depth));
-                writeln!(f, "{}{}\t{}\t{}\t{:.3}\t{:.4}", curr_prefix, j + 1, gc, depth, log10_prob, weight)?;
+                writeln!(f, "{}\t{}\t{}\t{}\t{:.3}", prefix, i + 1, w - wshift + 1, depth, log10_prob)?;
                 sum_depth_lik += log10_prob;
             }
         }
 
         sum_depth_lik *= self.depth_contrib;
         let total_lik = Ln::to_log10(self.likelihood);
-        writeln!(f, "{}\tsummary\t{},{},{}\tNA\t{:.4}\t{:.4}\t{:.4}", prefix,
-            self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize], self.read_assgn.len(),
+        writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} depth_lik={:.5} lik={:.5}", prefix,
+            self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
             total_lik - sum_depth_lik, sum_depth_lik, total_lik)
-    }
-
-    pub(crate) const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\twindow1\twindow2\tlik\tselected";
-
-    /// Write reads and their assignments to a CSV file in the following format (tab-separated):
-    /// `prefix  read_hash  aln1  aln2  w1  w2  log10-prob  selected`
-    pub fn write_alns(&self, f: &mut impl io::Write, prefix: &str, all_alns: &AllPairAlignments) -> io::Result<()> {
-        assert_eq!(all_alns.len() + 1, self.read_ixs.len());
-        for (rp, paired_alns) in all_alns.iter().enumerate() {
-            let hash = paired_alns.name_hash();
-            let start_ix = self.read_ixs[rp];
-            let end_ix = self.read_ixs[rp + 1];
-            let curr_ix = start_ix + self.read_assgn[rp] as usize;
-
-            for i in start_ix..end_ix {
-                write!(f, "{}\t{:X}\t", prefix, hash)?;
-
-                let curr_windows = &self.read_windows[i];
-                let (w1, w2) = curr_windows.windows();
-                if w1 < REG_WINDOW_SHIFT && w2 < REG_WINDOW_SHIFT {
-                    write!(f, "*\t*\t")?;
-                } else {
-                    match paired_alns.ith_aln(curr_windows.aln_ix() as usize).intervals() {
-                        TwoIntervals::Both(aln1, aln2) => write!(f, "{}\t{}\t", aln1, aln2),
-                        TwoIntervals::First(aln1) => write!(f, "{}\t*\t", aln1),
-                        TwoIntervals::Second(aln2) => write!(f, "*\t{}\t", aln2),
-                    }?;
-                }
-                let prob = Ln::to_log10(curr_windows.ln_prob());
-                writeln!(f, "{}\t{}\t{:.3}\t{}", w1, w2, prob, if i == curr_ix { 'T' } else { 'F' })?;
-            }
-        }
-        Ok(())
     }
 }

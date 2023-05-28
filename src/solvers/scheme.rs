@@ -14,7 +14,7 @@ use std::{
 use crate::{
     ext::{
         self,
-        vec::Tuples,
+        vec::{F64Ext, Tuples},
         rand::XoshiroRng,
     },
     math::{self, Ln, Phred},
@@ -23,13 +23,46 @@ use crate::{
     seq::{ContigId, ContigNames},
     model::{
         Params,
-        locs::AllPairAlignments,
+        locs::{AllPairAlignments, TwoIntervals},
         windows::{ContigWindows, MultiContigWindows},
-        assgn::ReadAssignment,
+        assgn::{ReadAssignment, SelectedCounter},
         dp_cache::CachedDepthDistrs,
     },
 };
 use super::Solver;
+
+const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\tlik\tselected";
+
+/// Write reads and their assignments to a CSV file in the following format (tab-separated):
+/// `prefix  read_hash  aln1  aln2  w1  w2  log10-prob  selected`
+fn write_alns(
+    f: &mut impl io::Write,
+    prefix: &str,
+    assgn: &ReadAssignment,
+    all_alns: &AllPairAlignments,
+    mut selected: impl Iterator<Item = f64>,
+) -> io::Result<()> {
+    for (rp, paired_alns) in all_alns.iter().enumerate() {
+        let hash = paired_alns.name_hash();
+        for curr_windows in assgn.possible_read_alns(rp) {
+            write!(f, "{}\t{:X}\t", prefix, hash)?;
+            let aln_ix = curr_windows.aln_ix();
+            if aln_ix == u32::MAX {
+                write!(f, "*\t*\t")?;
+            } else {
+                match paired_alns.ith_aln(aln_ix as usize).intervals() {
+                    TwoIntervals::Both(aln1, aln2) => write!(f, "{}\t{}\t", aln1, aln2),
+                    TwoIntervals::First(aln1) => write!(f, "{}\t*\t", aln1),
+                    TwoIntervals::Second(aln2) => write!(f, "*\t{}\t", aln2),
+                }?;
+            }
+            let prob = Ln::to_log10(curr_windows.ln_prob());
+            writeln!(f, "{:.3}\t{:.2}", prob, selected.next().expect("Not enough `selected` values"))?;
+        }
+    }
+    assert!(selected.next().is_none(), "Too many `selected` values");
+    Ok(())
+}
 
 /// One stage of the scheme: a solver and fraction of haplotypes, on which it is executed.
 #[derive(Clone)]
@@ -163,24 +196,36 @@ fn solve_single_thread(
     let total_tuples = data.tuples.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_tuples)?;
     let mut rem_ixs = (0..total_tuples).collect();
+    let mean = F64Ext::generalized_ln_mean(data.params.tweak_hoelder_p);
 
+    let mut liks = vec![f64::NAN; usize::from(data.params.tweak_count)];
+    let mut selected = SelectedCounter::default();
     for (stage_ix, stage) in data.scheme.iter().enumerate() {
         helper.start_stage(stage_ix, &mut rem_ixs);
         let solver = &stage.solver;
         for &ix in rem_ixs.iter() {
             let mcontig_windows = MultiContigWindows::new(&data.tuples[ix], &data.contig_windows);
-            let mut assgn = ReadAssignment::new(mcontig_windows, &data.all_alns, &data.cached_distrs, &data.params);
-            assgn.define_read_windows(data.params.tweak, rng);
-            let lik = solver.solve(&mut assgn, rng)?;
             let contigs_str = data.contigs.get_names(data.tuples[ix].iter().copied());
-            if stage.write {
-                let prefix = format!("{}\t{}", stage_ix + 1, contigs_str);
-                assgn.write_depth(&mut depth_writer, &prefix)?;
-                if data.debug {
-                    assgn.write_alns(&mut aln_writer, &prefix, &data.all_alns)?;
+            let mut assgn = ReadAssignment::new(mcontig_windows, &data.all_alns, &data.cached_distrs, &data.params);
+            if stage.write && data.debug {
+                selected.reset(&assgn);
+            }
+
+            for (i, lik) in liks.iter_mut().enumerate() {
+                assgn.define_read_windows(data.params.tweak, rng);
+                *lik = solver.solve(&mut assgn, rng)?;
+                if stage.write {
+                    assgn.write_depth(&mut depth_writer, &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, i + 1))?;
+                    if data.debug {
+                        selected.update(&assgn);
+                    }
                 }
             }
-            helper.update(ix, contigs_str, lik)?;
+            if stage.write && data.debug {
+                write_alns(&mut aln_writer, &format!("{}\t{}", stage_ix + 1, contigs_str), &assgn, &data.all_alns,
+                    selected.fractions())?;
+            }
+            helper.update(ix, contigs_str, mean(&liks))?;
         }
         helper.finish_stage();
     }
@@ -237,11 +282,11 @@ pub fn solve(
     let has_dbg_output = data.scheme.has_dbg_output();
     let (mut depth_writers, depth_filenames) = create_debug_files(
         &locus_dir.join("depth."), threads, has_dbg_output)?;
-    writeln!(depth_writers[0], "stage\tgenotype\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
+    writeln!(depth_writers[0], "stage\tgenotype\titer\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
 
     let (mut aln_writers, aln_filenames) = create_debug_files(
         &locus_dir.join("alns."), threads, has_dbg_output && data.debug)?;
-    writeln!(aln_writers[0], "stage\tgenotype\t{}", ReadAssignment::ALNS_CSV_HEADER)?;
+    writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER)?;
 
     if threads == 1 {
         solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
@@ -365,6 +410,7 @@ impl<W: Write, U: Write> Worker<W, U> {
             assert_ne!(n, 0);
             let all_alns = &self.data.all_alns;
             let stage = &self.data.scheme.0[stage_ix];
+            let debug = self.data.debug && stage.write;
             let solver = &stage.solver;
             let tuples = &self.data.tuples;
             let contigs = &self.data.contigs;
@@ -372,20 +418,34 @@ impl<W: Write, U: Write> Worker<W, U> {
             let cached_distrs = &self.data.cached_distrs;
             let params = &self.data.params;
 
+            let mut liks = vec![f64::NAN; usize::from(params.tweak_count)];
+            let mut selected = SelectedCounter::default();
+            let mean = F64Ext::generalized_ln_mean(params.tweak_hoelder_p);
             for ix in task.into_iter() {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
+                let contigs_str = contigs.get_names(tuples[ix].iter().copied());
                 let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
-                assgn.define_read_windows(params.tweak, &mut self.rng);
-                let lik = solver.solve(&mut assgn, &mut self.rng)?;
-                if stage.write {
-                    let prefix = format!("{}\t{}", stage_ix + 1, contigs.get_names(tuples[ix].iter().copied()));
-                    assgn.write_depth(&mut self.depth_writer, &prefix)?;
-                    if self.data.debug {
-                        assgn.write_alns(&mut self.aln_writer, &prefix, all_alns)?;
+
+                if debug {
+                    selected.reset(&assgn);
+                }
+                for (i, lik) in liks.iter_mut().enumerate() {
+                    assgn.define_read_windows(params.tweak, &mut self.rng);
+                    *lik = solver.solve(&mut assgn, &mut self.rng)?;
+                    if stage.write {
+                        assgn.write_depth(&mut self.depth_writer,
+                            &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, i + 1))?;
+                        if debug {
+                            selected.update(&assgn);
+                        }
                     }
                 }
+                if debug {
+                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, contigs_str),
+                        &assgn, all_alns, selected.fractions())?;
+                }
 
-                if let Err(_) = self.sender.send((ix, lik)) {
+                if let Err(_) = self.sender.send((ix, mean(&liks))) {
                     log::error!("Read recruitment: main thread stopped before the child thread.");
                     break;
                 }

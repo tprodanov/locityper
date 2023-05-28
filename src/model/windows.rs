@@ -1,6 +1,7 @@
 use std::{
     cmp::min,
-    fmt::Write,
+    fmt::{Write as FmtWrite},
+    io::{self, Write},
 };
 use rand::Rng;
 use crate::{
@@ -207,6 +208,18 @@ impl ContigWindows {
             BOUNDARY_WINDOW
         }
     }
+
+    pub const BED_HEADER: &'static str = "contig\tstart\tend\tgc\tweight";
+
+    /// Writes windows for this contig in a BED format (see `BED_HEADER`).
+    pub fn write_to(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
+        let name = contigs.get_name(self.contig_id);
+        for (i, (&gc, &weight)) in self.window_gcs.iter().zip(&self.window_weights).enumerate() {
+            let start = self.start + i as u32 * self.window;
+            writeln!(f, "{}\t{}\t{}\t{}\t{:.5}", name, start, start + self.window, gc, weight)?;
+        }
+        Ok(())
+    }
 }
 
 /// Stores the contigs and windows corresponding to the windows.
@@ -349,15 +362,5 @@ impl MultiContigWindows {
             }
         }
         distrs
-    }
-
-    /// Returns all window weights for i-th contig.
-    pub(crate) fn get_weights(&self, i: usize) -> &[f64] {
-        &self.by_contig[i].window_weights
-    }
-
-    /// Returns all GC-contents for i-th contig.
-    pub(crate) fn get_gc_contents(&self, i: usize) -> &[u8] {
-        &self.by_contig[i].window_gcs
     }
 }
