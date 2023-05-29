@@ -151,8 +151,10 @@ impl super::Solver for HighsSolver {
 
 impl super::SetParams for HighsSolver {
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> mode (as_str));
-        self.set_type(mode);
+        json_get!(obj -> mode? (as_str));
+        if let Some(mode) = mode {
+            self.set_type(mode);
+        }
         Ok(())
     }
 }

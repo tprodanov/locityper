@@ -10,35 +10,12 @@ use crate::{
         windows::REG_WINDOW_SHIFT,
         assgn::ReadAssignment,
     },
-    bg::ser::json_get,
     ext::rand::XoshiroRng,
 };
 
 /// Gurobi ILP solver.
-#[derive(Clone)]
-pub struct GurobiSolver {
-    tries: u16,
-}
-
-impl Default for GurobiSolver {
-    fn default() -> Self {
-        Self {
-            tries: 1,
-        }
-    }
-}
-
-impl GurobiSolver {
-    pub fn tries(&self) -> u16 {
-        self.tries
-    }
-
-    pub fn set_tries(&mut self, tries: u16) -> &mut Self {
-        assert_ne!(tries, 0, "Number of tries cannot be 0.");
-        self.tries = tries;
-        self
-    }
-}
+#[derive(Clone, Default)]
+pub struct GurobiSolver;
 
 /// Query read assignments from the ILP solution, and set them to `assignments`.
 fn set_assignments(
@@ -138,25 +115,18 @@ impl super::Solver for GurobiSolver {
         let (mut model, vars) = define_model(assignments)?;
         let mut best_lik = assignments.likelihood();
 
-        for it in 0..self.tries {
-            if it > 0 {
-                model.reset()?;
-                model.set_param(parameter::IntParam::OutputFlag, 0)?;
-                model.set_param(parameter::IntParam::Threads, 1)?;
-            }
-            model.set_param(parameter::IntParam::Seed, rng.gen::<i32>().abs())?;
-            model.optimize()?;
-            let status = model.status()?;
-            if status != Status::Optimal {
-                log::error!("Gurobi achieved non-optimal status {:?}", status);
-            }
-            let ilp_lik = model.get_attr(attr::ObjVal)?;
+        model.set_param(parameter::IntParam::Seed, rng.gen::<i32>().abs())?;
+        model.optimize()?;
+        let status = model.status()?;
+        if status != Status::Optimal {
+            log::error!("Gurobi achieved non-optimal status {:?}", status);
+        }
+        let ilp_lik = model.get_attr(attr::ObjVal)?;
 
-            if ilp_lik > best_lik {
-                best_lik = set_assignments(&model, &vars, assignments)?;
-                if (best_lik - ilp_lik).abs() > 1e-5 {
-                    log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, best_lik);
-                }
+        if ilp_lik > best_lik {
+            best_lik = set_assignments(&model, &vars, assignments)?;
+            if (best_lik - ilp_lik).abs() > 1e-5 {
+                log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, best_lik);
             }
         }
         Ok(best_lik)
@@ -164,15 +134,13 @@ impl super::Solver for GurobiSolver {
 }
 
 impl super::SetParams for GurobiSolver {
-    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> tries (as_u16));
-        self.set_tries(tries);
+    fn set_params(&mut self, _: &json::JsonValue) -> Result<(), Error> {
         Ok(())
     }
 }
 
 impl fmt::Display for GurobiSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Gurobi({} tries)", self.tries)
+        write!(f, "Gurobi")
     }
 }

@@ -11,6 +11,7 @@ use std::{
         mpsc::{self, Sender, Receiver},
     },
 };
+use json::JsonValue;
 use crate::{
     ext::{
         self,
@@ -64,6 +65,23 @@ fn write_alns(
     Ok(())
 }
 
+fn parse_averaging_mode(val: &JsonValue) -> Result<f64, Error> {
+    if val.is_null() {
+        Ok(0.0)
+    } else if let Some(s) = val.as_str() {
+        match &s.to_lowercase() as &str {
+            "min" | "minimum" | "-inf" | "-infinity" => Ok(f64::NEG_INFINITY),
+            "max" | "maximum" | "inf" | "infinity" => Ok(f64::INFINITY),
+            "mean" | "average" =>
+                Err(Error::InvalidInput(format!("Averaging mode {} is ambiguous, please use 0 or 1", s))),
+            _ => Err(Error::InvalidInput(format!("Unknown averaging mode {}", s))),
+        }
+    } else {
+        val.as_f64().ok_or_else(||
+            Error::InvalidInput(format!("Unknown averaging mode {:?}", val)))
+    }
+}
+
 /// One stage of the scheme: a solver and fraction of haplotypes, on which it is executed.
 #[derive(Clone)]
 struct Stage {
@@ -72,42 +90,78 @@ struct Stage {
     fraction: f64,
     /// Write debug information about read assignments?
     write: bool,
+    /// Number of tries.
+    tries: u16,
+    /// Averaging function: generalized mean with power `p`.
+    aver_p: f64,
 }
 
 impl Stage {
-    fn with_default<S: Solver + Default + 'static>(fraction: f64, write: bool) -> Result<Self, Error> {
-        Self::new(Box::new(S::default()), fraction, write)
+    fn new<S: Solver + 'static>(solver: S) -> Self {
+        Self {
+            solver: Box::new(solver),
+            fraction: 1.0,
+            write: false,
+            tries: 5,
+            aver_p: 0.0,
+        }
     }
 
-    fn new(solver: Box<dyn Solver>, fraction: f64, write: bool) -> Result<Self, Error> {
-        validate_param!(fraction >= 0.0 && fraction <= 1.0, "Ratio ({}) must be within [0, 1].", fraction);
-        Ok(Self { solver, fraction, write })
+    fn set_fraction(&mut self, fraction: f64) -> Result<&mut Self, Error> {
+        validate_param!(fraction >= 0.0 && fraction <= 1.0, "Ratio ({}) must be within [0, 1]", fraction);
+        self.fraction = fraction;
+        Ok(self)
+    }
+
+    fn set_write(&mut self, write: bool) -> &mut Self {
+        self.write = write;
+        self
+    }
+
+    fn set_tries(&mut self, tries: u16) -> Result<&mut Self, Error> {
+        validate_param!(tries > 0, "Number of tries must be over 1");
+        self.tries = tries;
+        Ok(self)
+    }
+
+    fn set_aver_power(&mut self, aver_p: f64) -> &mut Self {
+        self.aver_p = aver_p;
+        self
     }
 
     fn from_json(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> solver (as_str), fraction? (as_f64), write? (as_bool));
-        let mut solver: Box<dyn Solver> = match &solver.to_lowercase() as &str {
-            "greedy" => Box::new(super::GreedySolver::default()),
-            "simanneal" | "simulatedannealing" => Box::new(super::SimAnneal::default()),
+        json_get!(obj -> solver (as_str));
+        let mut stage = match &solver.to_lowercase() as &str {
+            "greedy" => Stage::new(super::GreedySolver::default()),
+            "simanneal" | "simulatedannealing" => Stage::new(super::SimAnneal::default()),
             "highs" =>
                 if cfg!(feature = "highs") {
-                    Box::new(super::HighsSolver::default())
+                    Stage::new(super::HighsSolver::default())
                 } else {
-                    panic!("HiGHS feature is disabled. Consider recompiling with `highs` feature enabled.");
+                    panic!("HiGHS feature is disabled. Please recompile with `highs` feature.");
                 },
             "gurobi" =>
                 if cfg!(feature = "gurobi") {
-                    Box::new(super::GurobiSolver::default())
+                    Stage::new(super::GurobiSolver::default())
                 } else {
-                    panic!("Gurobi feature is disabled. Consider recompiling with `gurobi` feature enabled.");
+                    panic!("Gurobi feature is disabled. Please recompile with `gurobi` feature.");
                 },
             _ => panic!("Unknown solver '{}'", solver),
         };
 
-        if obj.has_key("params") {
-            solver.set_params(&obj["params"])?;
+        json_get!(obj -> fraction? (as_f64), write? (as_bool), tries? (as_u16));
+        stage.solver.set_params(obj)?;
+        if let Some(frac) = fraction {
+            stage.set_fraction(frac)?;
         }
-        Self::new(solver, fraction.unwrap_or(1.0), write.unwrap_or(false))
+        if let Some(write) = write {
+            stage.set_write(write);
+        }
+        if let Some(tries) = tries {
+            stage.set_tries(tries)?;
+        }
+        stage.set_aver_power(parse_averaging_mode(&obj["aver"])?);
+        Ok(stage)
     }
 }
 
@@ -121,9 +175,21 @@ impl Default for Scheme {
     fn default() -> Self {
         Self(vec![
             // First, run Greedy solver on all haplotypes.
-            Stage::with_default::<super::GreedySolver>(1.0, false).unwrap(),
+            Stage {
+                solver: Box::new(super::GreedySolver::default()),
+                fraction: 1.0,
+                write: false,
+                tries: 5,
+                aver_p: f64::INFINITY, // Take maximum across all random tries.
+            },
             // Then, run HiGHS solver on the best 3%.
-            Stage::with_default::<super::HighsSolver>(0.03, false).unwrap(),
+            Stage {
+                solver: Box::new(super::HighsSolver::default()),
+                fraction: 0.03,
+                write: false,
+                tries: 5,
+                aver_p: 0.0, // Take geom. mean of all log-likehoods.
+            },
         ])
     }
 }
@@ -196,13 +262,14 @@ fn solve_single_thread(
     let total_tuples = data.tuples.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_tuples)?;
     let mut rem_ixs = (0..total_tuples).collect();
-    let mean = F64Ext::generalized_ln_mean(data.params.tweak_hoelder_p);
 
-    let mut liks = vec![f64::NAN; usize::from(data.params.tweak_count)];
     let mut selected = SelectedCounter::default();
     for (stage_ix, stage) in data.scheme.iter().enumerate() {
         helper.start_stage(stage_ix, &mut rem_ixs);
         let solver = &stage.solver;
+        let mean = F64Ext::generalized_ln_mean(stage.aver_p);
+        let mut liks = vec![f64::NAN; usize::from(stage.tries)];
+
         for &ix in rem_ixs.iter() {
             let mcontig_windows = MultiContigWindows::new(&data.tuples[ix], &data.contig_windows);
             let contigs_str = data.contigs.get_names(data.tuples[ix].iter().copied());
@@ -418,9 +485,9 @@ impl<W: Write, U: Write> Worker<W, U> {
             let cached_distrs = &self.data.cached_distrs;
             let params = &self.data.params;
 
-            let mut liks = vec![f64::NAN; usize::from(params.tweak_count)];
+            let mut liks = vec![f64::NAN; usize::from(stage.tries)];
             let mut selected = SelectedCounter::default();
-            let mean = F64Ext::generalized_ln_mean(params.tweak_hoelder_p);
+            let mean = F64Ext::generalized_ln_mean(stage.aver_p);
             for ix in task.into_iter() {
                 let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
                 let contigs_str = contigs.get_names(tuples[ix].iter().copied());

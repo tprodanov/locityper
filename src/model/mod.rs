@@ -28,10 +28,6 @@ pub struct Params {
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
     pub tweak: u32,
-    /// Average across `tweak_count` random tweakings for each genotype and solver.
-    /// Averaging function is ln-generalized mean with power `tweak_hoelder_p`.
-    pub tweak_count: u16,
-    pub tweak_hoelder_p: f64,
 }
 
 impl Default for Params {
@@ -45,8 +41,6 @@ impl Default for Params {
             semicommon_kmer: 5.0,
 
             tweak: 70,
-            tweak_count: 5,
-            tweak_hoelder_p: 0.0,
         }
     }
 }
@@ -71,11 +65,6 @@ impl Params {
 
         validate_param!(self.tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
             self.boundary_size, self.tweak);
-        if self.tweak == 0 {
-            self.tweak_count = 0;
-        } else {
-            validate_param!(self.tweak_count > 0, "Number of tweak randomizations must be at least 1");
-        }
         Ok(())
     }
 }

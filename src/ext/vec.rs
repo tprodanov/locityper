@@ -75,7 +75,7 @@ impl F64Ext {
             Box::new(Self::min)
         } else if p.abs() < 1e-8 {
             // ln-geometric mean.
-            Box::new(|a| a.iter().copied().sum::<f64>() / a.len() as f64)
+            Box::new(Self::mean)
         } else if p > 100.0 {
             Box::new(Self::max)
         } else {

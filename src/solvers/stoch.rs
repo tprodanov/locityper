@@ -12,7 +12,7 @@ use crate::{
     },
     bg::ser::json_get,
 };
-use super::MultiTrySolver;
+use super::Solver;
 
 /// Assigns reads in a greedy way.
 ///
@@ -20,8 +20,6 @@ use super::MultiTrySolver;
 /// If no improvement was made for `plato_size` iterations, the solver stops.
 #[derive(Clone)]
 pub struct GreedySolver {
-    /// Number of tries the solver makes to assign reads anew.
-    tries: u16,
     /// Number of read-pairs, examined per iteration.
     sample_size: usize,
     /// Number of iteration without improvement, after which the solver stops.
@@ -31,7 +29,6 @@ pub struct GreedySolver {
 impl Default for GreedySolver {
     fn default() -> Self {
         Self {
-            tries: 3,
             sample_size: 100,
             plato_size: 5,
         }
@@ -51,19 +48,9 @@ impl GreedySolver {
     }
 }
 
-impl MultiTrySolver for GreedySolver {
-    fn tries(&self) -> u16 {
-        self.tries
-    }
-
-    fn set_tries(&mut self, tries: u16) -> &mut Self {
-        assert_ne!(tries, 0, "Number of tries cannot be 0.");
-        self.tries = tries;
-        self
-    }
-
+impl Solver for GreedySolver {
     /// Single greedy iteration to find the best read assignment.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         let mut buffer = Vec::new();
         assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
         let mut curr_plato = 0;
@@ -88,17 +75,14 @@ impl MultiTrySolver for GreedySolver {
                 curr_plato += 1;
             }
         }
-        Ok(())
+        Ok(assignments.likelihood())
     }
 }
 
 impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> tries? (as_u16), sample_size? (as_usize), plato_size? (as_usize));
-        if let Some(val) = tries {
-            self.set_tries(val);
-        }
+        json_get!(obj -> sample_size? (as_usize), plato_size? (as_usize));
         if let Some(val) = sample_size {
             self.set_sample_size(val);
         }
@@ -111,7 +95,7 @@ impl super::SetParams for GreedySolver {
 
 impl fmt::Display for GreedySolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Greedy({} tries, {} reads/iter, plato {})", self.tries, self.sample_size, self.plato_size)
+        write!(f, "Greedy({} reads/iter, plato {})", self.sample_size, self.plato_size)
     }
 }
 
@@ -120,8 +104,6 @@ impl fmt::Display for GreedySolver {
 /// Randomly selects direction based on the current temperature, and stops once there are no improvement `plato_size`.
 #[derive(Clone)]
 pub struct SimAnneal {
-    /// Number of tries the solver makes to assign reads anew.
-    tries: u16,
     /// Temperature starts at 1, and decreases by `cooling_temp` every step.
     cooling_temp: f64,
     /// Initialize temperature constant in such way, that initially
@@ -134,7 +116,6 @@ pub struct SimAnneal {
 impl Default for SimAnneal {
     fn default() -> Self {
         Self {
-            tries: 3,
             cooling_temp: 5e-5,
             init_prob: 0.1,
             plato_size: 10000,
@@ -181,19 +162,9 @@ impl SimAnneal {
     }
 }
 
-impl MultiTrySolver for SimAnneal {
-    fn tries(&self) -> u16 {
-        self.tries
-    }
-
-    fn set_tries(&mut self, tries: u16) -> &mut Self {
-        assert_ne!(tries, 0, "Number of tries cannot be 0.");
-        self.tries = tries;
-        self
-    }
-
+impl Solver for SimAnneal {
     /// Run simulated annealing once to find the best read assignment.
-    fn solve_once(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         assignments.init_assignments(
             |possible_alns| IterExt::argmax(possible_alns.iter().map(ReadWindows::ln_prob)).0);
         let coeff = self.find_temperature_coeff(assignments, rng);
@@ -211,17 +182,14 @@ impl MultiTrySolver for SimAnneal {
             }
             curr_temp -= cooling_temp;
         }
-        Ok(())
+        Ok(assignments.likelihood())
     }
 }
 
 impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
     fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> tries? (as_u16), cooling_temp? (as_f64), init_prob? (as_f64), plato_size? (as_usize));
-        if let Some(val) = tries {
-            self.set_tries(val);
-        }
+        json_get!(obj -> cooling_temp? (as_f64), init_prob? (as_f64), plato_size? (as_usize));
         if let Some(val) = cooling_temp {
             self.set_cooling_temp(val);
         }
@@ -237,7 +205,7 @@ impl super::SetParams for SimAnneal {
 
 impl fmt::Display for SimAnneal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SimAnneal({} tries, cool.temp {}, init.prob {}, plato {})",
-            self.tries, self.cooling_temp, self.init_prob, self.plato_size)
+        write!(f, "SimAnneal(cool.temp {}, init.prob {}, plato {})",
+            self.cooling_temp, self.init_prob, self.plato_size)
     }
 }

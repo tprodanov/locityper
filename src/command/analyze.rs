@@ -161,16 +161,8 @@ fn print_help() {
         {EMPTY}  Windows with values equal to {} [{}] receive half weight.",
         "    --rare-kmer".green(), "FLOAT FLOAT".yellow(), "FLOAT_1".yellow(), defaults.assgn_params.rare_kmer,
         "FLOAT_2".yellow(), defaults.assgn_params.semicommon_kmer);
-    println!("{}", "    Random tweaking:".bold());
     println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
         "    --tweak".green(), "INT".yellow(), "INT".yellow(), defaults.assgn_params.tweak);
-    println!("    {:KEY$} {:VAL$}  Average across this number of random tweaking\n\
-        {EMPTY}  for each genotype and each solver [{}].",
-        "    --tw-count".green(), "INT".yellow(), defaults.assgn_params.tweak_count);
-    println!("    {:KEY$} {:VAL$}  Genotype likelihoods for random tweakings are averaged\n\
-        {EMPTY}  using generalized mean with this power [{:.0}].\n\
-        {EMPTY}  -inf -> min, 0 -> geom.mean, 1 -> arithm.mean, inf -> max, etc.",
-        "    --tw-aver".green(), "FLOAT".yellow(), defaults.assgn_params.tweak_hoelder_p);
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -234,8 +226,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     .parse()?;
             }
             Long("tweak") => args.assgn_params.tweak = parser.value()?.parse()?,
-            Long("tw-count") => args.assgn_params.tweak_count = parser.value()?.parse()?,
-            Long("tw-aver") => args.assgn_params.tweak_hoelder_p = parser.value()?.parse()?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
