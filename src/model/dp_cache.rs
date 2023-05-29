@@ -20,41 +20,6 @@ impl DiscretePmf for AlwaysOneDistr {
     fn ln_pmf(&self, _: u32) -> f64 { 0.0 }
 }
 
-/// Discrete distribution, repeated `count` times.
-/// PMF is redefined in the following way:
-/// `RepeatedDistr[count].pmf(k) ~= count * inner.pmf(k / count)`.
-///
-/// This is done as simply modifying NBinom `n` parameter gives too high probability to repeated haplotypes.
-/// `2 * NBinom::new(1000, 0.99).ln_pmf(10) << NBinom::new(2000, 0.99).ln_pmf(20)`.
-///
-/// Not really a distribution, sum probability will be < 1.
-#[derive(Clone, Debug)]
-struct RepeatedDistr<D> {
-    inner: D,
-    count: u8,
-}
-
-impl<D: DiscretePmf + 'static> RepeatedDistr<D> {
-    /// Returns a box to either `inner` (if count is 1), or to `RepeatedDistr` if count > 1.
-    fn new_box(inner: D, count: u8) -> DistrBox {
-        assert_ne!(count, 0, "Count cannot be 0.");
-        if count == 1 {
-            Box::new(inner)
-        } else {
-            Box::new(Self { inner, count })
-        }
-    }
-}
-
-impl<D: DiscretePmf> DiscretePmf for RepeatedDistr<D> {
-    fn ln_pmf(&self, k: u32) -> f64 {
-        let count = u32::from(self.count);
-        let div = k / count;
-        let rem = k % count;
-        f64::from(rem) * self.inner.ln_pmf(div + 1) + f64::from(count - rem) * self.inner.ln_pmf(div)
-    }
-}
-
 #[derive(Clone, Debug)]
 struct WeightedDistr {
     ln_probs: Vec<f64>,
@@ -137,7 +102,7 @@ impl CachedDepthDistrs {
         self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef)
     }
 
-    /// Returns read depth distribution in regular windows at GC-content and contig CN.
+    /// Returns read depth distribution in regular windows at GC-content.
     pub fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
         self.cached[usize::from(gc_content)].get_or_init(|| {
             let null = self.regular_nbinom(gc_content);
@@ -147,22 +112,21 @@ impl CachedDepthDistrs {
         })
     }
 
-    /// Returns depth bound for the given GC-content and contig CN (see `UNIFSIZE_QUANTILE`).
+    /// Returns depth bound for the given GC-content (see `UNIFSIZE_QUANTILE`).
     fn uniform_size(&self, gc_content: u8) -> u32 {
         *self.unif_size[usize::from(gc_content)].get_or_init(||
             (UNIFSIZE_MULT * self.regular_nbinom(gc_content).quantile(UNIFSIZE_QUANTILE)) as u32)
     }
 
-    /// Returns a box to either `RepeatedDistr`, `NBinom`, `Uniform`, or `Mixure<NBinom, Uniform>`,
-    /// depending on the CN and `nbinom_weight`.
-    pub fn get_distribution(&self, gc_content: u8, cn: u8, weight: f64) -> DistrBox {
+    /// Returns a box to either `NBinom`, `WeightedDistr`, depending on GC-content and the weight of the window.
+    pub fn get_distribution(&self, gc_content: u8, weight: f64) -> DistrBox {
         if weight < 0.00001 {
-            RepeatedDistr::new_box(Uniform::new(0, self.uniform_size(gc_content)), cn)
+            Box::new(Uniform::new(0, self.uniform_size(gc_content)))
         } else if weight > 0.99999 {
-            RepeatedDistr::new_box(Arc::clone(&self.regular_distr(gc_content)), cn)
+            Box::new(Arc::clone(&self.regular_distr(gc_content)))
         } else {
             let wdistr = WeightedDistr::new(self.regular_distr(gc_content), weight);
-            RepeatedDistr::new_box(wdistr, cn)
+            Box::new(wdistr)
         }
     }
 }

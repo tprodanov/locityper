@@ -1,6 +1,5 @@
 use std::{
     cmp::min,
-    fmt::{Write as FmtWrite},
     io::{self, Write},
 };
 use rand::Rng;
@@ -225,7 +224,6 @@ impl ContigWindows {
 /// Stores the contigs and windows corresponding to the windows.
 pub struct MultiContigWindows {
     by_contig: Vec<ContigWindows>,
-    cns: Vec<u8>,
     /// `ln(sum(cns))`.
     ln_ploidy: f64,
     /// Start index for each contig id (length: n-contigs + 1).
@@ -238,27 +236,21 @@ impl MultiContigWindows {
     pub fn new(contig_ids: &[ContigId], contig_windows: &[ContigWindows]) -> Self {
         let n = contig_ids.len();
         let mut by_contig = Vec::<ContigWindows>::with_capacity(n);
-        let mut cns = Vec::<u8>::with_capacity(n);
         let mut wshifts = Vec::with_capacity(n + 1);
         let mut curr_wshift = REG_WINDOW_SHIFT;
         wshifts.push(curr_wshift);
 
         for &id in contig_ids.iter() {
-            if let Some(i) = by_contig.iter().position(|el| el.contig_id == id) {
-                cns[i] = cns[i].checked_add(1).unwrap();
-                continue;
-            }
             let curr_contig = contig_windows[id.ix()].clone();
             curr_wshift += curr_contig.n_windows();
             wshifts.push(curr_wshift);
             by_contig.push(curr_contig);
-            cns.push(1);
         }
         assert!(by_contig.len() < 256, "Multi-contig collection cannot contain more than 256 entries");
         Self {
             ln_ploidy: (n as f64).ln(),
             window: by_contig[0].window,
-            by_contig, cns, wshifts,
+            by_contig, wshifts,
         }
     }
 
@@ -282,21 +274,7 @@ impl MultiContigWindows {
 
     /// Returns string with all contig names through a comma.
     pub fn ids_str(&self, contigs: &ContigNames) -> String {
-        let mut s = String::new();
-        for (id, cn) in self.contigs_cns() {
-            for _ in 0..cn {
-                if !s.is_empty() {
-                    write!(s, ",").unwrap();
-                }
-                write!(s, "{}", contigs.get_name(id)).unwrap();
-            }
-        }
-        s
-    }
-
-    /// Returns iterator over pairs `(contig_id, contig_cn)`.
-    pub fn contigs_cns(&self) -> impl Iterator<Item = (ContigId, u8)> + '_ {
-        self.ids().zip(self.cns.iter().copied())
+        contigs.get_names(self.ids())
     }
 
     /// Returns window shift for the `i`-th contig.
@@ -356,9 +334,9 @@ impl MultiContigWindows {
         distrs.push(Box::new(cached_distrs.unmapped_distr()));
         distrs.push(Box::new(cached_distrs.boundary_distr()));
 
-        for (curr_contig, &contig_cn) in self.by_contig.iter().zip(&self.cns) {
+        for curr_contig in self.by_contig.iter() {
             for (&gc_content, &weight) in curr_contig.window_gcs.iter().zip(&curr_contig.window_weights) {
-                distrs.push(cached_distrs.get_distribution(gc_content, contig_cn, weight));
+                distrs.push(cached_distrs.get_distribution(gc_content, weight));
             }
         }
         distrs
