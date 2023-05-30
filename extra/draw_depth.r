@@ -1,31 +1,40 @@
 #!/usr/bin/Rscript
 
+pdf(NULL)
 suppressWarnings(library(ggplot2, quietly = T))
 suppressMessages(library(ggnewscale, quietly = T))
 suppressMessages(library(dplyr, quietly = T))
-pdf(NULL)
+suppressMessages(library(stringi, quietly = T))
 
 parser <- argparse::ArgumentParser(description = 'Draw read assignment.')
-parser$add_argument('sol', metavar = 'FILE',
-    help = 'Input CSV file with solutions.')
+parser$add_argument('dir', metavar = 'DIR',
+    help = 'Input directory with locus analysis.')
 parser$add_argument('-g', '--genotype', metavar = 'STR',
     help = paste('Genotype to draw (through a comma).',
     'Required, unless there is only one genotype in the solution.'))
 parser$add_argument('-s', '--stage', metavar = 'INT', type = 'integer',
     help = 'Draw this stage. Default: stage with highest likelihood.')
+parser$add_argument('-i', '--iter', metavar = 'INT', type = 'integer',
+    help = 'Draw this stage iteration. Default: iteration with highest likelihood.')
 parser$add_argument('-d', '--depth', metavar = 'FLOAT', type = 'double',
     help = 'Read depth limit (inferred by default).')
 parser$add_argument('-l', '--lik', metavar = 'FLOAT', type = 'double',
     help = 'Likelihood limit (inferred by default).')
 parser$add_argument('--no-lik', action = 'store_true',
     help = 'Do not draw likelihood axis.')
-parser$add_argument('-o', '--out', metavar = 'FILE', required = T,
-    help = 'Output plot file (PNG, PDF, etc.). Literal {} is replaced with the genotype.')
+parser$add_argument('-o', '--out', metavar = 'FILE',
+    help = paste('Output plot file (PNG, PDF, etc.).',
+        'Literal {%s} is replaced with the value for keys "gt", "stage", "iter".',
+        'Default: "<dir>/plots/{gt}.png".'))
 args <- parser$parse_args()
 
-# Select appropriate solution from the whole dataframe.
+# Load data.
 
-sol <- read.csv(args$sol, sep = '\t', comment = '#')
+dir <- args$dir
+sol <- read.csv(file.path(dir, 'depth.csv.gz'), sep = '\t', comment = '#')
+
+# Filter read depth according to genotype and the best likelihood.
+
 if (is.null(args$genotype)) {
     if (length(unique(sol$genotype)) > 1) {
         stop(paste('There is more than 1 genotype in the solution,',
@@ -35,40 +44,64 @@ if (is.null(args$genotype)) {
 } else {
     sol <- filter(sol, genotype == args$genotype)
 }
-if (is.null(args$stage)) {
-    args$stage <- (filter(sol, contig == 'summary') |>
-            arrange(-weight) |>
-            head(1))$stage
+if (!is.null(args$stage)) {
+    sol <- filter(sol, stage == args$stage)
 }
-sol <- filter(sol, stage == args$stage)
+if (!is.null(args$iter)) {
+    sol <- filter(sol, iter == args$iter)
+}
 if (nrow(sol) == 0) {
     stop('Empty dataframe after filtering!')
 }
+gt <- strsplit(args$genotype, ',', fixed = T) |> unlist()
 
-split_gt <- strsplit(args$genotype, ',', fixed = T) |> unlist()
-summary_info <- filter(sol, contig == 'summary')
+summary_info <- filter(sol, contig == 'summary') |>
+    rename(info = window) |>
+    mutate(depth = NULL, lik = NULL,
+        lik = as.numeric(sub(' .*', '', sub('.*lik=', '', info)))) |>
+    arrange(-lik) |> head(n = 1)
+sol <- filter(sol,
+    stage == summary_info$stage & iter == summary_info$iter)
+if (sum(sol$contig == 'summary') != 1) {
+    stop('Unexpected number of solutions!')
+}
 sol <- filter(sol, contig != 'summary') |>
-    mutate(contig = split_gt[as.numeric(contig)],
-        window = as.numeric(window))
+    mutate(contig = gt[as.numeric(contig)], window = as.numeric(window))
+
+# Load window information.
+
+windows <- read.csv(file.path(dir, 'windows.bed.gz'), sep = '\t')
+names(windows)[1] <- 'contig'
+windows <- filter(windows, contig %in% gt) |>
+    group_by(contig) |>
+    mutate(window = 1:n()) |>
+    ungroup()
+
+sol <- full_join(sol, windows, by = c('contig', 'window'))
+if (with(sol, any(is.na(weight) | is.na(depth)))) {
+    stop('Window information does not match depth information completely')
+}
+
+# Parse information.
+
+info <- unlist(strsplit(summary_info$info, ' ')) |>
+    strsplit('=')
+info <- setNames(as.numeric(sapply(info, `[`, 2)), sapply(info, `[`, 1))
 
 # Create title and subtitle.
 
-reads_info <- as.numeric(unlist(strsplit(summary_info$window, ',', fixed = T)))
-unmapped <- reads_info[1]
-boundary <- reads_info[2]
-total_reads <- reads_info[3]
-alns_lik <- summary_info$depth
-depth_lik <- summary_info$lik
-total_lik <- summary_info$weight
-
 comma_int <- scales::label_comma(accuracy = 1)
 comma_prec2 <- scales::label_comma(accuracy = 0.01, style_positive = 'plus')
-title <- sub(',', ', ', args$genotype)
+title <- paste(gt, collapse = ', ')
 subtitle <- paste(
     sprintf('Reads: %s,  Unmapped: %s,  On boundary: %s.',
-        comma_int(total_reads), comma_int(unmapped), comma_int(boundary)),
+        comma_int(info['reads']),
+        comma_int(info['unmapped']),
+        comma_int(info['boundary'])),
     sprintf('log10-likelihood: %s  =  %s (alns)   %s (depth)',
-        comma_prec2(total_lik), comma_prec2(alns_lik), comma_prec2(depth_lik)),
+        comma_prec2(info['lik']),
+        comma_prec2(info['aln_lik']),
+        comma_prec2(info['depth_lik'])),
     sep = '\n')
 
 # Select scale limits.
@@ -88,7 +121,6 @@ ylim <- if (no_lik) { c(0, max_depth) } else { c(lik_axis_mult * min_lik, max_de
 
 # Drawing and saving.
 
-# fill_colors <- c('#4F000B', '#720026', '#CE4257', '#FF7F51', '#FF9B54')
 fill_colors <- rev(c('#355070', '#6D597A', '#B56576', '#E56B6F'))
 main_color <- tail(fill_colors, n = 1)
 fill_rescale <- -c(seq(min_lik, -1, length.out = length(fill_colors)), 0) /
@@ -165,6 +197,16 @@ ggplot(sol) +
         axis.ticks.y = element_blank(),
     )
 
-out_filename <- gsub('{}', args$genotype, args$out, fixed = T)
+if (is.null(args$out)) {
+    args$out <- file.path(dir, 'plots/{gt}.png')
+}
+
+out_filename <- stri_replace_all_fixed(
+    args$out,
+    pattern = c('{gt}', '{stage}', '{iter}'),
+    replacement = c(summary_info$genotype, summary_info$stage, summary_info$iter),
+    vectorize_all = F
+)
+dir.create(dirname(out_filename), showWarnings = F)
 ggsave(out_filename, width = 9, height = 6, dpi = 400, scale = 1.2)
 warnings()
