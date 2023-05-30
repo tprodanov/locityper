@@ -180,8 +180,14 @@ impl ContigNames {
     }
 
     /// Returns contig id, if it is available.
-    pub fn try_get_id(&self, name: &str) -> Option<ContigId> {
+    pub fn try_get_id(&self, name: &str) -> Result<ContigId, Error> {
         self.name_to_id.get(name).copied()
+            .ok_or_else(|| Error::ParsingError(format!("Unknown contig {:?}", name)))
+    }
+
+    /// Parses genotype (contig names through comma).
+    pub fn parse_ids(&self, genotype: &str) -> Result<Vec<ContigId>, Error> {
+        genotype.split(',').map(|name| self.try_get_id(name)).collect()
     }
 
     /// Returns iterator over all contig IDs.

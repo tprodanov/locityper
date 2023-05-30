@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, Write, BufRead},
     process::{Command, Stdio},
     cmp::{min, max},
     path::{Path, PathBuf},
@@ -9,17 +9,18 @@ use std::{
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
-use fnv::FnvHashSet;
+use fnv::{FnvHashSet, FnvHashMap};
 use crate::{
     err::{Error, validate_param},
     math::Ln,
     seq::{
         recruit, fastx,
-        ContigSet, NamedSeq,
+        ContigId, ContigSet, NamedSeq,
         kmers::Kmer,
     },
     bg::{BgDistr, JsonSer},
     ext,
+    ext::vec::Tuples,
     model::{
         Params as AssgnParams,
         locs::{self, PrelimAlignments},
@@ -38,6 +39,7 @@ struct Args {
     subset_loci: FnvHashSet<String>,
     ploidy: u8,
     solvers: Option<PathBuf>,
+    priors: Option<PathBuf>,
 
     interleaved: bool,
     threads: u16,
@@ -60,6 +62,7 @@ impl Default for Args {
             subset_loci: FnvHashSet::default(),
             ploidy: 2,
             solvers: None,
+            priors: None,
 
             interleaved: false,
             threads: 8,
@@ -127,6 +130,10 @@ fn print_help() {
         "-^, --interleaved".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
         "    --subset-loci".green(), "STR+".yellow());
+    println!("    {:KEY$} {:VAL$}  Optional: genotype priors. Contains three columns:\n\
+        {EMPTY}  <locus>  <genotype (through comma)> <log10(prior)>.\n\
+        {EMPTY}  Missing genotypes are removed from the analysis.",
+        "    --priors".green(), "FILE".yellow());
 
     println!("\n{}", "Read recruitment:".bold());
     println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than {}) [{}].",
@@ -203,6 +210,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     return Err(lexopt::Error::MissingValue { option: Some("subset-loci".to_owned()) });
                 }
             }
+            Long("priors") => args.priors = Some(parser.value()?.parse()?),
 
             Short('k') | Long("recr-kmer") => args.recr_params.minimizer_k = parser.value()?.parse()?,
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
@@ -267,6 +275,43 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> O
             }
         }
     }
+}
+
+/// Loads priors from a file with three columns: <locus> <genotype> <log10-prior>.
+/// Repeated lines <locus> <genotype> are not allowed.
+///
+/// Output dictionary: `locus -> { genotype -> ln-prior }`.
+fn load_priors(path: &Path) -> Result<FnvHashMap<String, FnvHashMap<String, f64>>, Error> {
+    let mut res: FnvHashMap<String, FnvHashMap<String, f64>> = FnvHashMap::default();
+    for line in ext::sys::open(path)?.lines() {
+        let line = line?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let cols: Vec<_> = line.trim_end().split_whitespace().collect();
+        if cols.len() < 3 {
+            return Err(Error::InvalidData(format!(
+                "Cannot parse genotype priors: invalid line {:?} (expected at least 3 columns)", line)));
+        }
+        let locus = cols[0];
+        let gt = cols[1];
+        let prior: f64 = cols[2].parse()
+            .map(Ln::from_log10)
+            .map_err(|_| Error::InvalidData(format!("Cannot parse genotype priors: offending line {:?}", line)))?;
+        if prior > 0.0 {
+            return Err(Error::InvalidData(format!(
+                "Cannot parse genotype priors: offending line {:?} (priors must be in log-10 space)", line)));
+        }
+
+        if let Some(old_prior) = res.entry(locus.to_owned()).or_default().insert(gt.to_owned(), prior) {
+            if old_prior != prior {
+                return Err(Error::InvalidData(format!(
+                    "Cannot parse genotype priors: locus {} genotype {} contains two priors ({} and {})",
+                    locus, gt, Ln::from_log10(old_prior), Ln::from_log10(prior))));
+            }
+        }
+    }
+    Ok(res)
 }
 
 struct LocusData {
@@ -451,6 +496,7 @@ fn analyze_locus(
     bg_distr: &BgDistr,
     scheme: &scheme::Scheme,
     cached_distrs: &Arc<CachedDepthDistrs>,
+    opt_priors: Option<&FnvHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
 ) -> Result<(), Error>
@@ -482,11 +528,29 @@ fn analyze_locus(
         }
     }
 
-    let contig_ids: Vec<_> = contigs.ids().collect();
-    let tuples = ext::vec::Tuples::repl_combinations(&contig_ids, usize::from(args.ploidy));
-    // let mut tuples = ext::vec::Tuples::new(2);
-    // tuples.push(&[contigs.get_id("HG00733.1"), contigs.get_id("HG00735.1")]);
-    // tuples.push(&[contigs.get_id("HG00673.1"), contigs.get_id("HG02080.1")]);
+    let ploidy = usize::from(args.ploidy);
+    let mut genotypes: Tuples<ContigId>;
+    let mut priors: Vec<f64>;
+    if let Some(priors_map) = opt_priors {
+        genotypes = Tuples::new(ploidy);
+        priors = Vec::new();
+        for (genotype, &prior) in priors_map.iter() {
+            match contigs.parse_ids(genotype) {
+                Ok(tuple) if tuple.len() == ploidy && prior.is_finite() => {
+                    genotypes.push(&tuple);
+                    priors.push(prior);
+                }
+                _ => log::error!("Cannot parse genotype {:?} (invalid contig or ploidy)", genotype),
+            }
+        }
+    } else {
+        let contig_ids: Vec<_> = contigs.ids().collect();
+        genotypes = ext::vec::Tuples::repl_combinations(&contig_ids, ploidy);
+        priors = vec![0.0; genotypes.len()]
+    }
+    if genotypes.is_empty() {
+        return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
+    }
 
     let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     let data = scheme::Data {
@@ -494,8 +558,9 @@ fn analyze_locus(
         params: args.assgn_params.clone(),
         contigs: Arc::clone(&contigs),
         cached_distrs: Arc::clone(&cached_distrs),
+        priors: Arc::new(priors),
         debug: args.debug,
-        all_alns, contig_windows, tuples,
+        all_alns, contig_windows, genotypes,
     };
     scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)
 }
@@ -505,6 +570,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
+    let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
 
     let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
@@ -524,10 +590,16 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {
+        // Remove to get ownership of the locus priors.
+        let locus_priors = priors.as_ref().and_then(|priors| priors.get(locus.set.tag()));
+        if priors.is_some() && locus_priors.is_none() {
+            log::warn!("Priors for locus {} are not found. Assuming equal priors", locus.set.tag());
+        }
+
         let rng_clone = rng.clone();
         // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
         rng.long_jump();
-        analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, rng_clone, &args)?;
+        analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, locus_priors, rng_clone, &args)?;
     }
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())

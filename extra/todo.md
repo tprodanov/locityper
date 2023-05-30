@@ -2,3 +2,4 @@
 - Remove `bio` dependency.
 - `add`: allow FASTA input.
 - WFA: Stop very bad alignments.
+- `draw_depth`: handle repeated genotypes.

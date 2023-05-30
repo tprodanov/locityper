@@ -14,7 +14,7 @@ parser$add_argument('-g', '--genotype', metavar = 'STR',
     'Required, unless there is only one genotype in the solution.'))
 parser$add_argument('-s', '--stage', metavar = 'INT', type = 'integer',
     help = 'Draw this stage. Default: stage with highest likelihood.')
-parser$add_argument('-i', '--iter', metavar = 'INT', type = 'integer',
+parser$add_argument('-a', '--attempt', metavar = 'INT', type = 'integer',
     help = 'Draw this stage iteration. Default: iteration with highest likelihood.')
 parser$add_argument('-d', '--depth', metavar = 'FLOAT', type = 'double',
     help = 'Read depth limit (inferred by default).')
@@ -24,7 +24,7 @@ parser$add_argument('--no-lik', action = 'store_true',
     help = 'Do not draw likelihood axis.')
 parser$add_argument('-o', '--out', metavar = 'FILE',
     help = paste('Output plot file (PNG, PDF, etc.).',
-        'Literal {%s} is replaced with the value for keys "gt", "stage", "iter".',
+        'Literal {%s} is replaced with the value for keys "gt", "stage", "attempt".',
         'Default: "<dir>/plots/{gt}.png".'))
 args <- parser$parse_args()
 
@@ -47,8 +47,8 @@ if (is.null(args$genotype)) {
 if (!is.null(args$stage)) {
     sol <- filter(sol, stage == args$stage)
 }
-if (!is.null(args$iter)) {
-    sol <- filter(sol, iter == args$iter)
+if (!is.null(args$attempt)) {
+    sol <- filter(sol, attempt == args$attempt)
 }
 if (nrow(sol) == 0) {
     stop('Empty dataframe after filtering!')
@@ -61,7 +61,7 @@ summary_info <- filter(sol, contig == 'summary') |>
         lik = as.numeric(sub(' .*', '', sub('.*lik=', '', info)))) |>
     arrange(-lik) |> head(n = 1)
 sol <- filter(sol,
-    stage == summary_info$stage & iter == summary_info$iter)
+    stage == summary_info$stage & attempt == summary_info$attempt)
 if (sum(sol$contig == 'summary') != 1) {
     stop('Unexpected number of solutions!')
 }
@@ -107,8 +107,8 @@ subtitle <- paste(
 # Select scale limits.
 
 no_lik <- args$no_lik
-max_depth <- (if (is.null(args$depth)) { max(sol$depth) } else { args$depth }) * 1.01
-min_lik <- (if (is.null(args$lik)) { min(sol$lik) * 1.00001 } else { -abs(args$lik) }) * 1.01
+max_depth <- (if (is.null(args$depth)) { max(sol$depth) } else { args$depth })
+min_lik <- (if (is.null(args$lik)) { min(sol$lik) * 1.00001 } else { -abs(args$lik) })
 
 depth_breaks <- scales::breaks_extended(3)(c(0, max_depth))
 lik_breaks <- scales::breaks_extended(3)(c(min_lik, 0))
@@ -117,7 +117,7 @@ lik_axis_mult <- -0.5 * (max_depth / min_lik)
 breaks <- c(lik_axis_mult * lik_breaks, depth_breaks)
 labels_left <- c(rep('', length(lik_breaks)), depth_breaks)
 labels_right <- c(lik_breaks, rep('', length(depth_breaks)))
-ylim <- if (no_lik) { c(0, max_depth) } else { c(lik_axis_mult * min_lik, max_depth) }
+ylim <- (if (no_lik) { c(0, max_depth) } else { c(lik_axis_mult * min_lik, max_depth) }) * 1.01
 
 # Drawing and saving.
 
@@ -203,8 +203,8 @@ if (is.null(args$out)) {
 
 out_filename <- stri_replace_all_fixed(
     args$out,
-    pattern = c('{gt}', '{stage}', '{iter}'),
-    replacement = c(summary_info$genotype, summary_info$stage, summary_info$iter),
+    pattern = c('{gt}', '{stage}', '{attempt}'),
+    replacement = c(summary_info$genotype, summary_info$stage, summary_info$attempt),
     vectorize_all = F
 )
 dir.create(dirname(out_filename), showWarnings = F)

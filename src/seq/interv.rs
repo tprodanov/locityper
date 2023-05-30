@@ -69,8 +69,7 @@ impl Interval {
     }
 
     fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
-        let contig_id = contigs.try_get_id(&captures[1])
-            .ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}': unknown contig", s)))?;
+        let contig_id = contigs.try_get_id(&captures[1])?;
         let start: u32 = parse_int(&captures[2])
             .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
         let end: u32 = parse_int(&captures[3])
@@ -94,8 +93,7 @@ impl Interval {
     {
         let contig_name = split.next()
             .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?;
-        let contig_id = contigs.try_get_id(contig_name)
-            .ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}': unknown contig", contig_name)))?;
+        let contig_id = contigs.try_get_id(contig_name)?;
         let start = split.next()
             .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?
             .parse::<u32>().map_err(|e| Error::ParsingError(format!("Cannot parse BED line: {}", e)))?;

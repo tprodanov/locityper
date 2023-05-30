@@ -79,7 +79,7 @@ impl F64Ext {
         } else if p > 100.0 {
             Box::new(Self::max)
         } else {
-            Box::new(move |a| Ln::map_sum(a, |x| x * p) / a.len() as f64 / p)
+            Box::new(move |a| (Ln::map_sum(a, |x| x * p) - (a.len() as f64).ln()) / p)
         }
     }
 
@@ -286,6 +286,10 @@ impl<T> Tuples<T> {
     /// Returns the number of tuples in the set.
     pub fn len(&self) -> usize {
         self.data.len() / self.tup_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 
     /// Returns tuple length.

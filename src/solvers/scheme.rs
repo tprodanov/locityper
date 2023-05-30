@@ -86,14 +86,14 @@ fn parse_averaging_mode(val: &JsonValue) -> Result<f64, Error> {
 #[derive(Clone)]
 struct Stage {
     solver: Box<dyn Solver>,
-    /// Fraction of best tuples, used for analysis.
+    /// Fraction of best genotypes, used for analysis.
     fraction: f64,
     /// Write debug information about read assignments?
     write: bool,
-    /// Number of tries.
-    tries: u16,
+    /// Number of attempts.
+    attempts: u16,
     /// Averaging function: generalized mean with power `p`.
-    aver_p: f64,
+    aver_power: f64,
 }
 
 impl Stage {
@@ -102,8 +102,8 @@ impl Stage {
             solver: Box::new(solver),
             fraction: 1.0,
             write: false,
-            tries: 5,
-            aver_p: 0.0,
+            attempts: 5,
+            aver_power: 0.0,
         }
     }
 
@@ -118,14 +118,14 @@ impl Stage {
         self
     }
 
-    fn set_tries(&mut self, tries: u16) -> Result<&mut Self, Error> {
-        validate_param!(tries > 0, "Number of tries must be over 1");
-        self.tries = tries;
+    fn set_tries(&mut self, attempts: u16) -> Result<&mut Self, Error> {
+        validate_param!(attempts > 0, "Number of attempts must be over 1");
+        self.attempts = attempts;
         Ok(self)
     }
 
-    fn set_aver_power(&mut self, aver_p: f64) -> &mut Self {
-        self.aver_p = aver_p;
+    fn set_aver_power(&mut self, aver_power: f64) -> &mut Self {
+        self.aver_power = aver_power;
         self
     }
 
@@ -149,7 +149,7 @@ impl Stage {
             _ => panic!("Unknown solver '{}'", solver),
         };
 
-        json_get!(obj -> fraction? (as_f64), write? (as_bool), tries? (as_u16));
+        json_get!(obj -> fraction? (as_f64), write? (as_bool), attempts? (as_u16));
         stage.solver.set_params(obj)?;
         if let Some(frac) = fraction {
             stage.set_fraction(frac)?;
@@ -157,8 +157,8 @@ impl Stage {
         if let Some(write) = write {
             stage.set_write(write);
         }
-        if let Some(tries) = tries {
-            stage.set_tries(tries)?;
+        if let Some(attempts) = attempts {
+            stage.set_tries(attempts)?;
         }
         stage.set_aver_power(parse_averaging_mode(&obj["aver"])?);
         Ok(stage)
@@ -179,16 +179,16 @@ impl Default for Scheme {
                 solver: Box::new(super::GreedySolver::default()),
                 fraction: 1.0,
                 write: false,
-                tries: 5,
-                aver_p: f64::INFINITY, // Take maximum across all random tries.
+                attempts: 5,
+                aver_power: f64::INFINITY, // Take maximum across all random attempts.
             },
             // Then, run HiGHS solver on the best 3%.
             Stage {
                 solver: Box::new(super::HighsSolver::default()),
                 fraction: 0.03,
                 write: false,
-                tries: 5,
-                aver_p: 0.0, // Take geom. mean of all log-likehoods.
+                attempts: 5,
+                aver_power: 0.0, // Take geom. mean of all log-likehoods.
             },
         ])
     }
@@ -246,7 +246,10 @@ pub struct Data {
     pub contig_windows: Vec<ContigWindows>,
     pub contigs: Arc<ContigNames>,
     pub cached_distrs: Arc<CachedDepthDistrs>,
-    pub tuples: Tuples<ContigId>,
+
+    pub genotypes: Tuples<ContigId>,
+    /// Prior for each genotype (in the same order).
+    pub priors: Arc<Vec<f64>>,
     pub params: Params,
     pub debug: bool,
 }
@@ -259,30 +262,32 @@ fn solve_single_thread(
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let total_tuples = data.tuples.len();
-    let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_tuples)?;
-    let mut rem_ixs = (0..total_tuples).collect();
+    let total_genotypes = data.genotypes.len();
+    let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
+    let mut rem_ixs = (0..total_genotypes).collect();
 
     let mut selected = SelectedCounter::default();
     for (stage_ix, stage) in data.scheme.iter().enumerate() {
         helper.start_stage(stage_ix, &mut rem_ixs);
         let solver = &stage.solver;
-        let mean = F64Ext::generalized_ln_mean(stage.aver_p);
-        let mut liks = vec![f64::NAN; usize::from(stage.tries)];
+        let mean = F64Ext::generalized_ln_mean(stage.aver_power);
+        let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
 
         for &ix in rem_ixs.iter() {
-            let mcontig_windows = MultiContigWindows::new(&data.tuples[ix], &data.contig_windows);
-            let contigs_str = data.contigs.get_names(data.tuples[ix].iter().copied());
+            let prior = data.priors[ix];
+            let mcontig_windows = MultiContigWindows::new(&data.genotypes[ix], &data.contig_windows);
+            let contigs_str = data.contigs.get_names(data.genotypes[ix].iter().copied());
             let mut assgn = ReadAssignment::new(mcontig_windows, &data.all_alns, &data.cached_distrs, &data.params);
             if stage.write && data.debug {
                 selected.reset(&assgn);
             }
 
-            for (i, lik) in liks.iter_mut().enumerate() {
+            for (attempt, lik) in liks.iter_mut().enumerate() {
                 assgn.define_read_windows(data.params.tweak, rng);
-                *lik = solver.solve(&mut assgn, rng)?;
+                *lik = prior + solver.solve(&mut assgn, rng)?;
                 if stage.write {
-                    assgn.write_depth(&mut depth_writer, &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, i + 1))?;
+                    assgn.write_depth(&mut depth_writer,
+                        &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1))?;
                     if data.debug {
                         selected.update(&assgn);
                     }
@@ -341,19 +346,22 @@ pub fn solve(
     lik_writer: impl Write,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
-    threads: u16,
+    mut threads: u16,
 ) -> Result<(), Error>
 {
-    log::info!("    [{}] Genotyping complex locus in {} stages and {} threads across {} possible tuples",
-        data.contigs.tag(), data.scheme.len(), threads, data.tuples.len());
+    log::info!("    [{}] Genotyping complex locus in {} stages and {} threads across {} possible genotypes",
+        data.contigs.tag(), data.scheme.len(), threads, data.genotypes.len());
     let has_dbg_output = data.scheme.has_dbg_output();
     let (mut depth_writers, depth_filenames) = create_debug_files(
         &locus_dir.join("depth."), threads, has_dbg_output)?;
-    writeln!(depth_writers[0], "stage\tgenotype\titer\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
+    writeln!(depth_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
 
     let (mut aln_writers, aln_filenames) = create_debug_files(
         &locus_dir.join("alns."), threads, has_dbg_output && data.debug)?;
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER)?;
+    if usize::from(threads) > data.genotypes.len() {
+        threads = data.genotypes.len() as u16;
+    }
 
     if threads == 1 {
         solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
@@ -413,13 +421,13 @@ impl MainWorker {
 
     fn run(self, lik_writer: impl Write) -> Result<(), Error> {
         let n_workers = self.handles.len();
-        let total_tuples = self.data.tuples.len();
+        let total_genotypes = self.data.genotypes.len();
         let scheme = &self.data.scheme;
-        let tuples = &self.data.tuples;
+        let genotypes = &self.data.genotypes;
         let contigs = &self.data.contigs;
-        let mut helper = Helper::new(&scheme, self.data.contigs.tag(), lik_writer, total_tuples)?;
+        let mut helper = Helper::new(&scheme, self.data.contigs.tag(), lik_writer, total_genotypes)?;
         let mut rem_jobs = vec![0; n_workers];
-        let mut rem_ixs = (0..total_tuples).collect();
+        let mut rem_ixs = (0..total_genotypes).collect();
 
         for stage_ix in 0..scheme.len() {
             helper.start_stage(stage_ix, &mut rem_ixs);
@@ -439,11 +447,11 @@ impl MainWorker {
             }
             assert_eq!(start, m);
 
-            while helper.solved_tuples < m {
+            while helper.solved_genotypes < m {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, lik) = receiver.recv().expect("Genotyping worker has failed!");
-                        let contigs_str = contigs.get_names(tuples[ix].iter().copied());
+                        let contigs_str = contigs.get_names(genotypes[ix].iter().copied());
                         helper.update(ix, contigs_str, lik)?;
                         *jobs -= 1;
                     }
@@ -479,29 +487,32 @@ impl<W: Write, U: Write> Worker<W, U> {
             let stage = &self.data.scheme.0[stage_ix];
             let debug = self.data.debug && stage.write;
             let solver = &stage.solver;
-            let tuples = &self.data.tuples;
+            let genotypes = &self.data.genotypes;
             let contigs = &self.data.contigs;
             let contig_windows = &self.data.contig_windows;
             let cached_distrs = &self.data.cached_distrs;
+            let priors = &self.data.priors;
             let params = &self.data.params;
 
-            let mut liks = vec![f64::NAN; usize::from(stage.tries)];
+            let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
             let mut selected = SelectedCounter::default();
-            let mean = F64Ext::generalized_ln_mean(stage.aver_p);
+            let mean = F64Ext::generalized_ln_mean(stage.aver_power);
             for ix in task.into_iter() {
-                let mcontig_windows = MultiContigWindows::new(&tuples[ix], contig_windows);
-                let contigs_str = contigs.get_names(tuples[ix].iter().copied());
-                let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
+                let prior = priors[ix];
+                let mcontig_windows = MultiContigWindows::new(&genotypes[ix], contig_windows);
+                let contigs_str = contigs.get_names(genotypes[ix].iter().copied());
 
+                // Actually calling genotypes.
+                let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
                 if debug {
                     selected.reset(&assgn);
                 }
-                for (i, lik) in liks.iter_mut().enumerate() {
+                for (attempt, lik) in liks.iter_mut().enumerate() {
                     assgn.define_read_windows(params.tweak, &mut self.rng);
-                    *lik = solver.solve(&mut assgn, &mut self.rng)?;
+                    *lik = prior + solver.solve(&mut assgn, &mut self.rng)?;
                     if stage.write {
                         assgn.write_depth(&mut self.depth_writer,
-                            &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, i + 1))?;
+                            &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1))?;
                         if debug {
                             selected.update(&assgn);
                         }
@@ -528,8 +539,8 @@ struct Helper<'a, W> {
     lik_writer: W,
 
     stage_ix: usize,
-    solved_tuples: usize,
-    curr_tuples: usize,
+    solved_genotypes: usize,
+    curr_genotypes: usize,
     num_width: usize,
 
     likelihoods: Vec<f64>,
@@ -543,17 +554,17 @@ struct Helper<'a, W> {
 }
 
 impl<'a, W: Write> Helper<'a, W> {
-    fn new(scheme: &'a Scheme, tag: &'a str, mut lik_writer: W, total_tuples: usize) -> io::Result<Self> {
+    fn new(scheme: &'a Scheme, tag: &'a str, mut lik_writer: W, total_genotypes: usize) -> io::Result<Self> {
         writeln!(lik_writer, "stage\tgenotype\tlik")?;
         Ok(Self {
             scheme, tag, lik_writer,
 
             stage_ix: 0,
-            solved_tuples: 0,
-            curr_tuples: total_tuples,
-            num_width: math::num_digits(total_tuples as u64),
+            solved_genotypes: 0,
+            curr_genotypes: total_genotypes,
+            num_width: math::num_digits(total_genotypes as u64),
 
-            likelihoods: vec![f64::NEG_INFINITY; total_tuples],
+            likelihoods: vec![f64::NEG_INFINITY; total_genotypes],
             best_lik: f64::NEG_INFINITY,
             best_ix: 0,
             best_str: String::new(),
@@ -568,19 +579,20 @@ impl<'a, W: Write> Helper<'a, W> {
         self.stage_start = self.timer.elapsed();
         self.stage_ix = stage_ix;
         let stage = &self.scheme.0[stage_ix];
-        let total_tuples = self.likelihoods.len();
+        let total_genotypes = self.likelihoods.len();
         // Consider at least one tuple irrespective of the fraction.
-        self.curr_tuples = ((total_tuples as f64 * stage.fraction).ceil() as usize).clamp(1, self.curr_tuples);
-        if self.curr_tuples < rem_ixs.len() {
+        self.curr_genotypes = ((total_genotypes as f64 * stage.fraction).ceil() as usize).clamp(1, self.curr_genotypes);
+        if self.curr_genotypes < rem_ixs.len() {
             rem_ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].total_cmp(&self.likelihoods[i]));
-            rem_ixs.truncate(self.curr_tuples);
-            self.num_width = math::num_digits(self.curr_tuples as u64);
+            rem_ixs.truncate(self.curr_genotypes);
+            self.num_width = math::num_digits(self.curr_genotypes as u64);
         }
 
-        self.solved_tuples = 0;
+        self.solved_genotypes = 0;
         self.last_msg = self.stage_start;
-        log::info!("    [{}] Stage {:>3}.  {}  ({} tuples)", self.tag, LATIN_NUMS[stage_ix], stage.solver,
-            self.curr_tuples);
+        log::info!("    [{}] Stage {:>3}.  {}.  {} genotypes, {} attempts, averaging power: {:.0}",
+            self.tag, LATIN_NUMS[stage_ix], stage.solver,
+            self.curr_genotypes, stage.attempts, stage.aver_power);
     }
 
     fn update(&mut self, ix: usize, tuple_str: String, lik: f64) -> io::Result<()> {
@@ -592,13 +604,13 @@ impl<'a, W: Write> Helper<'a, W> {
             self.best_ix = ix;
             self.best_str = tuple_str;
         }
-        self.solved_tuples += 1;
+        self.solved_genotypes += 1;
         let now_dur = self.timer.elapsed();
         const UPDATE_FREQ: u64 = 2;
         if (now_dur - self.last_msg).as_secs() >= UPDATE_FREQ {
-            let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_tuples as f64;
-            log::debug!("        [{:width$}/{},  {:.4} s/tuple]  Best: {} -> {:11.2}", self.solved_tuples,
-                self.curr_tuples, speed, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
+            let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
+            log::debug!("        [{:width$}/{},  {:.4} s/tuple]  Best: {} -> {:11.2}", self.solved_genotypes,
+                self.curr_genotypes, speed, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
             self.last_msg = now_dur;
         }
         Ok(())
