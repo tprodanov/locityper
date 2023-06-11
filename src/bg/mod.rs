@@ -33,7 +33,7 @@ impl Default for Params {
             depth: Default::default(),
             ins_quantile: 0.99,
             ins_quantile_mult: 3.0,
-            err_rate_mult: 1.2,
+            err_rate_mult: 1.0,
         }
     }
 }

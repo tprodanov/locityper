@@ -4,8 +4,7 @@ use std::{
 use once_cell::sync::OnceCell;
 use crate::{
     math::{
-        Ln,
-        distr::{DiscretePmf, WithQuantile, NBinom, Uniform, LinearCache},
+        distr::{DiscretePmf, WithQuantile, NBinom, Uniform, LinearCache, BayesCalc},
     },
     bg::{self,
         depth::GC_BINS,
@@ -20,31 +19,24 @@ impl DiscretePmf for AlwaysOneDistr {
     fn ln_pmf(&self, _: u32) -> f64 { 0.0 }
 }
 
+/// Wrapper over another distribution, where all probabilities are raised to the power `weight`.
 #[derive(Clone, Debug)]
-struct WeightedDistr {
-    ln_probs: Vec<f64>,
+struct WeightedDistr<D> {
+    weight: f64,
+    inner: D,
 }
 
-impl WeightedDistr {
-    /// Creates a new distribution from all cached values in the `cached` distribution, raising them in the power of
-    /// `weight` (ln-probabilities are multiplied by weight).
-    ///
-    /// Values out of the cache range are ignored.
-    fn new(cached: &LinearCache<impl DiscretePmf>, weight: f64) -> Self {
-        let mut ln_probs: Vec<_> = (0..cached.cache_size() as u32)
-            .map(|k| cached.ln_pmf(k) * weight)
-            .collect();
-        let norm_fct = Ln::sum(&ln_probs);
-        assert!(norm_fct.is_finite(), "Cannot normalize by an infinite factor.");
-        ln_probs.iter_mut().for_each(|v| *v -= norm_fct);
-        Self { ln_probs }
+impl<D: DiscretePmf> WeightedDistr<D> {
+    /// Creates a new weighted distribution.
+    fn new(inner: D, weight: f64) -> Self {
+        assert!(weight >= 0.0 && weight <= 1.0, "Weight ({}) must be in [0, 1].", weight);
+        Self { inner, weight }
     }
 }
 
-impl DiscretePmf for WeightedDistr {
+impl<D: DiscretePmf> DiscretePmf for WeightedDistr<D> {
     fn ln_pmf(&self, k: u32) -> f64 {
-        // This will produce an error if `k` is too large. This is intended behaviour.
-        self.ln_probs[k as usize]
+        self.inner.ln_pmf(k) * self.weight
     }
 }
 
@@ -58,7 +50,7 @@ const CACHE_SIZE: usize = 256;
 
 pub(super) type DistrBox = Box<dyn DiscretePmf>;
 
-type RegularDistr = NBinom;
+type RegularDistr = BayesCalc<NBinom>;
 
 /// Store cached depth distbrutions.
 #[derive(Clone)]
@@ -72,12 +64,13 @@ pub struct CachedDepthDistrs {
     cached: [OnceCell<Arc<LinearCache<RegularDistr>>>; GC_BINS],
     /// Uniform distribution size (one for each GC-content).
     unif_size: [OnceCell<u32>; GC_BINS],
+    alt_cn: (f64, f64),
 }
 
 impl CachedDepthDistrs {
     /// Create a set of cached depth distributions.
     /// Assume that there are `mul_coef` as much reads, as in the background distribution.
-    pub fn new(bg_distr: &bg::BgDistr) -> Self {
+    pub fn new(bg_distr: &bg::BgDistr, alt_cn: (f64, f64)) -> Self {
         const NBINOM_CELL: OnceCell<Arc<LinearCache<RegularDistr>>> = OnceCell::new();
         const U32_CELL: OnceCell<u32> = OnceCell::new();
         Self {
@@ -85,6 +78,7 @@ impl CachedDepthDistrs {
             mul_coef: if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 },
             cached: [NBINOM_CELL; GC_BINS],
             unif_size: [U32_CELL; GC_BINS],
+            alt_cn,
         }
     }
 
@@ -105,10 +99,12 @@ impl CachedDepthDistrs {
     /// Returns read depth distribution in regular windows at GC-content.
     pub fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
         self.cached[usize::from(gc_content)].get_or_init(|| {
-            let null = self.regular_nbinom(gc_content);
-            // let alt = vec![null.mul(0.01), null.mul(2.0)];
-            // let bayes = BayesCalc::new(null, alt);
-            Arc::new(LinearCache::new(null, CACHE_SIZE))
+            // Probability at CN = 1.
+            let cn1 = self.regular_nbinom(gc_content);
+            // Probabilities at alternative CN values.
+            let alt = vec![cn1.mul(self.alt_cn.0), cn1.mul(self.alt_cn.1)];
+            let bayes = BayesCalc::new(cn1, alt);
+            Arc::new(LinearCache::new(bayes, CACHE_SIZE))
         })
     }
 
@@ -125,7 +121,7 @@ impl CachedDepthDistrs {
         } else if weight > 0.99999 {
             Box::new(Arc::clone(&self.regular_distr(gc_content)))
         } else {
-            let wdistr = WeightedDistr::new(self.regular_distr(gc_content), weight);
+            let wdistr = WeightedDistr::new(Arc::clone(self.regular_distr(gc_content)), weight);
             Box::new(wdistr)
         }
     }

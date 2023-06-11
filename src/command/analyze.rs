@@ -156,6 +156,10 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
         {EMPTY}  read alignment likelihoods [{:.1}].",
         "-C, --dp-contrib".green(), "FLOAT".yellow(), defaults.assgn_params.depth_contrib);
+    println!("    {} {}  Compare window probability to have copy number 1 against two\n\
+        {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
+        "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
+        defaults.assgn_params.alt_cn.0, defaults.assgn_params.alt_cn.1);
     println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
         {EMPTY}  the best alignment [{:.1}].",
         "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(), Ln::to_log10(defaults.assgn_params.prob_diff));
@@ -219,8 +223,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
             Short('S') | Long("solvers") => args.solvers = Some(parser.value()?.parse()?),
-            Short('C') | Long("dp-contrib") | Long("depth-contrib") | Long("dp-contribution")
-                => args.assgn_params.depth_contrib = parser.value()?.parse()?,
+            Short('C') | Long("dp-contrib") | Long("depth-contrib") | Long("dp-contribution") =>
+                args.assgn_params.depth_contrib = parser.value()?.parse()?,
+            Short('A') | Long("alt-cn") =>
+                args.assgn_params.alt_cn = (parser.value()?.parse()?, parser.value()?.parse()?),
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
@@ -575,7 +581,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
-    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr));
+    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn));
     validate_param!(bg_distr.depth().window_padding() <= args.assgn_params.boundary_size,
         "Window padding ({}) must not exceed boundary size ({})", bg_distr.depth().window_padding(),
         args.assgn_params.boundary_size);

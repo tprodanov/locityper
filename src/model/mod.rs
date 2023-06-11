@@ -28,6 +28,8 @@ pub struct Params {
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
     pub tweak: u32,
+    /// Alternative hypotheses copy number values (main hypothesis is 1).
+    pub alt_cn: (f64, f64),
 }
 
 impl Default for Params {
@@ -41,6 +43,7 @@ impl Default for Params {
             semicommon_kmer: 5.0,
 
             tweak: 70,
+            alt_cn: (0.01, 2.0),
         }
     }
 }
@@ -65,6 +68,10 @@ impl Params {
 
         validate_param!(self.tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
             self.boundary_size, self.tweak);
+        validate_param!(self.alt_cn.0 > 0.0 && self.alt_cn.0 < 1.0,
+            "Alternative copy number #1 ({}) must be in (0, 1).", self.alt_cn.0);
+        validate_param!(self.alt_cn.1 > 1.0,
+            "Alternative copy number #2 ({}) must be over 1.", self.alt_cn.1);
         Ok(())
     }
 }

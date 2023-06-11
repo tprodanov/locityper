@@ -349,6 +349,9 @@ pub fn solve(
     mut threads: u16,
 ) -> Result<(), Error>
 {
+    if usize::from(threads) > data.genotypes.len() {
+        threads = data.genotypes.len() as u16;
+    }
     log::info!("    [{}] Genotyping complex locus in {} stages and {} threads across {} possible genotypes",
         data.contigs.tag(), data.scheme.len(), threads, data.genotypes.len());
     let has_dbg_output = data.scheme.has_dbg_output();
@@ -359,9 +362,6 @@ pub fn solve(
     let (mut aln_writers, aln_filenames) = create_debug_files(
         &locus_dir.join("alns."), threads, has_dbg_output && data.debug)?;
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER)?;
-    if usize::from(threads) > data.genotypes.len() {
-        threads = data.genotypes.len() as u16;
-    }
 
     if threads == 1 {
         solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
