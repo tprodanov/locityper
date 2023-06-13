@@ -113,9 +113,9 @@ fn print_help() {
     const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
-    println!("{}", "Analyze WGS dataset.".yellow());
+    println!("{}", "Genotype complex loci.".yellow());
 
-    println!("\n{} {} analyze -i reads1.fq [reads2.fq] -d db -o out [arguments]",
+    println!("\n{} {} genotype -i reads1.fq [reads2.fq] -d db -o out [arguments]",
         "Usage:".bold(), super::PKG_NAME);
 
     println!("\n{}", "Input/output arguments:".bold());

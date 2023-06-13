@@ -2,7 +2,7 @@ mod paths;
 mod create;
 mod add;
 mod preproc;
-mod analyze;
+mod genotype;
 
 use colored::Colorize;
 
@@ -38,23 +38,30 @@ fn print_citation() {
 }
 
 fn print_help() {
-    const WIDTH: usize = 8;
+    const WIDTH: usize = 12;
     print_version();
     println!("\n{} {} command [arguments]",
         "Usage:".bold(), PKG_NAME);
 
     println!("\n{}", "[ Creating database ]".bold());
-    println!("    {:WIDTH$}  Create an empty database.", "create".red());
-    println!("    {:WIDTH$}  Add complex locus/loci to the database.", "add".red());
+    println!("    {:WIDTH$} Create an empty database",
+        "c, create".red());
+    println!("    {:WIDTH$} Add complex locus/loci to the database",
+        "a, add".red());
 
     println!("\n{}", "[ Analysing WGS data ]".bold());
-    println!("    {:WIDTH$}  Preprocess WGS dataset.", "preproc".red());
-    println!("    {:WIDTH$}  Analyze WGS dataset.",    "analyze".red());
+    println!("    {:WIDTH$} Preprocess WGS dataset",
+        "p, preproc".red());
+    println!("    {:WIDTH$} Genotype complex loci",
+        "g, genotype".red());
 
     println!("\n{}", "[ General help ]".bold());
-    println!("    {:WIDTH$}  Show this help message.", "help".red());
-    println!("    {:WIDTH$}  Show version.", "version".red());
-    println!("    {:WIDTH$}  Show citation information.", "cite".red());
+    println!("    {:WIDTH$} Show this help message",
+        "h, help".red());
+    println!("    {:WIDTH$} Show version",
+        "V, version".red());
+    println!("    {:WIDTH$} Show citation information",
+        "   cite".red());
 }
 
 fn flag() -> impl std::fmt::Display {
@@ -67,13 +74,13 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
         std::process::exit(1);
     }
     match &argv[1] as &str {
-        "create" => create::run(&argv[2..])?,
-        "add" => add::run(&argv[2..])?,
-        "preproc" | "preprocess" => preproc::run(&argv[2..])?,
-        "analyze" | "analyse" => analyze::run(&argv[2..])?,
+        "c" | "create" => create::run(&argv[2..])?,
+        "a" | "add" => add::run(&argv[2..])?,
+        "p" | "preproc" | "preprocess" => preproc::run(&argv[2..])?,
+        "g" | "genotype" => genotype::run(&argv[2..])?,
 
-        "help" | "h" | "--help" | "-h" => print_help(),
-        "version" | "V" | "--version" | "-V" => print_version(),
+        "h" | "help" | "--help" | "-h" => print_help(),
+        "V" | "version" | "--version" | "-V" => print_version(),
         "cite" => print_citation(),
         cmd => panic!("Unknown command {}", cmd),
     }

@@ -1,5 +1,5 @@
 [package]
-name = "reconstr"
+name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
 version = "0.0.1"
 edition = "2021"
