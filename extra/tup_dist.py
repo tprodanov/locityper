@@ -51,7 +51,7 @@ def _create_power_mean(power):
     return functools.partial(scipy.stats.pmean, p=power)
 
 
-def _open_stream(filename, mode='r'):
+def open_stream(filename, mode='r'):
     assert mode == 'r' or mode == 'w'
     if filename is None or filename == '-':
         return sys.stdin if mode == 'r' else sys.stdout
@@ -66,7 +66,7 @@ def main():
         description='Calculates distance between a target haplotypes tuple and all other haplotype tuples',
         usage='%(prog)s alns.paf target -o out.csv [-t tag -p power]')
     parser.add_argument('paf', metavar='FILE',
-        help='Input PAF[.gz] file with distances pairwise distances.')
+        help='Input PAF[.gz] file with pairwise distances.')
     parser.add_argument('target', metavar='STR',
         help='Target tuple of haplotypes (separated by comma, without spaces).')
     parser.add_argument('-o', '--output', metavar='FILE', required=False,
@@ -79,7 +79,7 @@ def main():
 
     mean = _create_power_mean(args.power)
     targets = list(map(str.strip, args.target.split(',')))
-    with _open_stream(args.paf) as f:
+    with open_stream(args.paf) as f:
         distances = _load_distances(f, args.tag, targets)
     assert min(map(len, distances)) > 1
     counts = list(map(len, distances))
@@ -97,7 +97,7 @@ def main():
         query = ','.join(sorted(query))
         results[query] = min(results[query], score)
 
-    with _open_stream(args.output, 'w') as out:
+    with open_stream(args.output, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         out.write('# target: {}\n'.format(args.target))
         out.write('# tag: {}\n'.format(args.tag))

@@ -3,3 +3,4 @@
 /*.log
 Cargo.lock
 /src/test.rs
+__pycache__

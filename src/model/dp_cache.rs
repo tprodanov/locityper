@@ -84,7 +84,7 @@ impl CachedDepthDistrs {
     }
 
     /// Returns read depth distribution in regular windows at GC-content.
-    pub fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
+    fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
         self.cached[usize::from(gc_content)].get_or_init(|| {
             // Probability at CN = 1.
             let cn1 = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef);

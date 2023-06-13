@@ -103,7 +103,7 @@ impl Stage {
             fraction: 1.0,
             write: false,
             attempts: 5,
-            aver_power: 0.0,
+            aver_power: 1.0,
         }
     }
 
@@ -188,7 +188,7 @@ impl Default for Scheme {
                 fraction: 0.03,
                 write: false,
                 attempts: 5,
-                aver_power: 0.0, // Take geom. mean of all log-likehoods.
+                aver_power: 1.0, // Take arithmetic mean of all likelihoods.
             },
         ])
     }
