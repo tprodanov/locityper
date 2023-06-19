@@ -48,10 +48,8 @@ impl HighsSolver {
         for rp in 0..assignments.total_reads() {
             let read_alns = assignments.possible_read_alns(rp);
             if read_alns.len() == 1 {
-                let loc = &read_alns[0];
-                let ((w1s, w1e), (w2s, w2e)) = loc.windows();
-                for w in (w1s..w1e).chain(w2s..w2e) {
-                    window_depth[w as usize].0 += 1;
+                for (w, upd) in read_alns[0].windows().iter() {
+                    window_depth[w as usize].0 += u32::try_from(upd).unwrap();
                 }
                 // const_term += loc.ln_prob();
                 continue;
@@ -60,13 +58,12 @@ impl HighsSolver {
             for loc in read_alns.iter() {
                 let var = problem.add_integer_column(loc.ln_prob(), 0.0..=1.0);
                 assgn_constr.push((var, 1.0));
-                let ((w1s, w1e), (w2s, w2e)) = loc.windows();
-                for w in (w1s..w1e).chain(w2s..w2e) {
+                for (w, upd) in loc.windows().iter() {
                     if w < REG_WINDOW_SHIFT {
-                        window_depth[w as usize].0 += 1;
+                        window_depth[w as usize].0 += u32::try_from(upd).unwrap();
                     } else {
-                        window_depth[w as usize].1 += 1;
-                        window_depth_constrs[w as usize].push((var, 1.0));
+                        window_depth[w as usize].1 += u32::try_from(upd).unwrap();
+                        window_depth_constrs[w as usize].push((var, f64::from(upd)));
                     }
                 }
             }

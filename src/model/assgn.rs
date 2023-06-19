@@ -7,7 +7,7 @@ use crate::{
 };
 use super::{
     locs::AllPairAlignments,
-    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadWindows, MultiContigWindows},
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadWindows, MultiContigWindows, AffectedWindows},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
@@ -140,9 +140,8 @@ impl ReadAssignment {
                 assert!(start_ix + assgn < end_ix,
                     "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
             }
-            let ((w1s, w1e), (w2s, w2e)) = self.read_windows[start_ix + assgn].windows();
-            for w in (w1s..w1e).chain(w2s..w2e) {
-                self.depth[w as usize] += 1;
+            for (w, upd) in self.read_windows[start_ix + assgn].windows().iter() {
+                self.depth[w as usize] += u32::try_from(upd).unwrap();
             }
             *assgn_mut = assgn as u16;
         }
@@ -171,9 +170,8 @@ impl ReadAssignment {
             let end_ix = self.read_ixs[rp + 1];
             assert!(start_ix + assgn < end_ix,
                 "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
-            let ((w1s, w1e), (w2s, w2e)) = self.read_windows[start_ix + assgn].windows();
-            for w in (w1s..w1e).chain(w2s..w2e) {
-                self.depth[w as usize] += 1;
+            for (w, upd) in self.read_windows[start_ix + assgn].windows().iter() {
+                self.depth[w as usize] += u32::try_from(upd).unwrap();
             }
         }
         self.recalc_likelihood();
@@ -225,81 +223,34 @@ impl ReadAssignment {
         self.read_windows.len()
     }
 
-    /// Returns random reassignment pair: (random read pair index, new random assignment).
-    /// Does not actually reassign the read.
-    pub fn random_reassignment(&self, rng: &mut impl Rng) -> (usize, u16) {
-        let rp = self.non_trivial_reads[rng.gen_range(0..self.non_trivial_reads.len())];
-        let start_ix = self.read_ixs[rp];
-        let end_ix = self.read_ixs[rp + 1];
-        let total_assgns = end_ix - start_ix;
-        assert!(total_assgns > 1, "Read pair #{} has less than 2 possible assignments", rp);
-
-        let old_assgn = self.read_assgn[rp];
-        let new_assgn = if total_assgns == 2 {
-            1 - old_assgn
-        } else {
-            let i = rng.gen_range(1..total_assgns as u16);
-            if i <= old_assgn { i - 1 } else { i }
-        };
-        debug_assert_ne!(old_assgn, new_assgn);
-        (rp, new_assgn)
+    /// Calculates improvement, achieved by reassigning read pair `rp` to a new location.
+    /// Does not actually performs reassignment.
+    pub fn calculate_improvement(&self, target: &ReassignmentTarget) -> f64 {
+        let mut diff = 0.0;
+        for (w, upd) in target.window_diff.iter() {
+            let old_depth = self.depth[w as usize];
+            let new_depth = old_depth.checked_add_signed(i32::from(upd)).unwrap();
+            let distr = &self.depth_distrs[w as usize];
+            diff += distr.ln_pmf(new_depth) - distr.ln_pmf(old_depth);
+        }
+        self.depth_contrib * diff
+            + self.read_windows[target.new_ix].ln_prob() - self.read_windows[target.old_ix].ln_prob()
     }
 
-    /// Reassigns read pair `rp` to the new location.
-    /// Checks `keep(likelihood difference)`, if true, keeps assignment, otherwise reverts to the old assignment.
-    /// Returns true if reassignment happened.
-    pub fn reassign_or_revert<F>(&mut self, rp: usize, new_assignment: u16, mut keep: F) -> bool
-    where F: FnMut(f64) -> bool,
-    {
-        let start_ix = self.read_ixs[rp];
-        let end_ix = self.read_ixs[rp + 1];
-        let old_ix = start_ix + self.read_assgn[rp] as usize;
-        let new_ix = start_ix + new_assignment as usize;
-        debug_assert_ne!(old_ix, new_ix, "Read pair #{}: cannot reassign read to the same location", rp);
-        assert!(new_ix < end_ix, "Read pair #{}: cannot assign read to location {} (maximum {} locations)",
-            rp, new_assignment, end_ix - start_ix);
-        let old_lik = self.likelihood;
-
-        let old_paln = &self.read_windows[old_ix];
-        let new_paln = &self.read_windows[new_ix];
-        self.likelihood += new_paln.ln_prob() - old_paln.ln_prob();
-        let ((w1s, w1e), (w2s, w2e)) = old_paln.windows();
-        let ((u1s, u1e), (u2s, u2e)) = new_paln.windows();
-        for w in (u1s..u1e).chain(u2s..u2e) {
-            self.update_window_depth::<true>(w);
+    /// Reassigns read pair to a new location.
+    pub fn reassign(&mut self, target: &ReassignmentTarget) {
+        let mut diff = 0.0;
+        for (w, upd) in target.window_diff.iter() {
+            let old_depth = self.depth[w as usize];
+            let new_depth = old_depth.checked_add_signed(i32::from(upd)).unwrap();
+            let distr = &self.depth_distrs[w as usize];
+            diff += distr.ln_pmf(new_depth) - distr.ln_pmf(old_depth);
+            self.depth[w as usize] = new_depth;
         }
-        for w in (w1s..w1e).chain(w2s..w2e) {
-            self.update_window_depth::<false>(w);
-        }
-
-        if keep(self.likelihood - old_lik) {
-            self.read_assgn[rp] = new_assignment;
-            true
-        } else {
-            self.likelihood = old_lik;
-            for w in (w1s..w1e).chain(w2s..w2e) {
-                self.update_window_depth::<true>(w);
-            }
-            for w in (u1s..u1e).chain(u2s..u2e) {
-                self.update_window_depth::<false>(w);
-            }
-            false
-        }
-    }
-
-    /// Updates window depth (+1 if `INC`, -1 otherwise).
-    fn update_window_depth<const INC: bool>(&mut self, window: u32) {
-        let w = window as usize;
-        let depth = &mut self.depth[w];
-        let distr = &self.depth_distrs[w];
-        self.likelihood -= distr.ln_pmf(*depth);
-        if INC {
-            *depth += 1;
-        } else {
-            assert_ne!(*depth, 0);
-            *depth -= 1;
-        }
-        self.likelihood += distr.ln_pmf(*depth);
+        diff = self.depth_contrib * diff
+            + self.read_windows[target.new_ix].ln_prob() - self.read_windows[target.old_ix].ln_prob();
+        self.read_assgn[target.read_pair] = target.new_assgn;
+        self.likelihood += diff;
     }
 
     /// Recalculates total model likelihood, and returns separately
@@ -358,5 +309,74 @@ impl ReadAssignment {
         writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} depth_lik={:.5} lik={:.5}", prefix,
             self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
             total_lik - sum_depth_lik, sum_depth_lik, total_lik)
+    }
+}
+
+/// Reassignment target: one read pair, its old location and its new location.
+#[derive(Debug)]
+pub struct ReassignmentTarget {
+    read_pair: usize,
+    old_assgn: u16,
+    new_assgn: u16,
+    old_ix: usize,
+    new_ix: usize,
+    window_diff: AffectedWindows,
+}
+
+impl ReassignmentTarget {
+    pub fn new() -> Self {
+        Self {
+            read_pair: usize::MAX,
+            old_assgn: u16::MAX,
+            new_assgn: u16::MAX,
+            old_ix: usize::MAX,
+            new_ix: usize::MAX,
+            window_diff: AffectedWindows::new(),
+        }
+    }
+
+    pub fn set(&mut self, read_pair: usize, new_assgn: u16, assgn: &ReadAssignment) {
+        self.read_pair = read_pair;
+        self.old_assgn = assgn.read_assgn[self.read_pair];
+        self.new_assgn = new_assgn;
+        assert_ne!(self.old_assgn, self.new_assgn, "Read pair #{}: cannot change to the same assignment", read_pair);
+
+        let start_ix = assgn.read_ixs[self.read_pair];
+        let end_ix = assgn.read_ixs[self.read_pair + 1];
+        self.old_ix = start_ix + usize::from(self.old_assgn);
+        self.new_ix = start_ix + usize::from(self.new_assgn);
+        assert!(self.new_ix < end_ix, "Invalid read assignment for read pair #{}", read_pair);
+
+        self.window_diff.fill_diff(
+            &assgn.read_windows[self.new_ix].windows(),
+            &assgn.read_windows[self.old_ix].windows());
+    }
+
+    /// Randomly fills reassignment target: selects one random read pair, and its possible random new location.
+    pub fn set_random(&mut self, assgn: &ReadAssignment, rng: &mut impl Rng) {
+        self.read_pair = assgn.non_trivial_reads[rng.gen_range(0..assgn.non_trivial_reads.len())];
+        let start_ix = assgn.read_ixs[self.read_pair];
+        let end_ix = assgn.read_ixs[self.read_pair + 1];
+        let total_assgns = end_ix - start_ix;
+        assert!(total_assgns > 1, "Read pair #{} has less than 2 possible assignments", self.read_pair);
+
+        self.old_assgn = assgn.read_assgn[self.read_pair];
+        self.new_assgn = if total_assgns == 2 {
+            1 - self.old_assgn
+        } else {
+            let i = rng.gen_range(1..total_assgns as u16);
+            if i <= self.old_assgn { i - 1 } else { i }
+        };
+
+        self.old_ix = start_ix + usize::from(self.old_assgn);
+        self.new_ix = start_ix + usize::from(self.new_assgn);
+        self.window_diff.fill_diff(
+            &assgn.read_windows[self.new_ix].windows(),
+            &assgn.read_windows[self.old_ix].windows());
+    }
+
+    /// Returns read pair index and new assignment index
+    pub fn get(&self) -> (usize, u16) {
+        (self.read_pair, self.new_assgn)
     }
 }

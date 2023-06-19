@@ -51,9 +51,8 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
         let read_alns = assignments.possible_read_alns(rp);
         if read_alns.len() == 1 {
             let loc = &read_alns[0];
-            let ((w1s, w1e), (w2s, w2e)) = loc.windows();
-            for w in (w1s..w1e).chain(w2s..w2e) {
-                window_depth[w as usize].0 += 1;
+            for (w, upd) in loc.windows().iter() {
+                window_depth[w as usize].0 += u32::try_from(upd).unwrap();
             }
             objective.add_constant(loc.ln_prob());
             continue;
@@ -64,13 +63,12 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
             let var = add_binvar!(model, name: &format!("R{:x}_{}", rp, j))?;
             assignment_vars.push(var);
             objective.add_term(loc.ln_prob(), var);
-            let ((w1s, w1e), (w2s, w2e)) = loc.windows();
-            for w in (w1s..w1e).chain(w2s..w2e) {
+            for (w, upd) in loc.windows().iter() {
                 if w < REG_WINDOW_SHIFT {
-                    window_depth[w as usize].0 += 1;
+                    window_depth[w as usize].0 += u32::try_from(upd).unwrap();
                 } else {
-                    window_depth[w as usize].1 += 1;
-                    window_depth_constrs[w as usize].add_term(1.0, var);
+                    window_depth[w as usize].1 += u32::try_from(upd).unwrap();
+                    window_depth_constrs[w as usize].add_term(f64::from(upd), var);
                 }
             }
         }
