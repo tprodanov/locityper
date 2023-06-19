@@ -133,7 +133,7 @@ impl Stage {
         json_get!(obj -> solver (as_str));
         let mut stage = match &solver.to_lowercase() as &str {
             "greedy" => Stage::new(super::GreedySolver::default()),
-            "simanneal" | "simulatedannealing" => Stage::new(super::SimAnneal::default()),
+            "anneal" | "simanneal" | "simulatedannealing" => Stage::new(super::SimAnneal::default()),
             "highs" =>
                 if cfg!(feature = "highs") {
                     Stage::new(super::HighsSolver::default())

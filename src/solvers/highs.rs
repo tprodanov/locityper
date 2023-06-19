@@ -49,9 +49,10 @@ impl HighsSolver {
             let read_alns = assignments.possible_read_alns(rp);
             if read_alns.len() == 1 {
                 let loc = &read_alns[0];
-                let (w1, w2) = loc.windows();
-                window_depth[w1 as usize].0 += 1;
-                window_depth[w2 as usize].0 += 1;
+                let ((w1s, w1e), (w2s, w2e)) = loc.windows();
+                for w in (w1s..w1e).chain(w2s..w2e) {
+                    window_depth[w as usize].0 += 1;
+                }
                 // const_term += loc.ln_prob();
                 continue;
             }
@@ -59,17 +60,13 @@ impl HighsSolver {
             for loc in read_alns.iter() {
                 let var = problem.add_integer_column(loc.ln_prob(), 0.0..=1.0);
                 assgn_constr.push((var, 1.0));
-                let (w1, w2) = loc.windows();
-                let inc = if w1 == w2 { 2 } else { 1 };
-                for &w in &[w1, w2] {
+                let ((w1s, w1e), (w2s, w2e)) = loc.windows();
+                for w in (w1s..w1e).chain(w2s..w2e) {
                     if w < REG_WINDOW_SHIFT {
-                        window_depth[w as usize].0 += inc;
+                        window_depth[w as usize].0 += 1;
                     } else {
-                        window_depth[w as usize].1 += inc;
-                        window_depth_constrs[w as usize].push((var, f64::from(inc)));
-                    }
-                    if inc == 2 {
-                        break;
+                        window_depth[w as usize].1 += 1;
+                        window_depth_constrs[w as usize].push((var, 1.0));
                     }
                 }
             }

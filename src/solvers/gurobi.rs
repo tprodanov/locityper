@@ -51,9 +51,10 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
         let read_alns = assignments.possible_read_alns(rp);
         if read_alns.len() == 1 {
             let loc = &read_alns[0];
-            let (w1, w2) = loc.windows();
-            window_depth[w1 as usize].0 += 1;
-            window_depth[w2 as usize].0 += 1;
+            let ((w1s, w1e), (w2s, w2e)) = loc.windows();
+            for w in (w1s..w1e).chain(w2s..w2e) {
+                window_depth[w as usize].0 += 1;
+            }
             objective.add_constant(loc.ln_prob());
             continue;
         }
@@ -63,17 +64,13 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
             let var = add_binvar!(model, name: &format!("R{:x}_{}", rp, j))?;
             assignment_vars.push(var);
             objective.add_term(loc.ln_prob(), var);
-            let (w1, w2) = loc.windows();
-            let inc = if w1 == w2 { 2 } else { 1 };
-            for &w in &[w1, w2] {
+            let ((w1s, w1e), (w2s, w2e)) = loc.windows();
+            for w in (w1s..w1e).chain(w2s..w2e) {
                 if w < REG_WINDOW_SHIFT {
-                    window_depth[w as usize].0 += inc;
+                    window_depth[w as usize].0 += 1;
                 } else {
-                    window_depth[w as usize].1 += inc;
-                    window_depth_constrs[w as usize].add_term(f64::from(inc), var);
-                }
-                if inc == 2 {
-                    break;
+                    window_depth[w as usize].1 += 1;
+                    window_depth_constrs[w as usize].add_term(1.0, var);
                 }
             }
         }

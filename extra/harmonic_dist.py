@@ -44,7 +44,7 @@ def calc_dist(arr, window, hsums):
     return dist
 
 
-def add_dist(line, window, hsums, max_dist_const):
+def add_dist(line, window, hsums, padding, max_dist_const):
     if line.startswith('#'):
         return line
     line = line.strip()
@@ -57,7 +57,8 @@ def add_dist(line, window, hsums, max_dist_const):
         max_dist = hsums[len(arr)]
     else:
         max_dist = max_dist_const + (len(arr) - window + 1) * hsums[-1] / window
-        arr = [False] * (window - 1) + arr + [False] * (window - 1)
+        if padding:
+            arr = [False] * padding + arr + [False] * padding
         dist = calc_dist(arr, window, hsums)
     diverg = dist / max_dist
     return f'{line}\thd:f:{dist:.8f}\thf:f:{diverg:.8f}\n'
@@ -74,14 +75,19 @@ def main():
         help='Window size [default: %(default)s].')
     parser.add_argument('-p', '--power', metavar='FLOAT', type=float, default=1,
         help='Harmonic sum power [default: %(default)s].')
+    parser.add_argument('-P', '--padding', metavar='INT', type=int,
+        help='Padding size [default: window-1].')
     args = parser.parse_args()
 
     hsums = define_harmonic_sums(args.power, args.window)
-    max_dist_const = 2.0 * hsums[:-1].sum() / args.window
+    if args.padding is None:
+        args.padding = args.window - 1
+    args.padding = min(args.padding, args.window - 1)
+    max_dist_const = 2.0 * hsums[:args.padding].sum() / args.window
 
     with open_stream(args.paf) as inp, open_stream(args.output, 'w') as out:
         for line in tqdm(inp):
-            out.write(add_dist(line, args.window, hsums, max_dist_const))
+            out.write(add_dist(line, args.window, hsums, args.padding, max_dist_const))
 
 
 if __name__ == '__main__':

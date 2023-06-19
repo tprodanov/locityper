@@ -144,10 +144,9 @@ impl PrelimAlignments {
                 }
             }
 
-            let any_central = alns.iter().any(|aln| {
-                let middle = aln.interval().middle();
-                left_boundary <= middle && middle <= right_boundaries[aln.contig_id().ix()]
-            });
+            // Does any of the read alignment lie within the main part of the locus?
+            let any_central = alns.iter().any(|aln| left_boundary < aln.interval().end()
+                && aln.interval().start() < right_boundaries[aln.contig_id().ix()]);
             if any_central {
                 writeln!(dbg_writer, "{:X}\tsave\t{} alns", name_hash, alns.len())?;
                 all_alns.push((name_hash, alns));
@@ -291,18 +290,18 @@ pub(crate) enum TwoIntervals {
 }
 
 impl TwoIntervals {
-    /// Returns the middle of the first alignment.
-    pub fn middle1(&self) -> Option<u32> {
+    /// Returns the range of the first alignment.
+    pub fn range1(&self) -> Option<(u32, u32)> {
         match self {
-            TwoIntervals::Both(interval1, _) | TwoIntervals::First(interval1) => Some(interval1.middle()),
+            TwoIntervals::Both(interval1, _) | TwoIntervals::First(interval1) => Some(interval1.range()),
             TwoIntervals::Second(_) => None,
         }
     }
 
-    /// Returns the middle of the second alignment.
-    pub fn middle2(&self) -> Option<u32> {
+    /// Returns the range of the second alignment.
+    pub fn range2(&self) -> Option<(u32, u32)> {
         match self {
-            TwoIntervals::Both(_, interval2) | TwoIntervals::Second(interval2) => Some(interval2.middle()),
+            TwoIntervals::Both(_, interval2) | TwoIntervals::Second(interval2) => Some(interval2.range()),
             TwoIntervals::First(_) => None,
         }
     }

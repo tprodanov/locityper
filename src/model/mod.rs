@@ -68,6 +68,8 @@ impl Params {
 
         validate_param!(self.tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
             self.boundary_size, self.tweak);
+        const MAX_TWEAK: u32 = u16::MAX as u32 / 2 - 1;
+        validate_param!(self.tweak < MAX_TWEAK, "Tweaking size ({}) is too large (max = {})", self.tweak, MAX_TWEAK);
         validate_param!(self.alt_cn.0 > 0.0 && self.alt_cn.0 < 1.0,
             "Alternative copy number #1 ({}) must be in (0, 1).", self.alt_cn.0);
         validate_param!(self.alt_cn.1 > 1.0,

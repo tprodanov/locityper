@@ -51,31 +51,32 @@ impl GreedySolver {
 impl Solver for GreedySolver {
     /// Single greedy iteration to find the best read assignment.
     fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
-        let mut buffer = Vec::new();
-        assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
-        let mut curr_plato = 0;
-        while curr_plato <= self.plato_size {
-            let mut best_rp = 0;
-            let mut best_assgn = 0;
-            let mut best_improv = 0.0;
-            for &rp in assignments.non_trivial_reads().choose_multiple(rng, self.sample_size) {
-                buffer.clear();
-                assignments.possible_reassignments(rp, &mut buffer);
-                let (assgn, improv) = F64Ext::argmax(&buffer);
-                if improv > best_improv {
-                    best_rp = rp;
-                    best_assgn = assgn as u16;
-                    best_improv = improv;
-                }
-            }
-            if best_improv > 0.0 {
-                curr_plato = 0;
-                assignments.reassign(best_rp, best_assgn);
-            } else {
-                curr_plato += 1;
-            }
-        }
-        Ok(assignments.likelihood())
+        unimplemented!()
+        // let mut buffer = Vec::new();
+        // assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
+        // let mut curr_plato = 0;
+        // while curr_plato <= self.plato_size {
+        //     let mut best_rp = 0;
+        //     let mut best_assgn = 0;
+        //     let mut best_improv = 0.0;
+        //     for &rp in assignments.non_trivial_reads().choose_multiple(rng, self.sample_size) {
+        //         buffer.clear();
+        //         assignments.possible_reassignments(rp, &mut buffer);
+        //         let (assgn, improv) = F64Ext::argmax(&buffer);
+        //         if improv > best_improv {
+        //             best_rp = rp;
+        //             best_assgn = assgn as u16;
+        //             best_improv = improv;
+        //         }
+        //     }
+        //     if best_improv > 0.0 {
+        //         curr_plato = 0;
+        //         assignments.reassign(best_rp, best_assgn);
+        //     } else {
+        //         curr_plato += 1;
+        //     }
+        // }
+        // Ok(assignments.likelihood())
     }
 }
 
@@ -143,22 +144,30 @@ impl SimAnneal {
     }
 
     /// Finds temperature coefficient by checking 100 random reassignments and their probabilities.
-    fn find_temperature_coeff(&self, assignments: &ReadAssignment, rng: &mut XoshiroRng) -> f64 {
+    fn find_temperature_coeff(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> f64 {
         let mut neg_sum = 0.0;
         let mut neg_count: u32 = 0;
         const INIT_ITERS: u32 = 100;
         for _ in 0..INIT_ITERS {
-            let diff = assignments.random_reassignment(rng).2;
-            if diff < 0.0 {
-                neg_sum += diff;
-                neg_count += 1;
-            }
+            let (rp, new_assgn) = assignments.random_reassignment(rng);
+            // Store difference, if it is decreasing, and always revert to the old state.
+            assignments.reassign_or_revert(rp, new_assgn, |diff| {
+                if diff < 0.0 {
+                    neg_sum += diff;
+                    neg_count += 1;
+                }
+                false
+            });
         }
         if neg_count == 0 {
             1.0
         } else {
             self.init_prob.ln() * f64::from(neg_count) / neg_sum
         }
+    }
+
+    fn accept_change(diff: f64, curr_temp: f64, rng: &mut impl Rng) -> bool {
+        diff > 0.0 || (diff > 0.0 && rng.gen::<f64>() <= (diff / curr_temp).exp())
     }
 }
 
@@ -173,9 +182,8 @@ impl Solver for SimAnneal {
         let cooling_temp = self.cooling_temp / coeff;
         let mut curr_plato = 0;
         while curr_plato <= self.plato_size {
-            let (rp, new_assign, improv) = assignments.random_reassignment(rng);
-            if improv > 0.0 || (curr_temp > 0.0 && rng.gen::<f64>() <= (improv / curr_temp).exp()) {
-                assignments.reassign(rp, new_assign);
+            let (rp, new_assgn) = assignments.random_reassignment(rng);
+            if assignments.reassign_or_revert(rp, new_assgn, |diff| SimAnneal::accept_change(diff, curr_temp, rng)) {
                 curr_plato = 0;
             } else {
                 curr_plato += 1;

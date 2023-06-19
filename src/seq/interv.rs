@@ -131,11 +131,6 @@ impl Interval {
         self.end
     }
 
-    /// Returns the middle of the interval.
-    pub fn middle(&self) -> u32 {
-        (self.start + self.end) / 2
-    }
-
     /// Returns start and end of the interval.
     pub fn range(&self) -> (u32, u32) {
         (self.start, self.end)

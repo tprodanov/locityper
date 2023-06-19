@@ -16,7 +16,7 @@ use super::{
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
-/// First window represents unmapped reads.
+/// First window represents unmapped reads (or windows on the boundary).
 pub(crate) const UNMAPPED_WINDOW: u32 = 0;
 /// Second window represents reads alignments within the boundary.
 pub(crate) const BOUNDARY_WINDOW: u32 = 1;
@@ -31,12 +31,14 @@ pub struct ReadWindows {
     ln_prob: f64,
     /// Index of the contig (within multi-contig windows).
     contig_ix: Option<u8>,
-    /// Middle of the first read end.
-    middle1: Option<u32>,
-    /// Middle of the second read end.
-    middle2: Option<u32>,
-    ///Window for each read-end. Due to random tweaking, may change from iteration to iteration.
-    windows: (u32, u32),
+    /// Start and end of the first read end alignment.
+    range1: Option<(u32, u32)>,
+    /// Start and end of the second read end alignment.
+    range2: Option<(u32, u32)>,
+    /// Window start and end indices for each read-end.
+    /// Due to random tweaking, may change from iteration to iteration.
+    windows1: (u32, u32),
+    windows2: (u32, u32),
 }
 
 impl ReadWindows {
@@ -44,10 +46,11 @@ impl ReadWindows {
         Self {
             aln_ix,
             contig_ix: Some(contig_ix),
-            middle1: paln.intervals().middle1(),
-            middle2: paln.intervals().middle2(),
+            range1: paln.intervals().range1(),
+            range2: paln.intervals().range2(),
             ln_prob: paln.ln_prob(),
-            windows: (UNMAPPED_WINDOW, UNMAPPED_WINDOW),
+            windows1: (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
+            windows2: (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
         }
     }
 
@@ -55,10 +58,11 @@ impl ReadWindows {
         Self {
             aln_ix: u32::MAX,
             contig_ix: None,
-            middle1: None,
-            middle2: None,
+            range1: None,
+            range2: None,
             ln_prob,
-            windows: (UNMAPPED_WINDOW, UNMAPPED_WINDOW),
+            windows1: (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
+            windows2: (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
         }
     }
 
@@ -66,9 +70,12 @@ impl ReadWindows {
         if let Some(i) = self.contig_ix {
             let contig = &mcontigs.by_contig[i as usize];
             let shift = mcontigs.wshifts[i as usize];
-            let w1 = self.middle1.map(|middle| contig.get_window(middle, shift)).unwrap_or(UNMAPPED_WINDOW);
-            let w2 = self.middle2.map(|middle| contig.get_window(middle, shift)).unwrap_or(UNMAPPED_WINDOW);
-            self.windows = (w1, w2);
+            if let Some((start, end)) = self.range1 {
+                self.windows1 = contig.get_windows(start, end, shift);
+            }
+            if let Some((start, end)) = self.range2 {
+                self.windows2 = contig.get_windows(start, end, shift);
+            }
         }
     }
 
@@ -77,22 +84,22 @@ impl ReadWindows {
             let contig = &mcontigs.by_contig[i as usize];
             let shift = mcontigs.wshifts[i as usize];
             let r = rng.next_u64();
-            let r1 = (r >> 32) as u32;
-            let r2 = r as u32;
-
-            let w1 = self.middle1
-                .map(|middle| contig.get_window(middle + (r1 % (2 * tweak + 1)).saturating_sub(tweak), shift))
-                .unwrap_or(UNMAPPED_WINDOW);
-            let w2 = self.middle2
-                .map(|middle| contig.get_window(middle + (r2 % (2 * tweak + 1)).saturating_sub(tweak), shift))
-                .unwrap_or(UNMAPPED_WINDOW);
-            self.windows = (w1, w2);
+            if let Some((start, end)) = self.range1 {
+                let abs_tweak = (r >> 32) as u32 % (2 * tweak + 1);
+                self.windows1 = contig.get_windows(
+                    (start + abs_tweak).saturating_sub(tweak), (end + abs_tweak).saturating_sub(tweak), shift);
+            }
+            if let Some((start, end)) = self.range2 {
+                let abs_tweak = r as u32 % (2 * tweak + 1);
+                self.windows2 = contig.get_windows(
+                    (start + abs_tweak).saturating_sub(tweak), (end + abs_tweak).saturating_sub(tweak), shift);
+            }
         }
     }
 
-    /// Returns two windows, to which the read pair is aligned.
-    pub fn windows(&self) -> (u32, u32) {
-        self.windows
+    /// Returns range of windows, to which the first and the second read ends are aligned.
+    pub fn windows(&self) -> ((u32, u32), (u32, u32)) {
+        (self.windows1, self.windows2)
     }
 
     /// Returns ln-probability of the alignment.
@@ -136,6 +143,8 @@ pub struct ContigWindows {
     start: u32,
     /// End of the windows within contig (after discarding boundary). `end - start` divides window size.
     end: u32,
+    /// Number of windows.
+    n_windows: u32,
     /// GC-content for each window within contig.
     window_gcs: Vec<u8>,
     /// k-mer-based window weights.
@@ -180,7 +189,7 @@ impl ContigWindows {
                 ..min(padded_end - halfk, contig_len - k + 1) as usize]);
             window_weights.push(sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer));
         }
-        Self { contig_id, window, start, end, window_gcs, window_weights }
+        Self { contig_id, window, start, end, n_windows, window_gcs, window_weights }
     }
 
     /// Creates a set of contig windows for each contig.
@@ -192,19 +201,22 @@ impl ContigWindows {
     }
 
     pub fn n_windows(&self) -> u32 {
-        self.window_gcs.len() as u32
+        self.n_windows
     }
 
     pub fn window_size(&self) -> u32 {
         self.window
     }
 
-    /// Returns read window within the contig based on the read middle.
-    fn get_window(&self, read_middle: u32, shift: u32) -> u32 {
-        if self.start <= read_middle && read_middle < self.end {
-            shift + (read_middle - self.start) / self.window
+    /// Returns window range within the contig based on the read alignment range.
+    fn get_windows(&self, aln_start: u32, aln_end: u32, shift: u32) -> (u32, u32) {
+        if self.start < aln_end && aln_start < self.end {
+            (
+                shift + aln_start.saturating_sub(self.start) / self.window,
+                min(shift + aln_end.saturating_sub(self.start + 1) / self.window + 1, self.n_windows)
+            )
         } else {
-            BOUNDARY_WINDOW
+            (BOUNDARY_WINDOW, BOUNDARY_WINDOW + 1)
         }
     }
 

@@ -575,7 +575,7 @@ fn estimate_bg_from_paired(
         }
     }
     let depth_distr = ReadDepth::estimate(depth_alns.into_iter(), &data.interval, &data.sequence, &data.kmer_counts,
-        &args.bg_params.depth, args.params.subsampling_rate, true, opt_out_dir)?;
+        &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 
@@ -592,7 +592,7 @@ fn estimate_bg_from_unpaired(
         .filter(|aln| err_prof.ln_prob(aln.cigar()) >= args.min_aln_prob)
         .map(Deref::deref);
     let depth_distr = ReadDepth::estimate(filt_alns, &data.interval, &data.sequence, &data.kmer_counts,
-        &args.bg_params.depth, args.params.subsampling_rate, false, opt_out_dir)?;
+        &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
     Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
 }
 

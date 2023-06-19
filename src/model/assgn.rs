@@ -140,9 +140,10 @@ impl ReadAssignment {
                 assert!(start_ix + assgn < end_ix,
                     "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
             }
-            let (w1, w2) = self.read_windows[start_ix + assgn].windows();
-            self.depth[w1 as usize] += 1;
-            self.depth[w2 as usize] += 1;
+            let ((w1s, w1e), (w2s, w2e)) = self.read_windows[start_ix + assgn].windows();
+            for w in (w1s..w1e).chain(w2s..w2e) {
+                self.depth[w as usize] += 1;
+            }
             *assgn_mut = assgn as u16;
         }
         self.recalc_likelihood();
@@ -170,9 +171,10 @@ impl ReadAssignment {
             let end_ix = self.read_ixs[rp + 1];
             assert!(start_ix + assgn < end_ix,
                 "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
-            let (w1, w2) = self.read_windows[start_ix + assgn].windows();
-            self.depth[w1 as usize] += 1;
-            self.depth[w2 as usize] += 1;
+            let ((w1s, w1e), (w2s, w2e)) = self.read_windows[start_ix + assgn].windows();
+            for w in (w1s..w1e).chain(w2s..w2e) {
+                self.depth[w as usize] += 1;
+            }
         }
         self.recalc_likelihood();
         self.likelihood
@@ -223,129 +225,81 @@ impl ReadAssignment {
         self.read_windows.len()
     }
 
-    /// Iterates over possible read reassignments, and adds likelihood differences to the vector `buffer`.
-    /// This way, buffer is extended by `n` floats,
-    /// where `n` is the total number of possible locations for the read pair.
-    ///
-    /// NAN is added for the current read assignment.
-    pub fn possible_reassignments(&self, rp: usize, buffer: &mut Vec<f64>) {
-        let start_ix = self.read_ixs[rp];
-        let end_ix = self.read_ixs[rp + 1];
-        assert!(end_ix - start_ix >= 2,
-            "Read pair #{} has {} possible locations! Impossible or or useless.", rp, end_ix - start_ix);
-
-        let curr_ix = start_ix + self.read_assgn[rp] as usize;
-        debug_assert!(curr_ix < end_ix, "Read pair #{}: impossible current location!", rp);
-        let curr_paln = &self.read_windows[curr_ix];
-        let (w1, w2) = curr_paln.windows();
-
-        for i in start_ix..end_ix {
-            if i == curr_ix {
-                buffer.push(f64::NAN);
-                continue;
-            }
-            let new_paln = &self.read_windows[i];
-            let (w3, w4) = new_paln.windows();
-            let diff = new_paln.ln_prob() - curr_paln.ln_prob() + self.depth_lik_diff(w1, w2, w3, w4);
-            buffer.push(diff);
-        }
-    }
-
-    /// Calculates the probability of a random reassignment from a random read pair `rp` to a random location.
-    /// Returns the read pair index, new assignment and the improvement in likelihood.
-    /// Does not actually update any assignments.
-    pub fn random_reassignment<R: Rng>(&self, rng: &mut R) -> (usize, u16, f64) {
+    /// Returns random reassignment pair: (random read pair index, new random assignment).
+    /// Does not actually reassign the read.
+    pub fn random_reassignment(&self, rng: &mut impl Rng) -> (usize, u16) {
         let rp = self.non_trivial_reads[rng.gen_range(0..self.non_trivial_reads.len())];
         let start_ix = self.read_ixs[rp];
         let end_ix = self.read_ixs[rp + 1];
         let total_assgns = end_ix - start_ix;
-        let curr_assgn = self.read_assgn[rp] as usize;
-        let new_assgn = if total_assgns < 2 {
-            panic!("Read pair #{} less than 2 possible assignments.", rp)
-        } else if total_assgns == 2 {
-            1 - curr_assgn
-        } else {
-            let i = rng.gen_range(1..total_assgns);
-            if i <= curr_assgn { i - 1 } else { i }
-        };
-        debug_assert_ne!(new_assgn, curr_assgn);
+        assert!(total_assgns > 1, "Read pair #{} has less than 2 possible assignments", rp);
 
-        let old_paln = &self.read_windows[start_ix + curr_assgn];
-        let new_paln = &self.read_windows[start_ix + new_assgn];
-        let (w1, w2) = old_paln.windows();
-        let (w3, w4) = new_paln.windows();
-        let diff = new_paln.ln_prob() - old_paln.ln_prob() + self.depth_lik_diff(w1, w2, w3, w4);
-        (rp, new_assgn as u16, diff)
+        let old_assgn = self.read_assgn[rp];
+        let new_assgn = if total_assgns == 2 {
+            1 - old_assgn
+        } else {
+            let i = rng.gen_range(1..total_assgns as u16);
+            if i <= old_assgn { i - 1 } else { i }
+        };
+        debug_assert_ne!(old_assgn, new_assgn);
+        (rp, new_assgn)
     }
 
-    /// Reassigns read pair `rp` to a new location and returns the difference in likelihood.
-    pub fn reassign(&mut self, rp: usize, new_assignment: u16) -> f64 {
-        debug_assert_ne!(self.read_assgn[rp], new_assignment,
-            "Read pair #{}: cannot reassign read to the same location", rp);
+    /// Reassigns read pair `rp` to the new location.
+    /// Checks `keep(likelihood difference)`, if true, keeps assignment, otherwise reverts to the old assignment.
+    /// Returns true if reassignment happened.
+    pub fn reassign_or_revert<F>(&mut self, rp: usize, new_assignment: u16, mut keep: F) -> bool
+    where F: FnMut(f64) -> bool,
+    {
         let start_ix = self.read_ixs[rp];
         let end_ix = self.read_ixs[rp + 1];
         let old_ix = start_ix + self.read_assgn[rp] as usize;
         let new_ix = start_ix + new_assignment as usize;
+        debug_assert_ne!(old_ix, new_ix, "Read pair #{}: cannot reassign read to the same location", rp);
         assert!(new_ix < end_ix, "Read pair #{}: cannot assign read to location {} (maximum {} locations)",
             rp, new_assignment, end_ix - start_ix);
+        let old_lik = self.likelihood;
 
         let old_paln = &self.read_windows[old_ix];
         let new_paln = &self.read_windows[new_ix];
-        let (w1, w2) = old_paln.windows();
-        let (w3, w4) = new_paln.windows();
-        let diff = new_paln.ln_prob() - old_paln.ln_prob() + self.depth_lik_diff(w1, w2, w3, w4);
-        self.likelihood += diff;
-        self.read_assgn[rp] = new_assignment;
-        self.depth[w1 as usize] -= 1;
-        self.depth[w2 as usize] -= 1;
-        self.depth[w3 as usize] += 1;
-        self.depth[w4 as usize] += 1;
-        diff
-    }
+        self.likelihood += new_paln.ln_prob() - old_paln.ln_prob();
+        let ((w1s, w1e), (w2s, w2e)) = old_paln.windows();
+        let ((u1s, u1e), (u2s, u2e)) = new_paln.windows();
+        for w in (u1s..u1e).chain(u2s..u2e) {
+            self.update_window_depth::<true>(w);
+        }
+        for w in (w1s..w1e).chain(w2s..w2e) {
+            self.update_window_depth::<false>(w);
+        }
 
-    /// Assuming that read depth in `window` will change by `depth_change`,
-    /// calculates the difference between the new and the old ln-probabilities.
-    /// Positive value means that the likelihood will improve.
-    /// Does not actually update the read depth.
-    /// Does not account for read depth contribution.
-    fn atomic_depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
-        if depth_change == 0 {
-            0.0
+        if keep(self.likelihood - old_lik) {
+            self.read_assgn[rp] = new_assignment;
+            true
         } else {
-            let i = window as usize;
-            let old_depth = self.depth[i];
-            let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative");
-            self.depth_distrs[i].ln_pmf(new_depth) - self.depth_distrs[i].ln_pmf(old_depth)
+            self.likelihood = old_lik;
+            for w in (w1s..w1e).chain(w2s..w2e) {
+                self.update_window_depth::<true>(w);
+            }
+            for w in (u1s..u1e).chain(u2s..u2e) {
+                self.update_window_depth::<false>(w);
+            }
+            false
         }
     }
 
-    /// Calculate likelihood difference on four windows (some of them can be equal to others).
-    /// Depth at w1 and w2 is decreased by one, depth at w3 and w4 is increased by one.
-    fn depth_lik_diff(&self, w1: u32, w2: u32, w3: u32, w4: u32) -> f64 {
-        // Variables c1..c4 store change in read depth. If cX == 0, it means that wX is the same as some other window.
-        let mut c1 = -1;
-
-        let mut c2 = if w2 == w1 {
-            c1 -= 1; 0
-        } else { -1 };
-
-        let mut c3 = if w3 == w1 {
-            c1 += 1; 0
-        } else if w3 == w2 {
-            c2 += 1; 0
-        } else { 1 };
-
-        let c4 = if w4 == w1 {
-            c1 += 1; 0
-        } else if w4 == w2 {
-            c2 += 1; 0
-        } else if w4 == w3 {
-            c3 += 1; 0
-        } else { 1 };
-
-        debug_assert_eq!(c1 + c2 + c3 + c4, 0);
-        self.depth_contrib * (self.atomic_depth_lik_diff(w1, c1) + self.atomic_depth_lik_diff(w2, c2)
-            + self.atomic_depth_lik_diff(w3, c3) + self.atomic_depth_lik_diff(w4, c4))
+    /// Updates window depth (+1 if `INC`, -1 otherwise).
+    fn update_window_depth<const INC: bool>(&mut self, window: u32) {
+        let w = window as usize;
+        let depth = &mut self.depth[w];
+        let distr = &self.depth_distrs[w];
+        self.likelihood -= distr.ln_pmf(*depth);
+        if INC {
+            *depth += 1;
+        } else {
+            assert_ne!(*depth, 0);
+            *depth -= 1;
+        }
+        self.likelihood += distr.ln_pmf(*depth);
     }
 
     /// Recalculates total model likelihood, and returns separately

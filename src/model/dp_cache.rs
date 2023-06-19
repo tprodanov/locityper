@@ -45,15 +45,13 @@ const CACHE_SIZE: usize = 256;
 
 pub(super) type DistrBox = Box<dyn DiscretePmf>;
 
-type RegularDistr = BayesCalc<NBinom>;
+type RegularDistr = BayesCalc<NBinom, NBinom, 2>;
 
 /// Store cached depth distbrutions.
 #[derive(Clone)]
 pub struct CachedDepthDistrs {
     /// Background read depth distribution.
     bg_depth: bg::depth::ReadDepth,
-    /// Multiplication coefficient: assume that read depth is `mul_coef` * bg read depth.
-    mul_coef: f64,
 
     /// Cached read depth distributions in windows with few common k-mers (one for each GC-content).
     cached: [OnceCell<Arc<LinearCache<RegularDistr>>>; GC_BINS],
@@ -62,12 +60,10 @@ pub struct CachedDepthDistrs {
 
 impl CachedDepthDistrs {
     /// Create a set of cached depth distributions.
-    /// Assume that there are `mul_coef` as much reads, as in the background distribution.
     pub fn new(bg_distr: &bg::BgDistr, alt_cn: (f64, f64)) -> Self {
         const NBINOM_CELL: OnceCell<Arc<LinearCache<RegularDistr>>> = OnceCell::new();
         Self {
             bg_depth: bg_distr.depth().clone(),
-            mul_coef: if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 },
             cached: [NBINOM_CELL; GC_BINS],
             alt_cn,
         }
@@ -87,9 +83,9 @@ impl CachedDepthDistrs {
     fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
         self.cached[usize::from(gc_content)].get_or_init(|| {
             // Probability at CN = 1.
-            let cn1 = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef);
+            let cn1 = self.bg_depth.depth_distribution(gc_content).clone();
             // Probabilities at alternative CN values.
-            let alt = vec![cn1.mul(self.alt_cn.0), cn1.mul(self.alt_cn.1)];
+            let alt = [cn1.mul(self.alt_cn.0), cn1.mul(self.alt_cn.1)];
             let bayes = BayesCalc::new(cn1, alt);
             Arc::new(LinearCache::new(bayes, CACHE_SIZE))
         })

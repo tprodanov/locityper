@@ -1,5 +1,6 @@
 use std::{
     io::{self, Write},
+    cmp::min,
     path::Path,
 };
 use crate::{
@@ -50,6 +51,10 @@ impl WindowCounts {
     fn len(&self) -> u32 {
         self.end - self.start
     }
+
+    fn sum_depth(&self) -> u32 {
+        self.depth[0] + self.depth[1]
+    }
 }
 
 /// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.boundary_size`
@@ -60,8 +65,7 @@ fn count_reads<'a>(
     params: &ReadDepthParams,
 ) -> Vec<WindowCounts> {
     assert!(interval.len() >= params.window_size + 2 * params.boundary_size, "Input interval is too short!");
-    let n_windows = (f64::from(interval.len() - 2 * params.boundary_size) / f64::from(params.window_size))
-        .floor() as u32;
+    let n_windows = (interval.len() - 2 * params.boundary_size) / params.window_size;
     let sum_len = n_windows * params.window_size;
     let interval_start = interval.start();
     let start = interval_start + (interval.len() - sum_len) / 2;
@@ -71,10 +75,15 @@ fn count_reads<'a>(
         .collect();
 
     for aln in alignments {
-        let middle = aln.interval().middle();
-        if start <= middle && middle < end {
-            let ix = (middle - start) / params.window_size;
-            windows[ix as usize].depth[aln.read_end().ix()] += 1;
+        let (aln_start, aln_end) = aln.interval().range();
+        if aln_start < end && start < aln_end {
+            let start_ix = aln_start.saturating_sub(start) / params.window_size;
+            let end_ix = min(aln_end.saturating_sub(start + 1) / params.window_size + 1, n_windows);
+            assert!(start_ix < end_ix, "Read alignment ({}-{}) cover any windows", aln_start + 1, aln_end);
+            let read_end = aln.read_end().ix();
+            for ix in start_ix..end_ix {
+                windows[ix as usize].depth[read_end] += 1;
+            }
         }
     }
     windows
@@ -383,7 +392,6 @@ impl ReadDepth {
         kmer_counts: &KmerCounts,
         params: &ReadDepthParams,
         subsampling_rate: f64,
-        is_paired_end: bool,
         out_dir: Option<&Path>,
     ) -> io::Result<Self>
     {
@@ -404,16 +412,15 @@ impl ReadDepth {
         let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
 
-        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth[0])).collect();
+        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].sum_depth())).collect();
         let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
         let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
         let ploidy = f64::from(params.ploidy);
         let distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy);
 
         const GC_VAL: usize = 40;
-        let logging_distr = distributions[GC_VAL].mul(ploidy * if is_paired_end { 2.0 } else { 1.0 });
-        log::info!("    Read depth mean = {:.2},  variance: {:.2}  (per {} bp window at GC-content {})",
-            logging_distr.mean(), logging_distr.variance(), params.window_size, GC_VAL);
+        let logging_distr = distributions[GC_VAL].mul(ploidy);
+        log::info!("    Read depth mean = {:.2},  variance: {:.2}", logging_distr.mean(), logging_distr.variance());
 
         if let Some(dir) = out_dir {
             let dbg_writer = ext::sys::create_gzip(&dir.join("depth.csv.gz"))?;
