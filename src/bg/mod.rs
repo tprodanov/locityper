@@ -8,8 +8,9 @@ pub use {
     depth::{ReadDepth, ReadDepthParams},
     insertsz::InsertDistr,
     err_prof::ErrorProfile,
+    ser::JsonSer,
 };
-pub use ser::JsonSer;
+use ser::json_get;
 
 /// Parameters for background distributions estimation.
 #[derive(Debug, Clone)]
@@ -51,19 +52,25 @@ impl Params {
     }
 }
 
-/// Various background distributions, including
-/// - read depth distribution,
-/// - insert size distribution,
-/// - error profile.
+/// Various background distributions.
 pub struct BgDistr {
+    /// Mean read length.
+    read_len: f64,
+    /// Insert size distribution,
     insert_distr: InsertDistr,
+    /// Error profile.
     err_prof: ErrorProfile,
+    /// Read depth distribution,
     depth: ReadDepth,
 }
 
 impl BgDistr {
-    pub fn new(insert_distr: InsertDistr, err_prof: ErrorProfile, depth: ReadDepth) -> Self {
-        Self { insert_distr, err_prof, depth }
+    pub fn new(read_len: f64, insert_distr: InsertDistr, err_prof: ErrorProfile, depth: ReadDepth) -> Self {
+        Self { read_len, insert_distr, err_prof, depth }
+    }
+
+    pub fn mean_read_len(&self) -> f64 {
+        self.read_len
     }
 
     pub fn depth(&self) -> &ReadDepth {
@@ -82,6 +89,7 @@ impl BgDistr {
 impl JsonSer for BgDistr {
     fn save(&self) -> json::JsonValue {
         json::object!{
+            read_len: self.read_len,
             insert_distr: self.insert_distr.save(),
             error_profile: self.err_prof.save(),
             bg_depth: self.depth.save(),
@@ -89,8 +97,10 @@ impl JsonSer for BgDistr {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        json_get!(obj -> read_len (as_f64));
         if obj.has_key("bg_depth") && obj.has_key("insert_distr") && obj.has_key("error_profile") {
             Ok(Self {
+                read_len,
                 insert_distr: InsertDistr::load(&obj["insert_distr"])?,
                 err_prof: ErrorProfile::load(&obj["error_profile"])?,
                 depth: ReadDepth::load(&obj["bg_depth"])?,

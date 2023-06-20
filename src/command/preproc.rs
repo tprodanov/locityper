@@ -3,7 +3,7 @@
 use std::{
     fs, io, thread,
     fmt::Write as FmtWrite,
-    cmp::max,
+    cmp::{min, max},
     path::{Path, PathBuf},
     process::{Stdio, Command, ChildStdin},
     time::Instant,
@@ -445,9 +445,12 @@ fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam:
     let start = Instant::now();
     let mut strobealign = Command::new(&args.strobealign);
     strobealign.args(&[
-        "-N0", "-R0", "-U", // Retain 0 additional alignments, do not rescue reads, do not output unmapped reads.
-        "-f", "0.001", // Discard more minimizers to speed up alignment
-        "-t", &args.threads.to_string()]) // Specify the number of threads.
+        // Retain 0 additional alignments, do not rescue reads, do not output unmapped reads,
+        "-N", "0", "-R", "0", "-U",
+        "-f", "0.001", // Discard more minimizers to speed up alignment,
+        "--eqx", // Output X/= instead of M operations,
+        "-t", &args.threads.to_string() // Specify the number of threads.
+        ])
         .stdout(Stdio::piped());
     if args.params.subsampling_rate == 1.0 {
         // Provide input files as they are.
@@ -474,7 +477,7 @@ fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam:
             "-b", // Output BAM.
             // Ignore reads where any of the mates is unmapped,
             // + ignore secondary & supplementary alignments + ignore failed checks.
-            "-F3852",
+            "-F", "3852",
             "-q", &args.params.min_mapq.to_string(),
             ])
         .arg("-L").arg(&bed_target)
@@ -536,6 +539,13 @@ fn load_alns(
     Ok((alns, paired_counts[1] > 0))
 }
 
+fn mean_read_len(alns: &[Alignment]) -> f64 {
+    let n = min(alns.len(), 10000);
+    alns[..n].iter()
+        .map(|aln| f64::from(aln.cigar().query_len()))
+        .sum::<f64>() / n as f64
+}
+
 fn estimate_bg_from_paired(
     alns: Vec<Alignment>,
     args: &Args,
@@ -543,6 +553,7 @@ fn estimate_bg_from_paired(
     data: &RefData,
 ) -> Result<BgDistr, Error>
 {
+    let read_len = mean_read_len(&alns);
     // Group reads into pairs, and estimate insert size from them.
     let pair_ixs = insertsz::group_mates(&alns)?;
     let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params, opt_out_dir)?;
@@ -576,7 +587,7 @@ fn estimate_bg_from_paired(
     }
     let depth_distr = ReadDepth::estimate(depth_alns.into_iter(), &data.interval, &data.sequence, &data.kmer_counts,
         &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
-    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+    Ok(BgDistr::new(read_len, insert_distr, err_prof, depth_distr))
 }
 
 fn estimate_bg_from_unpaired(
@@ -586,6 +597,7 @@ fn estimate_bg_from_unpaired(
     data: &RefData,
 ) -> Result<BgDistr, Error>
 {
+    let read_len = mean_read_len(&alns);
     let insert_distr = InsertDistr::undefined();
     let err_prof = ErrorProfile::estimate(alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
     let filt_alns = alns.iter()
@@ -593,7 +605,7 @@ fn estimate_bg_from_unpaired(
         .map(Deref::deref);
     let depth_distr = ReadDepth::estimate(filt_alns, &data.interval, &data.sequence, &data.kmer_counts,
         &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
-    Ok(BgDistr::new(insert_distr, err_prof, depth_distr))
+    Ok(BgDistr::new(read_len, insert_distr, err_prof, depth_distr))
 }
 
 /// Map reads to the genome and to the background genome to estimate background distributions based solely on WGS reads.

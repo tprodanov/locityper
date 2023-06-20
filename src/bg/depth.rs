@@ -1,6 +1,5 @@
 use std::{
     io::{self, Write},
-    cmp::min,
     path::Path,
 };
 use crate::{
@@ -21,6 +20,7 @@ use crate::{
         },
     },
     err::{Error, validate_param},
+    model::windows::WindowGetter,
 };
 use super::{
     ser::{JsonSer, parse_f64_arr, json_get},
@@ -51,10 +51,6 @@ impl WindowCounts {
     fn len(&self) -> u32 {
         self.end - self.start
     }
-
-    fn sum_depth(&self) -> u32 {
-        self.depth[0] + self.depth[1]
-    }
 }
 
 /// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.boundary_size`
@@ -69,21 +65,17 @@ fn count_reads<'a>(
     let sum_len = n_windows * params.window_size;
     let interval_start = interval.start();
     let start = interval_start + (interval.len() - sum_len) / 2;
-    let end = start + sum_len;
     let mut windows: Vec<_> = (0..n_windows)
         .map(|i| WindowCounts::new(start + i * params.window_size, start + (i + 1) * params.window_size))
         .collect();
+    let window_getter = WindowGetter::new(start, start + sum_len, params.window_size);
 
     for aln in alignments {
         let (aln_start, aln_end) = aln.interval().range();
-        if aln_start < end && start < aln_end {
-            let start_ix = aln_start.saturating_sub(start) / params.window_size;
-            let end_ix = min(aln_end.saturating_sub(start + 1) / params.window_size + 1, n_windows);
-            assert!(start_ix < end_ix, "Read alignment ({}-{}) cover any windows", aln_start + 1, aln_end);
-            let read_end = aln.read_end().ix();
-            for ix in start_ix..end_ix {
-                windows[ix as usize].depth[read_end] += 1;
-            }
+        let (start_ix, end_ix) = window_getter.covered_middle(aln_start, aln_end);
+        let read_end = aln.read_end().ix();
+        for ix in start_ix..end_ix {
+            windows[ix as usize].depth[read_end] += 1;
         }
     }
     windows
@@ -412,7 +404,7 @@ impl ReadDepth {
         let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
 
-        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].sum_depth())).collect();
+        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth[0])).collect();
         let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
         let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
         let ploidy = f64::from(params.ploidy);

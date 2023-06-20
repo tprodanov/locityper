@@ -16,6 +16,45 @@ use super::{
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
+/// Structure that, for predefined region boundaries and window size,
+/// returns windows for each alignment boundaries.
+/// This function is used both in read depth calculation and during the locus genotyping.
+#[derive(Clone)]
+pub struct WindowGetter {
+    start: u32,
+    end: u32,
+    window: u32,
+    // Half window: size that needs to be covered in `get_significant` - 1.
+    halfw: u32,
+}
+
+impl WindowGetter {
+    pub fn new(start: u32, end: u32, window: u32) -> Self {
+        Self {
+            start, end, window,
+            halfw: window.checked_sub(1).unwrap() / 2,
+        }
+    }
+
+    /// Returns range of windows (start_ix..end_ix),
+    /// covered by the alignment (at least by 1 bp).
+    pub fn covered_any(&self, aln_start: u32, aln_end: u32) -> (u32, u32) {
+        (
+            min(aln_start, self.end).saturating_sub(self.start) / self.window,
+            (min(aln_end, self.end) + self.window - 1).saturating_sub(self.start) / self.window,
+        )
+    }
+
+    /// Returns range of windows (start_ix..end_ix),
+    /// middle of which are covered by the alignment.
+    pub fn covered_middle(&self, aln_start: u32, aln_end: u32) -> (u32, u32) {
+        (
+            (min(aln_start, self.end) + self.halfw).saturating_sub(self.start) / self.window,
+            (min(aln_end, self.end) + self.halfw).saturating_sub(self.start) / self.window,
+        )
+    }
+}
+
 /// First window represents unmapped reads (or windows on the boundary).
 pub(crate) const UNMAPPED_WINDOW: u32 = 0;
 /// Second window represents reads alignments within the boundary.
@@ -141,13 +180,8 @@ fn sech_weight(x: f64, c1: f64, c2: f64) -> f64 {
 #[derive(Clone)]
 pub struct ContigWindows {
     contig_id: ContigId,
-    window: u32,
-    /// Start of the windows within contig (after discarding boundary).
-    start: u32,
-    /// End of the windows within contig (after discarding boundary). `end - start` divides window size.
-    end: u32,
-    /// Number of windows.
-    n_windows: u32,
+    /// Structure, that stores start, end and window.
+    window_getter: WindowGetter,
     /// GC-content for each window within contig.
     window_gcs: Vec<u8>,
     /// k-mer-based window weights.
@@ -170,8 +204,7 @@ impl ContigWindows {
         assert!(contig_len > window + 2 * params.boundary_size,
             "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
-        let n_windows = (f64::from(contig_len - 2 * params.boundary_size) / f64::from(window))
-            .floor() as u32;
+        let n_windows = (contig_len - 2 * params.boundary_size) / window;
         let sum_len = n_windows * window;
         let start = (contig_len - sum_len) / 2;
         let end = start + sum_len;
@@ -192,7 +225,10 @@ impl ContigWindows {
                 ..min(padded_end - halfk, contig_len - k + 1) as usize]);
             window_weights.push(sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer));
         }
-        Self { contig_id, window, start, end, n_windows, window_gcs, window_weights }
+        Self {
+            window_getter: WindowGetter::new(start, end, window),
+            contig_id, window_gcs, window_weights
+        }
     }
 
     /// Creates a set of contig windows for each contig.
@@ -204,20 +240,18 @@ impl ContigWindows {
     }
 
     pub fn n_windows(&self) -> u32 {
-        self.n_windows
+        self.window_gcs.len() as u32
     }
 
     pub fn window_size(&self) -> u32 {
-        self.window
+        self.window_getter.window
     }
 
     /// Returns window range within the contig based on the read alignment range.
     fn get_windows(&self, aln_start: u32, aln_end: u32, shift: u32) -> (u32, u32) {
-        if self.start < aln_end && aln_start < self.end {
-            (
-                shift + aln_start.saturating_sub(self.start) / self.window,
-                shift + min(aln_end.saturating_sub(self.start + 1) / self.window + 1, self.n_windows)
-            )
+        let (start_ix, end_ix) = self.window_getter.covered_middle(aln_start, aln_end);
+        if start_ix < end_ix {
+            (start_ix + shift, end_ix + shift)
         } else {
             (BOUNDARY_WINDOW, BOUNDARY_WINDOW + 1)
         }
@@ -229,8 +263,8 @@ impl ContigWindows {
     pub fn write_to(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
         let name = contigs.get_name(self.contig_id);
         for (i, (&gc, &weight)) in self.window_gcs.iter().zip(&self.window_weights).enumerate() {
-            let start = self.start + i as u32 * self.window;
-            writeln!(f, "{}\t{}\t{}\t{}\t{:.5}", name, start, start + self.window, gc, weight)?;
+            let start = self.window_getter.start + i as u32 * self.window_getter.window;
+            writeln!(f, "{}\t{}\t{}\t{}\t{:.5}", name, start, start + self.window_getter.window, gc, weight)?;
         }
         Ok(())
     }
@@ -264,7 +298,7 @@ impl MultiContigWindows {
         assert!(by_contig.len() < 256, "Multi-contig collection cannot contain more than 256 entries");
         Self {
             ln_ploidy: (n as f64).ln(),
-            window: by_contig[0].window,
+            window: by_contig[0].window_size(),
             by_contig, wshifts,
         }
     }

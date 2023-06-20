@@ -448,7 +448,7 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
     Ok(())
 }
 
-fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
+fn map_reads(locus: &LocusData, read_len: f64, args: &Args) -> Result<(), Error> {
     if locus.aln_filename.exists() {
         log::info!("    Skipping read mapping");
         return Ok(());
@@ -470,7 +470,8 @@ fn map_reads(locus: &LocusData, args: &Args) -> Result<(), Error> {
         "-S", "0.5",     // Try candidate sites with score >= 0.2 * best score.
         "-f", "0",       // Do not discard repetitive minimizers.
         "-k", "15",      // Use smaller minimizers to get more matches.
-        // TODO: Use -r MEAN_READ_LEN
+        "--eqx",         // Output X/= instead of M operations.
+        "-r", &format!("{:.1}", read_len),
         "-t", &args.threads.to_string()])
         .arg(&in_fasta) // Input fasta.
         .arg(&locus.reads_filename) // Input FASTQ.
@@ -508,7 +509,7 @@ fn analyze_locus(
 ) -> Result<(), Error>
 {
     log::info!("Analyzing {}", locus.set.tag());
-    map_reads(locus, &args)?;
+    map_reads(locus, bg_distr.mean_read_len(), &args)?;
 
     log::info!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
