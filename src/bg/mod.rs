@@ -124,7 +124,7 @@ impl JsonSer for BgDistr {
 }
 
 /// Sequencing technology.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Technology {
     Illumina,
     HiFi,
@@ -139,6 +139,18 @@ impl Technology {
             Self::HiFi => "hifi",
             Self::PacBio => "pacbio",
             Self::Nanopore => "nanopore",
+        }
+    }
+
+    pub fn minimap_preset(&self) -> &'static str {
+        match self {
+            Self::Illumina => {
+                log::warn!("Using Minimap2 for short reads!");
+                "sr"
+            },
+            Self::HiFi => "map-hifi",
+            Self::PacBio => "map-pb",
+            Self::Nanopore => "map-ont",
         }
     }
 }
@@ -163,6 +175,17 @@ impl fmt::Display for Technology {
     }
 }
 
+impl fmt::Debug for Technology {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::Illumina => "'Illumina'",
+            Self::HiFi => "'PacBio HiFi'",
+            Self::PacBio => "'Pacbio CLR'",
+            Self::Nanopore => "'Oxford Nanopore'",
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SequencingInfo {
     /// Mean read length.
@@ -173,8 +196,8 @@ pub struct SequencingInfo {
 
 impl SequencingInfo {
     pub fn new(read_len: f64, technology: Technology) -> Self {
-        if read_len > 400.0 && technology != Technology::Illumina {
-            log::error!("Unusual mean read length ({:.0}) for the '{}' sequencing technology",
+        if read_len > 400.0 && technology == Technology::Illumina {
+            log::error!("Unusual mean read length ({:.0}) for the {:?} sequencing technology",
                 read_len, technology);
         }
         Self { read_len, technology }

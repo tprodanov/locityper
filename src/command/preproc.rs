@@ -179,8 +179,13 @@ impl Args {
             "Read files (-i) and an alignment file (-a) cannot be provided together");
         validate_param!(n_input != 2 || !self.interleaved,
             "Two read files (-i/--input) are provided, however, --interleaved is specified");
-        if !self.interleaved && n_input == 1 {
-            log::warn!("Running in single-end mode.");
+        if self.params.technology == Technology::Illumina {
+            if self.is_single_end() {
+                log::warn!("Running in single-end mode.");
+            }
+        } else {
+            validate_param!(self.is_single_end(),
+                "Paired end reads are not supported for technology {:?}", self.params.technology);
         }
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
@@ -206,6 +211,10 @@ impl Args {
 
     fn is_paired_end(&self) -> bool {
         self.input.len() == 2 || self.interleaved
+    }
+
+    fn is_single_end(&self) -> bool {
+        !self.is_paired_end()
     }
 }
 
@@ -411,7 +420,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     Ok(bg_dir)
 }
 
-fn set_strobealign_stdin(
+fn set_mapping_stdin(
     args: &Args,
     child_stdin: ChildStdin,
 ) -> Result<thread::JoinHandle<Result<(), io::Error>>, Error>
@@ -439,6 +448,48 @@ fn set_strobealign_stdin(
     }
 }
 
+fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: &Path) -> Command {
+    let mut command;
+    if seq_info.technology() == Technology::Illumina {
+        // Strobealign for short reads.
+        command = Command::new(&args.strobealign);
+        command.args(&[
+            "-N", "0",     // Retain 0 additional alignments,
+            "-R", "0",     // Do not rescue reads,
+            "-U",          // Do not output unmapped reads,
+            "-f", "0.001", // Discard more minimizers to speed up alignment,
+            "--eqx",       // Output X/= instead of M operations,
+            "-t", &args.threads.to_string(), // Specify the number of threads,
+            "-r", &format!("{:.1}", seq_info.mean_read_len()), // Provide mean read length.
+            ]);
+        if (args.params.subsampling_rate == 1.0 && args.interleaved) || args.is_paired_end() {
+            command.arg("--interleaved");
+        }
+    } else {
+        // Minimap2 for long reads.
+        command = Command::new(&args.minimap);
+        command.args(&[
+            "-a", // Output SAM format,
+            "-x", seq_info.technology().minimap_preset(), // Set mapping preset.
+            "-N", "2",     // Examine at most 2 additional alignments,
+            "--secondary=no", // Do not output secondary alignments,
+            "-f", "0.001", // Discard more minimizers to speed up alignment,
+            "--eqx",       // Output X/= instead of M operations,
+            "-t", &args.threads.to_string() // Specify the number of threads,
+            ]);
+    }
+
+    // Providing paths to the reference and reads.
+    command.arg(&ref_filename);
+    if args.params.subsampling_rate == 1.0 {
+        command.args(&args.input);
+    } else {
+        command.arg("-").stdin(Stdio::piped());
+    }
+    command.stdout(Stdio::piped());
+    command
+}
+
 fn first_step_str(args: &Args) -> String {
     let mut s = String::new();
     if args.params.subsampling_rate == 1.0 {
@@ -459,7 +510,14 @@ fn first_step_str(args: &Args) -> String {
 
 /// Map reads to the whole reference genome, and then take only reads mapped to the corresponding BED file.
 /// Subsample reads if the corresponding rate is less than 1.
-fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam: &Path) -> Result<(), Error> {
+fn run_mapping(
+    args: &Args,
+    seq_info: &SequencingInfo,
+    ref_filename: &Path,
+    bed_target: &Path,
+    out_bam: &Path
+) -> Result<(), Error>
+{
     let tmp_bam = out_bam.with_extension("tmp.bam");
     if out_bam.exists() {
         log::warn!("    BAM file {} exists, skipping read mapping", ext::fmt::path(out_bam));
@@ -467,33 +525,12 @@ fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam:
     }
 
     let start = Instant::now();
-    let mut strobealign = Command::new(&args.strobealign);
-    strobealign.args(&[
-        // Retain 0 additional alignments, do not rescue reads, do not output unmapped reads,
-        "-N", "0", "-R", "0", "-U",
-        "-f", "0.001", // Discard more minimizers to speed up alignment,
-        "--eqx", // Output X/= instead of M operations,
-        "-t", &args.threads.to_string() // Specify the number of threads.
-        ])
-        .stdout(Stdio::piped());
-    if args.params.subsampling_rate == 1.0 {
-        // Provide input files as they are.
-        if args.interleaved {
-            strobealign.arg("--interleaved");
-        }
-        strobealign.arg(&ref_filename).args(&args.input);
-    } else {
-        if args.is_paired_end() {
-            strobealign.arg("--interleaved");
-        }
-        // Subsample or take first N records from the input files, and pass them through stdin.
-        strobealign.arg(&ref_filename).arg("-").stdin(Stdio::piped());
-    }
-    let mut strobealign_child = strobealign.spawn()?;
-    let strobealign_stdin = strobealign_child.stdin.take();
-    let strobealign_stdout = strobealign_child.stdout.take();
-    let mut guard = ext::sys::ChildGuard::new(strobealign_child);
-    let handle = strobealign_stdin.map(|stdin| set_strobealign_stdin(args, stdin)).transpose()?;
+    let mut mapping = create_mapping_command(args, seq_info, ref_filename);
+    let mut mapping_child = mapping.spawn()?;
+    let mapping_stdin = mapping_child.stdin.take();
+    let mapping_stdout = mapping_child.stdout.take();
+    let mut guard = ext::sys::ChildGuard::new(mapping_child);
+    let handle = mapping_stdin.map(|stdin| set_mapping_stdin(args, stdin)).transpose()?;
 
     let mut samtools = Command::new(&args.samtools);
     // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
@@ -506,8 +543,8 @@ fn run_strobealign(args: &Args, ref_filename: &Path, bed_target: &Path, out_bam:
             ])
         .arg("-L").arg(&bed_target)
         .arg("-o").arg(&tmp_bam)
-        .stdin(Stdio::from(strobealign_stdout.unwrap()));
-    log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&strobealign), ext::fmt::command(&samtools));
+        .stdin(Stdio::from(mapping_stdout.unwrap()));
+    log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&mapping), ext::fmt::command(&samtools));
     let output = samtools.output()?;
     log::debug!("");
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
@@ -658,6 +695,7 @@ fn estimate_bg_distrs(
     let is_paired_end: bool;
     let alns: Vec<Alignment>;
     let seq_info: SequencingInfo;
+
     if let Some(alns_filename) = args.alns.as_ref() {
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
@@ -669,6 +707,10 @@ fn estimate_bg_distrs(
         (alns, is_paired_end) = load_alns(&mut bam_reader,
             |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
             &data.ref_contigs, args)?;
+        if is_paired_end && args.params.technology != Technology::Illumina {
+            return Err(Error::InvalidInput(format!("Paired end reads are not supported for technology {:?}",
+                args.params.technology)));
+        }
         seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.params.technology);
     } else {
         seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.params.technology);
@@ -676,7 +718,7 @@ fn estimate_bg_distrs(
 
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
-        run_strobealign(args, &data.ref_filename, &data.bed_filename, &bam_filename)?;
+        run_mapping(args, &seq_info, &data.ref_filename, &data.bed_filename, &bam_filename)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
