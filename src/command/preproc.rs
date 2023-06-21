@@ -9,6 +9,7 @@ use std::{
     time::Instant,
     ops::Deref,
     sync::Arc,
+    str::FromStr,
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
@@ -25,7 +26,7 @@ use crate::{
         aln::{Alignment, LightAlignment, ReadEnd},
     },
     bg::{
-        self, BgDistr,
+        self, BgDistr, Technology, SequencingInfo,
         insertsz::{self, InsertDistr},
         err_prof::ErrorProfile,
         depth::ReadDepth,
@@ -37,6 +38,7 @@ use super::paths;
 /// Parameters, that need to be saved between preprocessing executions.
 /// On a new run, rerun is recommended if the parameters have changed.
 struct Params {
+    technology: Technology,
     min_mapq: u8,
     subsampling_rate: f64,
     subsampling_seed: Option<u64>,
@@ -45,6 +47,7 @@ struct Params {
 impl Default for Params {
     fn default() -> Self {
         Self {
+            technology: Technology::Illumina,
             min_mapq: 20,
             subsampling_rate: 0.1,
             subsampling_seed: None,
@@ -63,26 +66,34 @@ impl Params {
     }
 
     /// Loads parameters from the previous run. If the parameters do not match, or cannot be loaded, returns true.
-    fn need_rerun(&self, path: &Path) -> bool {
+    fn need_rerun(&self, from_reads: bool, path: &Path) -> bool {
         if !path.exists() {
-            log::warn!("Cannot find old parameters at {}", ext::fmt::path(path));
+            log::error!("Cannot find old parameters at {}", ext::fmt::path(path));
             return true;
         }
         let old_params = match ext::sys::load_json(&path)
                 .map_err(|e| Error::from(e))
                 .and_then(|json| Params::load(&json)) {
             Err(_) => {
-                log::warn!("Cannot load old parameters from {}", ext::fmt::path(path));
+                log::error!("Cannot load old parameters from {}", ext::fmt::path(path));
                 return true;
             }
             Ok(val) => val,
         };
-        if self.min_mapq != old_params.min_mapq || self.subsampling_rate != old_params.subsampling_rate {
-            log::warn!("Parameters has changed");
+        if self.technology != old_params.technology {
+            log::error!("Sequencing technology has changed ({} -> {})", old_params.technology, self.technology);
+            true
+        } else if from_reads && self.min_mapq != old_params.min_mapq {
+            log::error!("Minimal MAPQ has changed ({} -> {})", old_params.min_mapq, self.min_mapq);
+            true
+        } else if from_reads && self.subsampling_rate != old_params.subsampling_rate {
+            log::error!("Subsampling rate has changed ({} -> {})", old_params.subsampling_rate, self.subsampling_rate);
             true
         } else {
-            if self.subsampling_seed != old_params.subsampling_seed {
-                log::warn!("Subsampling seed has changed");
+            // Not critical.
+            if from_reads && self.subsampling_seed != old_params.subsampling_seed {
+                log::warn!("Subsampling seed has changed ({:?} -> {:?})",
+                    old_params.subsampling_seed, self.subsampling_seed);
             }
             false
         }
@@ -92,6 +103,7 @@ impl Params {
 impl JsonSer for Params {
     fn save(&self) -> json::JsonValue {
         json::object!{
+            technology: self.technology.to_str(),
             min_mapq: self.min_mapq,
             subsampling_rate: self.subsampling_rate,
             subsampling_seed: self.subsampling_seed,
@@ -99,8 +111,9 @@ impl JsonSer for Params {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> min_mapq (as_u8), subsampling_rate (as_f64), subsampling_seed? (as_u64));
-        Ok(Self { min_mapq, subsampling_rate, subsampling_seed })
+        json_get!(obj -> technology (as_str), min_mapq (as_u8), subsampling_rate (as_f64), subsampling_seed? (as_u64));
+        let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
+        Ok(Self { technology, min_mapq, subsampling_rate, subsampling_seed })
     }
 }
 
@@ -115,6 +128,7 @@ struct Args {
     threads: u16,
     force: bool,
     strobealign: PathBuf,
+    minimap: PathBuf,
     samtools: PathBuf,
     debug: bool,
 
@@ -142,6 +156,7 @@ impl Default for Args {
             force: false,
             debug: false,
             strobealign: PathBuf::from("strobealign"),
+            minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
 
             max_clipping: 0.02,
@@ -224,6 +239,12 @@ fn print_help(extended: bool) {
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
         "-^, --interleaved".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Sequencing technology [{}]:\n\
+        {EMPTY}  sr  | illumina : short-read sequencing,\n\
+        {EMPTY}        hifi     : PacBio HiFi,\n\
+        {EMPTY}  pb  | pacbio   : PacBio CLR,\n\
+        {EMPTY}  ont | nanopore : Oxford Nanopore.",
+        "-t, --technology".green(), "STR".yellow(), defaults.params.technology);
 
     if extended {
         println!("\n{}", "Insert size and error profile estimation:".bold());
@@ -286,6 +307,8 @@ fn print_help(extended: bool) {
     if extended {
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
+        println!("    {:KEY$} {:VAL$}  Minimap2 executable [{}].",
+            "    --minimap".green(), "EXE".yellow(), defaults.minimap.display());
         println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
             "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
     }
@@ -310,6 +333,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
+            Short('t') | Long("technology") => args.params.technology = parser.value()?.parse()?,
 
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
@@ -375,7 +399,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
         if args.force || !bg_dir.join(paths::BG_DISTR).exists() {
             log::warn!("Clearing output directory {}", ext::fmt::path(&bg_dir));
             fs::remove_dir_all(&bg_dir)?;
-        } else if args.alns.is_none() && args.params.need_rerun(&params_path) {
+        } else if args.params.need_rerun(!args.input.is_empty(), &params_path) {
             log::error!("Please rerun with -F/--force");
             std::process::exit(1);
         }
@@ -539,21 +563,36 @@ fn load_alns(
     Ok((alns, paired_counts[1] > 0))
 }
 
-fn mean_read_len(alns: &[Alignment]) -> f64 {
-    let n = min(alns.len(), 10000);
+const MEAN_LEN_RECORDS: usize = 10000;
+
+/// Calculate mean read length from existing alignments.
+fn read_len_from_alns(alns: &[Alignment]) -> f64 {
+    let n = min(alns.len(), MEAN_LEN_RECORDS);
     alns[..n].iter()
         .map(|aln| f64::from(aln.cigar().query_len()))
         .sum::<f64>() / n as f64
 }
 
+/// Calculate mean read length from input reads.
+fn read_len_from_reads(input: &[PathBuf]) -> io::Result<f64> {
+    log::info!("Calculating mean read length");
+    let lengths: Vec<f64> = input.iter()
+        .map(|path| {
+            let mut reader = fastx::Reader::from_path(path)?;
+            reader.mean_read_len(MEAN_LEN_RECORDS / input.len())
+        })
+        .collect::<io::Result<_>>()?;
+    Ok(ext::vec::F64Ext::mean(&lengths))
+}
+
 fn estimate_bg_from_paired(
     alns: Vec<Alignment>,
+    seq_info: SequencingInfo,
     args: &Args,
     opt_out_dir: Option<&Path>,
     data: &RefData,
 ) -> Result<BgDistr, Error>
 {
-    let read_len = mean_read_len(&alns);
     // Group reads into pairs, and estimate insert size from them.
     let pair_ixs = insertsz::group_mates(&alns)?;
     let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params, opt_out_dir)?;
@@ -587,17 +626,17 @@ fn estimate_bg_from_paired(
     }
     let depth_distr = ReadDepth::estimate(depth_alns.into_iter(), &data.interval, &data.sequence, &data.kmer_counts,
         &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
-    Ok(BgDistr::new(read_len, insert_distr, err_prof, depth_distr))
+    Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
 fn estimate_bg_from_unpaired(
     alns: Vec<Alignment>,
+    seq_info: SequencingInfo,
     args: &Args,
     opt_out_dir: Option<&Path>,
     data: &RefData,
 ) -> Result<BgDistr, Error>
 {
-    let read_len = mean_read_len(&alns);
     let insert_distr = InsertDistr::undefined();
     let err_prof = ErrorProfile::estimate(alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
     let filt_alns = alns.iter()
@@ -605,10 +644,10 @@ fn estimate_bg_from_unpaired(
         .map(Deref::deref);
     let depth_distr = ReadDepth::estimate(filt_alns, &data.interval, &data.sequence, &data.kmer_counts,
         &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
-    Ok(BgDistr::new(read_len, insert_distr, err_prof, depth_distr))
+    Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
-/// Map reads to the genome and to the background genome to estimate background distributions based solely on WGS reads.
+/// Estimate background distributions from input reads or existing alignments.
 fn estimate_bg_distrs(
     args: &Args,
     out_dir: &Path,
@@ -616,7 +655,10 @@ fn estimate_bg_distrs(
 ) -> Result<BgDistr, Error>
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
-    let (alns, is_paired_end) = if let Some(alns_filename) = args.alns.as_ref() {
+    let is_paired_end: bool;
+    let alns: Vec<Alignment>;
+    let seq_info: SequencingInfo;
+    if let Some(alns_filename) = args.alns.as_ref() {
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
         bam_reader.set_reference(&data.ref_filename)?;
@@ -624,23 +666,29 @@ fn estimate_bg_distrs(
         let interval_start = interval.start();
         let ref_seq = &data.sequence;
         bam_reader.fetch((interval.contig_name(), i64::from(interval_start), i64::from(interval.end())))?;
-        load_alns(&mut bam_reader, |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
-            &data.ref_contigs, args)?
+        (alns, is_paired_end) = load_alns(&mut bam_reader,
+            |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
+            &data.ref_contigs, args)?;
+        seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.params.technology);
     } else {
+        seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.params.technology);
+        log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
+
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
         run_strobealign(args, &data.ref_filename, &data.bed_filename, &bam_filename)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-        load_alns(&mut bam_reader, |record| Some(Cigar::from_raw(record)), &data.ref_contigs, args)?
-    };
-    assert!(args.alns.is_some() || (is_paired_end == args.is_paired_end()));
+        (alns, is_paired_end) = load_alns(&mut bam_reader, |record| Some(Cigar::from_raw(record)),
+            &data.ref_contigs, args)?;
+        assert!(is_paired_end == args.is_paired_end());
+    }
 
     if is_paired_end {
-        estimate_bg_from_paired(alns, args, opt_out_dir, data)
+        estimate_bg_from_paired(alns, seq_info, args, opt_out_dir, data)
     } else {
-        estimate_bg_from_unpaired(alns, args, opt_out_dir, data)
+        estimate_bg_from_unpaired(alns, seq_info, args, opt_out_dir, data)
     }
 }
 

@@ -3,14 +3,18 @@ pub mod insertsz;
 pub mod depth;
 pub mod ser;
 
+use std::{
+    fmt,
+    str::FromStr,
+};
 use crate::err::{Error, validate_param};
+use self::ser::json_get;
 pub use {
     depth::{ReadDepth, ReadDepthParams},
     insertsz::InsertDistr,
     err_prof::ErrorProfile,
     ser::JsonSer,
 };
-use ser::json_get;
 
 /// Parameters for background distributions estimation.
 #[derive(Debug, Clone)]
@@ -54,8 +58,7 @@ impl Params {
 
 /// Various background distributions.
 pub struct BgDistr {
-    /// Mean read length.
-    read_len: f64,
+    seq_info: SequencingInfo,
     /// Insert size distribution,
     insert_distr: InsertDistr,
     /// Error profile.
@@ -65,12 +68,19 @@ pub struct BgDistr {
 }
 
 impl BgDistr {
-    pub fn new(read_len: f64, insert_distr: InsertDistr, err_prof: ErrorProfile, depth: ReadDepth) -> Self {
-        Self { read_len, insert_distr, err_prof, depth }
+    pub fn new(
+        seq_info: SequencingInfo,
+        insert_distr: InsertDistr,
+        err_prof: ErrorProfile,
+        depth: ReadDepth
+    ) -> Self
+    {
+        Self { seq_info, insert_distr, err_prof, depth }
     }
 
-    pub fn mean_read_len(&self) -> f64 {
-        self.read_len
+    /// Access sequencing information (read length and technology).
+    pub fn seq_info(&self) -> &SequencingInfo {
+        &self.seq_info
     }
 
     pub fn depth(&self) -> &ReadDepth {
@@ -89,7 +99,7 @@ impl BgDistr {
 impl JsonSer for BgDistr {
     fn save(&self) -> json::JsonValue {
         json::object!{
-            read_len: self.read_len,
+            seq_info: self.seq_info.save(),
             insert_distr: self.insert_distr.save(),
             error_profile: self.err_prof.save(),
             bg_depth: self.depth.save(),
@@ -97,17 +107,99 @@ impl JsonSer for BgDistr {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> read_len (as_f64));
-        if obj.has_key("bg_depth") && obj.has_key("insert_distr") && obj.has_key("error_profile") {
+        if obj.has_key("seq_info") && obj.has_key("bg_depth")
+                && obj.has_key("insert_distr") && obj.has_key("error_profile") {
             Ok(Self {
-                read_len,
+                seq_info: SequencingInfo::load(&obj["seq_info"])?,
                 insert_distr: InsertDistr::load(&obj["insert_distr"])?,
                 err_prof: ErrorProfile::load(&obj["error_profile"])?,
                 depth: ReadDepth::load(&obj["bg_depth"])?,
             })
         } else {
             Err(Error::JsonLoad(format!(
-                "BgDistr: Failed to parse '{}': missing 'bg_depth', 'insert_distr' or 'error_profile' keys!", obj)))
+                "BgDistr: Failed to parse '{}': missing 'seq_info', 'bg_depth', \
+                    'insert_distr' or 'error_profile' keys!", obj)))
         }
+    }
+}
+
+/// Sequencing technology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Technology {
+    Illumina,
+    HiFi,
+    PacBio,
+    Nanopore,
+}
+
+impl Technology {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Self::Illumina => "illumina",
+            Self::HiFi => "hifi",
+            Self::PacBio => "pacbio",
+            Self::Nanopore => "nanopore",
+        }
+    }
+}
+
+impl FromStr for Technology {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "illumina" | "sr" => Ok(Self::Illumina),
+            "hifi" => Ok(Self::HiFi),
+            "pacbio" | "pb" => Ok(Self::PacBio),
+            "nanopore" | "ont" => Ok(Self::Nanopore),
+            _ => Err(format!("Unknown technology {:?}", s)),
+        }
+    }
+}
+
+impl fmt::Display for Technology {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.to_str())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SequencingInfo {
+    /// Mean read length.
+    read_len: f64,
+    /// Sequencing technology.
+    technology: Technology,
+}
+
+impl SequencingInfo {
+    pub fn new(read_len: f64, technology: Technology) -> Self {
+        if read_len > 400.0 && technology != Technology::Illumina {
+            log::error!("Unusual mean read length ({:.0}) for the '{}' sequencing technology",
+                read_len, technology);
+        }
+        Self { read_len, technology }
+    }
+
+    pub fn mean_read_len(&self) -> f64 {
+        self.read_len
+    }
+
+    pub fn technology(&self) -> Technology {
+        self.technology
+    }
+}
+
+impl JsonSer for SequencingInfo {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            read_len: self.read_len,
+            technology: self.technology.to_str(),
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        json_get!(obj -> read_len (as_f64), technology (as_str));
+        let technology = Technology::from_str(technology).map_err(|e| Error::JsonLoad(e))?;
+        Ok(Self { read_len, technology })
     }
 }

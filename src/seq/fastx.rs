@@ -240,6 +240,25 @@ impl<R: BufRead> Reader<R> {
 }
 
 impl<R: BufRead + Send> Reader<R> {
+    /// Calculates mean read length across at most `max_records` entries.
+    pub fn mean_read_len(&mut self, max_records: usize) -> io::Result<f64> {
+        let mut count: u64 = 0;
+        let mut sum_len: u64 = 0;
+        let mut record = Record::default();
+        for _ in 0..max_records {
+            match self.read_next(&mut record)? {
+                true => {
+                    count += 1;
+                    sum_len += record.seq().len() as u64;
+                }
+                false => break,
+            }
+        }
+        Ok(sum_len as f64 / count as f64)
+    }
+}
+
+impl<R: BufRead + Send> Reader<R> {
     /// Reads all sequences into memory.
     pub fn read_all(&mut self) -> io::Result<Vec<NamedSeq>> {
         let mut record = Record::default();

@@ -509,7 +509,7 @@ fn analyze_locus(
 ) -> Result<(), Error>
 {
     log::info!("Analyzing {}", locus.set.tag());
-    map_reads(locus, bg_distr.mean_read_len(), &args)?;
+    map_reads(locus, bg_distr.seq_info().mean_read_len(), &args)?;
 
     log::info!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
