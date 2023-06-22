@@ -378,7 +378,7 @@ impl ReadDepth {
     ///
     /// Write debug information if `out_dir` is Some.
     pub fn estimate<'a>(
-        alignments: impl Iterator<Item = &'a LightAlignment>,
+        alignments: &[&'a LightAlignment],
         interval: &Interval,
         ref_seq: &[u8],
         kmer_counts: &KmerCounts,
@@ -387,11 +387,12 @@ impl ReadDepth {
         out_dir: Option<&Path>,
     ) -> io::Result<Self>
     {
-        log::info!("Estimating read depth (ploidy {}, subsampling rate {})", params.ploidy, subsampling_rate);
+        log::info!("Estimating read depth from {} reads", alignments.len());
+        log::info!("    ploidy {}, subsampling rate {}", params.ploidy, subsampling_rate);
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
 
-        let windows = count_reads(alignments, interval, params);
+        let windows = count_reads(alignments.iter().copied(), interval, params);
         let (windows, gc_contents) = if let Some(dir) = out_dir {
             let dbg_writer = ext::sys::create_gzip(&dir.join("counts.csv.gz"))?;
             filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, params, dbg_writer)?

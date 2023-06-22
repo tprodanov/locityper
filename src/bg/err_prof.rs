@@ -4,8 +4,9 @@ use std::{
 };
 use crate::{
     Error,
+    math::Ln,
     seq::cigar::{Operation, Cigar, RAW_OPERATIONS},
-    math::distr::{NBinom, Multinomial},
+    math::distr::{DiscretePmf, NBinom, Multinomial},
     bg::ser::{JsonSer, json_get},
 };
 
@@ -54,32 +55,24 @@ impl OpCounts<u64> {
     /// Clipping is ignored.
     fn get_profile(&self, err_rate_mult: f64) -> ErrorProfile {
         // Clipping is ignored.
-        let read_len = self.matches + self.mismatches + self.insertions;
-        let read_lenf = read_len as f64;
-        let mism_prob = self.mismatches as f64 / read_lenf;
+        let sum_len = (self.matches + self.mismatches + self.insertions + self.deletions) as f64;
+        let mism_prob = self.mismatches as f64 / sum_len;
         let corr_mism_prob = mism_prob * err_rate_mult;
-        let ins_prob = self.insertions as f64 / read_lenf;
+        let ins_prob = self.insertions as f64 / sum_len;
         let corr_ins_prob = ins_prob * err_rate_mult;
-        let del_prob = self.deletions as f64 / (read_lenf + self.deletions as f64);
+        let del_prob = self.deletions as f64 / sum_len;
         let corr_del_prob = del_prob * err_rate_mult;
-        let corr_match_prob = 1.0 - corr_mism_prob - corr_ins_prob;
+        let corr_match_prob = 1.0 - corr_mism_prob - corr_ins_prob - corr_del_prob;
 
         log::info!("    {:12} matches    ({:.6} -> {:.6})",
-            self.matches, self.matches as f64 / read_lenf, corr_match_prob);
+            self.matches, self.matches as f64 / sum_len, corr_match_prob);
         log::info!("    {:12} mismatches ({:.6} -> {:.6})",
             self.mismatches, mism_prob, corr_mism_prob);
         log::info!("    {:12} insertions ({:.6} -> {:.6})",
             self.insertions, ins_prob, corr_ins_prob);
         log::info!("    {:12} deletions  ({:.6} -> {:.6})",
             self.deletions, del_prob, corr_del_prob);
-        assert!(corr_match_prob >= 0.5, "Match probability ({:.5}) cannot be less than 50%", corr_match_prob);
-        assert!(corr_del_prob < 0.5, "Deletion probability ({:.5}) cannot be over 50%", corr_del_prob);
-
-        ErrorProfile {
-            // Probabilities are normalized in Multinomial::new.
-            op_distr: Multinomial::new(&[corr_match_prob, corr_ins_prob, corr_del_prob]),
-            no_del_prob: 1.0 - corr_del_prob,
-        }
+        ErrorProfile::new(corr_match_prob, corr_mism_prob, corr_ins_prob, corr_del_prob)
     }
 }
 
@@ -107,27 +100,46 @@ where U: TryInto<T> + Copy,
     }
 }
 
-/// Read error profile, characterised by two distributions:
-/// * Multinomial(P(matches), P(mismatches), P(insertions)),
-/// * Neg.Binomial(p = no_deletion, n = read_length):
-///       where success = extend read length by one; failure = skip one base-pair in the reference.
+/// Read error profile.
+/// Basically, each operation is penalized according to its probability in the background data.
+/// This ensures that an alignment with fewer errors receives higher probability than the more errorneous alignment,
+/// even at high error probabilities (< 50% is still required).
+///
+/// Note that two alignments of the same read can be directly compared between each other,
+/// however, absolute probability values are not relevant, and cannot be directly compared.
 #[derive(Clone)]
 pub struct ErrorProfile {
-    /// Distribution of matches, mismatches and insertions.
-    op_distr: Multinomial,
-    /// Probability of success (no deletion) per base-pair in the read sequence.
-    /// Used in Neg.Binomial distribution.
-    no_del_prob: f64,
+    /// ln-probabilities of different operations, summing up to one.
+    match_lik: f64,
+    mism_lik: f64,
+    ins_lik: f64,
+    del_lik: f64,
+    /// Clipping probability is selected as max(mismatch_lik, insert_lik).
+    clip_lik: f64,
 }
 
 impl ErrorProfile {
+    pub fn new(match_prob: f64, mism_prob: f64, ins_prob: f64, del_prob: f64) -> Self {
+        assert!(match_prob > 0.5, "Match probability ({:.5}) must be over 50%", match_prob);
+        assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
+            "Error probabilities do not sum to one");
+        Self {
+            match_lik: match_prob.ln(),
+            mism_lik: mism_prob.ln(),
+            ins_lik: ins_prob.ln(),
+            del_lik: del_prob.ln(),
+            clip_lik: mism_prob.max(ins_prob).ln(),
+        }
+    }
+
     /// Create error profile from the iterator over CIGARs (with extended operations X/=).
     pub fn estimate<'a>(
+        count: usize,
         cigars: impl Iterator<Item = &'a Cigar>,
         err_rate_mult: f64,
     ) -> ErrorProfile
     {
-        log::info!("Estimating read error profiles");
+        log::info!("Estimating read error profiles from {} reads", count);
         let mut prof_builder = OpCounts::<u64>::default();
         for cigar in cigars {
             prof_builder += &OpCounts::<u32>::calculate(cigar);
@@ -138,34 +150,41 @@ impl ErrorProfile {
     /// Returns alignment ln-probability.
     pub fn ln_prob(&self, cigar: &Cigar) -> f64 {
         let read_prof = OpCounts::<u32>::calculate(cigar);
-        NBinom::new(f64::from(cigar.query_len()), self.no_del_prob).ln_pmf_f64(f64::from(read_prof.deletions))
-            + self.op_distr.ln_pmf(
-                &[read_prof.matches, read_prof.mismatches + read_prof.clipping, read_prof.insertions])
+        self.match_lik * f64::from(read_prof.matches)
+            + self.mism_lik * f64::from(read_prof.mismatches)
+            + self.ins_lik * f64::from(read_prof.insertions)
+            + self.del_lik * f64::from(read_prof.deletions)
+            + self.clip_lik * f64::from(read_prof.clipping)
     }
+
 }
 
 impl fmt::Debug for ErrorProfile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "ErrorProfile {{ (M, X, I): {:?}; D: NBinom(p = {:.6}) }}", self.op_distr, 1.0 - self.no_del_prob)
+        writeln!(f, "ErrorProfile {{ M: {}, X: {}, I: {}, D: {} }}",
+            self.match_lik, self.mism_lik, self.ins_lik, self.del_lik)
     }
 }
 
 impl JsonSer for ErrorProfile {
     fn save(&self) -> json::JsonValue {
-        let err_probs = self.op_distr.ln_probs();
         json::object!{
-            matches: err_probs[0],
-            mismatches: err_probs[1],
-            insertions: err_probs[2],
-            no_del_prob: self.no_del_prob,
+            m: self.match_lik,
+            x: self.mism_lik,
+            i: self.ins_lik,
+            d: self.del_lik,
+            s: self.clip_lik,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> matches (as_f64), mismatches (as_f64), insertions (as_f64), no_del_prob (as_f64));
+        json_get!(obj -> m (as_f64), x (as_f64), i (as_f64), d (as_f64), s (as_f64));
         Ok(Self {
-            op_distr: Multinomial::from_ln(&[matches, mismatches, insertions]),
-            no_del_prob,
+            match_lik: m,
+            mism_lik: x,
+            ins_lik: i,
+            del_lik: d,
+            clip_lik: s,
         })
     }
 }

@@ -583,12 +583,15 @@ fn load_alns(
 
     let mut alns = Vec::new();
     let mut record = bam::Record::new();
+    let mut discarded = 0;
     while let Some(()) = reader.read(&mut record).transpose()? {
         if record.flags() & 3844 == 0 && record.mapq() >= min_mapq && cigar::clipping_rate(&record) <= max_clipping {
             if let Some(cigar) = cigar_getter(&record) {
                 alns.push(Alignment::new(&record, cigar, ReadEnd::from_record(&record), Arc::clone(contigs), f64::NAN));
                 paired_counts[usize::from(record.is_paired())] += 1;
             }
+        } else {
+            discarded += 1;
         }
     }
     if paired_counts[0] > 0 && paired_counts[1] > 0 {
@@ -597,6 +600,7 @@ fn load_alns(
     if alns.is_empty() {
         return Err(Error::InvalidData(format!("BAM file contains no reads in the target region")));
     }
+    log::debug!("    Loaded {} alignments, discarded {}", alns.len(), discarded);
     Ok((alns, paired_counts[1] > 0))
 }
 
@@ -645,7 +649,8 @@ fn estimate_bg_from_paired(
             errprof_alns.push(second);
         }
     }
-    let err_prof = ErrorProfile::estimate(errprof_alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
+    let err_prof = ErrorProfile::estimate(errprof_alns.len(),
+        errprof_alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
     let mut depth_alns: Vec<&LightAlignment> = Vec::with_capacity(errprof_alns.len());
@@ -661,7 +666,7 @@ fn estimate_bg_from_paired(
             depth_alns.push(second.deref());
         }
     }
-    let depth_distr = ReadDepth::estimate(depth_alns.into_iter(), &data.interval, &data.sequence, &data.kmer_counts,
+    let depth_distr = ReadDepth::estimate(&depth_alns, &data.interval, &data.sequence, &data.kmer_counts,
         &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
@@ -675,11 +680,13 @@ fn estimate_bg_from_unpaired(
 ) -> Result<BgDistr, Error>
 {
     let insert_distr = InsertDistr::undefined();
-    let err_prof = ErrorProfile::estimate(alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
-    let filt_alns = alns.iter()
+    let err_prof = ErrorProfile::estimate(alns.len(),
+        alns.iter().map(|aln| aln.cigar()), args.bg_params.err_rate_mult);
+    let filt_alns: Vec<&LightAlignment> = alns.iter()
         .filter(|aln| err_prof.ln_prob(aln.cigar()) >= args.min_aln_prob)
-        .map(Deref::deref);
-    let depth_distr = ReadDepth::estimate(filt_alns, &data.interval, &data.sequence, &data.kmer_counts,
+        .map(Deref::deref)
+        .collect();
+    let depth_distr = ReadDepth::estimate(&filt_alns, &data.interval, &data.sequence, &data.kmer_counts,
         &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }

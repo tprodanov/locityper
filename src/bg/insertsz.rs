@@ -85,7 +85,7 @@ impl InsertDistr {
         } else if pair_ixs.len() < 1000 {
             return Err(Error::InvalidData("Not enough paired reads to calculate insert size distribution".to_owned()));
         }
-        log::info!("Estimating insert size distribution");
+        log::info!("Estimating insert size distribution from {} read pairs", pair_ixs.len());
         let mut insert_sizes = Vec::<f64>::new();
         let mut orient_counts = [0_u64; 2];
         let mut histogram = IntMap::<u32, u32>::default();
