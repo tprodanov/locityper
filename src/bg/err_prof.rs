@@ -1,12 +1,18 @@
 use std::{
     ops::{Add, AddAssign},
     fmt,
+    cmp::min,
+    cell::RefCell,
+    borrow::Borrow,
 };
+use nohash::IntMap;
 use crate::{
     Error,
-    math::Ln,
-    seq::cigar::{Operation, Cigar, RAW_OPERATIONS},
-    math::distr::{DiscretePmf, NBinom, Multinomial},
+    seq::{
+        aln::Alignment,
+        cigar::{Operation, Cigar, RAW_OPERATIONS},
+    },
+    math::distr::BetaBinomial,
     bg::ser::{JsonSer, json_get},
 };
 
@@ -52,8 +58,8 @@ impl OpCounts<u64> {
     /// Error probabilities (mismatches, insertions & deletions) are increased by `err_rate_mult`
     /// to account for possible mutations in the data.
     ///
-    /// Clipping is ignored.
-    fn get_profile(&self, err_rate_mult: f64) -> ErrorProfile {
+    /// Returns (match_prob, mism_prob, ins_prob, del_prob).
+    fn get_profile(&self, err_rate_mult: f64) -> (f64, f64, f64, f64) {
         // Clipping is ignored.
         let sum_len = (self.matches + self.mismatches + self.insertions + self.deletions) as f64;
         let mism_prob = self.mismatches as f64 / sum_len;
@@ -72,7 +78,7 @@ impl OpCounts<u64> {
             self.insertions, ins_prob, corr_ins_prob);
         log::info!("    {:12} deletions  ({:.6} -> {:.6})",
             self.deletions, del_prob, corr_del_prob);
-        ErrorProfile::new(corr_match_prob, corr_mism_prob, corr_ins_prob, corr_del_prob)
+        (corr_match_prob, corr_mism_prob, corr_ins_prob, corr_del_prob)
     }
 }
 
@@ -110,81 +116,114 @@ where U: TryInto<T> + Copy,
 #[derive(Clone)]
 pub struct ErrorProfile {
     /// ln-probabilities of different operations, summing up to one.
-    match_lik: f64,
-    mism_lik: f64,
-    ins_lik: f64,
-    del_lik: f64,
-    /// Clipping probability is selected as max(mismatch_lik, insert_lik).
-    clip_lik: f64,
+    ln_match: f64,
+    ln_mism: f64,
+    ln_ins: f64,
+    ln_del: f64,
+    /// Clipping probability is selected as max(misln_match, insert_lik).
+    ln_clip: f64,
+
+    /// Distribution of edit distance (n = read length).
+    edit_dist_distr: BetaBinomial,
+    /// Maximum edit distance that is in the one-sided Beta-Binomial confidence interval.
+    max_edit_dist: RefCell<IntMap<u32, u32>>,
+    /// Confidence level.
+    conf_lvl: f64,
 }
 
 impl ErrorProfile {
-    pub fn new(match_prob: f64, mism_prob: f64, ins_prob: f64, del_prob: f64) -> Self {
+    /// Create error profile from the iterator over CIGARs (with extended operations X/=).
+    pub fn estimate<'a>(
+        alns: &[impl Borrow<Alignment>],
+        mean_read_len: f64,
+        params: &super::Params,
+    ) -> ErrorProfile
+    {
+        log::info!("Estimating read error profiles from {} reads", alns.len());
+        let mut prof_builder = OpCounts::<u64>::default();
+        let mut edit_distances = Vec::with_capacity(alns.len());
+        let mut read_lengths = Vec::with_capacity(alns.len());
+
+        for aln in alns.iter() {
+            let cigar = aln.borrow().cigar();
+            let counts = OpCounts::<u32>::calculate(cigar);
+            prof_builder += &counts;
+
+            let read_len = cigar.query_len();
+            read_lengths.push(read_len);
+            edit_distances.push(min(read_len, read_len - counts.matches + counts.deletions));
+        }
+
+        let (match_prob, mism_prob, ins_prob, del_prob) = prof_builder.get_profile(params.err_rate_mult);
         assert!(match_prob > 0.5, "Match probability ({:.5}) must be over 50%", match_prob);
         assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
             "Error probabilities do not sum to one");
-        Self {
-            match_lik: match_prob.ln(),
-            mism_lik: mism_prob.ln(),
-            ins_lik: ins_prob.ln(),
-            del_lik: del_prob.ln(),
-            clip_lik: mism_prob.max(ins_prob).ln(),
-        }
-    }
 
-    /// Create error profile from the iterator over CIGARs (with extended operations X/=).
-    pub fn estimate<'a>(
-        count: usize,
-        cigars: impl Iterator<Item = &'a Cigar>,
-        err_rate_mult: f64,
-    ) -> ErrorProfile
-    {
-        log::info!("Estimating read error profiles from {} reads", count);
-        let mut prof_builder = OpCounts::<u64>::default();
-        for cigar in cigars {
-            prof_builder += &OpCounts::<u32>::calculate(cigar);
-        }
-        prof_builder.get_profile(err_rate_mult)
+        let err_prof = Self {
+            ln_match: match_prob.ln(),
+            ln_mism: mism_prob.ln(),
+            ln_ins: ins_prob.ln(),
+            ln_del: del_prob.ln(),
+            ln_clip: mism_prob.max(ins_prob).ln(),
+            edit_dist_distr: BetaBinomial::max_lik_estimate(&edit_distances, &read_lengths),
+            max_edit_dist: RefCell::default(),
+            conf_lvl: params.confidence_level,
+        };
+
+        let read_len = mean_read_len.round() as u32;
+        log::info!("    Maximum allowed edit distance: {} (mean read length {}, {:.1}%-confidence interval)",
+            err_prof.allowed_edit_dist(read_len), read_len, 100.0 * params.confidence_level);
+        err_prof
     }
 
     /// Returns alignment ln-probability.
     pub fn ln_prob(&self, cigar: &Cigar) -> f64 {
         let read_prof = OpCounts::<u32>::calculate(cigar);
-        self.match_lik * f64::from(read_prof.matches)
-            + self.mism_lik * f64::from(read_prof.mismatches)
-            + self.ins_lik * f64::from(read_prof.insertions)
-            + self.del_lik * f64::from(read_prof.deletions)
-            + self.clip_lik * f64::from(read_prof.clipping)
+        self.ln_match * f64::from(read_prof.matches)
+            + self.ln_mism * f64::from(read_prof.mismatches)
+            + self.ln_ins * f64::from(read_prof.insertions)
+            + self.ln_del * f64::from(read_prof.deletions)
+            + self.ln_clip * f64::from(read_prof.clipping)
     }
 
+    /// Returns the maximum allowed edit distance for the given read length.
+    /// Values are cached for future use.
+    pub fn allowed_edit_dist(&self, read_len: u32) -> u32 {
+        let mut cache = self.max_edit_dist.borrow_mut();
+        *cache.entry(read_len).or_insert_with(||
+            self.edit_dist_distr.confidence_right_border(read_len, self.conf_lvl))
+    }
 }
 
 impl fmt::Debug for ErrorProfile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "ErrorProfile {{ M: {}, X: {}, I: {}, D: {} }}",
-            self.match_lik, self.mism_lik, self.ins_lik, self.del_lik)
+            self.ln_match, self.ln_mism, self.ln_ins, self.ln_del)
     }
 }
 
 impl JsonSer for ErrorProfile {
     fn save(&self) -> json::JsonValue {
         json::object!{
-            m: self.match_lik,
-            x: self.mism_lik,
-            i: self.ins_lik,
-            d: self.del_lik,
-            s: self.clip_lik,
+            ln_match: self.ln_match,
+            ln_mism: self.ln_mism,
+            ln_ins: self.ln_ins,
+            ln_del: self.ln_del,
+            ln_clip: self.ln_clip,
+
+            alpha: self.edit_dist_distr.alpha(),
+            beta: self.edit_dist_distr.beta(),
+            conf_lvl: self.conf_lvl,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> m (as_f64), x (as_f64), i (as_f64), d (as_f64), s (as_f64));
+        json_get!(obj -> ln_match (as_f64), ln_mism (as_f64), ln_ins (as_f64), ln_del (as_f64), ln_clip (as_f64),
+            alpha (as_f64), beta (as_f64), conf_lvl (as_f64));
         Ok(Self {
-            match_lik: m,
-            mism_lik: x,
-            ins_lik: i,
-            del_lik: d,
-            clip_lik: s,
+            ln_match, ln_mism, ln_ins, ln_del, ln_clip, conf_lvl,
+            edit_dist_distr: BetaBinomial::new(alpha, beta),
+            max_edit_dist: RefCell::default(),
         })
     }
 }

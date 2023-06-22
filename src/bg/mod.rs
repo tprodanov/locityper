@@ -30,6 +30,9 @@ pub struct Params {
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
     pub err_rate_mult: f64,
+
+    /// Calculate confidence levels for the alignment edit distance and insert sizes.
+    pub confidence_level: f64,
 }
 
 impl Default for Params {
@@ -39,6 +42,7 @@ impl Default for Params {
             ins_quantile: 0.99,
             ins_quantile_mult: 3.0,
             err_rate_mult: 1.0,
+            confidence_level: 0.99,
         }
     }
 }
@@ -52,6 +56,8 @@ impl Params {
             "Insert size quantile multiplier ({:.5}) must be at least 1", self.ins_quantile_mult);
         validate_param!(0.2 <= self.err_rate_mult,
             "Error rate multiplier ({:.5}) should not be too low", self.err_rate_mult);
+        validate_param!(0.5 < self.confidence_level && self.confidence_level < 1.0,
+            "Confidence level ({}) must be in (0.5, 1).", self.confidence_level);
         self.depth.validate()
     }
 }

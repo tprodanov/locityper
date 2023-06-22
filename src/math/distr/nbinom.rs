@@ -212,7 +212,8 @@ impl RegularizedEstimator {
             vec![20.0, 0.7],
             vec![30.0, 0.3],
         ];
-        let solver = NelderMead::new(start_points.clone());
+        let solver = NelderMead::new(start_points)
+            .with_sd_tolerance(1e-6).unwrap();
         let problem = NBinomProblem::new(sample_mean, sample_var, self.rate, self.lambda);
         let solution = Executor::new(problem, solver)
             .run()

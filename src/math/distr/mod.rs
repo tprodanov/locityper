@@ -7,6 +7,7 @@ pub mod mixure;
 pub mod chimeric;
 pub mod lincache;
 pub mod bayes;
+pub mod betabinom;
 
 pub use uniform::Uniform;
 pub use nbinom::NBinom;
@@ -15,6 +16,7 @@ pub use mixure::Mixure;
 pub use chimeric::Chimeric;
 pub use lincache::LinearCache;
 pub use bayes::BayesCalc;
+pub use betabinom::BetaBinomial;
 
 /// Discrete distribution with a single argument.
 pub trait DiscretePmf {
