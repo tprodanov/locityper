@@ -16,7 +16,6 @@ use const_format::{str_repeat, concatcp};
 use htslib::bam;
 use crate::{
     err::{Error, validate_param},
-    math::Ln,
     ext,
     seq::{
         ContigNames, Interval,
@@ -135,8 +134,6 @@ struct Args {
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
     pub max_clipping: f64,
-    /// Do not use reads with alignment probability < `min_aln_prob` (ln-space) for read depth calculation.
-    min_aln_prob: f64,
 
     params: Params,
     bg_params: bg::Params,
@@ -160,8 +157,6 @@ impl Default for Args {
             samtools: PathBuf::from("samtools"),
 
             max_clipping: 0.02,
-            min_aln_prob: Ln::from_log10(-3.0),
-
             params: Params::default(),
             bg_params: bg::Params::default(),
         }
@@ -197,8 +192,6 @@ impl Args {
 
         validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
-        validate_param!(self.min_aln_prob < 0.0,
-            "Minimum alignment probability ({:.5}) must be under 0.", Ln::to_log10(self.min_aln_prob));
         if self.alns.is_some() {
             self.params.subsampling_rate = 1.0;
             self.params.subsampling_seed = None;
@@ -261,12 +254,11 @@ fn print_help(extended: bool) {
             "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
             "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.max_clipping);
-        println!("    {:KEY$} {}\n\
-            {EMPTY}  Max allowed insert size is calculated as {} multiplied by\n\
-            {EMPTY}  the {}-th insert size quantile [{}, {}].",
-            "-I, --ins-quantile".green(), "FLOAT FLOAT".yellow(),
-            "FLOAT_1".yellow(), "FLOAT_2".yellow(),
-            defaults.bg_params.ins_quantile_mult, defaults.bg_params.ins_quantile);
+        println!("    {:KEY$} {:VAL$}\n\
+            {EMPTY}  Two confidence levels: for filtering insert size [{}]\n\
+            {EMPTY}  and alignment edit distance [{}].",
+            "-C, --conf-lvl".green(), "FLOAT [FLOAT]".yellow(),
+            defaults.bg_params.ins_conf_level, defaults.bg_params.err_conf_level);
         println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
             {EMPTY}  read mappings missed due to higher error rate [{}].",
             "-m, --err-mult".green(), "FLOAT".yellow(), defaults.bg_params.err_rate_mult);
@@ -289,8 +281,6 @@ fn print_help(extended: bool) {
             {EMPTY}  Must not be smaller than {} [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
             defaults.bg_params.depth.boundary_size);
-        println!("    {:KEY$} {:VAL$}  Single-end alignment likelihood threshold in log10-space [{:.1}].",
-            "    --min-aln-lik".green(), "FLOAT".yellow(), Ln::to_log10(defaults.min_aln_prob));
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
             "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
@@ -346,9 +336,13 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
-            Short('I') | Long("ins-quant") | Long("ins-quantile") => {
-                args.bg_params.ins_quantile_mult = parser.value()?.parse()?;
-                args.bg_params.ins_quantile = parser.value()?.parse()?;
+            Short('C') | Long("conf-lvl") | Long("conf-level") | Long("confidence-level") => {
+                let mut values = parser.values()?;
+                args.bg_params.ins_conf_level = values.next().expect("At least one value must be present").parse()?;
+                args.bg_params.err_conf_level = values.next()
+                    .map(|v| v.parse())
+                    .transpose()?
+                    .unwrap_or(args.bg_params.ins_conf_level);
             }
             Short('m') | Long("err-mult") | Long("err-multiplier") =>
                 args.bg_params.err_rate_mult = parser.value()?.parse()?,
@@ -356,15 +350,12 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('p') | Long("ploidy") => args.bg_params.depth.ploidy = parser.value()?.parse()?,
             Short('s') | Long("subsample") => {
                 let mut values = parser.values()?;
-                args.params.subsampling_rate = values.next()
-                    .ok_or_else(|| lexopt::Error::MissingValue { option: Some("subsample".to_owned()) })?
-                    .parse()?;
+                args.params.subsampling_rate = values.next().expect("At least one value must be present").parse()?;
                 args.params.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
             }
             Short('w') | Long("window") => args.bg_params.depth.window_size = parser.value()?.parse()?,
             Long("window-padd") | Long("window-padding") => args.bg_params.depth.window_padding = parser.value()?.parse()?,
             Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse()?,
-            Long("min-aln-lik") => args.min_aln_prob = Ln::from_log10(parser.value()?.parse()?),
             Long("kmer-freq") | Long("kmer-frequency") => args.bg_params.depth.max_kmer_freq = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
                 args.bg_params.depth.frac_windows = parser.value()?.parse()?,
@@ -639,12 +630,13 @@ fn estimate_bg_from_paired(
     let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params, opt_out_dir)?;
 
     // Estimate error profile from read pairs with appropriate insert size.
-    let max_insert_size = insert_distr.max_size();
+    let (min_insert_size, max_insert_size) = insert_distr.confidence_interval();
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
     for &(i, j) in pair_ixs.iter() {
         let first = &alns[i];
         let second = &alns[j];
-        if first.insert_size(second.deref()) <= max_insert_size {
+        let insert_size = first.insert_size(second.deref());
+        if min_insert_size <= insert_size && insert_size <= max_insert_size {
             errprof_alns.push(first);
             errprof_alns.push(second);
         }
@@ -653,14 +645,10 @@ fn estimate_bg_from_paired(
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
     let mut depth_alns: Vec<&LightAlignment> = Vec::with_capacity(errprof_alns.len());
-    let thresh_prob = 2.0 * args.min_aln_prob + insert_distr.mode_prob();
-    log::info!("    Using paired-end alignment likelihood threshold {:.2}", Ln::to_log10(thresh_prob));
     for chunk in errprof_alns.chunks_exact(2) {
         let first = chunk[0];
         let second = chunk[1];
-        let prob = err_prof.ln_prob(first.cigar()) + err_prof.ln_prob(second.cigar())
-            + first.insert_size_prob(second.deref(), &insert_distr);
-        if prob >= thresh_prob {
+        if err_prof.aln_passes(first.cigar()) && err_prof.aln_passes(second.cigar()) {
             depth_alns.push(first.deref());
             depth_alns.push(second.deref());
         }
@@ -681,7 +669,7 @@ fn estimate_bg_from_unpaired(
     let insert_distr = InsertDistr::undefined();
     let err_prof = ErrorProfile::estimate(&alns, seq_info.mean_read_len(), &args.bg_params);
     let filt_alns: Vec<&LightAlignment> = alns.iter()
-        .filter(|aln| err_prof.ln_prob(aln.cigar()) >= args.min_aln_prob)
+        .filter(|aln| err_prof.aln_passes(aln.cigar()))
         .map(Deref::deref)
         .collect();
     let depth_distr = ReadDepth::estimate(&filt_alns, &data.interval, &data.sequence, &data.kmer_counts,

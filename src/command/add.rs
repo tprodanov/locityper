@@ -177,9 +177,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 for val in parser.values()? {
                     args.leave_out.insert(val.parse()?);
                 }
-                if args.leave_out.is_empty() {
-                    return Err(lexopt::Error::MissingValue { option: Some("leave-out".to_owned()) });
-                }
             }
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,

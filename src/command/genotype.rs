@@ -210,9 +210,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 for val in parser.values()? {
                     args.subset_loci.insert(val.parse()?);
                 }
-                if args.subset_loci.is_empty() {
-                    return Err(lexopt::Error::MissingValue { option: Some("subset-loci".to_owned()) });
-                }
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
 
@@ -231,13 +228,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
             Long("rare-kmer") => {
-                let mut values = parser.values()?;
-                args.assgn_params.rare_kmer = values.next()
-                    .ok_or_else(|| lexopt::Error::MissingValue { option: Some("rare-kmer".to_owned()) })?
-                    .parse()?;
-                args.assgn_params.semicommon_kmer = values.next()
-                    .ok_or_else(|| lexopt::Error::MissingValue { option: Some("rare-kmer".to_owned()) })?
-                    .parse()?;
+                args.assgn_params.rare_kmer = parser.value()?.parse()?;
+                args.assgn_params.semicommon_kmer = parser.value()?.parse()?;
             }
             Long("tweak") => args.assgn_params.tweak = parser.value()?.parse()?,
 

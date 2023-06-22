@@ -167,12 +167,12 @@ impl ErrorProfile {
             ln_clip: mism_prob.max(ins_prob).ln(),
             edit_dist_distr: BetaBinomial::max_lik_estimate(&edit_distances, &read_lengths),
             max_edit_dist: RefCell::default(),
-            conf_lvl: params.confidence_level,
+            conf_lvl: params.err_conf_level,
         };
 
         let read_len = mean_read_len.round() as u32;
-        log::info!("    Maximum allowed edit distance: {} (mean read length {}, {:.1}%-confidence interval)",
-            err_prof.allowed_edit_dist(read_len), read_len, 100.0 * params.confidence_level);
+        log::info!("    Maximum allowed edit distance: {} (mean read length {}, {}%-confidence interval)",
+            err_prof.allowed_edit_dist(read_len), read_len, 100.0 * err_prof.conf_lvl);
         err_prof
     }
 
@@ -192,6 +192,14 @@ impl ErrorProfile {
         let mut cache = self.max_edit_dist.borrow_mut();
         *cache.entry(read_len).or_insert_with(||
             self.edit_dist_distr.confidence_right_border(read_len, self.conf_lvl))
+    }
+
+    /// Returns true if edit distance does not exceed maximum allowed.
+    pub fn aln_passes(&self, cigar: &Cigar) -> bool {
+        let read_prof = OpCounts::<u32>::calculate(cigar);
+        let read_len = cigar.query_len();
+        let edit_dist = read_len - read_prof.matches + read_prof.deletions;
+        edit_dist <= self.allowed_edit_dist(read_len)
     }
 }
 

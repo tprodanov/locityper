@@ -198,7 +198,8 @@ fn extend_pair_alignments(
     insert_distr: &InsertDistr,
     params: &super::Params,
 ) {
-    let insert_penalty = insert_distr.mode_prob();
+    unimplemented!();
+    let insert_penalty = 0.0; // let insert_penalty = insert_distr.mode_prob();
     let thresh_prob = unmapped_pair_prob(params.unmapped_penalty, insert_penalty) - params.prob_diff;
     let alns1_empty = alns1.is_empty();
     if !alns1_empty {
@@ -263,8 +264,9 @@ fn identify_pair_alignments(
         i = k;
     }
 
+    unimplemented!();
     // Probability of both mates unmapped.
-    let mut unmapped_prob = unmapped_pair_prob(params.unmapped_penalty, insert_distr.mode_prob());
+    let mut unmapped_prob = unmapped_pair_prob(params.unmapped_penalty, 0.0); //insert_distr.mode_prob());
     // Normalization factor for all pair-end alignment probabilities.
     // For normalization, unmapped probability is multiplied by the number of contigs because there is an unmapped
     // possibility for every contig, which we do not store explicitely.

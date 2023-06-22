@@ -22,27 +22,22 @@ pub struct Params {
     /// Background read depth parameters.
     pub depth: ReadDepthParams,
 
-    // Calculate max insert size from input reads as `<ins_quantile_mult> * <ins_quantile>-th insert size quantile`.
-    // This is needed to remove read mates that were mapped to the same chromosome but very far apart.
-    pub ins_quantile: f64,
-    pub ins_quantile_mult: f64,
-
+    /// Confidence level for the insert size.
+    pub ins_conf_level: f64,
+    /// Confidence level for the edit distance.
+    pub err_conf_level: f64,
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
     pub err_rate_mult: f64,
-
-    /// Calculate confidence levels for the alignment edit distance and insert sizes.
-    pub confidence_level: f64,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Self {
             depth: Default::default(),
-            ins_quantile: 0.99,
-            ins_quantile_mult: 3.0,
+            ins_conf_level: 0.999,
+            err_conf_level: 0.99,
             err_rate_mult: 1.0,
-            confidence_level: 0.99,
         }
     }
 }
@@ -50,14 +45,12 @@ impl Default for Params {
 impl Params {
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(0.5 <= self.ins_quantile && self.ins_quantile <= 1.0,
-            "Insert size quantile ({:.5}) must be within [0.5, 1]", self.ins_quantile);
-        validate_param!(self.ins_quantile_mult >= 1.0,
-            "Insert size quantile multiplier ({:.5}) must be at least 1", self.ins_quantile_mult);
         validate_param!(0.2 <= self.err_rate_mult,
             "Error rate multiplier ({:.5}) should not be too low", self.err_rate_mult);
-        validate_param!(0.5 < self.confidence_level && self.confidence_level < 1.0,
-            "Confidence level ({}) must be in (0.5, 1).", self.confidence_level);
+        for &conf_lvl in &[self.ins_conf_level, self.err_conf_level] {
+            validate_param!(0.5 < conf_lvl && conf_lvl < 1.0,
+                "Confidence level ({}) must be in (0.5, 1).", conf_lvl);
+        }
         self.depth.validate()
     }
 }
