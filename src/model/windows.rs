@@ -200,7 +200,7 @@ impl ContigWindows {
     {
         let contig_len = seq.len() as u32;
         let window = depth.window_size();
-        let window_padding = depth.window_padding();
+        let neighb_size = depth.neighb_size();
         assert!(contig_len > window + 2 * params.boundary_size,
             "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
@@ -208,7 +208,6 @@ impl ContigWindows {
         let sum_len = n_windows * window;
         let start = (contig_len - sum_len) / 2;
         let end = start + sum_len;
-        debug_assert!(start >= window_padding && end + window_padding <= contig_len);
 
         let k = kmer_counts.k();
         let halfk = k / 2;
@@ -216,9 +215,10 @@ impl ContigWindows {
 
         let mut window_gcs = Vec::with_capacity(n_windows as usize);
         let mut window_weights = Vec::with_capacity(n_windows as usize);
-        for j in 0..n_windows {
-            let padded_start = start + window * j - window_padding;
-            let padded_end = start + window * (j + 1) + window_padding;
+        let window_padding = (neighb_size - window) / 2;
+        for i in 0..n_windows {
+            let padded_start = start + i * window - window_padding;
+            let padded_end = padded_start + neighb_size;
             window_gcs.push(seq::gc_content(&seq[padded_start as usize..padded_end as usize]).round() as u8);
 
             let mean_kmer_freq = F64Ext::mean(&contig_kmer_counts[padded_start.saturating_sub(halfk) as usize

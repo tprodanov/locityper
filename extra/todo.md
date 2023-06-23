@@ -3,3 +3,4 @@
 - `add`: allow FASTA input.
 - WFA: Stop very bad alignments.
 - `draw_depth`: handle repeated genotypes.
+- Read depth estimation: underestimating variance at low subsampling rates.

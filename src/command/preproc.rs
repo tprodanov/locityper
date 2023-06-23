@@ -243,7 +243,7 @@ fn print_help(extended: bool) {
         "-^, --interleaved".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Sequencing technology [{}]:\n\
         {EMPTY}  sr  | illumina : short-read sequencing,\n\
-        {EMPTY}        hifi     : PacBio HiFi,\n\
+        {EMPTY}    hifi         : PacBio HiFi,\n\
         {EMPTY}  pb  | pacbio   : PacBio CLR,\n\
         {EMPTY}  ont | nanopore : Oxford Nanopore.",
         "-t, --technology".green(), "STR".yellow(), defaults.params.technology);
@@ -274,13 +274,11 @@ fn print_help(extended: bool) {
             "-s 1".green(), "-a".green());
         println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
             "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.window_size);
-        println!("    {:KEY$} {:VAL$}  Extend window by {} bp to both sides in order to calculate\n\
-            {EMPTY}  GC-content and average k-mer frequency [{}].",
-            "    --window-padd".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.window_padding);
-        println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region.\n\
-            {EMPTY}  Must not be smaller than {} [{}].",
-            "    --boundary".green(), "INT".yellow(), "INT".yellow(), "--window-padd".green(),
-            defaults.bg_params.depth.boundary_size);
+        println!("    {:KEY$} {:VAL$}  Calculate GC-content and average k-mer frequency in\n\
+            {EMPTY}  window neighbourhoods of this size (>= window size) [{}].",
+            "    --neighb".green(), "INT".yellow(), defaults.bg_params.depth.neighb_size);
+        println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region [{}].",
+            "    --boundary".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.boundary_size);
         println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
             "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.max_kmer_freq);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
@@ -306,9 +304,9 @@ fn print_help(extended: bool) {
     if extended {
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
-        println!("    {:KEY$} {:VAL$}  Minimap2 executable [{}].",
+        println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
             "    --minimap".green(), "EXE".yellow(), defaults.minimap.display());
-        println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
+        println!("    {:KEY$} {:VAL$}  Samtools executable    [{}].",
             "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
     }
 
@@ -354,7 +352,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.params.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
             }
             Short('w') | Long("window") => args.bg_params.depth.window_size = parser.value()?.parse()?,
-            Long("window-padd") | Long("window-padding") => args.bg_params.depth.window_padding = parser.value()?.parse()?,
+            Long("neighb") | Long("neighborhood") | Long("neighbourhood")
+                => args.bg_params.depth.neighb_size = parser.value()?.parse()?,
             Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse()?,
             Long("kmer-freq") | Long("kmer-frequency") => args.bg_params.depth.max_kmer_freq = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
@@ -654,7 +653,7 @@ fn estimate_bg_from_paired(
         }
     }
     let depth_distr = ReadDepth::estimate(&depth_alns, &data.interval, &data.sequence, &data.kmer_counts,
-        &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
+        &args.bg_params.depth, args.params.subsampling_rate, true, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -673,7 +672,7 @@ fn estimate_bg_from_unpaired(
         .map(Deref::deref)
         .collect();
     let depth_distr = ReadDepth::estimate(&filt_alns, &data.interval, &data.sequence, &data.kmer_counts,
-        &args.bg_params.depth, args.params.subsampling_rate, opt_out_dir)?;
+        &args.bg_params.depth, args.params.subsampling_rate, false, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 

@@ -141,7 +141,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
         "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.minimizer_w);
     println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
-        {EMPTY}  of minimizers matching one of the targets [{:.1}].",
+        {EMPTY}  of minimizers matching one of the targets [{}].",
         "-m, --matches-frac".green(), "FLOAT".yellow(), defaults.recr_params.matches_frac);
     println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
         {EMPTY}  May impact runtime in multi-threaded read recruitment.",
@@ -154,16 +154,16 @@ fn print_help() {
         {EMPTY}  Please see README for information on the file content.",
         "-S, --solvers".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
-        {EMPTY}  read alignment likelihoods [{:.1}].",
+        {EMPTY}  read alignment likelihoods [{}].",
         "-C, --dp-contrib".green(), "FLOAT".yellow(), defaults.assgn_params.depth_contrib);
     println!("    {} {}  Compare window probability to have copy number 1 against two\n\
         {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
         "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
         defaults.assgn_params.alt_cn.0, defaults.assgn_params.alt_cn.1);
     println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
-        {EMPTY}  the best alignment [{:.1}].",
+        {EMPTY}  the best alignment [{}].",
         "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(), Ln::to_log10(defaults.assgn_params.prob_diff));
-    println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{:.1}].",
+    println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
         "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
         Ln::to_log10(defaults.assgn_params.unmapped_penalty));
     println!("    {:KEY$} {} \n\
@@ -574,10 +574,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
-    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn));
-    validate_param!(bg_distr.depth().window_padding() <= args.assgn_params.boundary_size,
-        "Window padding ({}) must not exceed boundary size ({})", bg_distr.depth().window_padding(),
-        args.assgn_params.boundary_size);
+    crate::bg::depth::ReadDepthParams::validate_sizes(
+        bg_distr.depth().window_size(), bg_distr.depth().neighb_size(), args.assgn_params.boundary_size)?;
 
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
     recruit_reads(&loci, &args)?;
@@ -586,6 +584,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         Some(filename) => scheme::Scheme::from_json(&ext::sys::load_json(filename)?)?,
         None => scheme::Scheme::default(),
     };
+    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn));
 
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {

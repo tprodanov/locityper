@@ -47,10 +47,6 @@ impl WindowCounts {
             depth: [0, 0],
         }
     }
-
-    fn len(&self) -> u32 {
-        self.end - self.start
-    }
 }
 
 /// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.boundary_size`
@@ -81,7 +77,7 @@ fn count_reads<'a>(
     windows
 }
 
-/// Discard windows, where the region <left_padding><window><right padding> contains
+/// Discard windows, where the region <left_padding><window><right padding> (sum length = neighb_size) contains
 /// - unknown nucleotides (Ns),
 /// - frequent k-mers (average k-mer frequency > max_kmer_freq).
 ///
@@ -104,16 +100,16 @@ fn filter_windows(
 
     let k = kmer_counts_coll.k();
     let kmer_counts = kmer_counts_coll.get_first();
-    let window_padding = params.window_padding;
-    let neigh_len = (windows[0].len() + 2 * window_padding) as usize;
-    let neigh_kmers = neigh_len + 1 - k as usize;
-    let norm_fct = 1.0 / (neigh_kmers as f64);
+    let window_padding = (params.neighb_size - params.window_size) / 2;
+    let neighb_size = params.neighb_size as usize;
+    let neighb_kmers = neighb_size + 1 - k as usize;
+    let norm_fct = 1.0 / (neighb_kmers as f64);
 
     let mut sel_windows = Vec::with_capacity(windows.len());
     let mut gc_contents = Vec::with_capacity(windows.len());
     for window in windows.into_iter() {
         let start_ix = (window.start - window_padding - seq_shift) as usize;
-        let window_seq = &ref_seq[start_ix..start_ix + neigh_len];
+        let window_seq = &ref_seq[start_ix..start_ix + neighb_size];
         let mut keep = true;
         let mut mean_kmer_freq = f64::NAN;
         let mut gc_content = f64::NAN;
@@ -121,7 +117,7 @@ fn filter_windows(
             have_ns += 1;
             keep = false
         } else {
-            mean_kmer_freq = norm_fct * kmer_counts[start_ix..start_ix + neigh_kmers]
+            mean_kmer_freq = norm_fct * kmer_counts[start_ix..start_ix + neighb_kmers]
                 .iter().copied().map(f64::from).sum::<f64>();
             gc_content = seq::gc_content(window_seq);
             if mean_kmer_freq > params.max_kmer_freq {
@@ -235,15 +231,13 @@ pub struct ReadDepthParams {
     /// Specie ploidy (2 in most cases).
     pub ploidy: u8,
 
-    /// Calculate background per windows of this size.
+    /// Calculate background read depth per windows of this size.
     /// Default: 100.
     pub window_size: u32,
-
-    /// Calculate GC-content and k-mer frequencies based on the window of size `window_size + 2 * window_padding`.
-    /// Default: 100.
-    pub window_padding: u32,
-
-    /// Ignore left-most and right-most `boundary_size` base-pairs. Must not be smaller than `window_padding`.
+    /// Calculate GC-content and k-mer frequencies based on the window neighbourhood of this size (includes window).
+    /// Default: 300.
+    pub neighb_size: u32,
+    /// Ignore left-most and right-most `boundary_size` base-pairs. Must be >= `neighb_size`.
     /// Default: 1000.
     pub boundary_size: u32,
 
@@ -267,7 +261,6 @@ pub struct ReadDepthParams {
     ///
     /// Repeat the same procedure for GC-content values > R.
     pub min_tail_obs: usize,
-
     /// See `min_tail_obs`. Default: 0.02.
     pub tail_var_mult: f64,
 }
@@ -277,7 +270,7 @@ impl Default for ReadDepthParams {
         Self {
             ploidy: 2,
             window_size: 100,
-            window_padding: 100,
+            neighb_size: 300,
             boundary_size: 1000,
             max_kmer_freq: 1.2,
 
@@ -289,15 +282,23 @@ impl Default for ReadDepthParams {
 }
 
 impl ReadDepthParams {
+    /// Compare window, neighbourhood and boundary sizes.
+    /// This function is static, as it is used elsewhere.
+    pub fn validate_sizes(window: u32, neighb: u32, boundary: u32) -> Result<(), Error> {
+        validate_param!(0 < window,
+            "Window size ({}) must be positive", window);
+        validate_param!(window <= neighb,
+            "Neighbourhood size ({}) must be at least window size ({})", neighb, window);
+        validate_param!((neighb - window + 1) / 2 <= boundary,
+            "Region boundary ({}) is too small compared to window ({}) and neighbourhood ({}) sizes",
+            boundary, window, neighb);
+        Ok(())
+    }
+
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
         validate_param!(self.ploidy > 0, "Ploidy cannot be zero");
-        validate_param!(self.boundary_size >= self.window_padding,
-            "Edge padding ({}) must not be smaller than window padding ({})", self.boundary_size, self.window_padding);
-        if self.boundary_size < self.window_size {
-            log::warn!("Edge padding ({}) is smaller than the window size ({}), consider using a larger value",
-                self.boundary_size, self.window_size);
-        }
+        Self::validate_sizes(self.window_size, self.neighb_size, self.boundary_size)?;
 
         validate_param!(self.max_kmer_freq >= 1.0,
             "Maximum k-mer frequency ({}) must be at least 1", self.max_kmer_freq);
@@ -346,12 +347,12 @@ fn write_summary(
 /// Background read depth distributions for each GC-content value.
 #[derive(Clone)]
 pub struct ReadDepth {
-    /// Read depth is calculated per windows with this size.
-    window_size: u32,
     /// Specie ploidy (2 in most cases).
     ploidy: u8,
-    /// For each window, add `window_padding` to the left and right before calculating GC-content.
-    window_padding: u32,
+    /// Read depth is calculated per windows with this size.
+    window_size: u32,
+    /// Calculate GC-content per window neighbourhood of this size (includes window).
+    neighb_size: u32,
     // Read depth distribution for each GC-content in 0..=100.
     distributions: Vec<NBinom>,
 }
@@ -384,6 +385,7 @@ impl ReadDepth {
         kmer_counts: &KmerCounts,
         params: &ReadDepthParams,
         subsampling_rate: f64,
+        is_paired_end: bool,
         out_dir: Option<&Path>,
     ) -> io::Result<Self>
     {
@@ -412,8 +414,9 @@ impl ReadDepth {
         let distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy);
 
         const GC_VAL: usize = 40;
-        let logging_distr = distributions[GC_VAL].mul(ploidy);
-        log::info!("    Read depth mean = {:.2},  variance: {:.2}", logging_distr.mean(), logging_distr.variance());
+        let logging_distr = distributions[GC_VAL].mul(ploidy * if is_paired_end { 2.0 } else { 1.0 });
+        log::info!("    Read depth mean = {:.2},  variance: {:.2}  (at GC-content {})",
+            logging_distr.mean(), logging_distr.variance(), GC_VAL);
 
         if let Some(dir) = out_dir {
             let dbg_writer = ext::sys::create_gzip(&dir.join("depth.csv.gz"))?;
@@ -423,7 +426,7 @@ impl ReadDepth {
         Ok(Self {
             ploidy: params.ploidy,
             window_size: params.window_size,
-            window_padding: params.window_padding,
+            neighb_size: params.neighb_size,
             distributions,
         })
     }
@@ -433,9 +436,9 @@ impl ReadDepth {
         self.window_size
     }
 
-    /// Returns window padding - added to both sides of the window to calculate GC-content and k-mer frequencies.
-    pub fn window_padding(&self) -> u32 {
-        self.window_padding
+    /// Returns neighbourhood size.
+    pub fn neighb_size(&self) -> u32 {
+        self.neighb_size
     }
 
     /// Returns read depth distribution at GC-content `gc_content` (between 0 and 100).
@@ -456,21 +459,22 @@ impl JsonSer for ReadDepth {
         json::object!{
             ploidy: self.ploidy,
             window: self.window_size,
-            window_padding: self.window_padding,
+            neighb: self.neighb_size,
             n: &n_params as &[f64],
             p: &p_params as &[f64],
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> ploidy (as_u8), window (as_usize), window_padding (as_u32));
+        json_get!(obj -> ploidy (as_u8), window (as_u32), neighb (as_u32));
         let mut n_params = vec![0.0; GC_BINS];
-        parse_f64_arr(obj, "n", &mut n_params)?;
         let mut p_params = vec![0.0; GC_BINS];
+        parse_f64_arr(obj, "n", &mut n_params)?;
         parse_f64_arr(obj, "p", &mut p_params)?;
         Ok(Self {
-            ploidy, window_padding,
-            window_size: window as u32,
+            ploidy,
+            window_size: window,
+            neighb_size: neighb,
             distributions: n_params.into_iter().zip(p_params).map(|(n, p)| NBinom::new(n, p)).collect(),
         })
     }
