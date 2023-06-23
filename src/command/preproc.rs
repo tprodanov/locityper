@@ -629,13 +629,11 @@ fn estimate_bg_from_paired(
     let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params, opt_out_dir)?;
 
     // Estimate error profile from read pairs with appropriate insert size.
-    let (min_insert_size, max_insert_size) = insert_distr.confidence_interval();
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
     for &(i, j) in pair_ixs.iter() {
         let first = &alns[i];
         let second = &alns[j];
-        let insert_size = first.insert_size(second.deref());
-        if min_insert_size <= insert_size && insert_size <= max_insert_size {
+        if insert_distr.in_conf_interval(first.insert_size(second.deref())) {
             errprof_alns.push(first);
             errprof_alns.push(second);
         }

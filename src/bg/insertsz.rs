@@ -50,6 +50,8 @@ pub struct InsertDistr {
     distr: Option<LinearCache<NBinom>>,
     /// Minimum and maximum allowed insert sizes.
     conf_interval: (u32, u32),
+    /// Minimum ln-probability at the ends of the confidence interval.
+    worst_prob: f64,
 }
 
 impl InsertDistr {
@@ -58,6 +60,7 @@ impl InsertDistr {
             orient_allowed: [false; 2],
             distr: None,
             conf_interval: (0, 0),
+            worst_prob: f64::NAN,
         }
     }
 
@@ -141,31 +144,38 @@ impl InsertDistr {
         let max_size = (distr.quantile(1.0 - quantile) + 1e-8).ceil() as u32;
         log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
             min_size, max_size, 100.0 * params.ins_conf_level);
+        let distr = distr.cached(max_size as usize + 1);
 
         Ok(Self {
             orient_allowed,
-            distr: Some(distr.cached(max_size as usize + 1)),
+            worst_prob: distr.ln_pmf(min_size).min(distr.ln_pmf(max_size)),
+            distr: Some(distr),
             conf_interval: (min_size, max_size),
         })
     }
 
     /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
     pub fn ln_prob(&self, sz: u32, same_orient: bool) -> f64 {
-        if self.conf_interval.0 <= sz && sz <= self.conf_interval.1 && self.orient_allowed[usize::from(same_orient)] {
+        if self.in_conf_interval(sz) && self.orient_allowed[usize::from(same_orient)] {
             self.distr.as_ref().unwrap().ln_pmf(sz)
         } else {
             f64::NEG_INFINITY
         }
     }
 
-    /// Maximum insert size. Over this size, all pairs are considered unpaired.
-    pub fn confidence_interval(&self) -> (u32, u32) {
-        self.conf_interval
+    /// Returns true if given insert size is within the predefined confidence interval.
+    pub fn in_conf_interval(&self, insert_size: u32) -> bool {
+        self.conf_interval.0 <= insert_size && insert_size <= self.conf_interval.1
     }
 
     /// Returns true if the reads are paired-end, false if single-end.
     pub fn is_paired_end(&self) -> bool {
         self.distr.is_some()
+    }
+
+    /// Returns worst available probability at one of the confidence interval edges.
+    pub fn worst_prob(&self) -> f64 {
+        self.worst_prob
     }
 }
 
@@ -197,6 +207,7 @@ impl JsonSer for InsertDistr {
         let distr = NBinom::new(n, p).cached(max_size as usize + 1);
         Ok(Self {
             orient_allowed: [fr_allowed, ff_allowed],
+            worst_prob: distr.ln_pmf(min_size).min(distr.ln_pmf(max_size)),
             distr: Some(distr),
             conf_interval: (min_size, max_size),
         })

@@ -13,22 +13,26 @@ use crate::{
         cigar::Cigar,
     },
     bg::{
-        err_prof::ErrorProfile,
+        err_prof::{OpCounts, ErrorProfile},
         insertsz::InsertDistr,
     },
     algo::{fnv1a, bisect},
     math::Ln,
 };
 
-pub(crate) const CSV_HEADER: &'static str = "read_hash\tread_end\tinterval\tlik";
+pub(crate) const CSV_HEADER: &'static str = "read_hash\tread_end\tinterval\tedit_dist\tpasses\tlik";
 
+/// BAM reader, which stores the next record within.
+/// Contains `read_mate_alns` method, which consecutively reads all records with the same name
+/// until the next primary alignment.
 struct FilteredReader<'a, R: bam::Read> {
     reader: R,
     record: bam::Record,
     has_more: bool,
     contigs: Arc<ContigNames>,
     err_prof: &'a ErrorProfile,
-    thresh_prob: f64,
+    /// Allow alignments with ln-probability at least `best_prob - max_diff` for the same read end.
+    max_diff: f64,
 }
 
 impl<'a, R: bam::Read> FilteredReader<'a, R> {
@@ -36,13 +40,13 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         mut reader: R,
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
-        thresh_prob: f64
+        max_diff: f64
     ) -> Result<Self, Error> {
         let mut record = bam::Record::new();
         Ok(FilteredReader {
             // Reader would return None if there are no more records.
             has_more: reader.read(&mut record).transpose()?.is_some(),
-            reader, record, contigs, err_prof, thresh_prob,
+            reader, record, contigs, err_prof, max_diff,
         })
     }
 
@@ -51,8 +55,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     /// Basically, the function continue to read until the next primary alignment is found,
     /// which is saved to `self.record`.
     ///
-    /// Function adds all alignments with probability over the threshold to `alns` and returns name hash.
-    fn read_mate_alns(
+    /// If best edit distance is too high, does not add any new alignments.
+    /// Otherwise, normalizes all alignment probabilities by the best probability (therefore max is always = 0).
+    fn load_read_end_alns(
         &mut self,
         read_end: ReadEnd,
         alns: &mut Vec<LightAlignment>,
@@ -68,28 +73,55 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             return Ok(name_hash);
         }
 
+        let mut any_passes = false;
+        let mut max_prob = f64::NEG_INFINITY;
+        let start_len = alns.len();
         loop {
             let cigar = Cigar::from_raw(&self.record);
-            let mate_prob = self.err_prof.ln_prob(&cigar);
-            let mate_aln = LightAlignment::new(
-                &self.record, &cigar, read_end, Arc::clone(&self.contigs), mate_prob);
-            writeln!(dbg_writer, "{:X}\t{}\t{}\t{:.2}",
-                name_hash, read_end, mate_aln.interval(), Ln::to_log10(mate_prob))?;
-            if mate_prob >= self.thresh_prob {
-                alns.push(mate_aln);
+            let read_prof = OpCounts::from_cigar(&cigar);
+            let read_len = cigar.query_len();
+            let edit_dist = read_prof.edit_distance(read_len);
+            let aln_passes = edit_dist <= self.err_prof.allowed_edit_dist(read_len);
+            any_passes |= aln_passes;
+            let aln_prob = self.err_prof.ln_prob(&read_prof);
+            let aln = LightAlignment::new(&self.record, &cigar, read_end, Arc::clone(&self.contigs), aln_prob);
+            writeln!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
+                edit_dist, if aln_passes { 'T' } else { 'F' }, Ln::to_log10(aln_prob))?;
+
+            if aln_prob >= max_prob - self.max_diff {
+                max_prob = max_prob.max(aln_prob);
+                alns.push(aln);
             }
 
             if self.reader.read(&mut self.record).transpose()?.is_none() {
                 self.has_more = false;
-                return Ok(name_hash);
+                break;
             }
             // Next primary record or unmapped read. Either way, it will be a new read or new read end.
             if !self.record.is_secondary() {
-                return Ok(name_hash);
+                break;
             }
             assert_eq!(fnv1a(self.record.qname()), name_hash,
                 "Read {} first alignment is not primary", String::from_utf8_lossy(self.record.qname()));
         }
+
+        if any_passes {
+            let mut i = start_len;
+            let thresh_prob = max_prob - self.max_diff;
+            assert!(max_prob.is_finite(), "Maximum probability is infinite for read hash {:X}", name_hash);
+            while i < alns.len() {
+                let prob = alns[i].ln_prob();
+                if prob >= thresh_prob {
+                    alns[i].set_ln_prob(prob - max_prob);
+                    i += 1;
+                } else {
+                    alns.swap_remove(i);
+                }
+            }
+        } else {
+            alns.truncate(start_len);
+        }
+        Ok(name_hash)
     }
 }
 
@@ -115,10 +147,9 @@ impl PrelimAlignments {
         mut dbg_writer: impl Write,
     ) -> Result<Self, Error>
     {
-        let thresh_prob = params.unmapped_penalty - params.prob_diff;
-        log::info!("[{}] Reading read alignments, alignment likelihood threshold = {:.1}",
-            contigs.tag(), Ln::to_log10(thresh_prob));
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), err_prof, thresh_prob)?;
+        log::info!("[{}] Loading read alignments", contigs.tag());
+        let max_diff = -(params.unmapped_penalty - params.prob_diff);
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), err_prof, max_diff)?;
         let left_boundary = params.boundary_size - params.tweak;
         let right_boundaries: Vec<_> = contigs.lengths().iter()
             .map(|len| len.saturating_sub(left_boundary)).collect();
@@ -129,7 +160,7 @@ impl PrelimAlignments {
             let read_name = String::from_utf8_lossy(reader.record.qname()).into_owned();
             write!(dbg_writer, "{}=", read_name)?;
             let mut alns = Vec::new();
-            let name_hash = reader.read_mate_alns(ReadEnd::First, &mut alns, &mut dbg_writer)?;
+            let name_hash = reader.load_read_end_alns(ReadEnd::First, &mut alns, &mut dbg_writer)?;
             if !hashes.insert(name_hash) {
                 log::warn!("Read {} produced hash collision ({:X}). \
                     If many such messages, reads appear in an unordered fashion, will lead to errors",
@@ -137,7 +168,7 @@ impl PrelimAlignments {
             }
 
             if is_paired_end {
-                let name_hash2 = reader.read_mate_alns(ReadEnd::Second, &mut alns, &mut dbg_writer)?;
+                let name_hash2 = reader.load_read_end_alns(ReadEnd::Second, &mut alns, &mut dbg_writer)?;
                 if name_hash != name_hash2 {
                     return Err(Error::InvalidData(format!("Read {} with hash {:X} does not have a second read end",
                         read_name, name_hash)));
@@ -198,8 +229,7 @@ fn extend_pair_alignments(
     insert_distr: &InsertDistr,
     params: &super::Params,
 ) {
-    unimplemented!();
-    let insert_penalty = 0.0; // let insert_penalty = insert_distr.mode_prob();
+    let insert_penalty = insert_distr.worst_prob();
     let thresh_prob = unmapped_pair_prob(params.unmapped_penalty, insert_penalty) - params.prob_diff;
     let alns1_empty = alns1.is_empty();
     if !alns1_empty {
@@ -264,9 +294,8 @@ fn identify_pair_alignments(
         i = k;
     }
 
-    unimplemented!();
     // Probability of both mates unmapped.
-    let mut unmapped_prob = unmapped_pair_prob(params.unmapped_penalty, 0.0); //insert_distr.mode_prob());
+    let mut unmapped_prob = unmapped_pair_prob(params.unmapped_penalty, insert_distr.worst_prob());
     // Normalization factor for all pair-end alignment probabilities.
     // For normalization, unmapped probability is multiplied by the number of contigs because there is an unmapped
     // possibility for every contig, which we do not store explicitely.

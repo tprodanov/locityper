@@ -102,6 +102,10 @@ impl ReadAssignment {
                 non_trivial_reads.push(rp);
             }
         }
+        assert!(read_ixs.len() > 1, "Cannot construct read assignment with 0 alignments.");
+        if non_trivial_reads.is_empty() {
+            log::warn!("There are only trivial reads, may lead to errors")
+        }
 
         Self {
             depth: vec![0; contig_windows.total_windows() as usize],

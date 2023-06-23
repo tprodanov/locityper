@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, AddAssign},
+    ops::{Add, AddAssign, Sub},
     fmt,
     cell::RefCell,
     borrow::Borrow,
@@ -18,7 +18,7 @@ use crate::{
 
 /// Counts of five operation types (=, X, I, D, S).
 #[derive(Clone, Default, Debug)]
-struct OpCounts<T> {
+pub struct OpCounts<T> {
     matches: T,
     mismatches: T,
     insertions: T,
@@ -26,14 +26,9 @@ struct OpCounts<T> {
     clipping: T,
 }
 
-impl<T> OpCounts<T>
-{
+impl OpCounts<u32> {
     /// Counts operations in a CIGAR. CIGAR must not contain "M" operation.
-    fn calculate(cigar: &Cigar) -> Self
-    where u32: TryInto<T>,
-          <u32 as TryInto<T>>::Error: fmt::Debug,
-          T: Eq + Add<Output = T> + Copy + fmt::Debug,
-    {
+    pub fn from_cigar(cigar: &Cigar) -> Self {
         let mut counts = [0_u32; RAW_OPERATIONS];
         let mut sum_len = 0;
         for item in cigar.iter() {
@@ -48,8 +43,15 @@ impl<T> OpCounts<T>
             clipping: counts[Operation::Soft.ix()].try_into().unwrap(),
         };
         assert_eq!(res.matches + res.mismatches + res.insertions + res.deletions + res.clipping,
-            sum_len.try_into().unwrap(), "Cigar {} contains unexpected operations!", cigar);
+            sum_len, "Cigar {} contains unexpected operations!", cigar);
         res
+    }
+}
+
+impl<T: Add<Output = T> + Sub<Output = T> + Copy> OpCounts<T> {
+    /// Calculates edit distance based on read length in three operations, not four.
+    pub fn edit_distance(&self, read_len: T) -> T {
+        read_len - self.matches + self.deletions
     }
 }
 
@@ -59,7 +61,7 @@ impl OpCounts<u64> {
     /// to account for possible mutations in the data.
     ///
     /// Returns (match_prob, mism_prob, ins_prob, del_prob).
-    fn get_profile(&self, err_rate_mult: f64) -> (f64, f64, f64, f64) {
+    pub fn get_op_probs(&self, err_rate_mult: f64) -> (f64, f64, f64, f64) {
         // Clipping is ignored.
         let sum_len = (self.matches + self.mismatches + self.insertions + self.deletions) as f64;
         let mism_prob = self.mismatches as f64 / sum_len;
@@ -82,9 +84,7 @@ impl OpCounts<u64> {
     }
 }
 
-impl<T> fmt::Display for OpCounts<T>
-where T: Add<Output = T> + Copy + fmt::Display,
-{
+impl<T: fmt::Display> fmt::Display for OpCounts<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Matches: {}, Mism: {}, Ins: {}, Del: {}, Clip: {}",
             self.matches, self.mismatches, self.insertions, self.deletions, self.clipping)
@@ -146,17 +146,17 @@ impl ErrorProfile {
 
         for aln in alns.iter() {
             let cigar = aln.borrow().cigar();
-            let counts = OpCounts::<u32>::calculate(cigar);
+            let counts = OpCounts::from_cigar(cigar);
             prof_builder += &counts;
 
             let read_len = cigar.query_len();
-            let edit_dist = read_len - counts.matches + counts.deletions;
+            let edit_dist = counts.edit_distance(read_len);
             edit_distances.entry((edit_dist, read_len))
                 .and_modify(|counter| *counter += 1)
                 .or_insert(1);
         }
 
-        let (match_prob, mism_prob, ins_prob, del_prob) = prof_builder.get_profile(params.err_rate_mult);
+        let (match_prob, mism_prob, ins_prob, del_prob) = prof_builder.get_op_probs(params.err_rate_mult);
         assert!(match_prob > 0.5, "Match probability ({:.5}) must be over 50%", match_prob);
         assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
             "Error probabilities do not sum to one");
@@ -181,14 +181,16 @@ impl ErrorProfile {
         err_prof
     }
 
-    /// Returns alignment ln-probability.
-    pub fn ln_prob(&self, cigar: &Cigar) -> f64 {
-        let read_prof = OpCounts::<u32>::calculate(cigar);
-        self.ln_match * f64::from(read_prof.matches)
-            + self.ln_mism * f64::from(read_prof.mismatches)
-            + self.ln_ins * f64::from(read_prof.insertions)
-            + self.ln_del * f64::from(read_prof.deletions)
-            + self.ln_clip * f64::from(read_prof.clipping)
+    /// Returns ln-probability for operation counts.
+    pub fn ln_prob<T>(&self, counts: &OpCounts<T>) -> f64
+    where T: Copy + TryInto<f64>,
+          <T as TryInto<f64>>::Error: std::fmt::Debug,
+    {
+        self.ln_match * counts.matches.try_into().unwrap()
+            + self.ln_mism * counts.mismatches.try_into().unwrap()
+            + self.ln_ins * counts.insertions.try_into().unwrap()
+            + self.ln_del * counts.deletions.try_into().unwrap()
+            + self.ln_clip * counts.clipping.try_into().unwrap()
     }
 
     /// Returns the maximum allowed edit distance for the given read length.
@@ -199,11 +201,11 @@ impl ErrorProfile {
             self.edit_dist_distr.confidence_right_border(read_len, self.conf_lvl))
     }
 
-    /// Returns true if edit distance does not exceed maximum allowed.
+    /// Returns true if alignment edit distance is not too high.
     pub fn aln_passes(&self, cigar: &Cigar) -> bool {
-        let read_prof = OpCounts::<u32>::calculate(cigar);
+        let read_prof = OpCounts::from_cigar(cigar);
         let read_len = cigar.query_len();
-        let edit_dist = read_len - read_prof.matches + read_prof.deletions;
+        let edit_dist = read_prof.edit_distance(read_len);
         edit_dist <= self.allowed_edit_dist(read_len)
     }
 }

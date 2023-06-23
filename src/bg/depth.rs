@@ -36,14 +36,13 @@ pub trait DepthDistr {
 #[derive(Clone, Debug)]
 struct WindowCounts {
     start: u32,
-    end: u32,
     depth: [u32; 2],
 }
 
 impl WindowCounts {
-    fn new(start: u32, end: u32) -> Self {
+    fn new(start: u32) -> Self {
         WindowCounts {
-            start, end,
+            start,
             depth: [0, 0],
         }
     }
@@ -62,7 +61,7 @@ fn count_reads<'a>(
     let interval_start = interval.start();
     let start = interval_start + (interval.len() - sum_len) / 2;
     let mut windows: Vec<_> = (0..n_windows)
-        .map(|i| WindowCounts::new(start + i * params.window_size, start + (i + 1) * params.window_size))
+        .map(|i| WindowCounts::new(start + i * params.window_size))
         .collect();
     let window_getter = WindowGetter::new(start, start + sum_len, params.window_size);
 
