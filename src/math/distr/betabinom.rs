@@ -67,17 +67,16 @@ impl BetaBinomial {
         n
     }
 
-    /// Use Nelder-Mead to find max-likelihood `alpha` & `beta` for observed vectors of `k` and `n`.
-    pub fn max_lik_estimate(ks: &[u32], ns: &[u32]) -> Self {
-        assert_eq!(ks.len(), ns.len());
+    /// Use Nelder-Mead to find max-likelihood `alpha` & `beta` for an observed vector of tuples `(k, n, weight)`.
+    pub fn max_lik_estimate(observations: &[(u32, u32, f64)]) -> Self {
         let start_points = vec![
             vec![0.7,  50.0],
             vec![0.3, 100.0],
             vec![0.5,  10.0],
         ];
         let solver = NelderMead::new(start_points)
-            .with_sd_tolerance(1e-5).unwrap();
-        let solution = Executor::new(MLEProblem { ks, ns }, solver)
+            .with_sd_tolerance(1e-6).unwrap();
+        let solution = Executor::new(MLEProblem { observations }, solver)
             .run()
             .expect("Nelder-Mead finished with an error");
         let param = solution.state.get_param().expect("Nelder-Mead failed to find appropriate N.Binom. parameters");
@@ -86,8 +85,7 @@ impl BetaBinomial {
 }
 
 struct MLEProblem<'a> {
-    ks: &'a [u32],
-    ns: &'a [u32],
+    observations: &'a [(u32, u32, f64)],
 }
 
 impl<'a> CostFunction for MLEProblem<'a> {
@@ -103,7 +101,9 @@ impl<'a> CostFunction for MLEProblem<'a> {
             Ok(LARGE_NUM)
         } else {
             let beta_binom = BetaBinomial::new(alpha, beta);
-            Ok(self.ks.iter().zip(self.ns).map(|(&k, &n)| -beta_binom.ln_pmf(k, n)).sum())
+            Ok(-self.observations.iter()
+                .map(|&(k, n, weight)| weight * beta_binom.ln_pmf(k, n))
+                .sum::<f64>())
         }
     }
 }

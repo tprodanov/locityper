@@ -1,9 +1,9 @@
 use std::{
     ops::{Add, AddAssign},
     fmt,
-    cmp::min,
     cell::RefCell,
     borrow::Borrow,
+    collections::HashMap,
 };
 use nohash::IntMap;
 use crate::{
@@ -141,8 +141,8 @@ impl ErrorProfile {
     {
         log::info!("Estimating read error profiles from {} reads", alns.len());
         let mut prof_builder = OpCounts::<u64>::default();
-        let mut edit_distances = Vec::with_capacity(alns.len());
-        let mut read_lengths = Vec::with_capacity(alns.len());
+        // (edit_dist, read_len) -> count.
+        let mut edit_distances = HashMap::<(u32, u32), u64>::new();
 
         for aln in alns.iter() {
             let cigar = aln.borrow().cigar();
@@ -150,8 +150,10 @@ impl ErrorProfile {
             prof_builder += &counts;
 
             let read_len = cigar.query_len();
-            read_lengths.push(read_len);
-            edit_distances.push(min(read_len, read_len - counts.matches + counts.deletions));
+            let edit_dist = read_len - counts.matches + counts.deletions;
+            edit_distances.entry((edit_dist, read_len))
+                .and_modify(|counter| *counter += 1)
+                .or_insert(1);
         }
 
         let (match_prob, mism_prob, ins_prob, del_prob) = prof_builder.get_profile(params.err_rate_mult);
@@ -159,13 +161,16 @@ impl ErrorProfile {
         assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
             "Error probabilities do not sum to one");
 
+        let edit_distances: Vec<_> = edit_distances.into_iter()
+            .map(|((k, n), count)| (k, n, count as f64))
+            .collect();
         let err_prof = Self {
             ln_match: match_prob.ln(),
             ln_mism: mism_prob.ln(),
             ln_ins: ins_prob.ln(),
             ln_del: del_prob.ln(),
             ln_clip: mism_prob.max(ins_prob).ln(),
-            edit_dist_distr: BetaBinomial::max_lik_estimate(&edit_distances, &read_lengths),
+            edit_dist_distr: BetaBinomial::max_lik_estimate(&edit_distances),
             max_edit_dist: RefCell::default(),
             conf_lvl: params.err_conf_level,
         };
