@@ -4,3 +4,4 @@
 - WFA: Stop very bad alignments.
 - `draw_depth`: handle repeated genotypes.
 - Read depth estimation: underestimating variance at low subsampling rates.
+- Count edit distance only within the region of interest!

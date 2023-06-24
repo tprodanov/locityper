@@ -50,8 +50,8 @@ pub struct InsertDistr {
     distr: Option<LinearCache<NBinom>>,
     /// Minimum and maximum allowed insert sizes.
     conf_interval: (u32, u32),
-    /// Minimum ln-probability at the ends of the confidence interval.
-    worst_prob: f64,
+    /// ln-probability at the mode of the insert size distribution.
+    mode_prob: f64,
 }
 
 impl InsertDistr {
@@ -60,7 +60,7 @@ impl InsertDistr {
             orient_allowed: [false; 2],
             distr: None,
             conf_interval: (0, 0),
-            worst_prob: f64::NAN,
+            mode_prob: f64::NAN,
         }
     }
 
@@ -148,7 +148,7 @@ impl InsertDistr {
 
         Ok(Self {
             orient_allowed,
-            worst_prob: distr.ln_pmf(min_size).min(distr.ln_pmf(max_size)),
+            mode_prob: distr.ln_pmf(distr.inner().mode()),
             distr: Some(distr),
             conf_interval: (min_size, max_size),
         })
@@ -174,8 +174,8 @@ impl InsertDistr {
     }
 
     /// Returns worst available probability at one of the confidence interval edges.
-    pub fn worst_prob(&self) -> f64 {
-        self.worst_prob
+    pub fn mode_prob(&self) -> f64 {
+        self.mode_prob
     }
 }
 
@@ -207,7 +207,7 @@ impl JsonSer for InsertDistr {
         let distr = NBinom::new(n, p).cached(max_size as usize + 1);
         Ok(Self {
             orient_allowed: [fr_allowed, ff_allowed],
-            worst_prob: distr.ln_pmf(min_size).min(distr.ln_pmf(max_size)),
+            mode_prob: distr.ln_pmf(distr.inner().mode()),
             distr: Some(distr),
             conf_interval: (min_size, max_size),
         })

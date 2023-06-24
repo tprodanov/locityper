@@ -112,7 +112,7 @@ impl HighsSolver {
 
 impl super::Solver for HighsSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, _rng: &mut XoshiroRng) -> Result<f64, Error> {
+    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, _rng: &mut XoshiroRng) -> Result<f64, Error> {
         let problem = self.define_model(assignments);
         let mut model = problem.optimise(Sense::Maximise);
         model.set_option("parallel", "off");

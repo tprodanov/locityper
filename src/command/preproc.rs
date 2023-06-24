@@ -187,7 +187,11 @@ impl Args {
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
-        self.strobealign = ext::sys::find_exe(self.strobealign)?;
+        if self.params.technology == Technology::Illumina {
+            self.strobealign = ext::sys::find_exe(self.strobealign)?;
+        } else {
+            self.minimap = ext::sys::find_exe(self.minimap)?;
+        }
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
@@ -368,6 +372,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('F') | Long("force") => args.force = true,
             Long("debug") => args.debug = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
+            Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {

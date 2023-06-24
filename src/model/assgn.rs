@@ -6,7 +6,7 @@ use crate::{
     math::Ln,
 };
 use super::{
-    locs::AllPairAlignments,
+    locs::AllAlignments,
     windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadWindows, MultiContigWindows, AffectedWindows},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
@@ -81,7 +81,7 @@ impl ReadAssignment {
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
         contig_windows: MultiContigWindows,
-        all_alns: &AllPairAlignments,
+        all_alns: &AllAlignments,
         cached_distrs: &CachedDepthDistrs,
         params: &super::Params,
     ) -> Self
@@ -185,6 +185,11 @@ impl ReadAssignment {
     /// Returns the total likelihood of the read assignment.
     pub fn likelihood(&self) -> f64 {
         self.likelihood
+    }
+
+    /// Returns true if there are no non-trivial reads, therefore there exists only one possible read assignment.
+    pub fn trivial(&self) -> bool {
+        self.non_trivial_reads.is_empty()
     }
 
     /// Returns slice with indices of all read pairs with at least two alignment locations.

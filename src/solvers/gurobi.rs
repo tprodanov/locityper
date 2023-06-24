@@ -106,7 +106,7 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
 
 impl super::Solver for GurobiSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
+    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         let (mut model, vars) = define_model(assignments)?;
         let mut best_lik = assignments.likelihood();
 

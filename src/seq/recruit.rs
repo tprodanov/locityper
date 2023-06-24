@@ -60,11 +60,12 @@ struct Stats {
     timer: Instant,
     recruited: u64,
     processed: u64,
-    /// Last log message was at this number of processed reads.
-    last_processed: u64,
+    /// Last log message was at this duration since start.
+    last_msg: Duration,
 }
 
-const UPDATE_FREQ: u64 = 2_000_000;
+// Update frequency in seconds.
+const UPDATE_SECS: u64 = 5;
 
 impl Stats {
     fn new() -> Self {
@@ -72,36 +73,29 @@ impl Stats {
             timer: Instant::now(),
             recruited: 0,
             processed: 0,
-            last_processed: 0,
+            last_msg: Duration::default(),
         }
     }
 
-    /// Prints log message in a single-thread function.
-    fn print_log_consec(&mut self) {
-        if self.processed % UPDATE_FREQ == 0 {
-            self.print_log();
+    /// Prints log message if enough time has passed.
+    fn timed_print_log(&mut self) {
+        let elapsed = self.timer.elapsed();
+        if (elapsed - self.last_msg).as_secs() >= UPDATE_SECS {
+            self.print_log_always(elapsed);
         }
     }
 
-    /// Prints log message in a parallel function.
-    fn print_log_parallel(&mut self) {
-        if self.processed - self.last_processed >= UPDATE_FREQ {
-            self.print_log();
-        }
-    }
-
-    fn print_log(&mut self) {
+    fn print_log_always(&mut self, elapsed: Duration) {
         let processed = self.processed as f64;
-        let speed = 1e-3 * processed / self.timer.elapsed().as_secs_f64();
-        log::debug!("    Recruited {:11} /{:7.1}M reads,  {:.0}k reads/s", self.recruited, 1e-6 * processed, speed);
-        self.last_processed = self.processed;
+        let speed = 1e-3 * processed / elapsed.as_secs_f64();
+        log::debug!("    Recruited {:11} /{:8.2}M reads,  {:.0}k reads/s", self.recruited, 1e-6 * processed, speed);
+        self.last_msg = elapsed;
     }
 
     fn finish(&mut self) {
-        if self.processed > self.last_processed {
-            self.print_log();
-        }
-        log::info!("Finished recruitment in {}", crate::ext::fmt::Duration(self.timer.elapsed()));
+        let elapsed = self.timer.elapsed();
+        self.print_log_always(elapsed);
+        log::info!("Finished recruitment in {}", crate::ext::fmt::Duration(elapsed));
     }
 }
 
@@ -218,7 +212,9 @@ impl Targets {
             }
             stats.recruited += u64::from(!answer.is_empty());
             stats.processed += 1;
-            stats.print_log_consec();
+            if stats.processed % 10000 == 0 {
+                stats.timed_print_log();
+            }
         }
         stats.finish();
         Ok(())
@@ -407,6 +403,7 @@ where T: RecordExt,
         }
         while let Some(mut shipment) = self.to_write.pop() {
             write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
+            self.stats.timed_print_log();
             fill_shipment(&mut self.reader, &mut shipment)?;
             if !shipment.is_empty() {
                 self.to_send.push(shipment);
@@ -435,7 +432,6 @@ where T: RecordExt,
                 const SLEEP: Duration = Duration::from_micros(100);
                 thread::sleep(SLEEP);
             }
-            self.stats.print_log_parallel();
         }
         Ok(())
     }
@@ -451,6 +447,7 @@ where T: RecordExt,
                 // Block thread and wait for the task completion.
                 let shipment = receiver.recv().expect("Recruitment worker has failed!");
                 write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
+                self.stats.timed_print_log();
             }
         }
         std::mem::drop(self.senders);

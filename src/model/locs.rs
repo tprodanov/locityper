@@ -67,7 +67,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(self.has_more, "Cannot read any more records from a BAM file.");
         let name_hash = fnv1a(self.record.qname());
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tNA", name_hash, read_end)?;
+            writeln!(dbg_writer, "{:X}\t{}\t*\tNA\tF\tNA", name_hash, read_end)?;
             // Read the next record, and return false if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
             return Ok(name_hash);
@@ -191,19 +191,24 @@ impl PrelimAlignments {
         })
     }
 
-    /// Find paired-end alignment locations for each contig.
-    pub fn identify_locations(&mut self, insert_distr: &InsertDistr, params: &super::Params) -> AllPairAlignments {
+    /// Find single-end or paired-end alignment locations for each read and each contig.
+    pub fn identify_locations(&mut self, insert_distr: &InsertDistr, params: &super::Params) -> AllAlignments {
         let n_reads = self.all_alns.len();
         let ln_ncontigs = (self.contigs.len() as f64).ln();
         log::info!("    [{}] Identify paired alignment location and probabilities ({} {})",
             self.contigs.tag(), n_reads, if insert_distr.is_paired_end() { "read pairs" } else { "reads" });
-        let mut res = AllPairAlignments::with_capacity(n_reads);
+        let mut res = AllAlignments::with_capacity(n_reads);
         for (name_hash, alns) in self.all_alns.iter_mut() {
-            // log::debug!("Read {:X}", name_hash);
             // Sort alignments first by contig id, then by read-end.
             alns.sort_unstable_by_key(LightAlignment::sort_key);
-            let pair_alns = identify_pair_alignments(*name_hash, alns, insert_distr, ln_ncontigs, params);
-            res.push(pair_alns);
+            let groupped_alns = if insert_distr.is_paired_end() {
+                identify_paired_end_alignments(*name_hash, alns, insert_distr, ln_ncontigs, params)
+            } else {
+                identify_single_end_alignments(*name_hash, alns, ln_ncontigs, params.unmapped_penalty)
+            };
+            assert!(!groupped_alns.is_empty(),
+                "Identified 0 alignments for read hash {:X} (initially {} alns)", name_hash, alns.len());
+            res.push(groupped_alns);
         }
         res
     }
@@ -229,7 +234,7 @@ fn extend_pair_alignments(
     insert_distr: &InsertDistr,
     params: &super::Params,
 ) {
-    let insert_penalty = insert_distr.worst_prob();
+    let insert_penalty = insert_distr.mode_prob();
     let thresh_prob = unmapped_pair_prob(params.unmapped_penalty, insert_penalty) - params.prob_diff;
     let alns1_empty = alns1.is_empty();
     if !alns1_empty {
@@ -267,15 +272,16 @@ fn extend_pair_alignments(
     }
 }
 
-/// For a single read pair, combine all single-mate alignments across all contigs.
-fn identify_pair_alignments(
+/// For a paired-end read, combine all single-mate alignments across all contigs.
+fn identify_paired_end_alignments(
     name_hash: u64,
     alns: &[LightAlignment],
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
-) -> ReadPairAlignments {
-    let mut pair_alns = Vec::new();
+) -> GrouppedAlns
+{
+    let mut groupped_alns = Vec::new();
     let mut buffer = Vec::with_capacity(16);
     let n = alns.len();
     // For the current contig id, first mates will be in i..j, and second mates in j..k.
@@ -290,26 +296,45 @@ fn identify_pair_alignments(
             bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key1), i, n, BISECT_RIGHT_STEP)
         } else { i };
         let k = bisect::right_by_approx(alns, |aln| aln.sort_key().cmp(&sort_key2), j, n, BISECT_RIGHT_STEP);
-        extend_pair_alignments(&mut pair_alns, &mut buffer, &alns[i..j], &alns[j..k], insert_distr, params);
+        extend_pair_alignments(&mut groupped_alns, &mut buffer, &alns[i..j], &alns[j..k], insert_distr, params);
         i = k;
     }
 
     // Probability of both mates unmapped.
-    let mut unmapped_prob = unmapped_pair_prob(params.unmapped_penalty, insert_distr.worst_prob());
+    let unmapped_prob = unmapped_pair_prob(params.unmapped_penalty, insert_distr.mode_prob());
     // Normalization factor for all pair-end alignment probabilities.
     // For normalization, unmapped probability is multiplied by the number of contigs because there is an unmapped
     // possibility for every contig, which we do not store explicitely.
     //
     // Unmapped probability is not multiplied by ln_ncontigs, it is just for normalization.
-    let norm_fct = Ln::map_sum_init(&pair_alns, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
-    unmapped_prob -= norm_fct;
-    // log::debug!("    {} pair-end alignments. Unmapped prob: {:.2}, norm_fct: {:.2}",
-    //     pair_alns.len(), Ln::to_log10(unmapped_prob), Ln::to_log10(norm_fct));
-    for aln in pair_alns.iter_mut() {
+    let norm_fct = Ln::map_sum_init(&groupped_alns, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
+    for aln in groupped_alns.iter_mut() {
         aln.ln_prob -= norm_fct;
-        // log::debug!("        {}", aln);
     }
-    ReadPairAlignments { name_hash, unmapped_prob, pair_alns }
+    GrouppedAlns::new(name_hash, unmapped_prob - norm_fct, groupped_alns)
+}
+
+/// For a single read pair, combine all single-mate alignments across all contigs.
+fn identify_single_end_alignments(
+    name_hash: u64,
+    alns: &[LightAlignment],
+    ln_ncontigs: f64,
+    unmapped_prob: f64,
+) -> GrouppedAlns
+{
+    let mut groupped_alns: Vec<_> = alns.iter()
+        .map(|aln| PairAlignment::new(TwoIntervals::First(aln.interval().clone()), aln.ln_prob()))
+        .collect();
+    // Normalization factor for all pair-end alignment probabilities.
+    // For normalization, unmapped probability is multiplied by the number of contigs because there is an unmapped
+    // possibility for every contig, which we do not store explicitely.
+    //
+    // Unmapped probability is not multiplied by ln_ncontigs, it is just for normalization.
+    let norm_fct = Ln::map_sum_init(&groupped_alns, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
+    for aln in groupped_alns.iter_mut() {
+        aln.ln_prob -= norm_fct;
+    }
+    GrouppedAlns::new(name_hash, unmapped_prob - norm_fct, groupped_alns)
 }
 
 #[derive(Clone)]
@@ -400,20 +425,22 @@ impl fmt::Display for PairAlignment {
     }
 }
 
-/// Read-pair alignments for a single read-pair.
-pub struct ReadPairAlignments {
+/// All alignments for a single read/read pair, sorted by contig.
+pub struct GrouppedAlns {
     /// Hash of the read name.
     name_hash: u64,
-
     /// Probability of that both read mates are unmapped.
     /// Needs to be normalized by ploidy.
     unmapped_prob: f64,
-
     /// All pair-read alignments, sorted by contig id.
-    pair_alns: Vec<PairAlignment>,
+    alns: Vec<PairAlignment>,
 }
 
-impl ReadPairAlignments {
+impl GrouppedAlns {
+    fn new(name_hash: u64, unmapped_prob: f64, alns: Vec<PairAlignment>) -> Self {
+        Self { name_hash, unmapped_prob, alns }
+    }
+
     /// Returns the FNV1a hash of the read name.
     pub fn name_hash(&self) -> u64 {
         self.name_hash
@@ -428,30 +455,38 @@ impl ReadPairAlignments {
     /// - index of the first appropriate alignment,
     /// - all alignments to the contig.
     pub fn contig_alns(&self, contig_id: ContigId) -> (usize, &[PairAlignment]) {
-        let i = bisect::left_by(&self.pair_alns, |paln| paln.contig_id().cmp(&contig_id));
-        let j = bisect::right_by_approx(&self.pair_alns, |paln| paln.contig_id().cmp(&contig_id),
-            i, self.pair_alns.len(), BISECT_RIGHT_STEP);
-        (i, &self.pair_alns[i..j])
+        let i = bisect::left_by(&self.alns, |paln| paln.contig_id().cmp(&contig_id));
+        let j = bisect::right_by_approx(&self.alns, |paln| paln.contig_id().cmp(&contig_id),
+            i, self.alns.len(), BISECT_RIGHT_STEP);
+        (i, &self.alns[i..j])
     }
 
     /// Return `i`-th alignment of all alignments for the read pair.
     pub fn ith_aln(&self, i: usize) -> &PairAlignment {
-        &self.pair_alns[i]
+        &self.alns[i]
+    }
+
+    pub fn len(&self) -> usize {
+        self.alns.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.alns.is_empty()
     }
 }
 
 /// All read-pair alignments for all read-pairs.
 /// Key: read name hash.
-pub struct AllPairAlignments(Vec<ReadPairAlignments>);
+pub struct AllAlignments(Vec<GrouppedAlns>);
 
-impl AllPairAlignments {
+impl AllAlignments {
     /// Creates a new instance with given capacity.
     fn with_capacity(capacity: usize) -> Self {
         Self(Vec::with_capacity(capacity))
     }
 
     /// Inserts new read-pair alignments. Name hash is not checked for being in the vector before.
-    fn push(&mut self, read_pair_alns: ReadPairAlignments) {
+    fn push(&mut self, read_pair_alns: GrouppedAlns) {
         self.0.push(read_pair_alns);
     }
 
@@ -459,16 +494,16 @@ impl AllPairAlignments {
     /// (product over all read-pair probabilities for that contig).
     pub fn sum_contig_prob(&self, contig_id: ContigId) -> f64 {
         let mut total_prob = 0.0;
-        for paired_alns in self.0.iter() {
-            let curr_paired_alns = paired_alns.contig_alns(contig_id).1;
-            let unmapped_prob = paired_alns.unmapped_prob();
+        for groupped_alns in self.0.iter() {
+            let curr_paired_alns = groupped_alns.contig_alns(contig_id).1;
+            let unmapped_prob = groupped_alns.unmapped_prob();
             total_prob += Ln::map_sum_init(curr_paired_alns, PairAlignment::ln_prob, unmapped_prob);
         }
         total_prob
     }
 
-    /// Returns iterator over `ReadPairAlignments` for all read pairs.
-    pub fn iter(&self) -> std::slice::Iter<'_, ReadPairAlignments> {
+    /// Returns iterator over `GrouppedAlns` for all read pairs.
+    pub fn iter(&self) -> std::slice::Iter<'_, GrouppedAlns> {
         self.0.iter()
     }
 

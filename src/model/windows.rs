@@ -12,7 +12,7 @@ use crate::{
     },
 };
 use super::{
-    locs::{ReadPairAlignments, PairAlignment},
+    locs::{GrouppedAlns, PairAlignment},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
@@ -340,23 +340,23 @@ impl MultiContigWindows {
     ///
     /// Any alignments that were in the vector before, stay as they are and in the same order.
     pub fn read_windows(&self,
-        pair_alns: &ReadPairAlignments,
+        groupped_alns: &GrouppedAlns,
         out_alns: &mut Vec<ReadWindows>,
         prob_diff: f64,
     ) -> usize {
         let start_len = out_alns.len();
         // Probability of being unmapped to any of the contigs.
-        let unmapped_prob = pair_alns.unmapped_prob() + self.ln_ploidy;
+        let unmapped_prob = groupped_alns.unmapped_prob() + self.ln_ploidy;
         // Current threshold, is updated during the for-loop.
         let mut thresh_prob = unmapped_prob - prob_diff;
         for (i, contig_id) in self.ids().enumerate() {
             let contig_ix = u8::try_from(i).unwrap();
-            let (start_ix, palns) = pair_alns.contig_alns(contig_id);
-            for (aln_ix, paln) in (start_ix..).zip(palns) {
-                let ln_prob = paln.ln_prob();
+            let (start_ix, alns) = groupped_alns.contig_alns(contig_id);
+            for (aln_ix, aln) in (start_ix..).zip(alns) {
+                let ln_prob = aln.ln_prob();
                 if ln_prob >= thresh_prob {
                     thresh_prob = thresh_prob.max(ln_prob - prob_diff);
-                    out_alns.push(ReadWindows::new(aln_ix as u32, contig_ix, paln));
+                    out_alns.push(ReadWindows::new(aln_ix as u32, contig_ix, aln));
                 }
             }
         }

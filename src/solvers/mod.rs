@@ -29,7 +29,15 @@ pub trait Solver : Send + Sync + SetParams + CloneSolver + Display {
     /// Returns likelihood of the assignment.
     ///
     /// In order for `Solver` to be object-safe, rng type should be known in advance.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error>;
+    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error>;
+
+    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
+        if assignments.trivial() {
+            Ok(assignments.init_assignments(|_| 0))
+        } else {
+            self.solve_nontrivial(assignments, rng)
+        }
+    }
 }
 
 /// We cannot ask `Solver` to inherit `Clone`, because then the trait is not object-safe.

@@ -18,7 +18,7 @@ use crate::{
         ContigId, ContigSet, NamedSeq,
         kmers::Kmer,
     },
-    bg::{BgDistr, JsonSer},
+    bg::{BgDistr, JsonSer, Technology, SequencingInfo},
     ext,
     ext::vec::Tuples,
     model::{
@@ -45,6 +45,7 @@ struct Args {
     threads: u16,
     force: bool,
     strobealign: PathBuf,
+    minimap: PathBuf,
     samtools: PathBuf,
     seed: Option<u64>,
     debug: bool,
@@ -68,6 +69,7 @@ impl Default for Args {
             threads: 8,
             force: false,
             strobealign: PathBuf::from("strobealign"),
+            minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
             seed: None,
             debug: false,
@@ -93,8 +95,6 @@ impl Args {
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
-
-        self.strobealign = ext::sys::find_exe(self.strobealign)?;
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
@@ -185,9 +185,11 @@ fn print_help() {
         "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Strobealign executable. [{}].",
+    println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
         "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
-    println!("    {:KEY$} {:VAL$}  Samtools executable [{}].",
+    println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
+        "    --minimap".green(), "EXE".yellow(), defaults.minimap.display());
+    println!("    {:KEY$} {:VAL$}  Samtools executable    [{}].",
         "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
 
     println!("\n{}", "Other parameters:".bold());
@@ -239,6 +241,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
             Long("debug") => args.debug = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
+            Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -440,7 +443,49 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
     Ok(())
 }
 
-fn map_reads(locus: &LocusData, read_len: f64, args: &Args) -> Result<(), Error> {
+/// Map reads with either Strobealign or Minimap2.
+/// `n_locs`: number of possible alignment locations to examine for each read.
+fn create_mapping_command(
+    ref_path: &Path,
+    reads_path: &Path,
+    seq_info: &SequencingInfo,
+    n_locs: &str,
+    args: &Args,
+) -> Command {
+    let mut cmd: Command;
+    if seq_info.technology() == Technology::Illumina {
+        cmd = Command::new(&args.strobealign);
+        // NOTE: Provide single input FASTQ, and do not use --interleaved option.
+        // This is because Strobealign starts to connect read pairs in multiple ways,
+        // which produces too large output, and takes a lot of time.
+        cmd.args(&[
+            "--no-progress",
+            "-M", n_locs,   // Try as many secondary locations as possible.
+            "-N", n_locs,   // Output as many secondary alignments as possible.
+            "-S", "0.5",     // Try candidate sites with score >= 0.5 * best score.
+            "-f", "0",       // Do not discard repetitive minimizers.
+            "-k", "15",      // Use smaller minimizers to get more matches.
+            "--eqx",         // Output X/= instead of M operations.
+            "-r", &format!("{:.1}", seq_info.mean_read_len()),
+            "-t", &args.threads.to_string()]);
+    } else {
+        cmd = Command::new(&args.minimap);
+        cmd.args(&[
+            "-a", // Output SAM format,
+            "-x", seq_info.technology().minimap_preset(), // Set mapping preset.
+            "-N", n_locs,   // Output as many secondary alignments as possible.
+            "-f", "0",       // Do not discard repetitive minimizers.
+            "--eqx",         // Output X/= instead of M operations.
+            "-Y",            // Use soft clipping.
+            "-t", &args.threads.to_string()]);
+    }
+    cmd.arg(&ref_path).arg(&reads_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Result<(), Error> {
     if locus.aln_filename.exists() {
         log::info!("    Skipping read mapping");
         return Ok(());
@@ -451,25 +496,8 @@ fn map_reads(locus: &LocusData, read_len: f64, args: &Args) -> Result<(), Error>
     // Output at most this number of alignments per read.
     let n_locs = min(30000, locus.set.len() * 30).to_string();
     let start = Instant::now();
-    let mut strobealign_cmd = Command::new(&args.strobealign);
-    strobealign_cmd.args(&[
-        "--no-progress",
-        // NOTE: Provide single input FASTQ, and do not use --interleaved option.
-        // This is because Strobealign starts to connect read pairs in multiple ways,
-        // which produces too large output, and takes a lot of time.
-        "-M", &n_locs,   // Try as many secondary locations as possible.
-        "-N", &n_locs,   // Output as many secondary alignments as possible.
-        "-S", "0.5",     // Try candidate sites with score >= 0.2 * best score.
-        "-f", "0",       // Do not discard repetitive minimizers.
-        "-k", "15",      // Use smaller minimizers to get more matches.
-        "--eqx",         // Output X/= instead of M operations.
-        "-r", &format!("{:.1}", read_len),
-        "-t", &args.threads.to_string()])
-        .arg(&in_fasta) // Input fasta.
-        .arg(&locus.reads_filename) // Input FASTQ.
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = strobealign_cmd.spawn()?;
+    let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, seq_info, &n_locs, args);
+    let mut child = mapping_cmd.spawn()?;
     let child_stdout = child.stdout.take().unwrap();
 
     let mut samtools_cmd = Command::new(&args.samtools);
@@ -477,7 +505,7 @@ fn map_reads(locus: &LocusData, read_len: f64, args: &Args) -> Result<(), Error>
         .arg("-o").arg(&locus.tmp_aln_filename)
         .stdin(Stdio::from(child_stdout));
 
-    log::debug!("    {} | {}", ext::fmt::command(&strobealign_cmd), ext::fmt::command(&samtools_cmd));
+    log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
     let samtools_output = samtools_cmd.output()?;
     let bwa_output = child.wait_with_output()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
@@ -501,7 +529,7 @@ fn analyze_locus(
 ) -> Result<(), Error>
 {
     log::info!("Analyzing {}", locus.set.tag());
-    map_reads(locus, bg_distr.seq_info().mean_read_len(), &args)?;
+    map_reads(locus, bg_distr.seq_info(), &args)?;
 
     log::info!("    [{}] Calculating read alignment probabilities", locus.set.tag());
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
@@ -566,7 +594,7 @@ fn analyze_locus(
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let timer = Instant::now();
-    let args = parse_args(argv)?.validate()?;
+    let mut args = parse_args(argv)?.validate()?;
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
@@ -576,6 +604,11 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
     crate::bg::depth::ReadDepthParams::validate_sizes(
         bg_distr.depth().window_size(), bg_distr.depth().neighb_size(), args.assgn_params.boundary_size)?;
+    if bg_distr.seq_info().technology() == Technology::Illumina {
+        args.strobealign = ext::sys::find_exe(args.strobealign)?;
+    } else {
+        args.minimap = ext::sys::find_exe(args.minimap)?;
+    }
 
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
     recruit_reads(&loci, &args)?;

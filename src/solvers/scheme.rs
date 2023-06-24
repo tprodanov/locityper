@@ -24,7 +24,7 @@ use crate::{
     seq::{ContigId, ContigNames},
     model::{
         Params,
-        locs::{AllPairAlignments, TwoIntervals},
+        locs::{AllAlignments, TwoIntervals},
         windows::{ContigWindows, MultiContigWindows},
         assgn::{ReadAssignment, SelectedCounter},
         dp_cache::CachedDepthDistrs,
@@ -40,7 +40,7 @@ fn write_alns(
     f: &mut impl io::Write,
     prefix: &str,
     assgn: &ReadAssignment,
-    all_alns: &AllPairAlignments,
+    all_alns: &AllAlignments,
     mut selected: impl Iterator<Item = f64>,
 ) -> io::Result<()> {
     for (rp, paired_alns) in all_alns.iter().enumerate() {
@@ -242,7 +242,7 @@ impl Scheme {
 /// Various structures, needed for sample genotyping.
 pub struct Data {
     pub scheme: Scheme,
-    pub all_alns: AllPairAlignments,
+    pub all_alns: AllAlignments,
     pub contig_windows: Vec<ContigWindows>,
     pub contigs: Arc<ContigNames>,
     pub cached_distrs: Arc<CachedDepthDistrs>,
@@ -606,8 +606,9 @@ impl<'a, W: Write> Helper<'a, W> {
         }
         self.solved_genotypes += 1;
         let now_dur = self.timer.elapsed();
-        const UPDATE_FREQ: u64 = 2;
-        if (now_dur - self.last_msg).as_secs() >= UPDATE_FREQ {
+        // Update frequency in seconds.
+        const UPDATE_SECS: u64 = 2;
+        if (now_dur - self.last_msg).as_secs() >= UPDATE_SECS {
             let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
             log::debug!("        [{:width$}/{},  {:.4} s/tuple]  Best: {} -> {:11.2}", self.solved_genotypes,
                 self.curr_genotypes, speed, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);

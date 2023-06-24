@@ -50,7 +50,7 @@ impl GreedySolver {
 
 impl Solver for GreedySolver {
     /// Single greedy iteration to find the best read assignment.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
+    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
         let mut target = ReassignmentTarget::new();
         let mut curr_plato = 0;
@@ -173,7 +173,7 @@ impl SimAnneal {
 
 impl Solver for SimAnneal {
     /// Run simulated annealing once to find the best read assignment.
-    fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
+    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         assignments.init_assignments(
             |possible_alns| IterExt::argmax(possible_alns.iter().map(ReadWindows::ln_prob)).0);
         let mut target = ReassignmentTarget::new();
