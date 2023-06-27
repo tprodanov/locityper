@@ -196,7 +196,7 @@ impl LightAlignment {
 pub struct Alignment {
     name: Vec<u8>,
     cigar: Cigar,
-    info: LightAlignment,
+    inner: LightAlignment,
 }
 
 impl Alignment {
@@ -210,7 +210,23 @@ impl Alignment {
     {
         Self {
             name: record.qname().to_vec(),
-            info: LightAlignment::new(record, &cigar, read_end, contigs, ln_prob),
+            inner: LightAlignment::new(record, &cigar, read_end, contigs, ln_prob),
+            cigar,
+        }
+    }
+
+    /// Creates new alignment, but does not store the alignment name.
+    pub fn new_without_name(
+        record: &Record,
+        cigar: Cigar,
+        read_end: ReadEnd,
+        contigs: Arc<ContigNames>,
+        ln_prob: f64,
+    ) -> Self
+    {
+        Self {
+            name: Vec::with_capacity(0),
+            inner: LightAlignment::new(record, &cigar, read_end, contigs, ln_prob),
             cigar,
         }
     }
@@ -231,32 +247,32 @@ impl Alignment {
     }
 
     pub fn take_light_aln(self) -> LightAlignment {
-        self.info
+        self.inner
     }
 
     /// Counts operations in the alignment, excluding operations outside the boundary of the `region`.
     pub fn count_region_operations(&self, region: &Interval) -> OperCounts<u32> {
-        debug_assert_eq!(self.info.interval.contig_id(), region.contig_id());
+        debug_assert_eq!(self.inner.interval.contig_id(), region.contig_id());
         let region_start = region.start();
         let region_end = region.end();
 
         let mut counts = OperCounts::default();
-        let mut rpos = self.info.interval.start();
+        let mut rpos = self.inner.interval.start();
         let mut first = true;
         for item in self.cigar.iter() {
             let oplen = item.len();
             match item.operation() {
                 Operation::Equal => {
                     // Equal, Diff, Del: same clause, different operations.
-                    counts.matches += min(rpos + oplen, region_end) - max(rpos, region_start);
+                    counts.matches += min(rpos + oplen, region_end).saturating_sub(max(rpos, region_start));
                     rpos += oplen;
                 }
                 Operation::Diff => {
-                    counts.mismatches += min(rpos + oplen, region_end) - max(rpos, region_start);
+                    counts.mismatches += min(rpos + oplen, region_end).saturating_sub(max(rpos, region_start));
                     rpos += oplen;
                 }
                 Operation::Del => {
-                    counts.deletions += min(rpos + oplen, region_end) - max(rpos, region_start);
+                    counts.deletions += min(rpos + oplen, region_end).saturating_sub(max(rpos, region_start));
                     rpos += oplen;
                 }
                 Operation::Ins => {
@@ -298,11 +314,11 @@ impl Alignment {
                     counts.clipping += if first {
                         // If first operation of the CIGAR,
                         // limit clipping to the distance between contig start (0) and alignment start.
-                        min(oplen, self.info.interval.start())
+                        min(oplen, self.inner.interval.start())
                     } else {
                         // Otherwise, we should be at the end of the CIGAR,
                         // limit clipping to the distance distance between curr position and contig end.
-                        min(oplen, contig_end.saturating_sub(self.info.interval.end()))
+                        min(oplen, contig_end.saturating_sub(self.inner.interval.end()))
                     };
                 }
                 op => panic!("Unhandled CIGAR operation {}", op),
@@ -317,12 +333,12 @@ impl Deref for Alignment {
     type Target = LightAlignment;
 
     fn deref(&self) -> &LightAlignment {
-        &self.info
+        &self.inner
     }
 }
 
 impl DerefMut for Alignment {
     fn deref_mut(&mut self) -> &mut LightAlignment {
-        &mut self.info
+        &mut self.inner
     }
 }

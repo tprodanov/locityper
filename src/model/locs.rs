@@ -68,11 +68,11 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         dbg_writer: &mut impl Write,
     ) -> Result<(u64, bool), Error>
     {
-        assert!(self.has_more, "Cannot read any more records from a BAM file.");
+        assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name_hash = fnv1a(self.record.qname());
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tNA\tF\tF\tNA", name_hash, read_end)?;
-            // Read the next record, and return false if there are no more records left.
+            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\tF\tNA", name_hash, read_end)?;
+            // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
             return Ok((name_hash, false));
         }
@@ -82,7 +82,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         let mut max_prob = f64::NEG_INFINITY;
         let start_len = alns.len();
         loop {
-            let mut aln = Alignment::new(
+            let mut aln = Alignment::new_without_name(
                 &self.record, Cigar::from_raw(&self.record), read_end, Arc::clone(&self.contigs), f64::NAN);
             let aln_interval = aln.interval();
             let contig_len = self.contigs.get_len(aln_interval.contig_id());
@@ -94,7 +94,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let (edit_dist, read_len) = read_prof.edit_and_read_len();
             let passes = edit_dist <= self.err_prof.allowed_edit_dist(read_len);
             any_passes |= passes;
-            writeln!(dbg_writer, "{:X}\t{}\t{}\t{}/{}\t{}\t{}\t{:.2}",
+            writeln!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}",
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
                 edit_dist, read_len, if passes { 'T' } else { 'F' }, Ln::to_log10(aln_prob))?;
             aln.set_ln_prob(aln_prob);
