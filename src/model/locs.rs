@@ -9,18 +9,18 @@ use crate::{
     Error,
     seq::{
         Interval, ContigId, ContigNames,
-        aln::{LightAlignment, ReadEnd},
+        aln::{LightAlignment, Alignment, ReadEnd},
         cigar::Cigar,
     },
     bg::{
-        err_prof::{OpCounts, ErrorProfile},
+        err_prof::ErrorProfile,
         insertsz::InsertDistr,
     },
     algo::{fnv1a, bisect},
     math::Ln,
 };
 
-pub(crate) const CSV_HEADER: &'static str = "read_hash\tread_end\tinterval\tedit_dist\tpasses\tlik";
+pub(crate) const CSV_HEADER: &'static str = "read_hash\tread_end\tinterval\tcentral\tedit_dist\tpasses\tlik";
 
 /// BAM reader, which stores the next record within.
 /// Contains `read_mate_alns` method, which consecutively reads all records with the same name
@@ -31,6 +31,7 @@ struct FilteredReader<'a, R: bam::Read> {
     has_more: bool,
     contigs: Arc<ContigNames>,
     err_prof: &'a ErrorProfile,
+    boundary: u32,
     /// Allow alignments with ln-probability at least `best_prob - max_diff` for the same read end.
     max_diff: f64,
 }
@@ -40,13 +41,14 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         mut reader: R,
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
+        boundary: u32,
         max_diff: f64
     ) -> Result<Self, Error> {
         let mut record = bam::Record::new();
         Ok(FilteredReader {
             // Reader would return None if there are no more records.
             has_more: reader.read(&mut record).transpose()?.is_some(),
-            reader, record, contigs, err_prof, max_diff,
+            reader, record, contigs, err_prof, boundary, max_diff,
         })
     }
 
@@ -57,42 +59,50 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     ///
     /// If best edit distance is too high, does not add any new alignments.
     /// Otherwise, normalizes all alignment probabilities by the best probability (therefore max is always = 0).
+    ///
+    /// Return pair (name_hash, any_central [true if at least one alignment is in the central region]).
     fn load_read_end_alns(
         &mut self,
         read_end: ReadEnd,
         alns: &mut Vec<LightAlignment>,
         dbg_writer: &mut impl Write,
-    ) -> Result<u64, Error>
+    ) -> Result<(u64, bool), Error>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file.");
         let name_hash = fnv1a(self.record.qname());
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tNA\tF\tNA", name_hash, read_end)?;
+            writeln!(dbg_writer, "{:X}\t{}\t*\tNA\tF\tF\tNA", name_hash, read_end)?;
             // Read the next record, and return false if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
-            return Ok(name_hash);
+            return Ok((name_hash, false));
         }
 
+        let mut any_central = false;
         let mut any_passes = false;
         let mut max_prob = f64::NEG_INFINITY;
         let start_len = alns.len();
         loop {
-            let cigar = Cigar::from_raw(&self.record);
-            let read_prof = OpCounts::from_cigar(&cigar);
-            let read_len = cigar.query_len();
-            let edit_dist = read_prof.edit_distance(read_len);
-            let aln_passes = edit_dist <= self.err_prof.allowed_edit_dist(read_len);
-            any_passes |= aln_passes;
+            let mut aln = Alignment::new(
+                &self.record, Cigar::from_raw(&self.record), read_end, Arc::clone(&self.contigs), f64::NAN);
+            let aln_interval = aln.interval();
+            let contig_len = self.contigs.get_len(aln_interval.contig_id());
+            let central = self.boundary < aln_interval.end() && aln_interval.start() < contig_len - self.boundary;
+            any_central |= central;
+
+            let read_prof = aln.count_region_operations_fast(contig_len);
             let aln_prob = self.err_prof.ln_prob(&read_prof);
-            let aln = LightAlignment::new(&self.record, &cigar, read_end, Arc::clone(&self.contigs), aln_prob);
-            writeln!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
-                edit_dist, if aln_passes { 'T' } else { 'F' }, Ln::to_log10(aln_prob))?;
+            let (edit_dist, read_len) = read_prof.edit_and_read_len();
+            let passes = edit_dist <= self.err_prof.allowed_edit_dist(read_len);
+            any_passes |= passes;
+            writeln!(dbg_writer, "{:X}\t{}\t{}\t{}/{}\t{}\t{}\t{:.2}",
+                name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
+                edit_dist, read_len, if passes { 'T' } else { 'F' }, Ln::to_log10(aln_prob))?;
+            aln.set_ln_prob(aln_prob);
 
             if aln_prob >= max_prob - self.max_diff {
                 max_prob = max_prob.max(aln_prob);
-                alns.push(aln);
+                alns.push(aln.take_light_aln());
             }
-
             if self.reader.read(&mut self.record).transpose()?.is_none() {
                 self.has_more = false;
                 break;
@@ -121,7 +131,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         } else {
             alns.truncate(start_len);
         }
-        Ok(name_hash)
+        Ok((name_hash, any_central))
     }
 }
 
@@ -136,7 +146,7 @@ impl PrelimAlignments {
     /// Creates `PrelimAlignments` from records.
     ///
     /// Only store read pairs where at least one read-end alignment
-    /// (i)  has probability over `unmapped_penalty` AND
+    /// (i)  has edit distance that is not too high (see error profile)  AND
     /// (ii) middle of the alignment lies within an inner region of any contig (beyond the boundary region).
     pub(crate) fn load(
         reader: impl bam::Read,
@@ -149,18 +159,18 @@ impl PrelimAlignments {
     {
         log::info!("[{}] Loading read alignments", contigs.tag());
         let max_diff = -(params.unmapped_penalty - params.prob_diff);
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), err_prof, max_diff)?;
-        let left_boundary = params.boundary_size - params.tweak;
-        let right_boundaries: Vec<_> = contigs.lengths().iter()
-            .map(|len| len.saturating_sub(left_boundary)).collect();
-        let mut all_alns = Vec::new();
+        let boundary = params.boundary_size.checked_sub(params.tweak).unwrap();
+        assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
+            "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), err_prof, boundary, max_diff)?;
 
+        let mut all_alns = Vec::new();
         let mut hashes = IntSet::default();
         while reader.has_more {
             let read_name = String::from_utf8_lossy(reader.record.qname()).into_owned();
             write!(dbg_writer, "{}=", read_name)?;
             let mut alns = Vec::new();
-            let name_hash = reader.load_read_end_alns(ReadEnd::First, &mut alns, &mut dbg_writer)?;
+            let (name_hash, mut central) = reader.load_read_end_alns(ReadEnd::First, &mut alns, &mut dbg_writer)?;
             if !hashes.insert(name_hash) {
                 log::warn!("Read {} produced hash collision ({:X}). \
                     If many such messages, reads appear in an unordered fashion, will lead to errors",
@@ -168,17 +178,14 @@ impl PrelimAlignments {
             }
 
             if is_paired_end {
-                let name_hash2 = reader.load_read_end_alns(ReadEnd::Second, &mut alns, &mut dbg_writer)?;
+                let (name_hash2, central2) = reader.load_read_end_alns(ReadEnd::Second, &mut alns, &mut dbg_writer)?;
                 if name_hash != name_hash2 {
                     return Err(Error::InvalidData(format!("Read {} with hash {:X} does not have a second read end",
                         read_name, name_hash)));
                 }
+                central |= central2;
             }
-
-            // Does any of the read alignment lie within the main part of the locus?
-            let any_central = alns.iter().any(|aln| left_boundary < aln.interval().end()
-                && aln.interval().start() < right_boundaries[aln.contig_id().ix()]);
-            if any_central {
+            if central {
                 writeln!(dbg_writer, "{:X}\tsave\t{} alns", name_hash, alns.len())?;
                 all_alns.push((name_hash, alns));
             } else {
@@ -187,7 +194,7 @@ impl PrelimAlignments {
         }
         Ok(Self {
             contigs: Arc::clone(&contigs),
-            all_alns
+            all_alns,
         })
     }
 

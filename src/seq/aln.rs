@@ -3,13 +3,14 @@ use std::{
     sync::Arc,
     ops::{Deref, DerefMut},
     borrow::Cow,
+    cmp::{min, max},
 };
 use htslib::bam::Record;
 use crate::{
-    bg::InsertDistr,
+    bg::{InsertDistr, err_prof::OperCounts},
     seq::{
         Interval, ContigId, ContigNames,
-        cigar::Cigar,
+        cigar::{Cigar, Operation},
     },
 };
 
@@ -103,15 +104,6 @@ impl fmt::Display for ReadEnd {
     }
 }
 
-/// Returns reference interval for the alignment. Panics if the record is unmapped.
-pub fn ref_interval(record: &Record, cigar: &Cigar, contigs: Arc<ContigNames>) -> Interval {
-    assert!(!record.is_unmapped(),
-        "Cannot get alignment interval for an unmapped record {}", String::from_utf8_lossy(record.qname()));
-    let contig_id = ContigId::new(record.tid());
-    let start = u32::try_from(record.pos()).unwrap();
-    Interval::new(contigs, contig_id, start, start + cigar.ref_len())
-}
-
 /// Light alignment information. Use `Alignemnt` to store alignment name and CIGAR as well.
 #[derive(Clone)]
 pub struct LightAlignment {
@@ -131,8 +123,13 @@ impl LightAlignment {
         ln_prob: f64,
     ) -> Self
     {
+        assert!(!record.is_unmapped(),
+            "Cannot get alignment interval for an unmapped record {}", String::from_utf8_lossy(record.qname()));
+        let contig_id = ContigId::new(record.tid());
+        let start = u32::try_from(record.pos()).unwrap();
+        let interval = Interval::new(contigs, contig_id, start, start + cigar.ref_len());
         Self {
-            interval: ref_interval(record, cigar, contigs),
+            interval,
             strand: Strand::from_record(record),
             ln_prob, read_end,
         }
@@ -188,14 +185,9 @@ impl LightAlignment {
         self.strand == mate.strand
     }
 
-    /// Returns insert size probability.
-    pub fn insert_size_prob(&self, mate: &LightAlignment, insert_distr: &InsertDistr) -> f64 {
-        insert_distr.ln_prob(self.insert_size(mate), self.pair_orientation(mate))
-    }
-
     /// Returns probability of two alignments: probability of first * probability of second * insert size probability.
     pub fn paired_prob(&self, mate: &LightAlignment, insert_distr: &InsertDistr) -> f64 {
-        self.ln_prob + mate.ln_prob + self.insert_size_prob(mate, insert_distr)
+        self.ln_prob + mate.ln_prob + insert_distr.ln_prob(self.insert_size(mate), self.pair_orientation(mate))
     }
 }
 
@@ -236,6 +228,88 @@ impl Alignment {
     /// Returns alignment CIGAR.
     pub fn cigar(&self) -> &Cigar {
         &self.cigar
+    }
+
+    pub fn take_light_aln(self) -> LightAlignment {
+        self.info
+    }
+
+    /// Counts operations in the alignment, excluding operations outside the boundary of the `region`.
+    pub fn count_region_operations(&self, region: &Interval) -> OperCounts<u32> {
+        debug_assert_eq!(self.info.interval.contig_id(), region.contig_id());
+        let region_start = region.start();
+        let region_end = region.end();
+
+        let mut counts = OperCounts::default();
+        let mut rpos = self.info.interval.start();
+        let mut first = true;
+        for item in self.cigar.iter() {
+            let oplen = item.len();
+            match item.operation() {
+                Operation::Equal => {
+                    // Equal, Diff, Del: same clause, different operations.
+                    counts.matches += min(rpos + oplen, region_end) - max(rpos, region_start);
+                    rpos += oplen;
+                }
+                Operation::Diff => {
+                    counts.mismatches += min(rpos + oplen, region_end) - max(rpos, region_start);
+                    rpos += oplen;
+                }
+                Operation::Del => {
+                    counts.deletions += min(rpos + oplen, region_end) - max(rpos, region_start);
+                    rpos += oplen;
+                }
+                Operation::Ins => {
+                    // Only add insertion if it is within boundaries.
+                    counts.insertions += if region_start <= rpos && rpos < region_end { oplen } else { 0 };
+                }
+                Operation::Soft => {
+                    counts.clipping += if first {
+                        // If first operation of the CIGAR,
+                        // limit clipping to the distance between the start of the region and current position.
+                        min(oplen, rpos.saturating_sub(region_start))
+                    } else {
+                        // Otherwise, we should be at the end of the CIGAR,
+                        // limit clipping to the distance between curr position and the end.
+                        min(oplen, region_end.saturating_sub(rpos))
+                    };
+                }
+                op => panic!("Unhandled CIGAR operation {}", op),
+            }
+            first = false;
+        }
+        counts
+    }
+
+    /// Counts operations in the alignment, excluding operations outside the boundary `0..contig_end`.
+    /// In contrast to `count_region_operations`, this function assumes that there is no alignment
+    /// out of the contig boundaries.
+    pub fn count_region_operations_fast(&self, contig_end: u32) -> OperCounts<u32> {
+        let mut counts = OperCounts::default();
+        let mut first = true;
+        for item in self.cigar.iter() {
+            let oplen = item.len();
+            match item.operation() {
+                Operation::Equal => counts.matches += oplen,
+                Operation::Diff => counts.mismatches += oplen,
+                Operation::Del => counts.deletions += oplen,
+                Operation::Ins => counts.insertions += oplen,
+                Operation::Soft => {
+                    counts.clipping += if first {
+                        // If first operation of the CIGAR,
+                        // limit clipping to the distance between contig start (0) and alignment start.
+                        min(oplen, self.info.interval.start())
+                    } else {
+                        // Otherwise, we should be at the end of the CIGAR,
+                        // limit clipping to the distance distance between curr position and contig end.
+                        min(oplen, contig_end.saturating_sub(self.info.interval.end()))
+                    };
+                }
+                op => panic!("Unhandled CIGAR operation {}", op),
+            }
+            first = false;
+        }
+        counts
     }
 }
 

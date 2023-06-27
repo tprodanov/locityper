@@ -5,3 +5,4 @@
 - `draw_depth`: handle repeated genotypes.
 - Read depth estimation: underestimating variance at low subsampling rates.
 - Count edit distance only within the region of interest!
+- What to do with read pairs where one of the mates is unmapped?
