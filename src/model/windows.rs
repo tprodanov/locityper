@@ -7,12 +7,12 @@ use crate::{
     ext::vec::F64Ext,
     bg::depth::ReadDepth,
     seq::{
-        self, ContigId, ContigNames, ContigSet,
+        self, ContigId, ContigNames, ContigSet, Interval,
         kmers::KmerCounts,
     },
 };
 use super::{
-    locs::{GrouppedAlns, PairAlignment},
+    locs::{GrouppedAlignments, PairAlignment},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
@@ -83,8 +83,8 @@ impl ReadWindows {
         Self {
             aln_ix,
             contig_ix: Some(contig_ix),
-            range1: paln.intervals().range1(),
-            range2: paln.intervals().range2(),
+            range1: paln.intervals().first().map(Interval::range),
+            range2: paln.intervals().second().map(Interval::range),
             ln_prob: paln.ln_prob(),
             windows: AffectedWindows::new(),
         }
@@ -340,7 +340,7 @@ impl MultiContigWindows {
     ///
     /// Any alignments that were in the vector before, stay as they are and in the same order.
     pub fn read_windows(&self,
-        groupped_alns: &GrouppedAlns,
+        groupped_alns: &GrouppedAlignments,
         out_alns: &mut Vec<ReadWindows>,
         prob_diff: f64,
     ) -> usize {

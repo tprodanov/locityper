@@ -15,9 +15,10 @@ pub struct Params {
     pub boundary_size: u32,
     /// Read depth likelihood contribution, relative to read alignment likelihood.
     pub depth_contrib: f64,
-    /// For each read pair, all alignments less probable than `best_prob - prob_diff` are discarded.
+    /// For each read pair, all alignments to a specific genotype,
+    /// less probable than `best_prob - prob_diff` are discarded.
     pub prob_diff: f64,
-    /// Unmapped reads receive this penalty.
+    /// Unmapped reads receive minimum alignment probability for this read PLUS this penalty.
     pub unmapped_penalty: f64,
 
     /// Average k-mer frequency is calculated for a window in question.
@@ -38,7 +39,7 @@ impl Default for Params {
             boundary_size: 200,
             depth_contrib: 2.0,
             prob_diff: Ln::from_log10(5.0),
-            unmapped_penalty: Ln::from_log10(-10.0),
+            unmapped_penalty: Ln::from_log10(-5.0),
             rare_kmer: 3.0,
             semicommon_kmer: 5.0,
 

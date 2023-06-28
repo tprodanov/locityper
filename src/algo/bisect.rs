@@ -81,7 +81,7 @@ pub fn right_by_at<T, F: FnMut(&T) -> Ordering>(a: &[T], mut f: F, mut lo: usize
 ///
 /// First, values are examined between `lo` and `lo+step`, with `step` gradually increased, if needed.
 pub fn right_by_approx<T, F>(a: &[T], mut f: F, lo: usize, hi: usize, mut step: usize) -> usize
-where F: FnMut(&T) -> Ordering
+where F: FnMut(&T) -> Ordering,
 {
     assert!(hi <= a.len() && step > 0,
         "Cannot perform binary search on indices {}, {} (len: {}, step: {})", lo, hi, a.len(), step);
@@ -89,4 +89,20 @@ where F: FnMut(&T) -> Ordering
         step *= 2;
     }
     right_by_at(a, f, lo, min(lo + step, hi))
+}
+
+/// Performs linear search between `lo` and `hi`
+/// and finds the first index `i` where `f(a[i]) -> Greater`.
+///
+/// This function takes $O(hi - lo)$, but can still be faster than binary search if expected $i - lo$ is small.
+pub fn right_linear<T, F>(a: &[T], mut f: F, lo: usize, hi: usize) -> usize
+where F: FnMut(&T) -> Ordering,
+{
+    assert!(hi <= a.len(), "Cannot perform binary search on indices {}, {} (len: {})", lo, hi, a.len());
+    for i in lo..hi {
+        if f(unsafe { a.get_unchecked(i) }) == Ordering::Greater {
+            return i;
+        }
+    }
+    hi
 }

@@ -24,7 +24,7 @@ use crate::{
     seq::{ContigId, ContigNames},
     model::{
         Params,
-        locs::{AllAlignments, TwoIntervals},
+        locs::{AllAlignments, Pair},
         windows::{ContigWindows, MultiContigWindows},
         assgn::{ReadAssignment, SelectedCounter},
         dp_cache::CachedDepthDistrs,
@@ -52,9 +52,9 @@ fn write_alns(
                 write!(f, "*\t*\t")?;
             } else {
                 match paired_alns.ith_aln(aln_ix as usize).intervals() {
-                    TwoIntervals::Both(aln1, aln2) => write!(f, "{}\t{}\t", aln1, aln2),
-                    TwoIntervals::First(aln1) => write!(f, "{}\t*\t", aln1),
-                    TwoIntervals::Second(aln2) => write!(f, "*\t{}\t", aln2),
+                    Pair::Both(interv1, interv2) => write!(f, "{}\t{}\t", interv1, interv2),
+                    Pair::First(interv1) => write!(f, "{}\t*\t", interv1),
+                    Pair::Second(interv2) => write!(f, "*\t{}\t", interv2),
                 }?;
             }
             let prob = Ln::to_log10(curr_windows.ln_prob());

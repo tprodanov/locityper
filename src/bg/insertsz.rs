@@ -40,6 +40,8 @@ pub fn group_mates<'a>(alns: &'a [Alignment]) -> Result<Vec<(usize, usize)>, Err
 
 /// Allow read-pair orientation, if at least 5% pairs support it.
 const ORIENT_THRESH: f64 = 0.05;
+/// Multiply max_size by 4 to get cache size.
+const CACHE_SIZE_MULT: usize = 4;
 
 /// Insert size distribution.
 #[derive(Debug, Clone)]
@@ -144,7 +146,7 @@ impl InsertDistr {
         let max_size = (distr.quantile(1.0 - quantile) + 1e-8).ceil() as u32;
         log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
             min_size, max_size, 100.0 * params.ins_conf_level);
-        let distr = distr.cached(max_size as usize + 1);
+        let distr = distr.cached(max_size as usize * CACHE_SIZE_MULT);
 
         Ok(Self {
             orient_allowed,
@@ -156,7 +158,7 @@ impl InsertDistr {
 
     /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
     pub fn ln_prob(&self, sz: u32, same_orient: bool) -> f64 {
-        if self.in_conf_interval(sz) && self.orient_allowed[usize::from(same_orient)] {
+        if self.orient_allowed[usize::from(same_orient)] {
             self.distr.as_ref().unwrap().ln_pmf(sz)
         } else {
             f64::NEG_INFINITY
@@ -174,7 +176,7 @@ impl InsertDistr {
     }
 
     /// Returns worst available probability at one of the confidence interval edges.
-    pub fn mode_prob(&self) -> f64 {
+    pub fn insert_penalty(&self) -> f64 {
         self.mode_prob
     }
 }
@@ -204,7 +206,7 @@ impl JsonSer for InsertDistr {
         }
         json_get!(obj -> n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool), min_size (as_u32));
 
-        let distr = NBinom::new(n, p).cached(max_size as usize + 1);
+        let distr = NBinom::new(n, p).cached(max_size as usize * CACHE_SIZE_MULT);
         Ok(Self {
             orient_allowed: [fr_allowed, ff_allowed],
             mode_prob: distr.ln_pmf(distr.inner().mode()),

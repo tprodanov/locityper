@@ -23,7 +23,7 @@ use crate::{
     ext::vec::Tuples,
     model::{
         Params as AssgnParams,
-        locs::{self, PrelimAlignments},
+        locs::{self, AllAlignments},
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
     },
@@ -535,17 +535,14 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let err_prof = bg_distr.error_profile();
-    let is_paired = args.is_paired_end();
-    let mut locs = if args.debug {
+    let all_alns = if args.debug {
         let mut reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         writeln!(reads_writer, "{}", locs::CSV_HEADER)?;
-        PrelimAlignments::load(bam_reader, is_paired, contigs, err_prof, &args.assgn_params, reads_writer)?
+        AllAlignments::load(bam_reader, contigs, bg_distr, &args.assgn_params, reads_writer)?
     } else {
-        PrelimAlignments::load(bam_reader, is_paired, contigs, err_prof, &args.assgn_params, io::sink())?
+        AllAlignments::load(bam_reader, contigs, bg_distr, &args.assgn_params, io::sink())?
     };
 
-    let all_alns = locs.identify_locations(bg_distr.insert_distr(), &args.assgn_params);
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
     if args.debug || scheme.has_dbg_output() {
         let mut windows_writer = ext::sys::create_gzip(&locus.out_dir.join("windows.bed.gz"))?;
@@ -602,6 +599,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
+    validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
+        "Paired-end/Single-end status does not match background data");
     crate::bg::depth::ReadDepthParams::validate_sizes(
         bg_distr.depth().window_size(), bg_distr.depth().neighb_size(), args.assgn_params.boundary_size)?;
     if bg_distr.seq_info().technology() == Technology::Illumina {
