@@ -80,6 +80,7 @@ impl Default for Loess {
 /// Uses local polynomials of degree `deg`.
 fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: usize) -> Vec<f64> {
     let n = x.len();
+    assert!(n > 0, "Cannot calculate LOESS on an empty vector");
     assert!(n == y.len(), "Cannot calculate LOESS on vectors of different length ({} and {})", n, y.len());
     let ixs = VecExt::argsort(x);
     let x = VecExt::reorder(x, &ixs);

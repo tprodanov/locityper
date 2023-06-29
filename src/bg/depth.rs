@@ -78,7 +78,7 @@ fn count_reads<'a>(
 
 /// Discard windows, where the region <left_padding><window><right padding> (sum length = neighb_size) contains
 /// - unknown nucleotides (Ns),
-/// - frequent k-mers (average k-mer frequency > max_kmer_freq).
+/// - frequent k-mers (specific k-mer percentile > 1).
 ///
 /// All windows must have the same length! (is not checked)
 ///
@@ -92,7 +92,7 @@ fn filter_windows(
     mut dbg_writer: impl Write,
 ) -> io::Result<(Vec<WindowCounts>, Vec<f64>)>
 {
-    writeln!(dbg_writer, "start\tgc\tkmer_freq\tkeep\tdepth1\tdepth2")?;
+    writeln!(dbg_writer, "start\tgc\tkmer_perc\tkeep\tdepth1\tdepth2")?;
     log::debug!("    Total windows:   {:7}", windows.len());
     let mut have_ns = 0;
     let mut have_common_kmers = 0;
@@ -102,7 +102,9 @@ fn filter_windows(
     let window_padding = (params.neighb_size - params.window_size) / 2;
     let neighb_size = params.neighb_size as usize;
     let neighb_kmers = neighb_size + 1 - k as usize;
-    let norm_fct = 1.0 / (neighb_kmers as f64);
+    assert!(neighb_kmers > 0);
+    let mut kmer_buffer = vec![0; neighb_kmers];
+    let percentile_index = ((neighb_kmers - 1) as f64 * 0.01 * params.kmer_perc) as usize;
 
     let mut sel_windows = Vec::with_capacity(windows.len());
     let mut gc_contents = Vec::with_capacity(windows.len());
@@ -110,22 +112,23 @@ fn filter_windows(
         let start_ix = (window.start - window_padding - seq_shift) as usize;
         let window_seq = &ref_seq[start_ix..start_ix + neighb_size];
         let mut keep = true;
-        let mut mean_kmer_freq = f64::NAN;
+        let mut kmer_perc = 0;
         let mut gc_content = f64::NAN;
         if seq::has_n(window_seq) {
             have_ns += 1;
             keep = false
         } else {
-            mean_kmer_freq = norm_fct * kmer_counts[start_ix..start_ix + neighb_kmers]
-                .iter().copied().map(f64::from).sum::<f64>();
+            kmer_buffer.copy_from_slice(&kmer_counts[start_ix..start_ix + neighb_kmers]);
+            kmer_buffer.sort_unstable();
+            kmer_perc = kmer_buffer[percentile_index];
             gc_content = seq::gc_content(window_seq);
-            if mean_kmer_freq > params.max_kmer_freq {
+            if kmer_perc > 1 {
                 have_common_kmers += 1;
                 keep = false;
             }
         }
 
-        writeln!(dbg_writer, "{}\t{:.1}\t{:.1}\t{}\t{}\t{}", window.start, gc_content, mean_kmer_freq,
+        writeln!(dbg_writer, "{}\t{:.1}\t{}\t{}\t{}\t{}", window.start, gc_content, kmer_perc,
             if keep { 'T' } else { 'F' }, window.depth[0], window.depth[1])?;
         if keep {
             sel_windows.push(window);
@@ -240,9 +243,10 @@ pub struct ReadDepthParams {
     /// Default: 1000.
     pub boundary_size: u32,
 
-    /// Filter windows with too many frequent k-mers (average frequency must be at most this value).
-    /// Default: 1.2.
-    pub max_kmer_freq: f64,
+    /// Filter windows with too many frequent k-mers:
+    /// where less than this percetage of k-mers are unique.
+    /// Default: 90.
+    pub kmer_perc: f64,
 
     /// When calculating read depth averages for various GC-content values, use `frac_windows` fraction
     /// across all windows. For example, if frac_windows is 0.1 (default),
@@ -271,7 +275,7 @@ impl Default for ReadDepthParams {
             window_size: 100,
             neighb_size: 300,
             boundary_size: 1000,
-            max_kmer_freq: 1.2,
+            kmer_perc: 90.0,
 
             frac_windows: 0.5,
             min_tail_obs: 100,
@@ -299,8 +303,8 @@ impl ReadDepthParams {
         validate_param!(self.ploidy > 0, "Ploidy cannot be zero");
         Self::validate_sizes(self.window_size, self.neighb_size, self.boundary_size)?;
 
-        validate_param!(self.max_kmer_freq >= 1.0,
-            "Maximum k-mer frequency ({}) must be at least 1", self.max_kmer_freq);
+        validate_param!(1.0 < self.kmer_perc && self.kmer_perc <= 100.0,
+            "Kmer percentile ({}) must be within (1, 100].", self.kmer_perc);
         validate_param!(0.0 < self.frac_windows && self.frac_windows <= 1.0,
             "Fraction of windows ({}) must be within (0, 1]", self.frac_windows);
 
@@ -389,7 +393,7 @@ impl ReadDepth {
     ) -> io::Result<Self>
     {
         log::info!("Estimating read depth from {} reads", alignments.len());
-        log::info!("    ploidy {}, subsampling rate {}", params.ploidy, subsampling_rate);
+        log::info!("    Ploidy {}, subsampling rate {}", params.ploidy, subsampling_rate);
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
 

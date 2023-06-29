@@ -283,8 +283,8 @@ fn print_help(extended: bool) {
             "    --neighb".green(), "INT".yellow(), defaults.bg_params.depth.neighb_size);
         println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.boundary_size);
-        println!("    {:KEY$} {:VAL$}  Ignore windows with average k-mer frequency over {} [{}].",
-            "    --kmer-freq".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.max_kmer_freq);
+        println!("    {:KEY$} {:VAL$}  Ignore windows, where less than {}% k-mers are unique [{}].",
+            "    --kmer-perc".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.kmer_perc);
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
             {EMPTY}  each GC-content [{}]. Smaller values lead to less robust estimates,\n\
             {EMPTY}  larger values - to similar estimates across different GC-contents.",
@@ -356,10 +356,11 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.params.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
             }
             Short('w') | Long("window") => args.bg_params.depth.window_size = parser.value()?.parse()?,
-            Long("neighb") | Long("neighborhood") | Long("neighbourhood")
+            Long("neigh") | Long("neighb") | Long("neighborhood") | Long("neighbourhood")
                 => args.bg_params.depth.neighb_size = parser.value()?.parse()?,
             Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse()?,
-            Long("kmer-freq") | Long("kmer-frequency") => args.bg_params.depth.max_kmer_freq = parser.value()?.parse()?,
+            Long("kmer-perc") | Long("kmer-percentage") | Long("kmer-percentile") =>
+                args.bg_params.depth.kmer_perc = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
                 args.bg_params.depth.frac_windows = parser.value()?.parse()?,
             Long("blur-extreme") => {
