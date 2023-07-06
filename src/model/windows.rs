@@ -1,5 +1,5 @@
 use std::{
-    cmp::{Ordering, min},
+    cmp::min,
     io::{self, Write},
 };
 use rand::Rng;
@@ -53,6 +53,15 @@ impl WindowGetter {
             (min(aln_end, self.end) + self.halfw).saturating_sub(self.start) / self.window,
         )
     }
+
+    /// Returns window that is covered by the alignment middle.
+    pub fn middle_window(&self, aln_middle: u32) -> Option<u32> {
+        if self.start <= aln_middle && aln_middle < self.end {
+            Some((aln_middle - self.start) / self.window)
+        } else {
+            None
+        }
+    }
 }
 
 /// First window represents unmapped reads (or windows on the boundary).
@@ -70,12 +79,13 @@ pub struct ReadWindows {
     ln_prob: f64,
     /// Index of the contig (within multi-contig windows).
     contig_ix: Option<u8>,
-    /// Start and end of the first read end alignment.
-    range1: Option<(u32, u32)>,
-    /// Start and end of the second read end alignment.
-    range2: Option<(u32, u32)>,
-    /// Windows, affected by the read.
-    windows: AffectedWindows,
+    /// Middle of the first read alignment.
+    middle1: Option<u32>,
+    /// Middle of the second read alignment.
+    middle2: Option<u32>,
+    /// Windows, to which the read is aligned to.
+    /// Can change based on the random tweaking.
+    windows: [u32; 2],
 }
 
 impl ReadWindows {
@@ -83,10 +93,10 @@ impl ReadWindows {
         Self {
             aln_ix,
             contig_ix: Some(contig_ix),
-            range1: paln.intervals().first().map(Interval::range),
-            range2: paln.intervals().second().map(Interval::range),
             ln_prob: paln.ln_prob(),
-            windows: AffectedWindows::new(),
+            middle1: paln.intervals().first().map(Interval::middle),
+            middle2: paln.intervals().second().map(Interval::middle),
+            windows: [UNMAPPED_WINDOW; 2],
         }
     }
 
@@ -95,9 +105,9 @@ impl ReadWindows {
             ln_prob,
             aln_ix: u32::MAX,
             contig_ix: None,
-            range1: None,
-            range2: None,
-            windows: AffectedWindows::new(),
+            middle1: None,
+            middle2: None,
+            windows: [UNMAPPED_WINDOW; 2],
         }
     }
 
@@ -105,15 +115,7 @@ impl ReadWindows {
         if let Some(i) = self.contig_ix {
             let contig = &mcontigs.by_contig[i as usize];
             let shift = mcontigs.wshifts[i as usize];
-            let (w1s, w1e) = match self.range1 {
-                Some((start, end)) => contig.get_windows(start, end, shift),
-                None => (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
-            };
-            let (w2s, w2e) = match self.range2 {
-                Some((start, end)) => contig.get_windows(start, end, shift),
-                None => (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
-            };
-            self.windows.init_from_ranges(w1s, w1e, w2s, w2e);
+            self.windows = [contig.get_window(shift, self.middle1), contig.get_window(shift, self.middle2)];
         }
     }
 
@@ -125,23 +127,16 @@ impl ReadWindows {
             let tweak1 = (r >> 32) as u32 % (2 * tweak + 1);
             let tweak2 = r as u32 % (2 * tweak + 1);
 
-            let (w1s, w1e) = match self.range1 {
-                Some((start, end)) => contig.get_windows(
-                    (start + tweak1).saturating_sub(tweak), (end + tweak1).saturating_sub(tweak), shift),
-                None => (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
-            };
-            let (w2s, w2e) = match self.range2 {
-                Some((start, end)) => contig.get_windows(
-                    (start + tweak2).saturating_sub(tweak), (end + tweak2).saturating_sub(tweak), shift),
-                None => (UNMAPPED_WINDOW, UNMAPPED_WINDOW + 1),
-            };
-            self.windows.init_from_ranges(w1s, w1e, w2s, w2e);
+            self.windows = [
+                contig.get_window(shift, self.middle1.map(|middle| middle + tweak1)),
+                contig.get_window(shift, self.middle2.map(|middle| middle + tweak2)),
+            ];
         }
     }
 
     /// Returns range of windows, to which the first and the second read ends are aligned.
-    pub fn windows(&self) -> &AffectedWindows {
-        &self.windows
+    pub fn windows(&self) -> [u32; 2] {
+        self.windows
     }
 
     /// Returns ln-probability of the alignment.
@@ -248,12 +243,10 @@ impl ContigWindows {
     }
 
     /// Returns window range within the contig based on the read alignment range.
-    fn get_windows(&self, aln_start: u32, aln_end: u32, shift: u32) -> (u32, u32) {
-        let (start_ix, end_ix) = self.window_getter.covered_middle(aln_start, aln_end);
-        if start_ix < end_ix {
-            (start_ix + shift, end_ix + shift)
-        } else {
-            (BOUNDARY_WINDOW, BOUNDARY_WINDOW + 1)
+    fn get_window(&self, shift: u32, middle: Option<u32>) -> u32 {
+        match middle {
+            Some(middle) => self.window_getter.middle_window(middle).map(|w| w + shift).unwrap_or(BOUNDARY_WINDOW),
+            None => UNMAPPED_WINDOW,
         }
     }
 
@@ -389,70 +382,5 @@ impl MultiContigWindows {
             }
         }
         distrs
-    }
-}
-
-/// Windows, affected by a single read/read pair.
-/// Contains pairs (window index, depth change), sorted by window index.
-#[derive(Debug)]
-pub struct AffectedWindows(Vec<(u32, i8)>);
-
-impl AffectedWindows {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    /// Creates list of affected windows from two ranges `w1s..w1e` and `w2s..w2e`.
-    fn init_from_ranges(&mut self, w1s: u32, w1e: u32, w2s: u32, w2e: u32) {
-        let (s1, s2) = if w1s <= w2s { (w1s, w2s) } else { (w2s, w1s) };
-        let (e1, e2) = if w1e <= w2e { (w1e, w2e) } else { (w2e, w1e) };
-
-        self.0.clear();
-        if e1 <= s2 {
-            // Ranges do not overlap.
-            // s1 < e1 <= s2 < e2
-            self.0.extend((s1..e1).map(|w| (w, 1)));
-            self.0.extend((s2..e2).map(|w| (w, 1)));
-        } else {
-            // Ranges overlap.
-            // s1 <= s2 < e1 <= e2
-            self.0.extend((s1..s2).map(|w| (w, 1)));
-            self.0.extend((s2..e1).map(|w| (w, 2)));
-            self.0.extend((e1..e2).map(|w| (w, 1)));
-        }
-    }
-
-    /// Calculates difference (w, a1 - a2), and fills buffer `self` with it.
-    pub fn fill_diff(&mut self, windows1: &Self, windows2: &Self) {
-        self.0.clear();
-        let mut it1 = windows1.iter();
-        let mut it2 = windows2.iter();
-        const UNDEF: (u32, i8) = (u32::MAX, 0);
-        let (mut w1, mut a1) = it1.next().unwrap_or(UNDEF);
-        let (mut w2, mut a2) = it2.next().unwrap_or(UNDEF);
-        while w1 < u32::MAX || w2 < u32::MAX {
-            match w1.cmp(&w2) {
-                Ordering::Less => {
-                    self.0.push((w1, a1));
-                    (w1, a1) = it1.next().unwrap_or(UNDEF);
-                }
-                Ordering::Equal => {
-                    if a1 != a2 {
-                        self.0.push((w1, a1 - a2));
-                    }
-                    (w1, a1) = it1.next().unwrap_or(UNDEF);
-                    (w2, a2) = it2.next().unwrap_or(UNDEF);
-                }
-                Ordering::Greater => {
-                    self.0.push((w2, -a2));
-                    (w2, a2) = it2.next().unwrap_or(UNDEF);
-                }
-            }
-        }
-    }
-
-    /// Returns iterator over pairs (window index, depth).
-    pub fn iter(&self) -> impl Iterator<Item = (u32, i8)> + std::iter::ExactSizeIterator + '_ {
-        self.0.iter().copied()
     }
 }

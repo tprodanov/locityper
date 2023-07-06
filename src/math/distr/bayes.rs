@@ -17,10 +17,11 @@ impl<T, U, const N: usize> BayesCalc<T, U, N> {
 impl<T: DiscretePmf, U: DiscretePmf, const N: usize> DiscretePmf for BayesCalc<T, U, N> {
     fn ln_pmf(&self, k: u32) -> f64 {
         let null_prob = self.null_hypoth.ln_pmf(k);
-        let mut sum_prob = null_prob;
-        for distr in self.alternative.iter() {
-            sum_prob = Ln::add(sum_prob, distr.ln_pmf(k));
+        let mut probs = [0.0; N];
+        for (prob, distr) in probs.iter_mut().zip(self.alternative.iter()) {
+            *prob = distr.ln_pmf(k);
         }
+        let sum_prob = Ln::sum_init(&probs, null_prob);
         null_prob - sum_prob
     }
 }

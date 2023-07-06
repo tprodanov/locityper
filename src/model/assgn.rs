@@ -7,7 +7,7 @@ use crate::{
 };
 use super::{
     locs::AllAlignments,
-    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadWindows, MultiContigWindows, AffectedWindows},
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadWindows, MultiContigWindows},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
@@ -72,8 +72,10 @@ pub struct ReadAssignment {
     /// Store current read assignment (length: n_reads).
     read_assgn: Vec<u16>,
 
-    /// Total ln-probability of the current read assignments (read depth probabilities + alignment probabilities).
-    likelihood: f64,
+    /// Sum alignment ln-probability.
+    aln_lik: f64,
+    /// Sum read depth ln-probability (without read depth contribution factor).
+    depth_lik: f64,
 }
 
 impl ReadAssignment {
@@ -107,7 +109,8 @@ impl ReadAssignment {
         Self {
             depth: vec![0; contig_windows.total_windows() as usize],
             read_assgn: vec![0; read_ixs.len() - 1],
-            likelihood: f64::NEG_INFINITY,
+            aln_lik: f64::NEG_INFINITY,
+            depth_lik: f64::NEG_INFINITY,
             depth_distrs: contig_windows.get_distributions(cached_distrs),
             depth_contrib: params.depth_contrib,
             contig_windows, read_windows, read_ixs, non_trivial_reads,
@@ -115,18 +118,20 @@ impl ReadAssignment {
     }
 
     /// Define read windows by randomly moving read middle by at most `tweak` bp to either side.
+    /// Resets read assignments and stored likelihood.
     pub fn define_read_windows(&mut self, tweak: u32, rng: &mut impl Rng) {
         if tweak == 0 {
             self.read_windows.iter_mut().for_each(|rw| rw.define_windows_determ(&self.contig_windows));
         } else {
             self.read_windows.iter_mut().for_each(|rw| rw.define_windows_random(&self.contig_windows, tweak, rng));
         }
-        self.likelihood = f64::NEG_INFINITY;
+        self.aln_lik = f64::NEG_INFINITY;
+        self.depth_lik = f64::NEG_INFINITY;
     }
 
     /// Try to initialize read assignments and return total likelihood.
     /// Same as `init_assignments`, but the `select_init` function may fail.
-    pub fn try_init_assignments<F, E>(&mut self, mut select_init: F) -> Result<f64, E>
+    pub fn try_init_assignments<F, E>(&mut self, mut select_init: F) -> Result<(), E>
     where F: FnMut(&[ReadWindows]) -> Result<usize, E>,
     {
         self.depth.fill(0);
@@ -141,19 +146,19 @@ impl ReadAssignment {
                 assert!(start_ix + assgn < end_ix,
                     "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
             }
-            for (w, upd) in self.read_windows[start_ix + assgn].windows().iter() {
-                self.depth[w as usize] += u32::try_from(upd).unwrap();
+            for w in self.read_windows[start_ix + assgn].windows().into_iter() {
+                self.depth[w as usize] += 1;
             }
             *assgn_mut = assgn as u16;
         }
         self.recalc_likelihood();
-        Ok(self.likelihood)
+        Ok(())
     }
 
     /// Initialize read assignments and return total likelihood.
     /// Must provide function, that provides initial assignment for all read pairs with at least two possible locations.
     /// Signature: `select_init(read_windows) -> initial_index`.
-    pub fn init_assignments<F>(&mut self, mut select_init: F) -> f64
+    pub fn init_assignments<F>(&mut self, mut select_init: F)
     where F: FnMut(&[ReadWindows]) -> usize,
     {
         // unwrap as select_init never returns Err.
@@ -162,7 +167,7 @@ impl ReadAssignment {
 
     /// Sets current read assignments with the new ones.
     /// This triggers complete recalculation of the model likelihood, which is then returned.
-    pub fn set_assignments(&mut self, new_assgn: &[u16]) -> f64 {
+    pub fn set_assignments(&mut self, new_assgn: &[u16]) {
         self.read_assgn.clone_from_slice(new_assgn);
         self.depth.fill(0);
         for (rp, assgn) in self.read_assgn.iter().enumerate() {
@@ -171,17 +176,17 @@ impl ReadAssignment {
             let end_ix = self.read_ixs[rp + 1];
             assert!(start_ix + assgn < end_ix,
                 "Read pair #{}: impossible read assignment: {} ({} locations)", rp, assgn, end_ix - start_ix);
-            for (w, upd) in self.read_windows[start_ix + assgn].windows().iter() {
-                self.depth[w as usize] += u32::try_from(upd).unwrap();
+            for w in self.read_windows[start_ix + assgn].windows().into_iter() {
+                self.depth[w as usize] += 1;
             }
         }
         self.recalc_likelihood();
-        self.likelihood
     }
 
     /// Returns the total likelihood of the read assignment.
+    /// Equal to `depth_contrib * depth_lik + aln_lik`
     pub fn likelihood(&self) -> f64 {
-        self.likelihood
+        self.depth_contrib * self.depth_lik + self.aln_lik
     }
 
     /// Returns true if there are no non-trivial reads, therefore there exists only one possible read assignment.
@@ -229,50 +234,87 @@ impl ReadAssignment {
         self.read_windows.len()
     }
 
+    /// Assuming that read depth in `window` will change by `depth_change`,
+    /// calculates the difference between the new and the old ln-probabilities.
+    /// Positive value means that the likelihood will improve.
+    /// Does not actually update the read depth.
+    /// Does not account for read depth contribution.
+    fn atomic_depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
+        if depth_change == 0 {
+            0.0
+        } else {
+            let w = window as usize;
+            let distr = &self.depth_distrs[w];
+            let old_depth = self.depth[w];
+            let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative");
+            distr.ln_pmf(new_depth) - distr.ln_pmf(old_depth)
+        }
+    }
+
+    /// Calculate likelihood difference on four windows (some of them can be equal to others).
+    /// Depth at w1 and w2 is decreased by one, depth at w3 and w4 is increased by one.
+    /// Does not account for read depth contribution.
+    fn depth_lik_diff(&self, w1: u32, w2: u32, w3: u32, w4: u32) -> f64 {
+        // Variables c1..c4 store change in read depth. If cX == 0, it means that wX is the same as some other window.
+        let mut c1 = -1;
+
+        let mut c2 = if w2 == w1 {
+            c1 -= 1; 0
+        } else { -1 };
+
+        let mut c3 = if w3 == w1 {
+            c1 += 1; 0
+        } else if w3 == w2 {
+            c2 += 1; 0
+        } else { 1 };
+
+        let c4 = if w4 == w1 {
+            c1 += 1; 0
+        } else if w4 == w2 {
+            c2 += 1; 0
+        } else if w4 == w3 {
+            c3 += 1; 0
+        } else { 1 };
+
+        debug_assert_eq!(c1 + c2 + c3 + c4, 0);
+        self.atomic_depth_lik_diff(w1, c1) + self.atomic_depth_lik_diff(w2, c2)
+            + self.atomic_depth_lik_diff(w3, c3) + self.atomic_depth_lik_diff(w4, c4)
+    }
+
     /// Calculates improvement, achieved by reassigning read pair `rp` to a new location.
     /// Does not actually performs reassignment.
     pub fn calculate_improvement(&self, target: &ReassignmentTarget) -> f64 {
-        let mut diff = 0.0;
-        for (w, upd) in target.window_diff.iter() {
-            let old_depth = self.depth[w as usize];
-            let new_depth = old_depth.checked_add_signed(i32::from(upd)).unwrap();
-            let distr = &self.depth_distrs[w as usize];
-            diff += distr.ln_pmf(new_depth) - distr.ln_pmf(old_depth);
-        }
-        self.depth_contrib * diff
-            + self.read_windows[target.new_ix].ln_prob() - self.read_windows[target.old_ix].ln_prob()
+        let old_windows = &self.read_windows[target.old_ix];
+        let new_windows = &self.read_windows[target.new_ix];
+        let [w1, w2] = old_windows.windows();
+        let [w3, w4] = new_windows.windows();
+        self.depth_contrib * self.depth_lik_diff(w1, w2, w3, w4) + new_windows.ln_prob() - old_windows.ln_prob()
     }
 
     /// Reassigns read pair to a new location.
     pub fn reassign(&mut self, target: &ReassignmentTarget) {
-        let mut diff = 0.0;
-        for (w, upd) in target.window_diff.iter() {
-            let old_depth = self.depth[w as usize];
-            let new_depth = old_depth.checked_add_signed(i32::from(upd)).unwrap();
-            let distr = &self.depth_distrs[w as usize];
-            diff += distr.ln_pmf(new_depth) - distr.ln_pmf(old_depth);
-            self.depth[w as usize] = new_depth;
-        }
-        diff = self.depth_contrib * diff
-            + self.read_windows[target.new_ix].ln_prob() - self.read_windows[target.old_ix].ln_prob();
+        let old_windows = &self.read_windows[target.old_ix];
+        let new_windows = &self.read_windows[target.new_ix];
+        let [w1, w2] = old_windows.windows();
+        let [w3, w4] = new_windows.windows();
+        self.depth_lik += self.depth_lik_diff(w1, w2, w3, w4);
+        self.aln_lik += new_windows.ln_prob() - old_windows.ln_prob();
+        self.depth[w3 as usize] += 1;
+        self.depth[w4 as usize] += 1;
+        self.depth[w1 as usize] -= 1;
+        self.depth[w2 as usize] -= 1;
         self.read_assgn[target.read_pair] = target.new_assgn;
-        self.likelihood += diff;
     }
 
-    /// Recalculates total model likelihood, and returns separately
-    /// - ln-probability of read depth across all windows,
-    /// - ln-probability of of all read alignments.
-    pub fn recalc_likelihood(&mut self) -> (f64, f64) {
-        let depth_lik = self.depth_distrs.iter()
+    /// Recalculates total model likelihood.
+    pub fn recalc_likelihood(&mut self) {
+        self.depth_lik = self.depth_distrs.iter()
             .zip(&self.depth)
             .map(|(distr, &depth)| distr.ln_pmf(depth))
-            .sum::<f64>()
-            * self.depth_contrib;
-        let aln_lik = self.read_ixs.iter().zip(&self.read_assgn)
+            .sum::<f64>();
+        self.aln_lik = self.read_ixs.iter().zip(&self.read_assgn)
             .map(|(&start_ix, &assgn)| self.read_windows[start_ix + assgn as usize].ln_prob())
             .sum();
-        self.likelihood = depth_lik + aln_lik;
-        (depth_lik, aln_lik)
     }
 
     /// Returns all information about windows.
@@ -297,8 +339,6 @@ impl ReadAssignment {
     /// General lines:  `prefix  contig(1|2)  window  depth     depth_lik`.
     /// Last line:      `prefix  summary      key=value key=value ...`. (key-value pairs separated by space).
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
-        // log10-likelihood of read depth.
-        let mut sum_depth_lik = 0.0;
         for i in 0..self.contig_windows.n_contigs() {
             let wshift = self.contig_windows.get_wshift(i) as usize;
             let wshift_end = self.contig_windows.get_wshift(i + 1) as usize;
@@ -306,15 +346,13 @@ impl ReadAssignment {
                 let depth = self.depth[w];
                 let log10_prob = Ln::to_log10(self.depth_distrs[w].ln_pmf(depth));
                 writeln!(f, "{}\t{}\t{}\t{}\t{:.3}", prefix, i + 1, w - wshift + 1, depth, log10_prob)?;
-                sum_depth_lik += log10_prob;
             }
         }
 
-        sum_depth_lik *= self.depth_contrib;
-        let total_lik = Ln::to_log10(self.likelihood);
         writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} depth_lik={:.5} lik={:.5}", prefix,
             self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
-            total_lik - sum_depth_lik, sum_depth_lik, total_lik)
+            Ln::to_log10(self.aln_lik), Ln::to_log10(self.depth_lik * self.depth_contrib),
+            Ln::to_log10(self.likelihood()))
     }
 }
 
@@ -322,63 +360,45 @@ impl ReadAssignment {
 #[derive(Debug)]
 pub struct ReassignmentTarget {
     read_pair: usize,
-    old_assgn: u16,
     new_assgn: u16,
     old_ix: usize,
     new_ix: usize,
-    window_diff: AffectedWindows,
 }
 
 impl ReassignmentTarget {
-    pub fn new() -> Self {
-        Self {
-            read_pair: usize::MAX,
-            old_assgn: u16::MAX,
-            new_assgn: u16::MAX,
-            old_ix: usize::MAX,
-            new_ix: usize::MAX,
-            window_diff: AffectedWindows::new(),
-        }
+    pub fn new(assgn: &ReadAssignment, read_pair: usize, new_assgn: u16) -> Self {
+        let old_assgn = assgn.read_assgn[read_pair];
+        assert_ne!(old_assgn, new_assgn, "Read pair #{}: cannot change to the same assignment", read_pair);
+
+        let start_ix = assgn.read_ixs[read_pair];
+        let end_ix = assgn.read_ixs[read_pair + 1];
+        let old_ix = start_ix + usize::from(old_assgn);
+        let new_ix = start_ix + usize::from(new_assgn);
+        assert!(new_ix < end_ix, "Invalid read assignment for read pair #{}", read_pair);
+        Self { read_pair, new_assgn, old_ix, new_ix }
     }
 
-    pub fn set(&mut self, read_pair: usize, new_assgn: u16, assgn: &ReadAssignment) {
-        self.read_pair = read_pair;
-        self.old_assgn = assgn.read_assgn[self.read_pair];
-        self.new_assgn = new_assgn;
-        assert_ne!(self.old_assgn, self.new_assgn, "Read pair #{}: cannot change to the same assignment", read_pair);
-
-        let start_ix = assgn.read_ixs[self.read_pair];
-        let end_ix = assgn.read_ixs[self.read_pair + 1];
-        self.old_ix = start_ix + usize::from(self.old_assgn);
-        self.new_ix = start_ix + usize::from(self.new_assgn);
-        assert!(self.new_ix < end_ix, "Invalid read assignment for read pair #{}", read_pair);
-
-        self.window_diff.fill_diff(
-            &assgn.read_windows[self.new_ix].windows(),
-            &assgn.read_windows[self.old_ix].windows());
-    }
-
-    /// Randomly fills reassignment target: selects one random read pair, and its possible random new location.
-    pub fn set_random(&mut self, assgn: &ReadAssignment, rng: &mut impl Rng) {
-        self.read_pair = assgn.non_trivial_reads[rng.gen_range(0..assgn.non_trivial_reads.len())];
-        let start_ix = assgn.read_ixs[self.read_pair];
-        let end_ix = assgn.read_ixs[self.read_pair + 1];
+    /// Creates a random reassignment target: selects one random read pair, and its possible random new location.
+    pub fn random(assgn: &ReadAssignment, rng: &mut impl Rng) -> Self {
+        let read_pair = assgn.non_trivial_reads[rng.gen_range(0..assgn.non_trivial_reads.len())];
+        let start_ix = assgn.read_ixs[read_pair];
+        let end_ix = assgn.read_ixs[read_pair + 1];
         let total_assgns = end_ix - start_ix;
-        assert!(total_assgns > 1, "Read pair #{} has less than 2 possible assignments", self.read_pair);
+        assert!(total_assgns > 1, "Read pair #{} has less than 2 possible assignments", read_pair);
 
-        self.old_assgn = assgn.read_assgn[self.read_pair];
-        self.new_assgn = if total_assgns == 2 {
-            1 - self.old_assgn
+        let old_assgn = assgn.read_assgn[read_pair];
+        let new_assgn = if total_assgns == 2 {
+            1 - old_assgn
         } else {
             let i = rng.gen_range(1..total_assgns as u16);
-            if i <= self.old_assgn { i - 1 } else { i }
+            if i <= old_assgn { i - 1 } else { i }
         };
 
-        self.old_ix = start_ix + usize::from(self.old_assgn);
-        self.new_ix = start_ix + usize::from(self.new_assgn);
-        self.window_diff.fill_diff(
-            &assgn.read_windows[self.new_ix].windows(),
-            &assgn.read_windows[self.old_ix].windows());
+        Self {
+            read_pair, new_assgn,
+            old_ix: start_ix + usize::from(old_assgn),
+            new_ix: start_ix + usize::from(new_assgn),
+        }
     }
 
     /// Returns read pair index and new assignment index

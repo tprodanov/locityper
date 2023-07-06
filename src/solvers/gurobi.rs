@@ -22,10 +22,10 @@ fn set_assignments(
     model: &Model,
     assignment_vars: &[Var],
     assignments: &mut ReadAssignment,
-) -> Result<f64, Error> {
+) -> Result<(), Error> {
     let vals = model.get_obj_attr_batch(attr::X, assignment_vars.iter().copied())?;
     let mut i = 0;
-    let lik = assignments.try_init_assignments::<_, Error>(|locs| {
+    assignments.try_init_assignments::<_, Error>(|locs| {
         let j = i + locs.len();
         let new_assgn = vals[i..j].iter().position(|&v| v >= 0.9999 && v <= 1.0001)
             .ok_or_else(|| Error::solver("Gurobi", "Cannot identify read assignment (output is not 0/1)"))?;
@@ -33,7 +33,7 @@ fn set_assignments(
         Ok(new_assgn)
     })?;
     assert_eq!(i, vals.len(), "Numbers of total read assignments do not match");
-    Ok(lik)
+    Ok(())
 }
 
 fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error> {
@@ -51,8 +51,8 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
         let read_alns = assignments.possible_read_alns(rp);
         if read_alns.len() == 1 {
             let loc = &read_alns[0];
-            for (w, upd) in loc.windows().iter() {
-                window_depth[w as usize].0 += u32::try_from(upd).unwrap();
+            for w in loc.windows().into_iter() {
+                window_depth[w as usize].0 += 1;
             }
             objective.add_constant(loc.ln_prob());
             continue;
@@ -63,12 +63,17 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
             let var = add_binvar!(model, name: &format!("R{:x}_{}", rp, j))?;
             assignment_vars.push(var);
             objective.add_term(loc.ln_prob(), var);
-            for (w, upd) in loc.windows().iter() {
+            let ws = loc.windows();
+            let inc: u32 = if ws[0] == ws[1] { 2 } else { 1 };
+            for w in ws.into_iter() {
                 if w < REG_WINDOW_SHIFT {
-                    window_depth[w as usize].0 += u32::try_from(upd).unwrap();
+                    window_depth[w as usize].0 += inc;
                 } else {
-                    window_depth[w as usize].1 += u32::try_from(upd).unwrap();
-                    window_depth_constrs[w as usize].add_term(f64::from(upd), var);
+                    window_depth[w as usize].1 += inc;
+                    window_depth_constrs[w as usize].add_term(f64::from(inc), var);
+                }
+                if inc == 2 {
+                    break;
                 }
             }
         }
@@ -106,25 +111,21 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
 
 impl super::Solver for GurobiSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
+    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
         let (mut model, vars) = define_model(assignments)?;
-        let mut best_lik = assignments.likelihood();
-
         model.set_param(parameter::IntParam::Seed, rng.gen::<i32>().abs())?;
         model.optimize()?;
         let status = model.status()?;
         if status != Status::Optimal {
             log::error!("Gurobi achieved non-optimal status {:?}", status);
         }
+        set_assignments(&model, &vars, assignments)?;
         let ilp_lik = model.get_attr(attr::ObjVal)?;
-
-        if ilp_lik > best_lik {
-            best_lik = set_assignments(&model, &vars, assignments)?;
-            if (best_lik - ilp_lik).abs() > 1e-5 {
-                log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, best_lik);
-            }
+        let assgn_lik = assignments.likelihood();
+        if (assgn_lik - ilp_lik).abs() > 1e-5 {
+            log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, assgn_lik);
         }
-        Ok(best_lik)
+        Ok(())
     }
 }
 

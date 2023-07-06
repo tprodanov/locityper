@@ -25,18 +25,20 @@ pub trait SetParams {
 
 /// General trait for all solvers.
 pub trait Solver : Send + Sync + SetParams + CloneSolver + Display {
+    /// Same as `solve`, but it is known that there is at least one read with more than one potential location.
+    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error>;
+
     /// Distribute reads between several haplotypes in a best way.
     /// Returns likelihood of the assignment.
     ///
     /// In order for `Solver` to be object-safe, rng type should be known in advance.
-    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error>;
-
     fn solve(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<f64, Error> {
         if assignments.trivial() {
-            Ok(assignments.init_assignments(|_| 0))
+            assignments.init_assignments(|_| 0);
         } else {
-            self.solve_nontrivial(assignments, rng)
+            self.solve_nontrivial(assignments, rng)?;
         }
+        Ok(assignments.likelihood())
     }
 }
 

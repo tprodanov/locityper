@@ -136,6 +136,11 @@ impl Interval {
         (self.start, self.end)
     }
 
+    /// Returns the middle of the interval.
+    pub fn middle(&self) -> u32 {
+        (self.start + self.end) / 2
+    }
+
     /// Get interval length.
     #[inline]
     pub fn len(&self) -> u32 {

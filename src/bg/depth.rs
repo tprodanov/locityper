@@ -66,11 +66,8 @@ fn count_reads<'a>(
     let window_getter = WindowGetter::new(start, start + sum_len, params.window_size);
 
     for aln in alignments {
-        let (aln_start, aln_end) = aln.interval().range();
-        let (start_ix, end_ix) = window_getter.covered_middle(aln_start, aln_end);
-        let read_end = aln.read_end().ix();
-        for ix in start_ix..end_ix {
-            windows[ix as usize].depth[read_end] += 1;
+        if let Some(window) = window_getter.middle_window(aln.interval().middle()) {
+            windows[window as usize].depth[aln.read_end().ix()] += 1;
         }
     }
     windows
