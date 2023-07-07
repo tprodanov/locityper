@@ -83,18 +83,19 @@ impl F64Ext {
         }
     }
 
-    /// Calculate sample variance.
-    pub fn variance(a: &[f64], mean: Option<f64>) -> f64 {
-        let mean = match mean {
-            Some(val) => val,
-            None => F64Ext::mean(a),
-        };
+    /// Returns variance for already calculated mean.
+    pub fn fast_variance(a: &[f64], mean: f64) -> f64 {
         let n = a.len();
         assert!(n > 1, "Cannot calculate variance from less than 2 elements!");
         a.iter().fold(0.0, |acc, x| {
             let diff = x - mean;
             acc + diff * diff
         }) / (n - 1) as f64
+    }
+
+    /// Calculate sample variance.
+    pub fn variance(a: &[f64]) -> f64 {
+        Self::fast_variance(a, Self::mean(a))
     }
 
     /// Returns minimal vector value.

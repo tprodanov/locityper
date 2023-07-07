@@ -181,7 +181,7 @@ fn predict_mean_var(gc_contents: &[f64], gc_bins: &[(usize, usize)], depth: &[f6
     for (gc, &(i, j)) in gc_bins.iter().enumerate() {
         if j - i >= VAR_MIN_WINDOWS {
             x.push(gc as f64);
-            y.push(F64Ext::variance(&depth[i..j], None));
+            y.push(F64Ext::variance(&depth[i..j]));
             w.push(((j - i) as f64 / n as f64).sqrt());
         }
     }
@@ -335,13 +335,25 @@ fn write_summary(
     for (gc, &(i, j)) in gc_bins.iter().enumerate() {
         let n = j - i;
         let mean = if n > 0 { F64Ext::mean(&depth[i..j]) } else { f64::NAN };
-        let var = if n > 1 { F64Ext::variance(&depth[i..j], Some(mean)) } else { f64::NAN };
+        let var = if n > 1 { F64Ext::fast_variance(&depth[i..j], mean) } else { f64::NAN };
         write!(dbg_writer, "{gc}\t{n}\t{mean:.5}\t{var:.5}\t")?;
         write!(dbg_writer, "{:.5}\t{:.5}\t", loess_means[gc], loess_vars[gc])?;
         write!(dbg_writer, "{:.5}\t{:.5}\t", blurred_means[gc], blurred_vars[gc])?;
         writeln!(dbg_writer, "{}\t{}", distrs[gc].n(), distrs[gc].p())?;
     }
     Ok(())
+}
+
+fn write_summary_without_gc(
+    count: usize,
+    mean: f64,
+    var: f64,
+    distr: &NBinom,
+    mut dbg_writer: impl Write,
+) -> io::Result<()>
+{
+    writeln!(dbg_writer, "nwindows\tmean\tvar\tnbinom_n\tnbinom_p")?;
+    writeln!(dbg_writer, "{}\t{:.5}\t{:.5}\t{}\t{}", count, mean, var, distr.n(), distr.p())
 }
 
 /// Background read depth distributions for each GC-content value.
@@ -364,13 +376,15 @@ pub struct ReadDepth {
 ///
 /// Although it is possible to estimate n & p directly, sometimes $p$ becomes close to 1 and $n$ grows very large.
 /// Due to this, we perform L1-regularization on $n$, and estimate parameters numerically using Nelder-Mead algorithm.
-fn estimate_nbinoms(means: &[f64], vars: &[f64], rate: f64, ploidy: f64) -> Vec<NBinom> {
+fn estimate_nbinoms<'a>(means: &'a [f64], vars: &'a [f64], rate: f64, ploidy: f64,
+) -> impl Iterator<Item = NBinom> + 'a
+{
     let mut estimator = RegularizedEstimator::default();
     estimator.set_subsampling_rate(rate).set_lambda(1e-5);
 
-    means.iter().zip(vars).map(|(&m, &v)| {
+    means.iter().zip(vars).map(move |(&m, &v)| {
         estimator.estimate(m, v).mul(1.0 / ploidy)
-    }).collect()
+    })
 }
 
 impl ReadDepth {
@@ -386,6 +400,7 @@ impl ReadDepth {
         params: &ReadDepthParams,
         subsampling_rate: f64,
         is_paired_end: bool,
+        technology: super::Technology,
         out_dir: Option<&Path>,
     ) -> io::Result<Self>
     {
@@ -406,23 +421,34 @@ impl ReadDepth {
         let ixs = VecExt::argsort(&gc_contents);
         let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
-
         let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth[0])).collect();
-        let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
-        let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
+
         let ploidy = f64::from(params.ploidy);
-        let distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy);
+        let dbg_writer = out_dir.map(|dirname| ext::sys::create_gzip(&dirname.join("depth.csv.gz"))).transpose()?;
+        let distributions: Vec<NBinom>;
+        if technology.has_gc_bias() {
+            let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
+            let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
+            distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy).collect();
+            if let Some(writer) = dbg_writer {
+                write_summary(&gc_bins, &depth, &loess_means, &loess_vars, &blurred_means, &blurred_vars,
+                    &distributions, writer)?;
+            }
+        } else {
+            let mean = F64Ext::mean(&depth);
+            let var = F64Ext::fast_variance(&depth, mean);
+            let distr = estimate_nbinoms(&[mean], &[var], subsampling_rate, ploidy).next().unwrap();
+            if let Some(writer) = dbg_writer {
+                write_summary_without_gc(depth.len(), mean, var, &distr, writer)?;
+            }
+            distributions = vec![distr; GC_BINS];
+        }
 
         const GC_VAL: usize = 40;
         let logging_distr = distributions[GC_VAL].mul(ploidy * if is_paired_end { 2.0 } else { 1.0 });
         log::info!("    Read depth mean = {:.2},  variance: {:.2}  (at GC-content {})",
             logging_distr.mean(), logging_distr.variance(), GC_VAL);
 
-        if let Some(dir) = out_dir {
-            let dbg_writer = ext::sys::create_gzip(&dir.join("depth.csv.gz"))?;
-            write_summary(&gc_bins, &depth, &loess_means, &loess_vars, &blurred_means, &blurred_vars, &distributions,
-                dbg_writer)?;
-        }
         Ok(Self {
             ploidy: params.ploidy,
             window_size: params.window_size,

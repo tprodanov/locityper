@@ -12,7 +12,7 @@ use crate::{
         Interval,
         aln::Alignment,
     },
-    math::distr::BetaBinomial,
+    math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
 };
 
@@ -147,8 +147,8 @@ impl ErrorProfile {
             conf_lvl: params.err_conf_level,
         };
 
-        let read_len = mean_read_len.round() as u32;
-        log::info!("    Maximum allowed edit distance: {} (mean read length {}, {}%-confidence interval)",
+        let read_len = math::round_significant(mean_read_len, 2).round() as u32;
+        log::info!("    Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
             err_prof.allowed_edit_dist(read_len), read_len, 100.0 * err_prof.conf_lvl);
         err_prof
     }

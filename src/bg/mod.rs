@@ -132,7 +132,7 @@ pub enum Technology {
 }
 
 impl Technology {
-    pub fn to_str(&self) -> &'static str {
+    pub fn to_str(self) -> &'static str {
         match self {
             Self::Illumina => "illumina",
             Self::HiFi => "hifi",
@@ -141,7 +141,7 @@ impl Technology {
         }
     }
 
-    pub fn minimap_preset(&self) -> &'static str {
+    pub fn minimap_preset(self) -> &'static str {
         match self {
             Self::Illumina => {
                 log::warn!("Using Minimap2 for short reads!");
@@ -151,6 +151,11 @@ impl Technology {
             Self::PacBio => "map-pb",
             Self::Nanopore => "map-ont",
         }
+    }
+
+    /// Returns true if the technology exhibits different depth values at different GC-contents.
+    pub fn has_gc_bias(self) -> bool {
+        self == Self::Illumina
     }
 }
 

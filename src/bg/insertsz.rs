@@ -137,7 +137,7 @@ impl InsertDistr {
 
         let mean = F64Ext::mean(lim_insert_sizes);
         // Increase variance, if less-equal than mean.
-        let var = F64Ext::variance(lim_insert_sizes, Some(mean));
+        let var = F64Ext::fast_variance(lim_insert_sizes, mean);
         let distr = RegularizedEstimator::default().estimate(mean, var);
         log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", distr.mean(), distr.variance().sqrt());
 
