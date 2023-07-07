@@ -70,10 +70,6 @@ impl NBinom {
     pub fn p(&self) -> f64 {
         self.p
     }
-
-    pub fn ln_pmf_f64(&self, x: f64) -> f64 {
-        self.lnpmf_const + ln_gamma(self.n + x) - ln_gamma(x + 1.0) + x * self.lnq
-    }
 }
 
 impl Debug for NBinom {
@@ -107,7 +103,8 @@ impl JsonSer for NBinom {
 
 impl DiscretePmf for NBinom {
     fn ln_pmf(&self, k: u32) -> f64 {
-        self.ln_pmf_f64(f64::from(k))
+        let x = f64::from(k);
+        self.lnpmf_const + ln_gamma(self.n + x) - ln_gamma(x + 1.0) + x * self.lnq
     }
 }
 
