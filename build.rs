@@ -27,6 +27,7 @@ fn make_wfa() {
     let output = std::process::Command::new("make")
         .arg("clean")
         .arg("all")
+        .arg("BUILD_WFA_PARALLEL=0") // Disable parallelization.
         .current_dir(&WFA_PATH)
         .output()
         .expect("Failed to compile WFA2-lib");

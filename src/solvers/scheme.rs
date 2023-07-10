@@ -134,18 +134,18 @@ impl Stage {
         let mut stage = match &solver.to_lowercase() as &str {
             "greedy" => Stage::new(super::GreedySolver::default()),
             "anneal" | "simanneal" | "simulatedannealing" => Stage::new(super::SimAnneal::default()),
-            "highs" =>
-                if cfg!(feature = "highs") {
-                    Stage::new(super::HighsSolver::default())
-                } else {
-                    panic!("HiGHS feature is disabled. Please recompile with `highs` feature.");
-                },
-            "gurobi" =>
-                if cfg!(feature = "gurobi") {
-                    Stage::new(super::GurobiSolver::default())
-                } else {
-                    panic!("Gurobi feature is disabled. Please recompile with `gurobi` feature.");
-                },
+            "highs" => {
+                #[cfg(feature = "highs")]
+                { Stage::new(super::HighsSolver::default()) }
+                #[cfg(not(feature = "highs"))]
+                panic!("HiGHS feature is disabled. Please recompile with `highs` feature.")
+            }
+            "gurobi" => {
+                #[cfg(feature = "gurobi")]
+                { Stage::new(super::GurobiSolver::default()) }
+                #[cfg(not(feature = "gurobi"))]
+                panic!("Gurobi feature is disabled. Please recompile with `gurobi` feature.")
+            }
             _ => panic!("Unknown solver '{}'", solver),
         };
 
@@ -172,6 +172,7 @@ impl Stage {
 pub struct Scheme(Vec<Stage>);
 
 impl Default for Scheme {
+    #[cfg(feature = "highs")]
     fn default() -> Self {
         Self(vec![
             // First, run Greedy solver on all haplotypes.
@@ -188,6 +189,28 @@ impl Default for Scheme {
                 fraction: 0.03,
                 write: false,
                 attempts: 5,
+                aver_power: 1.0, // Take arithmetic mean of all likelihoods.
+            },
+        ])
+    }
+
+    #[cfg(not(feature = "highs"))]
+    fn default() -> Self {
+        Self(vec![
+            // First, run Greedy solver on all haplotypes.
+            Stage {
+                solver: Box::new(super::GreedySolver::default()),
+                fraction: 1.0,
+                write: false,
+                attempts: 5,
+                aver_power: f64::INFINITY, // Take maximum across all random attempts.
+            },
+            // Then, run HiGHS solver on the best 3%.
+            Stage {
+                solver: Box::new(super::SimAnneal::default()),
+                fraction: 0.03,
+                write: false,
+                attempts: 10,
                 aver_power: 1.0, // Take arithmetic mean of all likelihoods.
             },
         ])
