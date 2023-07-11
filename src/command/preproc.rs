@@ -456,7 +456,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "-f", "0.001", // Discard more minimizers to speed up alignment,
             "--eqx",       // Output X/= instead of M operations,
             "-t", &args.threads.to_string(), // Specify the number of threads,
-            "-r", &format!("{:.1}", seq_info.mean_read_len()), // Provide mean read length.
+            "-r", &format!("{:.0}", seq_info.mean_read_len()), // Provide mean read length.
             ]);
         if (args.params.subsampling_rate == 1.0 && args.interleaved) || args.is_paired_end() {
             command.arg("--interleaved");

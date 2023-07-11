@@ -466,7 +466,7 @@ fn create_mapping_command(
             "-f", "0",       // Do not discard repetitive minimizers.
             "-k", "15",      // Use smaller minimizers to get more matches.
             "--eqx",         // Output X/= instead of M operations.
-            "-r", &format!("{:.1}", seq_info.mean_read_len()),
+            "-r", &format!("{:.0}", seq_info.mean_read_len()),
             "-t", &args.threads.to_string()]);
     } else {
         cmd = Command::new(&args.minimap);
