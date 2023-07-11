@@ -28,6 +28,7 @@ fn make_wfa() {
         .arg("clean")
         .arg("all")
         .arg("BUILD_WFA_PARALLEL=0") // Disable parallelization.
+        .args(&["CC_FLAGS+=-Wall", "CC_FLAGS+=-g", "CC_FLAGS+=-fPIC"])
         .current_dir(&WFA_PATH)
         .output()
         .expect("Failed to compile WFA2-lib");
