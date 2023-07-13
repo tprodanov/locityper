@@ -293,7 +293,7 @@ fn find_best_boundary(
     levels.push((start, end, 1));
     levels.extend(vars.iter().map(|var|
         ((var.pos() as u32).saturating_sub(VAR_MARGIN), var.end() as u32 + VAR_MARGIN, -1)));
-    levels.extend(nruns.into_iter().map(|(run_start, run_end)|
+    levels.extend(nruns.iter().map(|&(run_start, run_end)|
         ((seq_shift + run_start).saturating_sub(nrun_margin), seq_shift + run_end + nrun_margin, -1)));
     // Find regions with depth == 1: +1 when inside the region, -1 when there is a bubble, -1 when there is an N run.
     let islands = seq::interv::split_disjoint(&levels, |depth| depth == 1);
@@ -301,7 +301,13 @@ fn find_best_boundary(
         return Ok(None);
     }
 
-    let kmer_counts: Vec<f64> = kmer_getter.fetch_one(seq.to_vec())?
+    // Replace Ns with As for k-mer calculation.
+    let seq_wo_ns = if nruns.is_empty() {
+        seq.to_vec()
+    } else {
+        seq.iter().map(|&nt| if nt == b'N' { b'A' } else { nt }).collect()
+    };
+    let kmer_counts: Vec<f64> = kmer_getter.fetch_one(seq_wo_ns)?
         .take_first().into_iter()
         .map(f64::from).collect();
     let divisor = f64::from(mov_window + 1 - k);
