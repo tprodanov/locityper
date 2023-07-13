@@ -54,7 +54,7 @@ impl Aligner {
     pub fn new(penalties: &Penalties) -> Self {
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
         // Do not use a heuristic (enabled by default).
-        attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_none;
+        attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_wfadaptive;
         // Compute score and CIGAR as well.
         attributes.alignment_scope = cwfa::alignment_scope_t_compute_alignment;
         // Compute global alignment.

@@ -61,8 +61,8 @@ impl Default for Args {
 
             ref_name: "REF".to_owned(),
             leave_out: Default::default(),
-            max_expansion: 4000,
-            moving_window: 400,
+            max_expansion: 5000,
+            moving_window: 500,
 
             penalties: Default::default(),
             max_divergence: 0.0001,
@@ -509,10 +509,17 @@ where R: Read + Seek,
     }
     ext::sys::mkdir(&dir)?;
     log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
-    let seqs = seq::panvcf::reconstruct_sequences(new_start,
+    let reconstruction = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
-        vcf_file.header(), &vcf_recs, &args.leave_out)?;
-    process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?;
+        vcf_file.header(), &vcf_recs, &args.leave_out);
+    match reconstruction {
+        Ok(seqs) => process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?,
+        Err(Error::InvalidData(e)) => {
+            log::error!("Cannot extract locus {} sequences: {}", locus, e);
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    }
     Ok(true)
 }
 
