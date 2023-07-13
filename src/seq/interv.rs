@@ -29,8 +29,11 @@ const INTERVAL_PATTERN: &'static str = formatcp!("^{}$", INTERVAL_INNER);
 /// Name of the interval (almost the same as `CONTIG_PATTERN`, but includes `:`).
 const NAME_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*";
 
-/// Optionally named interval: `contig:start-end[@name]`.
+/// Optionally named interval: `contig:start-end=name`.
 const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^{}(={})?$", INTERVAL_INNER, NAME_PATTERN);
+
+/// Non-optionally named interval: `contig:start-end=name`.
+const EXPL_NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^{}=({})$", INTERVAL_INNER, NAME_PATTERN);
 
 /// Genomic interval.
 #[derive(Clone)]
@@ -283,7 +286,7 @@ impl NamedInterval {
         }
     }
 
-    /// Parse interval name from string "contig:start-end[@name]".
+    /// Parse interval name from string "contig:start-end[=name]".
     /// If name is not set, set it to `contig:start-end`.
     pub fn parse(s: &str, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
         lazy_static! {
@@ -293,6 +296,17 @@ impl NamedInterval {
         let interval = Interval::from_captures(s, &captures, contigs)?;
         let name: Option<&str> = captures.get(4).map(|m| &m.as_str()[1..]);
         NamedInterval::new(interval, name)
+    }
+
+    /// Parse interval name from string "contig:start-end=name".
+    pub fn parse_explicit(s: &str, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
+        lazy_static! {
+            static ref RE: Regex = Regex::new(EXPL_NAMED_INTERVAL_PATTERN).unwrap();
+        }
+        let captures = RE.captures(s).ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
+        let interval = Interval::from_captures(s, &captures, contigs)?;
+        let name = captures.get(4).expect("Interval name must be set").as_str();
+        NamedInterval::new(interval, Some(name))
     }
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
@@ -312,6 +326,11 @@ impl NamedInterval {
     /// Returns interval name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns true if the name was explicitely provided.
+    pub fn is_name_explicit(&self) -> bool {
+        self.explicit_name
     }
 
     /// Formats this named interval as `chrom  start  end  [name]`, where name is written only if it is explicitely set.

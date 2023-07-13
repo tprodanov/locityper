@@ -116,11 +116,11 @@ fn print_help() {
 
     println!("\n{}", "Complex loci coordinates:".bold());
     println!("    {:KEY$} {:VAL$}  Complex locus coordinates. Multiple loci are allowed.\n\
-        {EMPTY}  Format: 'chrom:start-end' or 'chrom:start-end=name',\n\
+        {EMPTY}  Format: 'chrom:start-end=name',\n\
         {EMPTY}  where 'name' is the locus name (must be unique).",
         "-l, --locus".green(), "STR+".yellow());
     println!("    {:KEY$} {:VAL$}  BED file with complex loci coordinates. May be repeated multiple times.\n\
-        {EMPTY}  If fourth column is present, it is used for the locus name (must be unique).",
+        {EMPTY}  Fourth column must contain locus name (all names should be unique).",
         "-L, --loci-bed".green(), "FILE".yellow());
 
     println!("\n{}", "Haplotype extraction parameters:".bold());
@@ -211,7 +211,7 @@ fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf])
     let mut intervals = Vec::new();
     let mut names = FnvHashSet::default();
     for locus in loci.iter() {
-        let interval = NamedInterval::parse(locus, contigs)?;
+        let interval = NamedInterval::parse_explicit(locus, contigs)?;
         if !names.insert(interval.name().to_string()) {
             return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
         }
@@ -221,6 +221,9 @@ fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf])
     for filename in bed_files.iter() {
         for line in ext::sys::open(filename)?.lines() {
             let interval = NamedInterval::parse_bed(&mut line?.split('\t'), contigs)?;
+            if !interval.is_name_explicit() {
+                return Err(Error::InvalidInput(format!("Interval '{}' has no name", interval)));
+            }
             if !names.insert(interval.name().to_string()) {
                 return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
             }
@@ -450,6 +453,18 @@ fn add_locus<R>(
 ) -> Result<bool, Error>
 where R: Read + Seek,
 {
+    let dir = loci_dir.join(locus.name());
+    let ok_file = dir.join("ok");
+    if dir.exists() {
+        if args.force || !ok_file.exists() {
+            log::warn!("    Clearing directory {}", ext::fmt::path(&dir));
+            fs::remove_dir_all(&dir)?;
+        } else {
+            log::warn!("    Skipping locus {}", locus);
+            return Ok(true);
+        }
+    }
+    ext::sys::mkdir(&dir)?;
     log::info!("Analyzing locus {}", locus);
     let inner_interv = locus.interval();
     // Add extra half-window to each sides.
@@ -495,22 +510,11 @@ where R: Read + Seek,
         new_locus = locus.with_new_range(new_start, new_end);
         log::info!("    [{}] Extending locus by {} bp left and {} bp right. New locus: {}",
             locus.name(), inner_start - new_start, new_end - inner_end, new_locus.interval());
+        assert!(new_locus.is_name_explicit());
     } else {
         new_locus = locus.clone();
     }
 
-    let dir = loci_dir.join(new_locus.name());
-    let ok_file = dir.join("ok");
-    if dir.exists() {
-        if args.force || !ok_file.exists() {
-            log::warn!("    Clearing directory {}", ext::fmt::path(&dir));
-            fs::remove_dir_all(&dir)?;
-        } else {
-            log::warn!("    Skipping directory {}", ext::fmt::path(&dir));
-            return Ok(true);
-        }
-    }
-    ext::sys::mkdir(&dir)?;
     log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
     let reconstruction = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
