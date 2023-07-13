@@ -340,14 +340,16 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Ite
                 if diverg > highest {
                     highest = diverg;
                     highest_i = i;
-                    highest_j = i + j + 1;
+                    highest_j = j;
                 }
             }
         }
     }
-    log::warn!("    Locus {}: {} haplotype pairs have high divergence", tag, count);
-    log::warn!("        Highest: {:.5} between {} and {}",
-        highest, entries[highest_i].name(), entries[highest_j].name());
+    if count > 0 {
+        log::warn!("    Locus {}: {} haplotype pairs have high divergence", tag, count);
+        log::warn!("        Highest: {:.5} between {} and {}",
+            highest, entries[highest_i].name(), entries[highest_j].name());
+    }
 }
 
 /// Cluster haplotypes using `kodama` crate
@@ -530,7 +532,7 @@ where R: Read + Seek,
 
     let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
     if seq::has_n(ref_seq) {
-        log::error!("Cannot extract locus {}: reference sequences contains Ns", new_locus);
+        log::error!("Cannot extract locus {}: reference sequence contains Ns", new_locus);
         return Ok(false);
     }
 
