@@ -438,7 +438,7 @@ fn process_haplotypes(
     let mut kmers_writer = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_writer)?;
 
-    File::create(locus_dir.join("ok"))?;
+    File::create(locus_dir.join("success"))?;
     Ok(())
 }
 
@@ -454,7 +454,7 @@ fn add_locus<R>(
 where R: Read + Seek,
 {
     let dir = loci_dir.join(locus.name());
-    let ok_file = dir.join("ok");
+    let ok_file = dir.join("success");
     if dir.exists() {
         if args.force || !ok_file.exists() {
             log::warn!("    Clearing directory {}", ext::fmt::path(&dir));
