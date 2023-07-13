@@ -325,22 +325,29 @@ fn find_best_boundary(
     }))
 }
 
-/// Check haplotypes:
-/// - warn if there are any Ns in the sequences,
-/// - warn if sequence divergence is too high.
-fn check_haplotypes(tag: &str, entries: &[NamedSeq], mut divergences: impl Iterator<Item = f64>) {
-    for (i, entry1) in entries.iter().enumerate() {
-        if entry1.seq().contains(&b'N') {
-            log::warn!("    Locus {}, haplotype {} contains Ns!", tag, entry1.name());
-        }
-        for entry2 in entries[i + 1..].iter() {
+/// Check divergencies and warns if they are too high.
+fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Iterator<Item = f64>) {
+    let n = entries.len();
+    let mut count = 0;
+    let mut highest = 0.0;
+    let mut highest_i = 0;
+    let mut highest_j = 0;
+    for i in 0..n {
+        for j in i + 1..n {
             let diverg = divergences.next().unwrap();
             if diverg >= 0.2 {
-                log::warn!("    Locus {}, haplotypes {} and {} have high divergence ({:.5})",
-                    tag, entry1.name(), entry2.name(), diverg);
+                count += 1;
+                if diverg > highest {
+                    highest = diverg;
+                    highest_i = i;
+                    highest_j = i + j + 1;
+                }
             }
         }
     }
+    log::warn!("    Locus {}: {} haplotype pairs have high divergence", tag, count);
+    log::warn!("        Highest: {:.5} between {} and {}",
+        highest, entries[highest_i].name(), entries[highest_j].name());
 }
 
 /// Cluster haplotypes using `kodama` crate
@@ -414,7 +421,7 @@ fn process_haplotypes(
     log::info!("    [{}] Calculating haplotype divergence", tag);
     let paf_writer = ext::sys::create_gzip(&locus_dir.join(paths::LOCUS_PAF))?;
     let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)?;
-    check_haplotypes(tag, &entries, divergences.iter().copied());
+    check_divergencies(tag, &entries, divergences.iter().copied());
 
     log::info!("    [{}] Clustering haploypes", tag);
     let nwk_writer = io::BufWriter::new(File::create(&locus_dir.join(paths::LOCUS_DENDROGRAM))?);
@@ -521,6 +528,12 @@ where R: Read + Seek,
         new_locus = locus.clone();
     }
 
+    let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
+    if seq::has_n(ref_seq) {
+        log::error!("Cannot extract locus {}: reference sequences contains Ns", new_locus);
+        return Ok(false);
+    }
+
     log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
     let reconstruction = seq::panvcf::reconstruct_sequences(new_start,
         &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
@@ -528,7 +541,7 @@ where R: Read + Seek,
     match reconstruction {
         Ok(seqs) => process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?,
         Err(Error::InvalidData(e)) => {
-            log::error!("Cannot extract locus {} sequences: {}", locus, e);
+            log::error!("Cannot extract locus {} sequences: {}", new_locus, e);
             return Ok(false);
         }
         Err(e) => return Err(e),
