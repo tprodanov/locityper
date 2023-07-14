@@ -54,10 +54,10 @@ impl Aligner {
     pub fn new(penalties: &Penalties) -> Self {
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
         // Use Adaptive heuristic.
-        attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_banded_adaptive;
-        attributes.heuristic.min_wavefront_length = 10;
-        attributes.heuristic.max_distance_threshold = 50;
-        attributes.heuristic.steps_between_cutoffs = 10;
+        attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_wfadaptive;
+        attributes.heuristic.min_wavefront_length = 50;
+        attributes.heuristic.max_distance_threshold = 200;
+        attributes.heuristic.steps_between_cutoffs = 1;
         // Use less memory at the expense of running time.
         attributes.memory_mode = cwfa::wavefront_memory_t_wavefront_memory_low;
 
