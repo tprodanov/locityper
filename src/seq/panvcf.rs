@@ -6,7 +6,7 @@ use htslib::bcf::{
     header::HeaderView,
     record::{Record, GenotypeAllele},
 };
-use crate::Error;
+use crate::{Error, seq};
 use super::NamedSeq;
 
 /// Formats variant as `chrom:pos`.
@@ -36,8 +36,8 @@ pub fn reconstruct_sequences(
     haplotype_names.insert(ref_name.to_owned());
 
     let mut seqs = vec![NamedSeq::new(ref_name.to_owned(), ref_seq.to_vec())];
-    // Boolean vector, do we keep the sequence according to `leave_out`?
-    let mut keep_seq = vec![leave_out.is_empty() || !leave_out.contains(ref_name)];
+    // Boolean vector, is the sequence in `leave_out`?
+    let mut leave_out_seq = vec![!leave_out.is_empty() && leave_out.contains(ref_name)];
 
     let capacity = ref_seq.len() * 3 / 2;
     let sample_names = header.samples();
@@ -48,14 +48,20 @@ pub fn reconstruct_sequences(
             if !haplotype_names.insert(name.clone()) {
                 return Err(Error::InvalidData(format!("Haplotype name {} is not unique", name)));
             }
-            keep_seq.push(leave_out.is_empty() || (!leave_out.contains(sample) && !leave_out.contains(&name)));
+            leave_out_seq.push(!leave_out.is_empty() && (leave_out.contains(sample) || leave_out.contains(&name)));
             seqs.push(NamedSeq::new(name, Vec::with_capacity(capacity)));
         }
     }
+    // Is the sequence missing (some of the genotypes unavailable)?
+    let mut missing_seq = vec![false; seqs.len()];
 
     let mut ref_pos = ref_start;
     for var in recs.iter() {
         let alleles = var.alleles();
+        if alleles.iter().copied().any(seq::has_n) {
+            return Err(Error::InvalidData(format!("Input VCF file contains Ns in one of the alleles of {}",
+                format_var(var, header))));
+        }
         let var_start = u32::try_from(var.pos()).unwrap();
         let var_end = var_start + alleles[0].len() as u32;
         if var_start < ref_pos {
@@ -81,24 +87,19 @@ pub fn reconstruct_sequences(
             // Check only last allele in the genotype, as only last allele has phasing marking,
             // (see https://docs.rs/rust-htslib/latest/rust_htslib/bcf/record/struct.Genotypes.html).
             match gt[PLOIDY - 1] {
-                GenotypeAllele::Unphased(_) => return Err(Error::InvalidData(format!(
-                    "Variant {} is unphased in sample {}", format_var(var, header),
-                    from_utf8(&sample_names[sample_id]).unwrap()))),
-                GenotypeAllele::UnphasedMissing | GenotypeAllele::PhasedMissing => return Err(
-                    Error::InvalidData(format!(
-                    "Variant {} is missing genotype for sample {}", format_var(var, header),
-                    from_utf8(&sample_names[sample_id]).unwrap()))),
+                GenotypeAllele::Unphased(_) | GenotypeAllele::UnphasedMissing =>
+                    return Err(Error::InvalidData(format!("Variant {} is unphased in sample {}",
+                        format_var(var, header), from_utf8(&sample_names[sample_id]).unwrap()))),
                 _ => {}
             }
             for haplotype in 0..PLOIDY {
-                let mut_seq = seqs[PLOIDY * sample_id + haplotype + 1].seq_mut();
+                let seq_ix = PLOIDY * sample_id + haplotype + 1;
+                let mut_seq = seqs[seq_ix].seq_mut();
                 mut_seq.extend_from_slice(seq_between_vars);
                 match gt[haplotype] {
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) =>
                         mut_seq.extend_from_slice(alleles[allele_ix as usize]),
-                    _ => return Err(Error::InvalidData(format!(
-                        "Variant {} is missing genotype for sample {}", format_var(var, header),
-                        from_utf8(&sample_names[sample_id]).unwrap()))),
+                    GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing => missing_seq[seq_ix] = true,
                 }
             }
         }
@@ -109,12 +110,19 @@ pub fn reconstruct_sequences(
         entry.seq_mut().extend_from_slice(suffix_seq);
     }
 
-    let n_keep = keep_seq.iter().fold(0, |acc, &keep| acc + usize::from(keep));
-    if n_keep < seqs.len() {
-        log::warn!("        Leave out {} sequences", seqs.len() - n_keep);
+    let n_leaveout = leave_out_seq.iter().fold(0, |acc, &val| acc + usize::from(val));
+    let n_missing = missing_seq.iter().zip(&leave_out_seq)
+        .fold(0, |acc, (&missing, &leave_out)| acc + usize::from(missing & !leave_out));
+    if n_leaveout > 0 || n_missing > 0 {
+        let n_remain = seqs.len().saturating_sub(n_leaveout + n_missing);
+        log::warn!("        {} haplotypes reconstructed ({} unavailable, {} leave out)",
+            n_remain, n_missing, n_leaveout);
+        if n_remain < 2 {
+            return Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()));
+        }
         Ok(
-            keep_seq.into_iter().zip(seqs.into_iter())
-                .filter_map(|(keep, seq)| if keep { Some(seq) } else { None })
+            seqs.into_iter().zip(leave_out_seq.into_iter().zip(missing_seq.into_iter()))
+                .filter_map(|(seq, (leave_out, missing))| if leave_out || missing { None } else { Some(seq) })
                 .collect()
         )
     } else {

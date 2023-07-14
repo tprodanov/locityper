@@ -346,8 +346,7 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Ite
         }
     }
     if count > 0 {
-        log::warn!("    Locus {}: {} haplotype pairs have high divergence", tag, count);
-        log::warn!("        Highest: {:.5} between {} and {}",
+        log::warn!("    [{}] {} haplotype pairs with high divergence, highest {:.5} ({}, {})", tag, count,
             highest, entries[highest_i].name(), entries[highest_j].name());
     }
 }
@@ -468,6 +467,7 @@ fn add_locus<R>(
 ) -> Result<bool, Error>
 where R: Read + Seek,
 {
+    log::info!("Analyzing locus {}", locus);
     let dir = loci_dir.join(locus.name());
     let ok_file = dir.join("success");
     if dir.exists() {
@@ -480,7 +480,6 @@ where R: Read + Seek,
         }
     }
     ext::sys::mkdir(&dir)?;
-    log::info!("Analyzing locus {}", locus);
     let inner_interv = locus.interval();
     // Add extra half-window to each sides.
     let halfw = args.moving_window / 2;
