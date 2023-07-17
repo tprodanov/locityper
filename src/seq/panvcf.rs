@@ -198,6 +198,7 @@ pub fn reconstruct_sequences(
 ) -> Result<Vec<NamedSeq>, Error>
 {
     let ref_end = ref_start + ref_seq.len() as u32;
+    log::debug!("    Reconstruct sequences {}..{}", ref_start, ref_end);
     let capacity = ref_seq.len() * 3 / 2;
 
     let mut seqs = Vec::with_capacity(haplotypes.total);
@@ -221,15 +222,18 @@ pub fn reconstruct_sequences(
         }
         let var_start = u32::try_from(var.pos()).unwrap();
         let var_end = var_start + alleles[0].len() as u32;
-        if var_start < ref_pos {
-            if var_end > ref_pos {
-                return Err(Error::InvalidData(format!("Input VCF file contains overlapping variants: see {}",
-                    format_var(var, header))));
-            }
+        if var_end <= ref_start {
             continue;
         }
         if ref_end <= var_start {
             break;
+        }
+        assert!(ref_start <= var_start && var_end <= ref_end,
+            "Variant {} overlaps the boundary of the region {}-{}", format_var(var, header), ref_start + 1, ref_end);
+        if var_start < ref_pos {
+            return Err(Error::InvalidData(format!("Input VCF file contains overlapping variants: see {}. \
+                Consider running `vcfbub -l 0 -i VCF | bgzip > VCF2 && tabix -p vcf VCF2`.",
+                format_var(var, header))));
         }
         let seq_between_vars = &ref_seq[(ref_pos - ref_start) as usize..(var_start - ref_start) as usize];
 
