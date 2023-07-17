@@ -25,7 +25,7 @@ use crate::{
         self, NamedInterval, ContigNames, NamedSeq,
         kmers::JfKmerGetter,
         wfa::Penalties,
-        dist,
+        dist, panvcf,
     },
 };
 use super::paths;
@@ -283,8 +283,8 @@ fn find_best_boundary(
     let start = seq_shift + halfw;
     let end = seq_shift + seq.len() as u32 - halfw;
 
-    /// Skip 20 bp around variants.
-    const VAR_MARGIN: u32 = 20;
+    /// Skip 10 bp around variants.
+    const VAR_MARGIN: u32 = 10;
     let k = kmer_getter.k();
     let nrun_margin = max(VAR_MARGIN, k);
     let nruns = seq::n_runs(seq);
@@ -462,6 +462,7 @@ fn add_locus<R>(
     locus: &NamedInterval,
     fasta_file: &mut fasta::IndexedReader<R>,
     vcf_file: &mut bcf::IndexedReader,
+    haplotypes: &panvcf::AllHaplotypes,
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<bool, Error>
@@ -488,7 +489,7 @@ where R: Read + Seek,
 
     let vcf_rid = vcf_file.header().name2rid(outer_interv.contig_name().as_bytes())?;
     vcf_file.fetch(vcf_rid, u64::from(outer_interv.start()), Some(u64::from(outer_interv.end())))?;
-    let vcf_recs: Vec<_> = vcf_file.records().collect::<Result<_, _>>()?;
+    let vcf_recs = panvcf::filter_variants(vcf_file, haplotypes)?;
 
     // Best locus coordinates (start, end) would be within
     // outer_start + halfw <= start <= inner_start  <  inner_end <= end <= outer_end - halfw.
@@ -536,9 +537,7 @@ where R: Read + Seek,
     }
 
     log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
-    let reconstruction = seq::panvcf::reconstruct_sequences(new_start,
-        &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize], &args.ref_name,
-        vcf_file.header(), &vcf_recs, &args.leave_out);
+    let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes, vcf_file.header());
     match reconstruction {
         Ok(seqs) => process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?,
         Err(Error::InvalidData(e)) => {
@@ -561,6 +560,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
 
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
+    let haplotypes = panvcf::AllHaplotypes::new(&mut vcf_file, &args.ref_name, &args.leave_out)?;
+
     let mut jf_filenames = ext::sys::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
     if jf_filenames.len() != 1 {
         return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
@@ -574,7 +575,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     ext::sys::mkdir(&loci_dir)?;
     let mut n_successes = 0;
     for locus in loci.iter() {
-        n_successes += u32::from(add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &kmer_getter, &args)?);
+        if add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &haplotypes, &kmer_getter, &args)? {
+            n_successes += 1;
+        }
     }
     if n_successes > 0 {
         log::info!("Success!");

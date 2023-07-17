@@ -3,11 +3,176 @@
 use std::str::from_utf8;
 use fnv::FnvHashSet;
 use htslib::bcf::{
+    self,
     header::HeaderView,
     record::{Record, GenotypeAllele},
 };
 use crate::{Error, seq};
 use super::NamedSeq;
+
+/// Stores one sample in the VCF file.
+pub struct Haplotype {
+    /// Haplotype index for this sample.
+    hap_ix: usize,
+    /// Shift in index across all remaining haplotypes.
+    shift_ix: usize,
+    /// Haplotype name.
+    name: String,
+}
+
+impl Haplotype {
+    pub fn hap_ix(&self) -> usize {
+        self.hap_ix
+    }
+}
+
+/// One sample.
+pub struct Sample {
+    /// Sample index.
+    sample_id: usize,
+    name: String,
+    ploidy: usize,
+    /// Sample haplotypes (some may be discarded).
+    haplotypes: Vec<Haplotype>,
+}
+
+impl Sample {
+    pub fn sample_id(&self) -> usize {
+        self.sample_id
+    }
+
+    pub fn haplotypes(&self) -> &[Haplotype] {
+        &self.haplotypes
+    }
+}
+
+/// Collection of all haplotypes.
+pub struct AllHaplotypes {
+    /// None if reference is skipped.
+    ref_name: Option<String>,
+    /// All samples.
+    samples: Vec<Sample>,
+    /// Total number of haplotypes.
+    total: usize,
+}
+
+impl AllHaplotypes {
+    pub fn samples(&self) -> &[Sample] {
+        &self.samples
+    }
+}
+
+impl AllHaplotypes {
+    /// Examines VCF header and the first record to extract sample ploidy.
+    /// Samples and haplotypes in `leave_out` are discarded.
+    pub fn new(
+        reader: &mut impl bcf::Read,
+        ref_name: &str,
+        leave_out: &FnvHashSet<String>,
+    ) -> Result<Self, Error>
+    {
+        let mut discarded = 0;
+        let mut total = 0;
+        let mut hap_names = FnvHashSet::default();
+        let ref_name = if leave_out.contains(ref_name) {
+            discarded += 1;
+            None
+        } else {
+            total += 1;
+            hap_names.insert(ref_name.to_owned());
+            Some(ref_name.to_owned())
+        };
+
+        let mut samples = Vec::new();
+        let record = reader.records().next()
+            .ok_or_else(|| Error::InvalidData("Input VCF file does not contain any records".to_owned()))??;
+        let genotypes = record.genotypes()?;
+        for (sample_id, sample) in reader.header().samples().into_iter().enumerate() {
+            let sample = std::str::from_utf8(sample).map_err(|_|
+                Error::InvalidData(format!("Input VCF file contains non-UTF8 sample names ({:?})",
+                String::from_utf8_lossy(sample))))?;
+
+            let ploidy = genotypes.get(sample_id).len();
+            if leave_out.contains(sample) {
+                discarded += ploidy;
+                continue;
+            }
+            if ploidy == 0 {
+                return Err(Error::InvalidData(format!("Sample {} has zero ploidy", sample)));
+            } else if ploidy > 255 {
+                return Err(Error::InvalidData(format!("Sample {} has extremely high ploidy", sample)));
+            }
+            let mut haplotypes = Vec::with_capacity(ploidy);
+            for hap_ix in 0..ploidy {
+                let haplotype = if ploidy == 1 { sample.to_owned() } else { format!("{}.{}", sample, hap_ix + 1) };
+                if leave_out.contains(&haplotype) {
+                    discarded += 1;
+                    continue;
+                }
+                if !hap_names.insert(haplotype.clone()) {
+                    return Err(Error::InvalidData(format!("Duplicate haplotype name ({})", haplotype)));
+                }
+                haplotypes.push(Haplotype {
+                    hap_ix,
+                    shift_ix: total,
+                    name: haplotype,
+                });
+                total += 1;
+            }
+            samples.push(Sample {
+                name: sample.to_owned(),
+                sample_id, ploidy, haplotypes,
+            });
+        }
+        log::info!("Total {} haplotypes", total);
+        if discarded > 0 {
+            log::warn!("Leave out {} haplotypes", discarded);
+        }
+        if samples.is_empty() {
+            return Err(Error::InvalidData("Loaded zero haplotypes".to_owned()));
+        }
+        Ok(Self { ref_name, samples, total })
+    }
+}
+
+/// Discard variants where there is no known variation.
+/// NOTE: Can also filter out poorly known variants, as well as variants with bad quality.
+pub fn filter_variants(
+    reader: &mut impl bcf::Read,
+    haplotypes: &AllHaplotypes,
+) -> Result<Vec<Record>, Error>
+{
+    let mut vars = Vec::new();
+    for rec in reader.records() {
+        let var = rec?;
+        let gts = var.genotypes()?;
+        let mut has_variation = false;
+        for sample in haplotypes.samples.iter() {
+            let gt = gts.get(sample.sample_id);
+            if gt.len() != sample.ploidy {
+                return Err(Error::InvalidData(format!("Variant {} in sample {} has ploidy {} (expected {})",
+                    format_var(&var, reader.header()), sample.name, gt.len(), sample.ploidy)));
+            }
+            // Check only last allele in the genotype, as only last allele has phasing marking,
+            // (see https://docs.rs/rust-htslib/latest/rust_htslib/bcf/record/struct.Genotypes.html).
+            match gt[sample.ploidy - 1] {
+                GenotypeAllele::Unphased(_) | GenotypeAllele::UnphasedMissing if sample.ploidy > 1 =>
+                    return Err(Error::InvalidData(format!("Variant {} is unphased in sample {}",
+                        format_var(&var, reader.header()), sample.name))),
+                _ => {}
+            }
+            has_variation |= sample.haplotypes.iter().any(|haplotype|
+                match gt[haplotype.hap_ix] {
+                    GenotypeAllele::Phased(1..) | GenotypeAllele::Unphased(1..) => true,
+                    _ => false,
+                });
+        }
+        if has_variation {
+            vars.push(var);
+        }
+    }
+    Ok(vars)
+}
 
 /// Formats variant as `chrom:pos`.
 fn format_var(var: &Record, header: &HeaderView) -> String {
@@ -23,33 +188,21 @@ fn format_var(var: &Record, header: &HeaderView) -> String {
 pub fn reconstruct_sequences(
     ref_start: u32,
     ref_seq: &[u8],
-    ref_name: &str,
-    header: &HeaderView,
     recs: &[Record],
-    leave_out: &FnvHashSet<String>,
+    haplotypes: &AllHaplotypes,
+    header: &HeaderView,
 ) -> Result<Vec<NamedSeq>, Error>
 {
-    const PLOIDY: usize = 2;
     let ref_end = ref_start + ref_seq.len() as u32;
-    let n_samples = header.sample_count() as usize;
-    let mut haplotype_names = FnvHashSet::with_capacity_and_hasher(1 + n_samples * PLOIDY, Default::default());
-    haplotype_names.insert(ref_name.to_owned());
-
-    let mut seqs = vec![NamedSeq::new(ref_name.to_owned(), ref_seq.to_vec())];
-    // Boolean vector, is the sequence in `leave_out`?
-    let mut leave_out_seq = vec![!leave_out.is_empty() && leave_out.contains(ref_name)];
-
     let capacity = ref_seq.len() * 3 / 2;
-    let sample_names = header.samples();
-    for sample in sample_names.iter() {
-        let sample = from_utf8(sample)?;
-        for i in 1..=PLOIDY {
-            let name = format!("{}.{}", sample, i);
-            if !haplotype_names.insert(name.clone()) {
-                return Err(Error::InvalidData(format!("Haplotype name {} is not unique", name)));
-            }
-            leave_out_seq.push(!leave_out.is_empty() && (leave_out.contains(sample) || leave_out.contains(&name)));
-            seqs.push(NamedSeq::new(name, Vec::with_capacity(capacity)));
+
+    let mut seqs = Vec::with_capacity(haplotypes.total);
+    if let Some(ref_name) = haplotypes.ref_name.as_ref() {
+        seqs.push(NamedSeq::new(ref_name.to_owned(), ref_seq.to_vec()));
+    }
+    for sample in haplotypes.samples.iter() {
+        for haplotype in sample.haplotypes.iter() {
+            seqs.push(NamedSeq::new(haplotype.name.clone(), Vec::with_capacity(capacity)));
         }
     }
     // Is the sequence missing (some of the genotypes unavailable)?
@@ -77,54 +230,37 @@ pub fn reconstruct_sequences(
         let seq_between_vars = &ref_seq[(ref_pos - ref_start) as usize..(var_start - ref_start) as usize];
 
         let gts = var.genotypes()?;
-        for sample_id in 0..n_samples {
-            let gt = gts.get(sample_id);
-            if gt.len() != PLOIDY {
-                return Err(Error::InvalidData(format!("Variant {} in sample {} has ploidy {} (expected {})",
-                    format_var(var, header), from_utf8(&sample_names[sample_id]).unwrap(),
-                    gt.len(), PLOIDY)));
-            }
-            // Check only last allele in the genotype, as only last allele has phasing marking,
-            // (see https://docs.rs/rust-htslib/latest/rust_htslib/bcf/record/struct.Genotypes.html).
-            match gt[PLOIDY - 1] {
-                GenotypeAllele::Unphased(_) | GenotypeAllele::UnphasedMissing =>
-                    return Err(Error::InvalidData(format!("Variant {} is unphased in sample {}",
-                        format_var(var, header), from_utf8(&sample_names[sample_id]).unwrap()))),
-                _ => {}
-            }
-            for haplotype in 0..PLOIDY {
-                let seq_ix = PLOIDY * sample_id + haplotype + 1;
-                let mut_seq = seqs[seq_ix].seq_mut();
+        for sample in haplotypes.samples.iter() {
+            let gt = gts.get(sample.sample_id);
+            assert_eq!(gt.len(), sample.ploidy);
+            for haplotype in sample.haplotypes.iter() {
+                let mut_seq = seqs[haplotype.shift_ix].seq_mut();
                 mut_seq.extend_from_slice(seq_between_vars);
-                match gt[haplotype] {
+                match gt[haplotype.hap_ix] {
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) =>
                         mut_seq.extend_from_slice(alleles[allele_ix as usize]),
-                    GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing => missing_seq[seq_ix] = true,
+                    GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing =>
+                        missing_seq[haplotype.shift_ix] = true,
                 }
             }
         }
         ref_pos = var_end;
     }
     let suffix_seq = &ref_seq[(ref_pos - ref_start) as usize..];
-    for entry in seqs[1..].iter_mut() {
+    for entry in seqs[haplotypes.samples[0].haplotypes[0].shift_ix..].iter_mut() {
         entry.seq_mut().extend_from_slice(suffix_seq);
     }
 
-    let n_leaveout = leave_out_seq.iter().fold(0, |acc, &val| acc + usize::from(val));
-    let n_missing = missing_seq.iter().zip(&leave_out_seq)
-        .fold(0, |acc, (&missing, &leave_out)| acc + usize::from(missing & !leave_out));
-    if n_leaveout > 0 || n_missing > 0 {
-        let n_remain = seqs.len().saturating_sub(n_leaveout + n_missing);
-        log::warn!("        {} haplotypes reconstructed ({} unavailable, {} leave out)",
-            n_remain, n_missing, n_leaveout);
+    let n_missing = missing_seq.iter().fold(0, |acc, &val| acc + usize::from(val));
+    if n_missing > 0 {
+        let n_remain = seqs.len() - n_missing;
+        log::warn!("        {} haplotypes unavailable, reconstructed {} haplotypes", n_missing, n_remain);
         if n_remain < 2 {
             return Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()));
         }
-        Ok(
-            seqs.into_iter().zip(leave_out_seq.into_iter().zip(missing_seq.into_iter()))
-                .filter_map(|(seq, (leave_out, missing))| if leave_out || missing { None } else { Some(seq) })
-                .collect()
-        )
+        Ok(seqs.into_iter().zip(missing_seq.into_iter())
+            .filter_map(|(seq, missing)| if missing { None } else { Some(seq) })
+            .collect())
     } else {
         Ok(seqs)
     }
