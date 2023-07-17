@@ -97,4 +97,9 @@ impl NamedSeq {
     pub fn take_seq(self) -> Vec<u8> {
         self.seq
     }
+
+    /// Sequence length.
+    pub fn len(&self) -> u32 {
+        self.seq.len() as u32
+    }
 }

@@ -43,6 +43,7 @@ struct Args {
     moving_window: u32,
 
     penalties: Penalties,
+    unavail_rate: f64,
     max_divergence: f64,
 
     threads: u16,
@@ -65,6 +66,7 @@ impl Default for Args {
             moving_window: 500,
 
             penalties: Default::default(),
+            unavail_rate: 0.0001,
             max_divergence: 0.0001,
 
             threads: 8,
@@ -81,6 +83,11 @@ impl Args {
         validate_param!(self.variants.is_some(), "Variants VCF file is not provided (see -v/--vcf)");
         validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
             "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
+
+        validate_param!(0.0 <= self.unavail_rate && self.unavail_rate <= 1.0,
+            "Unavailable rate ({}) must be within [0, 1]", self.unavail_rate);
+        validate_param!(0.0 <= self.max_divergence && self.max_divergence <= 1.0,
+            "Maximum divergence ({}) must be within [0, 1]", self.max_divergence);
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         // Make window size odd.
@@ -106,7 +113,7 @@ fn print_help() {
         "-d, --db".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " create").underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  PanGenie input VCF file. Encodes variation across pangenome samples.\n\
+    println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.\n\
         {EMPTY}  Must be compressed and indexed with {}.",
         "-v, --vcf".green(), "FILE".yellow(), "tabix".underline());
     // println!("    {:KEY$} {:VAL$}  Fasta file with haplotype sequences\n
@@ -131,6 +138,10 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.moving_window);
+    println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
+        {EMPTY}  (relative to the haplotype length). Variants that have no known variation\n\
+        {EMPTY}  in the input VCF pangenome are ignored.",
+        "-u, --unavail".green(), "FLOAT".yellow(), defaults.unavail_rate);
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
 
@@ -187,6 +198,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.penalties.gap_extension = parser.value()?.parse()?,
             Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
+            Short('u') | Long("unavail") | Long("unavailable") => args.unavail_rate = parser.value()?.parse()?,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
@@ -537,7 +549,8 @@ where R: Read + Seek,
     }
 
     log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
-    let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes, vcf_file.header());
+    let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
+        vcf_file.header(), args.unavail_rate);
     match reconstruction {
         Ok(seqs) => process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?,
         Err(Error::InvalidData(e)) => {

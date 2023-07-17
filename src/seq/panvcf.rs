@@ -7,7 +7,10 @@ use htslib::bcf::{
     header::HeaderView,
     record::{Record, GenotypeAllele},
 };
-use crate::{Error, seq};
+use crate::{
+    Error, seq,
+    ext::vec::F64Ext,
+};
 use super::NamedSeq;
 
 /// Stores one sample in the VCF file.
@@ -184,13 +187,14 @@ fn format_var(var: &Record, header: &HeaderView) -> String {
 }
 
 /// Reconstructs sample sequences by adding variants to the reference sequence.
-/// Returns Vector of pairs `(name, sequence)`.
+/// Returns Vector of named sequences.
 pub fn reconstruct_sequences(
     ref_start: u32,
     ref_seq: &[u8],
     recs: &[Record],
     haplotypes: &AllHaplotypes,
     header: &HeaderView,
+    unavail_rate: f64,
 ) -> Result<Vec<NamedSeq>, Error>
 {
     let ref_end = ref_start + ref_seq.len() as u32;
@@ -205,8 +209,8 @@ pub fn reconstruct_sequences(
             seqs.push(NamedSeq::new(haplotype.name.clone(), Vec::with_capacity(capacity)));
         }
     }
-    // Is the sequence missing (some of the genotypes unavailable)?
-    let mut missing_seq = vec![false; seqs.len()];
+    // Number of unavailable nucleotides for each sequence.
+    let mut unavail_size = vec![0_u32; haplotypes.total];
 
     let mut ref_pos = ref_start;
     for var in recs.iter() {
@@ -240,7 +244,10 @@ pub fn reconstruct_sequences(
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) =>
                         mut_seq.extend_from_slice(alleles[allele_ix as usize]),
                     GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing =>
-                        missing_seq[haplotype.shift_ix] = true,
+                    {
+                        unavail_size[haplotype.shift_ix] += alleles[0].len() as u32;
+                        mut_seq.extend_from_slice(alleles[0]) // Extend with the ref allele
+                    }
                 }
             }
         }
@@ -251,17 +258,21 @@ pub fn reconstruct_sequences(
         entry.seq_mut().extend_from_slice(suffix_seq);
     }
 
-    let n_missing = missing_seq.iter().fold(0, |acc, &val| acc + usize::from(val));
-    if n_missing > 0 {
-        let n_remain = seqs.len() - n_missing;
-        log::warn!("        {} haplotypes unavailable, reconstructed {} haplotypes", n_missing, n_remain);
-        if n_remain < 2 {
-            return Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()));
-        }
-        Ok(seqs.into_iter().zip(missing_seq.into_iter())
-            .filter_map(|(seq, missing)| if missing { None } else { Some(seq) })
-            .collect())
-    } else {
-        Ok(seqs)
+    let aver_unavail = F64Ext::mean(&unavail_size);
+    if aver_unavail > 0.0 {
+        log::debug!("        On average, {:.1} bp unavailable per haplotype", aver_unavail);
     }
+    let avail_seqs: Vec<NamedSeq> = seqs.into_iter().zip(unavail_size.into_iter())
+        .filter(|(seq, unavail)| f64::from(*unavail) <= unavail_rate * f64::from(seq.len()))
+        .map(|(seq, _)| seq)
+        .collect();
+    let n_remain = avail_seqs.len();
+    if n_remain < haplotypes.total {
+        log::warn!("        {} haplotypes unavailable, reconstructed {} haplotypes",
+            haplotypes.total - n_remain, n_remain);
+    }
+    if n_remain < 2 {
+        return Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()));
+    }
+    Ok(avail_seqs)
 }
