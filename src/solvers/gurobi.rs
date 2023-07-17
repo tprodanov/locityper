@@ -1,6 +1,6 @@
 use std::{fmt, result::Result};
 use grb::{
-    Env, Var, Model, Status, attr, parameter, c, add_binvar,
+    Env, Var, Model, Status, attr, parameter, c, add_binvar, add_intvar,
     expr::{LinExpr, GurobiSum},
 };
 use rand::Rng;
@@ -139,4 +139,105 @@ impl fmt::Display for GurobiSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Gurobi")
     }
+}
+
+pub fn solve2(assignments: &ReadAssignment, seed: i32, ploidy: u8) -> Result<(), Error> {
+    let mut env = Env::empty()?;
+    env.set(parameter::IntParam::OutputFlag, 0)?;
+    let mut model = Model::with_env("", &env.start()?)?;
+    model.set_param(parameter::IntParam::Threads, 1)?;
+
+    let contig_windows = assignments.contig_windows();
+    let n_contigs = contig_windows.n_contigs();
+    let contig_ploidies: Vec<_> = (0..n_contigs)
+        .map(|i| add_intvar!(model, name: &format!("contig{}", i), bounds: 0..2))
+        .collect::<Result<_, _>>()?;
+    model.add_constr(&"ploidy", c!( (&contig_ploidies).grb_sum() == ploidy ))?;
+
+    let total_windows = contig_windows.total_windows() as usize;
+    let mut max_depth = vec![0_u32; total_windows];
+    let mut window_depth_constrs = vec![LinExpr::new(); total_windows];
+    let mut objective = LinExpr::new();
+    let mut assignment_vars = Vec::new();
+
+    for rp in 0..assignments.total_reads() {
+        let read_alns = assignments.possible_read_alns(rp);
+        let prev_len = assignment_vars.len();
+        for (j, loc) in read_alns.iter().enumerate() {
+            let ws = loc.windows();
+            let var = add_binvar!(model, name: &format!("R{:x}_{}_{}_{}", rp, j, ws[0], ws[1]))?;
+            assignment_vars.push(var);
+            objective.add_term(loc.ln_prob(), var);
+            let inc: u32 = if ws[0] == ws[1] { 2 } else { 1 };
+            for w in ws.into_iter() {
+                if w >= REG_WINDOW_SHIFT {
+                    max_depth[w as usize] += inc;
+                    window_depth_constrs[w as usize].add_term(f64::from(inc), var);
+                }
+                if inc == 2 {
+                    break;
+                }
+            }
+        }
+        model.add_constr(&format!("R{:x}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
+    }
+
+    let depth_contrib = assignments.depth_contrib();
+    let mut depth_vars = Vec::new();
+    for (i, contig_ploidy) in contig_ploidies.iter().enumerate() {
+        for w in contig_windows.get_wshift(i)..contig_windows.get_wshift(i + 1) {
+            let depth_distr = assignments.depth_distr(w as usize);
+            if max_depth[w as usize] == 0 {
+                objective.add_term(depth_contrib * depth_distr.ln_pmf(0), *contig_ploidy);
+                continue;
+            }
+            let prev_len = depth_vars.len();
+            let depth_constr = &mut window_depth_constrs[w as usize];
+            for depth in 0..=max_depth[w as usize] {
+                let var = add_intvar!(model, name: &format!("D{}_{}", w, depth), bounds: 0..2)?;
+                objective.add_term(depth_contrib * depth_distr.ln_pmf(depth), var);
+                if depth > 0 {
+                    depth_constr.add_term(-f64::from(depth), var);
+                }
+                depth_vars.push(var);
+            }
+            model.add_constr(&format!("D{}_base", w), c!( (&depth_vars[prev_len..]).grb_sum() == contig_ploidy ))?;
+            model.add_constr(&format!("D{}_eq", w), c!( depth_constr.clone() == 0 ))?;
+        }
+    }
+    model.set_objective(objective, grb::ModelSense::Maximize)?;
+    model.write("model2.lp")?;
+    panic!();
+    model.set_param(parameter::IntParam::Seed, seed)?;
+
+    log::info!("Starting ILP optimization");
+    model.optimize()?;
+    let status = model.status()?;
+    if status != Status::Optimal {
+        log::error!("Gurobi achieved non-optimal status {:?}", status);
+    }
+    log::info!("Achieved likelihood {:.5}", model.get_attr(attr::ObjVal)?);
+
+    // let ploidy_vals = model.get_obj_attr_batch(attr::X, contig_ploidies.iter().copied())?;
+    // let depth_vals = model.get_obj_attr_batch(attr::X, depth_vars.iter().copied())?;
+    // let assgn_vals = model.get_obj_attr_batch(attr::X, assignment_vars.iter().copied())?;
+    log::info!("Contig ploidies:");
+    for var in contig_ploidies.iter() {
+        log::debug!("    {:10} -> {:.2}",
+            model.get_obj_attr(attr::VarName, var)?,
+            model.get_obj_attr(attr::X, var)?);
+    }
+    log::info!("Read depth:");
+    for var in depth_vars.iter() {
+        log::debug!("    {:10} -> {:.2}",
+            model.get_obj_attr(attr::VarName, var)?,
+            model.get_obj_attr(attr::X, var)?);
+    }
+    log::info!("Read assignment:");
+    for var in assignment_vars.iter() {
+        log::debug!("    {:10} -> {:.2}",
+            model.get_obj_attr(attr::VarName, var)?,
+            model.get_obj_attr(attr::X, var)?);
+    }
+    Ok(())
 }

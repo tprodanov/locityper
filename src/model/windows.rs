@@ -339,7 +339,7 @@ impl MultiContigWindows {
     ) -> usize {
         let start_len = out_alns.len();
         // Probability of being unmapped to any of the contigs.
-        let unmapped_prob = groupped_alns.unmapped_prob() + self.ln_ploidy;
+        let unmapped_prob = groupped_alns.unmapped_prob();                  // + self.ln_ploidy;
         // Current threshold, is updated during the for-loop.
         let mut thresh_prob = unmapped_prob - prob_diff;
         for (i, contig_id) in self.ids().enumerate() {

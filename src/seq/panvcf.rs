@@ -268,8 +268,7 @@ pub fn reconstruct_sequences(
         .collect();
     let n_remain = avail_seqs.len();
     if n_remain < haplotypes.total {
-        log::warn!("        {} haplotypes unavailable, reconstructed {} haplotypes",
-            haplotypes.total - n_remain, n_remain);
+        log::warn!("        Reconstructed {} haplotypes ({} unavailable)", n_remain, haplotypes.total - n_remain);
     }
     if n_remain < 2 {
         return Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()));
