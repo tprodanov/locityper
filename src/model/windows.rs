@@ -266,8 +266,6 @@ impl ContigWindows {
 /// Stores the contigs and windows corresponding to the windows.
 pub struct MultiContigWindows {
     by_contig: Vec<ContigWindows>,
-    /// `ln(sum(cns))`.
-    ln_ploidy: f64,
     /// Start index for each contig id (length: n-contigs + 1).
     /// Contig with index `i` will have windows between `wshifts[i]..wshifts[i + 1]`.
     wshifts: Vec<u32>,
@@ -290,7 +288,6 @@ impl MultiContigWindows {
         }
         assert!(by_contig.len() < 256, "Multi-contig collection cannot contain more than 256 entries");
         Self {
-            ln_ploidy: (n as f64).ln(),
             window: by_contig[0].window_size(),
             by_contig, wshifts,
         }
@@ -339,7 +336,7 @@ impl MultiContigWindows {
     ) -> usize {
         let start_len = out_alns.len();
         // Probability of being unmapped to any of the contigs.
-        let unmapped_prob = groupped_alns.unmapped_prob();                  // + self.ln_ploidy;
+        let unmapped_prob = groupped_alns.unmapped_prob();
         // Current threshold, is updated during the for-loop.
         let mut thresh_prob = unmapped_prob - prob_diff;
         for (i, contig_id) in self.ids().enumerate() {

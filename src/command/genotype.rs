@@ -576,16 +576,6 @@ fn analyze_locus(
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
 
-    let mcontig_windows = crate::model::windows::MultiContigWindows::new(
-        &[contigs.get_id("HG00621.1"), contigs.get_id("HG00621.2"),
-        contigs.get_id("HG00733.1"), contigs.get_id("HG00733.2"),
-        contigs.get_id("HG00735.1"), contigs.get_id("HG00735.2")],
-        &contig_windows);
-    let mut assgn = crate::model::assgn::ReadAssignment::new(mcontig_windows, &all_alns, &cached_distrs, &args.assgn_params);
-    assgn.define_read_windows(20, &mut rng);
-    crate::solvers::gurobi::solve2(&assgn, 1234, 2)?;
-    panic!("Stop");
-
     let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     let data = scheme::Data {
         scheme: scheme.clone(),
