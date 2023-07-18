@@ -55,19 +55,19 @@ impl Solver for GreedySolver {
         let mut curr_plato = 0;
 
         while curr_plato <= self.plato_size {
-            let mut best_target = ReassignmentTarget::new(assignments, 0, 0);
+            let mut best_target = None;
             let mut best_improv = 0.0;
             for _ in 0..self.sample_size {
                 let target = ReassignmentTarget::random(assignments, rng);
                 let improv = assignments.calculate_improvement(&target);
                 if improv > best_improv {
-                    best_target = target;
+                    best_target = Some(target);
                     best_improv = improv;
                 }
             }
-            if best_improv > 0.0 {
+            if let Some(target) = best_target {
                 curr_plato = 0;
-                assignments.reassign(&best_target);
+                assignments.reassign(&target);
             } else {
                 curr_plato += 1;
             }

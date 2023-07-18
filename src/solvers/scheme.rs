@@ -177,7 +177,7 @@ impl Default for Scheme {
         Self(vec![
             // First, run Greedy solver on all haplotypes.
             Stage {
-                solver: Box::new(super::GreedySolver::default()),
+                solver: Box::new(super::SimAnneal::default()),
                 fraction: 1.0,
                 write: false,
                 attempts: 5,
