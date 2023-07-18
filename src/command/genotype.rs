@@ -427,15 +427,15 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::from_path(&args.input[0])?;
-        targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
+        targets.recruit(reader, writers, args.threads)?;
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
-        targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
+        targets.recruit(reader, writers, args.threads)?;
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::from_path(&args.input[0])?,
             fastx::Reader::from_path(&args.input[1])?);
-        targets.recruit(reader, writers, args.threads, args.recr_params.chunk_size)?;
+        targets.recruit(reader, writers, args.threads)?;
     }
     for locus in filt_loci.iter() {
         fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)?;

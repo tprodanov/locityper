@@ -19,6 +19,7 @@ use crate::{
 
 pub type Minimizer = u64;
 
+#[derive(Clone)]
 pub struct Params {
     /// Recruit reads using k-mers of size `minimizer_k` that have the minimial hash across `minimizer_w`
     /// consecutive k-mers.
@@ -108,13 +109,10 @@ type Answer = Vec<u16>;
 /// Recruitement targets.
 #[derive(Clone)]
 pub struct Targets {
-    minimizer_k: u8,
-    minimizer_w: u8,
+    params: Params,
+    n_loci: u16,
     /// Minimizers appearing across the targets.
     minim_to_loci: MinimToLoci,
-    /// Minimal ratio of minimizer matches per read/read-pair, needed to recruit the read to the corresponding locus.
-    matches_frac: f32,
-    n_loci: u16,
 }
 
 impl Targets {
@@ -123,9 +121,7 @@ impl Targets {
         Self {
             minim_to_loci: MinimToLoci::default(),
             n_loci: 0,
-            minimizer_k: params.minimizer_k,
-            minimizer_w: params.minimizer_w,
-            matches_frac: params.matches_frac,
+            params: params.clone(),
         }
     }
 
@@ -135,7 +131,7 @@ impl Targets {
         let locus_ix = self.n_loci;
         for seq in seqs {
             buffer.clear();
-            kmers::minimizers(seq, self.minimizer_k, self.minimizer_w, &mut buffer);
+            kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, &mut buffer);
             for &minimizer in buffer.iter() {
                 match self.minim_to_loci.entry(minimizer) {
                     Entry::Occupied(entry) => {
@@ -166,26 +162,26 @@ impl Targets {
         &self,
         record: &T,
         answer: &mut Answer,
-        buffer_minimizers: &mut Vec<Minimizer>,
-        buffer_matches: &mut IntMap<u16, u16>,
+        record_minimizers: &mut Vec<Minimizer>,
+        matches: &mut IntMap<u16, u16>,
     ) {
-        buffer_minimizers.clear();
-        record.minimizers(self.minimizer_k, self.minimizer_w, buffer_minimizers);
-        buffer_matches.clear();
-        for minimizer in buffer_minimizers.iter() {
+        record_minimizers.clear();
+        matches.clear();
+        record.minimizers(self.params.minimizer_k, self.params.minimizer_w, record_minimizers);
+        for minimizer in record_minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for &locus_ix in loci_ixs.iter() {
-                    buffer_matches.entry(locus_ix)
+                    matches.entry(locus_ix)
                         .and_modify(|counter| *counter = counter.saturating_add(1))
                         .or_insert(1);
                 }
             }
         }
         answer.clear();
-        if !buffer_matches.is_empty() {
+        if !matches.is_empty() {
             const FLOAT_U16MAX: f32 = u16::MAX as f32;
-            let thresh = (buffer_minimizers.len() as f32 * self.matches_frac).min(FLOAT_U16MAX) as u16;
-            for (&locus_ix, &count) in buffer_matches.iter() {
+            let thresh = (record_minimizers.len() as f32 * self.params.matches_frac).min(FLOAT_U16MAX) as u16;
+            for (&locus_ix, &count) in matches.iter() {
                 if count >= thresh {
                     answer.push(locus_ix);
                 }
@@ -225,11 +221,10 @@ impl Targets {
         reader: impl FastxRead<Record = T>,
         writers: Vec<W>,
         threads: u16,
-        chunk_size: usize,
     ) -> io::Result<()> {
         let n_workers = usize::from(threads - 1);
         log::info!("Starting read recruitment with 1 read/write thread, and {} recruitment threads", n_workers);
-        let mut main_worker = MainWorker::<T, _, _>::new(self, reader, writers, n_workers, chunk_size);
+        let mut main_worker = MainWorker::<T, _, _>::new(self, reader, writers, n_workers, self.params.chunk_size);
         main_worker.run()?;
         main_worker.finish()
     }
@@ -240,18 +235,14 @@ impl Targets {
         reader: impl FastxRead<Record = T>,
         mut writers: Vec<W>,
         threads: u16,
-        chunk_size: usize,
     ) -> io::Result<()>
     {
         assert_ne!(self.n_loci, 0, "Cannot recruit to zero loci");
         assert_eq!(writers.len(), self.n_loci as usize, "Unexpected number of writers");
         if threads <= 1 {
-            // if threads == 2 {
-            //     log::warn!("2-thread recruitment is slower, running in single-thread mode!");
-            // }
             self.recruit_single_thread(reader, &mut writers)
         } else {
-            self.recruit_multi_thread(reader, writers, threads, chunk_size)
+            self.recruit_multi_thread(reader, writers, threads)
         }
     }
 }

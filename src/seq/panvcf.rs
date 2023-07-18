@@ -198,7 +198,6 @@ pub fn reconstruct_sequences(
 ) -> Result<Vec<NamedSeq>, Error>
 {
     let ref_end = ref_start + ref_seq.len() as u32;
-    log::debug!("    Reconstruct sequences {}..{}", ref_start, ref_end);
     let capacity = ref_seq.len() * 3 / 2;
 
     let mut seqs = Vec::with_capacity(haplotypes.total);
