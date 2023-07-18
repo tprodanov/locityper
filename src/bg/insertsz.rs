@@ -10,7 +10,7 @@ use nohash::IntMap;
 use crate::{
     Error,
     algo::bisect,
-    ext::{self, vec::{VecExt, F64Ext}},
+    ext::{self, vec::F64Ext},
     bg::ser::{JsonSer, json_get},
     math::distr::{
         DiscretePmf, LinearCache, WithMoments, WithQuantile,
@@ -129,8 +129,7 @@ impl InsertDistr {
                 if orient_allowed[i] { "allowed" } else { "forbidden" });
         }
 
-        VecExt::sort(&mut insert_sizes);
-        let max_size = INS_QUANTILE_MULT * F64Ext::quantile_sorted(&insert_sizes, INS_QUANTILE);
+        let max_size = INS_QUANTILE_MULT * F64Ext::interpol_quantile(&mut insert_sizes, INS_QUANTILE);
         // Find index after the limiting value.
         let m = bisect::right(&insert_sizes, &max_size);
         let lim_insert_sizes = &insert_sizes[..m];

@@ -210,14 +210,15 @@ impl ContigWindows {
 
         let mut window_gcs = Vec::with_capacity(n_windows as usize);
         let mut window_weights = Vec::with_capacity(n_windows as usize);
-        let window_padding = (neighb_size - window) / 2;
+        let left_padding = (neighb_size - window) / 2;
+        let right_padding = neighb_size - window - left_padding;
         for i in 0..n_windows {
-            let padded_start = start + i * window - window_padding;
-            let padded_end = padded_start + neighb_size;
+            let padded_start = (start + i * window).saturating_sub(left_padding);
+            let padded_end = (start + (i + 1) * window + right_padding).min(contig_len);
             window_gcs.push(seq::gc_content(&seq[padded_start as usize..padded_end as usize]).round() as u8);
 
-            let mean_kmer_freq = F64Ext::mean(&contig_kmer_counts[padded_start.saturating_sub(halfk) as usize
-                ..min(padded_end - halfk, contig_len - k + 1) as usize]);
+            let mean_kmer_freq = F64Ext::mean(&contig_kmer_counts[
+                padded_start.saturating_sub(halfk) as usize..min(padded_end - halfk, contig_len - k + 1) as usize]);
             window_weights.push(sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer));
         }
         Self {

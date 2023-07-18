@@ -50,6 +50,25 @@ impl VecExt {
         debug_assert_eq!(sums.len(), n - w + 1);
         sums
     }
+
+    /// Finds `q`-th quantile in a sorted array.
+    /// Does not use linear interpolation, just returns closest of the two values.
+    fn quantile_sorted<T>(a: &[T], q: f64) -> T
+    where T: Copy,
+    {
+        let n = a.len();
+        assert!(0.0 <= q && q <= 1.0, "Quantile must be within [0, 1]!");
+        assert!(n > 0, "Cannot find quantile on an empty array!");
+        let i = (((a.len() - 1) as f64 * q).round() as usize).min(n - 1);
+        a[i]
+    }
+
+    pub fn quantile<T>(a: &mut [T], q: f64) -> T
+    where T: Copy + PartialOrd,
+    {
+        Self::sort(a);
+        Self::quantile_sorted(a, q)
+    }
 }
 
 /// Static methods related to vectors over f64.
@@ -120,9 +139,9 @@ impl F64Ext {
 
     /// Finds `q`-th quantile in a sorted array.
     /// Uses linear interpolation, if the quantile is between two elements.
-    pub fn quantile_sorted(a: &[f64], q: f64) -> f64 {
+    fn interpol_quantile_sorted(a: &[f64], q: f64) -> f64 {
         assert!(0.0 <= q && q <= 1.0, "Quantile must be within [0, 1]!");
-        assert!(a.len() > 0, "Cannot find quantile on an empty array!");
+        assert!(!a.is_empty(), "Cannot find quantile on an empty array!");
         let f = (a.len() - 1) as f64 * q;
         let i = f as usize;
         let r = f.fract();
@@ -136,6 +155,13 @@ impl F64Ext {
             debug_assert!(y >= x);
             x + (y - x) * r
         }
+    }
+
+    /// Finds `q`-th quantile in an unsorted array.
+    /// Uses linear interpolation, if the quantile is between two elements.
+    pub fn interpol_quantile(a: &mut [f64], q: f64) -> f64 {
+        VecExt::sort(a);
+        Self::interpol_quantile_sorted(a, q)
     }
 
     /// Converts vector to string with given precision and width.
@@ -163,13 +189,6 @@ impl F64Ext {
 pub struct IterExt;
 
 impl IterExt {
-    /// Consume iterator and find `q`-th quantile in it. Takes *O(n log n)*.
-    pub fn quantile(it: impl Iterator<Item = f64>, q: f64) -> f64 {
-        let mut v: Vec<f64> = it.collect();
-        VecExt::sort(&mut v);
-        F64Ext::quantile_sorted(&v, q)
-    }
-
     /// Finds an index of an optimal value `opt`, according `is_better`.
     /// Unless stochastic, `is_better` will return `is_better(opt, e)` for all other `e` in the iterator.
     pub fn arg_optimal<T, I, F>(mut it: I, is_better: F) -> (usize, T)

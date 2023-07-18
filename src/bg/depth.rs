@@ -1,5 +1,6 @@
 use std::{
     io::{self, Write},
+    cmp::min,
     path::Path,
 };
 use crate::{
@@ -36,34 +37,36 @@ pub trait DepthDistr {
 #[derive(Clone, Debug)]
 struct WindowCounts {
     start: u32,
+    end: u32,
     depth: [u32; 2],
 }
 
 impl WindowCounts {
-    fn new(start: u32) -> Self {
+    fn new(start: u32, end: u32) -> Self {
         WindowCounts {
-            start,
+            start, end,
             depth: [0, 0],
         }
     }
 }
 
-/// Count reads in various windows of length `params.window_size` between ~ `interval.start() + params.boundary_size`
-/// and ~ `interval.end() - params.boundary_size`.
+/// Count reads in various windows of length `window_size`
+/// between approx. `interval.start() + boundary_size` and `interval.end() - boundary_size`.
 fn count_reads<'a>(
     alignments: impl Iterator<Item = &'a LightAlignment>,
     interval: &Interval,
-    params: &ReadDepthParams,
+    window_size: u32,
+    boundary_size: u32,
 ) -> Vec<WindowCounts> {
-    assert!(interval.len() >= params.window_size + 2 * params.boundary_size, "Input interval is too short!");
-    let n_windows = (interval.len() - 2 * params.boundary_size) / params.window_size;
-    let sum_len = n_windows * params.window_size;
+    assert!(interval.len() >= window_size + 2 * boundary_size, "Input interval is too short!");
+    let n_windows = (interval.len() - 2 * boundary_size) / window_size;
+    let sum_len = n_windows * window_size;
     let interval_start = interval.start();
     let start = interval_start + (interval.len() - sum_len) / 2;
     let mut windows: Vec<_> = (0..n_windows)
-        .map(|i| WindowCounts::new(start + i * params.window_size))
+        .map(|i| WindowCounts::new(start + i * window_size, start + (i + 1) * window_size))
         .collect();
-    let window_getter = WindowGetter::new(start, start + sum_len, params.window_size);
+    let window_getter = WindowGetter::new(start, start + sum_len, window_size);
 
     for aln in alignments {
         if let Some(window) = window_getter.middle_window(aln.interval().middle()) {
@@ -84,48 +87,51 @@ fn filter_windows(
     windows: Vec<WindowCounts>,
     seq_shift: u32,
     ref_seq: &[u8],
-    kmer_counts_coll: &KmerCounts,
-    params: &ReadDepthParams,
+    kmer_counts_collection: &KmerCounts,
+    window_size: u32,
+    neighb_size: u32,
+    kmer_perc: f64,
     mut dbg_writer: impl Write,
 ) -> io::Result<(Vec<WindowCounts>, Vec<f64>)>
 {
     writeln!(dbg_writer, "start\tgc\tkmer_perc\tkeep\tdepth1\tdepth2")?;
     log::debug!("    Total windows:   {:7}", windows.len());
+    let seq_len = ref_seq.len();
+    let k = kmer_counts_collection.k();
+    assert!(neighb_size > k);
+    let kmer_counts = kmer_counts_collection.get_first();
+    let left_padding = (neighb_size - window_size) / 2;
+    let right_padding = neighb_size - window_size - left_padding;
+    let mut kmer_buffer = Vec::with_capacity((neighb_size + 1 - k) as usize);
+
     let mut have_ns = 0;
     let mut have_common_kmers = 0;
-
-    let k = kmer_counts_coll.k();
-    let kmer_counts = kmer_counts_coll.get_first();
-    let window_padding = (params.neighb_size - params.window_size) / 2;
-    let neighb_size = params.neighb_size as usize;
-    let neighb_kmers = neighb_size + 1 - k as usize;
-    assert!(neighb_kmers > 0);
-    let mut kmer_buffer = vec![0; neighb_kmers];
-    let percentile_index = ((neighb_kmers - 1) as f64 * 0.01 * params.kmer_perc) as usize;
-
     let mut sel_windows = Vec::with_capacity(windows.len());
     let mut gc_contents = Vec::with_capacity(windows.len());
     for window in windows.into_iter() {
-        let start_ix = (window.start - window_padding - seq_shift) as usize;
-        let window_seq = &ref_seq[start_ix..start_ix + neighb_size];
+        let start_ix = window.start.saturating_sub(left_padding + seq_shift) as usize;
+        let end_ix = min((window.end + right_padding - seq_shift) as usize, seq_len);
+        let window_seq = &ref_seq[start_ix..end_ix];
         let mut keep = true;
-        let mut kmer_perc = 0;
+        let mut kmer_abund = 0;
         let mut gc_content = f64::NAN;
         if seq::has_n(window_seq) {
             have_ns += 1;
             keep = false
         } else {
-            kmer_buffer.copy_from_slice(&kmer_counts[start_ix..start_ix + neighb_kmers]);
-            kmer_buffer.sort_unstable();
-            kmer_perc = kmer_buffer[percentile_index];
+            let end_ix2 = (end_ix + 1).checked_sub(k as usize).unwrap();
+            assert!(end_ix2 > start_ix);
+            kmer_buffer.clear();
+            kmer_buffer.extend_from_slice(&kmer_counts[start_ix..end_ix2]);
+            kmer_abund = VecExt::quantile(&mut kmer_buffer, kmer_perc);
             gc_content = seq::gc_content(window_seq);
-            if kmer_perc > 1 {
+            if kmer_abund > 1 {
                 have_common_kmers += 1;
                 keep = false;
             }
         }
 
-        writeln!(dbg_writer, "{}\t{:.1}\t{}\t{}\t{}\t{}", window.start, gc_content, kmer_perc,
+        writeln!(dbg_writer, "{}\t{:.1}\t{}\t{}\t{}\t{}", window.start, gc_content, kmer_abund,
             if keep { 'T' } else { 'F' }, window.depth[0], window.depth[1])?;
         if keep {
             sel_windows.push(window);
@@ -224,6 +230,10 @@ fn blur_boundary_values(means: &[f64], vars: &[f64], gc_bins: &[(usize, usize)],
     (blurred_means, blurred_vars)
 }
 
+/// Calculate GC-content and k-mer frequencies based on the window neighbourhood of at least this size.
+/// Neighbourhood size = max(MIN_NEIGHBOURHOOD, window_size).
+const MIN_NEIGHBOURHOOD: u32 = 300;
+
 /// Read depth parameters.
 #[derive(Clone, Debug)]
 pub struct ReadDepthParams {
@@ -231,12 +241,9 @@ pub struct ReadDepthParams {
     pub ploidy: u8,
 
     /// Calculate background read depth per windows of this size.
-    /// Default: 100.
-    pub window_size: u32,
-    /// Calculate GC-content and k-mer frequencies based on the window neighbourhood of this size (includes window).
-    /// Default: 300.
-    pub neighb_size: u32,
-    /// Ignore left-most and right-most `boundary_size` base-pairs. Must be >= `neighb_size`.
+    /// None: automatic.
+    pub window_size: Option<u32>,
+    /// Ignore left-most and right-most `boundary_size` bp.
     /// Default: 1000.
     pub boundary_size: u32,
 
@@ -269,8 +276,7 @@ impl Default for ReadDepthParams {
     fn default() -> Self {
         Self {
             ploidy: 2,
-            window_size: 100,
-            neighb_size: 300,
+            window_size: None,
             boundary_size: 1000,
             kmer_perc: 90.0,
 
@@ -282,24 +288,9 @@ impl Default for ReadDepthParams {
 }
 
 impl ReadDepthParams {
-    /// Compare window, neighbourhood and boundary sizes.
-    /// This function is static, as it is used elsewhere.
-    pub fn validate_sizes(window: u32, neighb: u32, boundary: u32) -> Result<(), Error> {
-        validate_param!(0 < window,
-            "Window size ({}) must be positive", window);
-        validate_param!(window <= neighb,
-            "Neighbourhood size ({}) must be at least window size ({})", neighb, window);
-        validate_param!((neighb - window + 1) / 2 <= boundary,
-            "Region boundary ({}) is too small compared to window ({}) and neighbourhood ({}) sizes",
-            boundary, window, neighb);
-        Ok(())
-    }
-
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
         validate_param!(self.ploidy > 0, "Ploidy cannot be zero");
-        Self::validate_sizes(self.window_size, self.neighb_size, self.boundary_size)?;
-
         validate_param!(1.0 < self.kmer_perc && self.kmer_perc <= 100.0,
             "Kmer percentile ({}) must be within (1, 100].", self.kmer_perc);
         validate_param!(0.0 < self.frac_windows && self.frac_windows <= 1.0,
@@ -400,21 +391,27 @@ impl ReadDepth {
         params: &ReadDepthParams,
         subsampling_rate: f64,
         is_paired_end: bool,
-        technology: super::Technology,
+        seq_info: &super::SequencingInfo,
         out_dir: Option<&Path>,
     ) -> io::Result<Self>
     {
         log::info!("Estimating read depth from {} reads", alignments.len());
-        log::info!("    Ploidy {}, subsampling rate {}", params.ploidy, subsampling_rate);
+        log::debug!("    Ploidy {}, subsampling rate {}", params.ploidy, subsampling_rate);
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
+        let window_size = params.window_size.unwrap_or_else(|| (seq_info.mean_read_len() as u32 + 1) / 2);
+        let neighb_size = window_size.max(MIN_NEIGHBOURHOOD);
+        log::debug!("    Using {} bp windows, (window neighbourhood size {}, boundary {})",
+            window_size, neighb_size, params.boundary_size);
 
-        let windows = count_reads(alignments.iter().copied(), interval, params);
+        let windows = count_reads(alignments.iter().copied(), interval, window_size, params.boundary_size);
         let (windows, gc_contents) = if let Some(dir) = out_dir {
             let dbg_writer = ext::sys::create_gzip(&dir.join("counts.csv.gz"))?;
-            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, params, dbg_writer)?
+            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, window_size, neighb_size,
+                0.01 * params.kmer_perc, dbg_writer)?
         } else {
-            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, params, io::sink())?
+            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, window_size, neighb_size,
+                0.01 * params.kmer_perc, io::sink())?
         };
         assert!(windows.len() > 0, "ReadDepth: no applicable windows!");
 
@@ -426,7 +423,7 @@ impl ReadDepth {
         let ploidy = f64::from(params.ploidy);
         let dbg_writer = out_dir.map(|dirname| ext::sys::create_gzip(&dirname.join("depth.csv.gz"))).transpose()?;
         let distributions: Vec<NBinom>;
-        if technology.has_gc_bias() {
+        if seq_info.technology().has_gc_bias() {
             let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
             let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
             distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy).collect();
@@ -451,9 +448,7 @@ impl ReadDepth {
 
         Ok(Self {
             ploidy: params.ploidy,
-            window_size: params.window_size,
-            neighb_size: params.neighb_size,
-            distributions,
+            window_size, neighb_size, distributions,
         })
     }
 

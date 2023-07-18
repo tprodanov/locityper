@@ -601,8 +601,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
     validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
-    crate::bg::depth::ReadDepthParams::validate_sizes(
-        bg_distr.depth().window_size(), bg_distr.depth().neighb_size(), args.assgn_params.boundary_size)?;
     if bg_distr.seq_info().technology() == Technology::Illumina {
         args.strobealign = ext::sys::find_exe(args.strobealign)?;
     } else {

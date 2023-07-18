@@ -276,11 +276,9 @@ fn print_help(extended: bool) {
             {EMPTY}  Second value sets the subsampling seed (optional).",
             "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(), defaults.params.subsampling_rate,
             "-s 1".green(), "-a".green());
-        println!("    {:KEY$} {:VAL$}  Count read depth per {} bp windows [{}].",
-            "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.window_size);
-        println!("    {:KEY$} {:VAL$}  Calculate GC-content and average k-mer frequency in\n\
-            {EMPTY}  window neighbourhoods of this size (>= window size) [{}].",
-            "    --neighb".green(), "INT".yellow(), defaults.bg_params.depth.neighb_size);
+        println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [auto].\n\
+            {EMPTY}  Default: half of the mean read length.",
+            "-w, --window".green(), "INT".yellow());
         println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.boundary_size);
         println!("    {:KEY$} {:VAL$}  Ignore windows, where less than {}% k-mers are unique [{}].",
@@ -355,9 +353,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.params.subsampling_rate = values.next().expect("At least one value must be present").parse()?;
                 args.params.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
             }
-            Short('w') | Long("window") => args.bg_params.depth.window_size = parser.value()?.parse()?,
-            Long("neigh") | Long("neighb") | Long("neighborhood") | Long("neighbourhood")
-                => args.bg_params.depth.neighb_size = parser.value()?.parse()?,
+            Short('w') | Long("window") => {
+                let val = parser.value()?;
+                args.bg_params.depth.window_size = if val == "auto" {
+                    None
+                } else {
+                    Some(val.parse()?)
+                };
+            }
             Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse()?,
             Long("kmer-perc") | Long("kmer-percentage") | Long("kmer-percentile") =>
                 args.bg_params.depth.kmer_perc = parser.value()?.parse()?,
@@ -660,7 +663,7 @@ fn estimate_bg_from_paired(
         }
     }
     let depth_distr = ReadDepth::estimate(&depth_alns, interval, &data.sequence, &data.kmer_counts,
-        &args.bg_params.depth, args.params.subsampling_rate, true, seq_info.technology(), opt_out_dir)?;
+        &args.bg_params.depth, args.params.subsampling_rate, true, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -683,7 +686,7 @@ fn estimate_bg_from_unpaired(
         .map(Deref::deref)
         .collect();
     let depth_distr = ReadDepth::estimate(&filt_alns, interval, &data.sequence, &data.kmer_counts,
-        &args.bg_params.depth, args.params.subsampling_rate, false, seq_info.technology(), opt_out_dir)?;
+        &args.bg_params.depth, args.params.subsampling_rate, false, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
