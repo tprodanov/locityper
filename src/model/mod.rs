@@ -28,7 +28,9 @@ pub struct Params {
     pub semicommon_kmer: f64,
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
-    pub tweak: u32,
+    /// None: half window size.
+    pub tweak: Option<u32>,
+
     /// Alternative hypotheses copy number values (main hypothesis is 1).
     pub alt_cn: (f64, f64),
 }
@@ -37,14 +39,14 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             boundary_size: 200,
-            depth_contrib: 2.0,
+            depth_contrib: 50.0,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
             rare_kmer: 3.0,
             semicommon_kmer: 5.0,
 
-            tweak: 70,
-            alt_cn: (0.01, 2.0),
+            tweak: None,
+            alt_cn: (0.5, 1.5),
         }
     }
 }
@@ -67,14 +69,28 @@ impl Params {
         validate_param!(self.rare_kmer < self.semicommon_kmer,
             "k-mer frequency thresholds ({:.4}, {:.4}) are non-increasing", self.rare_kmer, self.semicommon_kmer);
 
-        validate_param!(self.tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
-            self.boundary_size, self.tweak);
-        const MAX_TWEAK: u32 = u16::MAX as u32 / 2 - 1;
-        validate_param!(self.tweak < MAX_TWEAK, "Tweaking size ({}) is too large (max = {})", self.tweak, MAX_TWEAK);
         validate_param!(self.alt_cn.0 > 0.0 && self.alt_cn.0 < 1.0,
             "Alternative copy number #1 ({}) must be in (0, 1).", self.alt_cn.0);
         validate_param!(self.alt_cn.1 > 1.0,
             "Alternative copy number #2 ({}) must be over 1.", self.alt_cn.1);
+        Ok(())
+    }
+
+    pub fn set_tweak_size(&mut self, window_size: u32) -> Result<(), Error> {
+        const MAX_THEORETICAL_TWEAK: u32 = u16::MAX as u32 / 2 - 1;
+        const MAX_TWEAK: u32 = 200;
+        if self.tweak.is_none() {
+            self.tweak = Some((window_size / 2).min(MAX_TWEAK).min(self.boundary_size.saturating_sub(1)));
+        }
+
+        let tweak = self.tweak.unwrap();
+        validate_param!(tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
+            self.boundary_size, tweak);
+        validate_param!(tweak < MAX_THEORETICAL_TWEAK, "Tweaking size ({}) is too large (max = {})",
+            tweak, MAX_THEORETICAL_TWEAK);
+        if tweak > MAX_TWEAK {
+            log::warn!("Tweaking size ({}) may be too large", tweak);
+        }
         Ok(())
     }
 }

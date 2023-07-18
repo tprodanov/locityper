@@ -411,7 +411,7 @@ impl AllAlignments {
     ) -> Result<Self, Error>
     {
         log::info!("[{}] Loading read alignments", contigs.tag());
-        let boundary = params.boundary_size.checked_sub(params.tweak).unwrap();
+        let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), boundary)?;

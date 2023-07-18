@@ -172,8 +172,8 @@ fn print_help() {
         {EMPTY}  Windows with values equal to {} [{}] receive half weight.",
         "    --rare-kmer".green(), "FLOAT FLOAT".yellow(), "FLOAT_1".yellow(), defaults.assgn_params.rare_kmer,
         "FLOAT_2".yellow(), defaults.assgn_params.semicommon_kmer);
-    println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
-        "    --tweak".green(), "INT".yellow(), "INT".yellow(), defaults.assgn_params.tweak);
+    println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [auto].",
+        "    --tweak".green(), "INT".yellow(), "INT".yellow());
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -233,7 +233,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.assgn_params.rare_kmer = parser.value()?.parse()?;
                 args.assgn_params.semicommon_kmer = parser.value()?.parse()?;
             }
-            Long("tweak") => args.assgn_params.tweak = parser.value()?.parse()?,
+            Long("tweak") => {
+                let val = parser.value()?;
+                args.assgn_params.tweak = if val == "auto" {
+                    None
+                } else {
+                    Some(val.parse()?)
+                };
+            }
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -599,6 +606,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
+    args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
     if bg_distr.seq_info().technology() == Technology::Illumina {

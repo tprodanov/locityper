@@ -286,6 +286,7 @@ fn solve_single_thread(
 ) -> Result<(), Error>
 {
     let total_genotypes = data.genotypes.len();
+    let tweak = data.params.tweak.unwrap();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
     let mut rem_ixs = (0..total_genotypes).collect();
 
@@ -306,7 +307,7 @@ fn solve_single_thread(
             }
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
-                assgn.define_read_windows(data.params.tweak, rng);
+                assgn.define_read_windows(tweak, rng);
                 *lik = prior + solver.solve(&mut assgn, rng)?;
                 if stage.write {
                     assgn.write_depth(&mut depth_writer,
@@ -516,6 +517,7 @@ impl<W: Write, U: Write> Worker<W, U> {
             let cached_distrs = &self.data.cached_distrs;
             let priors = &self.data.priors;
             let params = &self.data.params;
+            let tweak = params.tweak.unwrap();
 
             let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
             let mut selected = SelectedCounter::default();
@@ -531,7 +533,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                     selected.reset(&assgn);
                 }
                 for (attempt, lik) in liks.iter_mut().enumerate() {
-                    assgn.define_read_windows(params.tweak, &mut self.rng);
+                    assgn.define_read_windows(tweak, &mut self.rng);
                     *lik = prior + solver.solve(&mut assgn, &mut self.rng)?;
                     if stage.write {
                         assgn.write_depth(&mut self.depth_writer,
