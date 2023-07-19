@@ -4,7 +4,10 @@ use std::{
     cmp::min,
     path::Path,
 };
-use crate::ext;
+use crate::{
+    ext,
+    err::{Error, add_path},
+};
 use super::{
     NamedSeq,
     kmers::{self, Kmer},
@@ -176,8 +179,8 @@ pub struct Reader<R: BufRead> {
 }
 
 impl Reader<Box<dyn BufRead + Send>> {
-    pub fn from_path(path: &Path) -> io::Result<Self> {
-        Self::new(ext::sys::open(path)?)
+    pub fn from_path(path: &Path) -> Result<Self, Error> {
+        Self::new(ext::sys::open(path)?).map_err(add_path!(path))
     }
 }
 

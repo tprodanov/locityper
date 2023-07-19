@@ -1,12 +1,12 @@
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 /// General enum, representing possible errors.
 #[derive(Debug)]
 pub enum Error {
-    Io(io::Error),
+    Io(io::Error, Option<PathBuf>),
     /// Solver finished with an error: `(solver_name, error_description)`.
     Solver(&'static str, String),
     /// Error, produced by an argument parser.
@@ -26,7 +26,7 @@ pub enum Error {
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
-        Self::Io(e)
+        Self::Io(e, None)
     }
 }
 
@@ -66,6 +66,14 @@ impl Error {
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {
         Self::Solver(solver_name, s.into())
     }
+
+    pub fn io(e: io::Error, filename: impl AsRef<Path>) -> Self {
+        Self::Io(e, Some(filename.as_ref().to_owned()))
+    }
+
+    pub fn io_unkn(e: io::Error) -> Self {
+        Self::Io(e, None)
+    }
 }
 
 macro_rules! validate_param {
@@ -78,3 +86,13 @@ macro_rules! validate_param {
     }};
 }
 pub(crate) use validate_param;
+
+macro_rules! add_path {
+    (!) => {
+        |e| $crate::Error::Io(e, None)
+    };
+    ($path:expr) => {
+        |e| $crate::Error::Io(e, Some(std::convert::AsRef::<std::path::Path>::as_ref(&$path).to_owned()))
+    };
+}
+pub(crate) use add_path;

@@ -10,7 +10,10 @@ use std::{
     str::FromStr,
 };
 use colored::Colorize;
-use crate::{Error, ext};
+use crate::{
+    ext,
+    err::{Error, add_path},
+};
 
 const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
 
@@ -135,14 +138,14 @@ impl Rerun {
     ///     if all: always returns true and always clears output directory.
     fn need_analysis(self, dir: &Path) -> Result<bool, Error> {
         if !dir.exists() {
-            fs::create_dir(dir)?;
+            ext::sys::mkdir(dir)?;
             return Ok(true);
         }
 
         if self == Self::All {
             log::warn!("Clearing directory {}", ext::fmt::path(&dir));
-            fs::remove_dir_all(&dir)?;
-            fs::create_dir(dir)?;
+            fs::remove_dir_all(&dir).map_err(add_path!(dir))?;
+            ext::sys::mkdir(dir)?;
             return Ok(true);
         }
 
@@ -152,7 +155,7 @@ impl Rerun {
                 log::info!("Skipping directory {} (successfully completed)", ext::fmt::path(&dir));
                 return Ok(false);
             } else {
-                fs::remove_file(&success_file)?;
+                fs::remove_file(&success_file).map_err(add_path!(success_file))?;
                 return Ok(true);
             }
         }

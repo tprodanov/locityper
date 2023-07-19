@@ -11,7 +11,7 @@ use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use fnv::{FnvHashSet, FnvHashMap};
 use crate::{
-    err::{Error, validate_param},
+    err::{Error, validate_param, add_path},
     math::Ln,
     seq::{
         recruit, fastx,
@@ -407,7 +407,7 @@ fn load_loci(
 }
 
 /// Recruits reads to all loci, where neither reads nor alignments are available.
-fn recruit_reads(loci: &[LocusData], args: &Args) -> io::Result<()> {
+fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
     let filt_loci: Vec<&LocusData> = loci.iter()
         .filter(|locus| !locus.reads_filename.exists() && !locus.aln_filename.exists())
         .collect();
@@ -597,7 +597,7 @@ fn analyze_locus(
         all_alns, contig_windows, genotypes,
     };
     scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
-    fs::File::create(locus.out_dir.join(paths::SUCCESS))?;
+    ext::sys::touch(locus.out_dir.join(paths::SUCCESS))?;
     Ok(())
 }
 
@@ -608,9 +608,11 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let out_dir = args.output.as_ref().unwrap();
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
 
-    let bg_stream = io::BufReader::new(fs::File::open(out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?);
+    let bg_path = out_dir.join(paths::BG_DIR).join(paths::BG_DISTR);
+    let bg_stream = io::BufReader::new(fs::File::open(&bg_path).map_err(add_path!(bg_path))?);
     let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
-    let bg_distr = BgDistr::load(&json::parse(&io::read_to_string(bg_stream)?)?)?;
+    let bg_distr = BgDistr::load(&json::parse(
+        &io::read_to_string(bg_stream).map_err(add_path!(bg_path))?)?)?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");

@@ -15,8 +15,8 @@ use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use htslib::bam;
 use crate::{
-    err::{Error, validate_param},
     ext,
+    err::{Error, validate_param, add_path},
     seq::{
         ContigNames, Interval,
         kmers::KmerCounts,
@@ -619,14 +619,14 @@ fn read_len_from_alns(alns: &[Alignment]) -> f64 {
 }
 
 /// Calculate mean read length from input reads.
-fn read_len_from_reads(input: &[PathBuf]) -> io::Result<f64> {
+fn read_len_from_reads(input: &[PathBuf]) -> Result<f64, Error> {
     log::info!("Calculating mean read length");
     let lengths: Vec<f64> = input.iter()
         .map(|path| {
             let mut reader = fastx::Reader::from_path(path)?;
-            reader.mean_read_len(MEAN_LEN_RECORDS / input.len())
+            reader.mean_read_len(MEAN_LEN_RECORDS / input.len()).map_err(add_path!(path))
         })
-        .collect::<io::Result<_>>()?;
+        .collect::<Result<_, Error>>()?;
     Ok(ext::vec::F64Ext::mean(&lengths))
 }
 

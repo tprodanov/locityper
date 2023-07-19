@@ -10,7 +10,7 @@ use flate2::{
     write::GzEncoder,
     Compression,
 };
-use crate::Error;
+use crate::err::{Error, add_path};
 
 /// Finds an executable, and returns Error, if executable is not available.
 pub fn find_exe(p: impl AsRef<Path>) -> Result<PathBuf, Error> {
@@ -21,14 +21,14 @@ pub fn find_exe(p: impl AsRef<Path>) -> Result<PathBuf, Error> {
 /// - stdin if filename is `-`,
 /// - gzip reader if filename ends with `.gz`,
 /// - regular text file otherwise.
-pub fn open(filename: &Path) -> io::Result<Box<dyn BufRead + Send>> {
+pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         Ok(Box::new(BufReader::new(stdin())))
     } else {
-        let mut stream = BufReader::new(File::open(filename)?);
+        let mut stream = BufReader::new(File::open(filename).map_err(add_path!(filename))?);
         let mut two_bytes = [0_u8; 2];
-        let bytes_read = stream.read(&mut two_bytes)?;
-        stream.seek_relative(-(bytes_read as i64))?;
+        let bytes_read = stream.read(&mut two_bytes).map_err(add_path!(filename))?;
+        stream.seek_relative(-(bytes_read as i64)).map_err(add_path!(filename))?;
         // Check gzip magic number.
         if two_bytes[0] == 0x1f && two_bytes[1] == 0x8b {
             Ok(Box::new(BufReader::new(MultiGzDecoder::new(stream))))
@@ -39,35 +39,35 @@ pub fn open(filename: &Path) -> io::Result<Box<dyn BufRead + Send>> {
 }
 
 /// Loads full JSON contents from a file.
-pub fn load_json(filename: &Path) -> io::Result<json::JsonValue> {
+pub fn load_json(filename: &Path) -> Result<json::JsonValue, Error> {
     let stream = open(filename)?;
-    let contents = io::read_to_string(stream)?;
-    json::parse(&contents).map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+    let contents = io::read_to_string(stream).map_err(add_path!(filename))?;
+    json::parse(&contents).map_err(|_| Error::InvalidData(
         format!("Failed parsing {}: invalid JSON format", filename.display())))
 }
 
 /// Creates a buffered file OR stdout if filename is `-`.
-pub fn create_uncompressed(filename: &Path) -> io::Result<Box<dyn Write>> {
+pub fn create_uncompressed(filename: &Path) -> Result<Box<dyn Write>, Error> {
     if filename == OsStr::new("-") {
         Ok(Box::new(BufWriter::new(stdout())))
     } else {
-        Ok(Box::new(BufWriter::new(File::create(filename)?)))
+        Ok(Box::new(BufWriter::new(File::create(filename).map_err(add_path!(filename))?)))
     }
 }
 
 /// Creates a gzip file.
-pub fn create_gzip(filename: &Path) -> io::Result<BufWriter<GzEncoder<File>>> {
-    let file = File::create(filename)?;
+pub fn create_gzip(filename: &Path) -> Result<BufWriter<GzEncoder<File>>, Error> {
+    let file = File::create(filename).map_err(add_path!(filename))?;
     Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
 }
 
 /// Finds all filenames with appropriate extension in the directory.
-pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> io::Result<Vec<PathBuf>> {
+pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> Result<Vec<PathBuf>, Error> {
     let mut res = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in fs::read_dir(dir).map_err(add_path!(dir))? {
+        let entry = entry.map_err(add_path!(!))?;
         let path = entry.path();
-        if entry.file_type()?.is_file() && path.extension() == Some(ext.as_ref()) {
+        if entry.file_type().map_err(add_path!(path))?.is_file() && path.extension() == Some(ext.as_ref()) {
             res.push(path);
         }
     }
@@ -82,10 +82,10 @@ pub fn path_append(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
 }
 
 /// Create directory, if it does not exist yet.
-pub fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
+pub fn mkdir(path: impl AsRef<Path>) -> Result<(), Error> {
     let path = path.as_ref();
     if !path.exists() {
-        fs::create_dir(path)
+        fs::create_dir(path).map_err(add_path!(path))
     } else {
         Ok(())
     }
@@ -108,11 +108,17 @@ pub fn count_lines<R: BufRead>(mut stream: R) -> io::Result<u64> {
 
 /// Directly concantenates files, without trying to decompress them.
 /// Therefore, if input files are already gzipped, output writer should be plain, without compression.
-pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut writer: impl Write) -> io::Result<()> {
+pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut writer: impl Write) -> Result<(), Error> {
     for filename in filenames {
-        let mut reader = File::open(filename)?;
-        io::copy(&mut reader, &mut writer)?;
+        let mut reader = File::open(&filename).map_err(add_path!(filename))?;
+        io::copy(&mut reader, &mut writer).map_err(add_path!(filename))?;
     }
+    Ok(())
+}
+
+/// Just open the file, and do nothing else.
+pub fn touch(filename: impl AsRef<Path>) -> Result<(), Error> {
+    File::create(&filename).map_err(add_path!(filename))?;
     Ok(())
 }
 

@@ -393,7 +393,7 @@ impl ReadDepth {
         is_paired_end: bool,
         seq_info: &super::SequencingInfo,
         out_dir: Option<&Path>,
-    ) -> io::Result<Self>
+    ) -> Result<Self, Error>
     {
         log::info!("Estimating read depth from {} reads", alignments.len());
         log::debug!("    Ploidy {}, subsampling rate {}", params.ploidy, subsampling_rate);

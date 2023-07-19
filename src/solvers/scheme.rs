@@ -335,7 +335,7 @@ fn create_debug_files(
     prefix: &Path,
     threads: u16,
     has_dbg_output: bool,
-) -> io::Result<(Vec<Box<dyn Write + Send>>, Vec<PathBuf>)>
+) -> Result<(Vec<Box<dyn Write + Send>>, Vec<PathBuf>), Error>
 {
     if !has_dbg_output {
         return Ok(((0..threads).map(|_| Box::new(io::sink()) as Box<dyn Write + Send>).collect(), vec![]));
@@ -355,7 +355,7 @@ fn create_debug_files(
 }
 
 /// Merge output files if there is debug output and more than one thread.
-fn merge_dbg_files(filenames: &[PathBuf]) -> io::Result<()> {
+fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
     if filenames.len() > 1 {
         // By this point, all depth_writers should be already dropped.
         let mut file1 = std::fs::OpenOptions::new().append(true).open(&filenames[0])?;
