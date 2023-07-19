@@ -240,7 +240,8 @@ impl ContigSet {
         descriptions: impl VecOrNone<Option<String>>,
     ) -> Result<Self, Error>
     {
-        let (contigs, seqs) = ContigNames::load_fasta(tag, ext::sys::open(fasta_filename)?, descriptions)?;
+        let (contigs, seqs) = ContigNames::load_fasta(tag, ext::sys::open(fasta_filename)?, descriptions)
+            .map_err(add_path!(fasta_filename))?;
         let kmer_counts = KmerCounts::load(ext::sys::open(kmers_filename)?, contigs.lengths())?;
         Ok(Self { contigs, seqs, kmer_counts })
     }

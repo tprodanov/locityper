@@ -310,8 +310,8 @@ fn solve_single_thread(
                 assgn.define_read_windows(tweak, rng);
                 *lik = prior + solver.solve(&mut assgn, rng)?;
                 if stage.write {
-                    assgn.write_depth(&mut depth_writer,
-                        &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1))?;
+                    assgn.write_depth(&mut depth_writer, &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1))
+                        .map_err(add_path!(!))?;
                     if data.debug {
                         selected.update(&assgn);
                     }
@@ -319,7 +319,7 @@ fn solve_single_thread(
             }
             if stage.write && data.debug {
                 write_alns(&mut aln_writer, &format!("{}\t{}", stage_ix + 1, contigs_str), &assgn, &data.all_alns,
-                    selected.fractions())?;
+                    selected.fractions()).map_err(add_path!(!))?;
             }
             helper.update(ix, contigs_str, mean(&liks))?;
         }
@@ -358,9 +358,10 @@ fn create_debug_files(
 fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
     if filenames.len() > 1 {
         // By this point, all depth_writers should be already dropped.
-        let mut file1 = std::fs::OpenOptions::new().append(true).open(&filenames[0])?;
+        let mut file1 = std::fs::OpenOptions::new().append(true).open(&filenames[0]).map_err(add_path!(filenames[0]))?;
         ext::sys::concat_files(filenames[1..].iter(), &mut file1)?;
-        filenames[1..].iter().map(std::fs::remove_file).collect::<io::Result<()>>()?;
+        filenames[1..].iter().map(|path| std::fs::remove_file(path).map_err(add_path!(path)))
+            .collect::<Result<(), Error>>()?;
     }
     Ok(())
 }
@@ -381,11 +382,11 @@ pub fn solve(
     let has_dbg_output = data.scheme.has_dbg_output();
     let (mut depth_writers, depth_filenames) = create_debug_files(
         &locus_dir.join("depth."), threads, has_dbg_output)?;
-    writeln!(depth_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER)?;
+    writeln!(depth_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER).map_err(add_path!(!))?;
 
     let (mut aln_writers, aln_filenames) = create_debug_files(
         &locus_dir.join("alns."), threads, has_dbg_output && data.debug)?;
-    writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER)?;
+    writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
     if threads == 1 {
         solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
@@ -579,8 +580,8 @@ struct Helper<'a, W> {
 }
 
 impl<'a, W: Write> Helper<'a, W> {
-    fn new(scheme: &'a Scheme, tag: &'a str, mut lik_writer: W, total_genotypes: usize) -> io::Result<Self> {
-        writeln!(lik_writer, "stage\tgenotype\tlik")?;
+    fn new(scheme: &'a Scheme, tag: &'a str, mut lik_writer: W, total_genotypes: usize) -> Result<Self, Error> {
+        writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(!))?;
         Ok(Self {
             scheme, tag, lik_writer,
 
@@ -620,8 +621,9 @@ impl<'a, W: Write> Helper<'a, W> {
             self.curr_genotypes, stage.attempts, stage.aver_power);
     }
 
-    fn update(&mut self, ix: usize, tuple_str: String, lik: f64) -> io::Result<()> {
-        writeln!(self.lik_writer, "{}\t{}\t{:.3}", self.stage_ix + 1, &tuple_str, Ln::to_log10(lik))?;
+    fn update(&mut self, ix: usize, tuple_str: String, lik: f64) -> Result<(), Error> {
+        writeln!(self.lik_writer, "{}\t{}\t{:.3}", self.stage_ix + 1, &tuple_str, Ln::to_log10(lik))
+            .map_err(add_path!(!))?;
         let stored_lik = &mut self.likelihoods[ix];
         *stored_lik = stored_lik.max(lik);
         if lik > self.best_lik {

@@ -8,7 +8,7 @@ use std::{
 use fnv::FnvHashMap;
 use nohash::IntMap;
 use crate::{
-    Error,
+    err::{Error, add_path},
     algo::bisect,
     ext::{self, vec::F64Ext},
     bg::ser::{JsonSer, json_get},
@@ -109,12 +109,13 @@ impl InsertDistr {
         }
 
         if let Some(dir) = out_dir {
-            let mut dbg_writer = ext::sys::create_gzip(&dir.join("insert_sizes.csv.gz"))?;
-            writeln!(dbg_writer, "size\tcount")?;
+            let dbg_filename = dir.join("insert_sizes.csv.gz");
+            let mut dbg_writer = ext::sys::create_gzip(&dbg_filename)?;
+            writeln!(dbg_writer, "size\tcount").map_err(add_path!(dbg_filename))?;
             let mut histogram: Vec<(u32, u32)> = histogram.into_iter().collect();
             histogram.sort_unstable();
             for (size, count) in histogram.into_iter() {
-                writeln!(dbg_writer, "{}\t{}", size, count)?;
+                writeln!(dbg_writer, "{}\t{}", size, count).map_err(add_path!(dbg_filename))?;
             }
         }
 

@@ -5,7 +5,7 @@ use std::{
 use htslib::bam;
 use nohash::IntSet;
 use crate::{
-    Error,
+    err::{Error, add_path},
     seq::{
         Interval, ContigId, ContigNames,
         aln::{LightAlignment, Alignment, ReadEnd},
@@ -71,7 +71,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name_hash = fnv1a(self.record.qname());
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA", name_hash, read_end)?;
+            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA", name_hash, read_end).map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
             return Ok((name_hash, 0.0, false));
@@ -104,7 +104,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             writeln!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}",
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
                 edit_dist, read_len, if good_dist { '+' } else if medium_dist { '~' } else { '-' },
-                Ln::to_log10(aln_prob))?;
+                Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             aln.set_ln_prob(aln_prob);
 
             if medium_dist {
@@ -426,7 +426,7 @@ impl AllAlignments {
         while reader.has_more {
             tmp_alns.clear();
             let read_name = reader.next_name()?.to_owned();
-            write!(dbg_writer, "{}=", read_name)?;
+            write!(dbg_writer, "{}=", read_name).map_err(add_path!(!))?;
             let (hash, min_prob1, mut central) = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut dbg_writer)?;
             if !hashes.insert(hash) {
                 log::warn!("Read {} produced hash collision ({:X}). \

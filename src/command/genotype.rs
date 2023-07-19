@@ -591,7 +591,6 @@ fn analyze_locus(
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
 
-    let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     let data = scheme::Data {
         scheme: scheme.clone(),
         params: args.assgn_params.clone(),
@@ -601,6 +600,7 @@ fn analyze_locus(
         debug: args.debug,
         all_alns, contig_windows, genotypes,
     };
+    let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
     ext::sys::touch(locus.out_dir.join(paths::SUCCESS))?;
     Ok(())

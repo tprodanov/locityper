@@ -1,7 +1,7 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.1.3-1"
+version = "0.1.3-2"
 edition = "2021"
 
 [dependencies]

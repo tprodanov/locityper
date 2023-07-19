@@ -263,7 +263,8 @@ impl KmerCounts {
     pub fn load<R: BufRead>(f: R, contig_lengths: &[u32]) -> Result<Self, Error> {
         assert!(!contig_lengths.is_empty(), "Cannot load k-mer counts for empty contigs set!");
         let mut lines = f.lines();
-        let first = lines.next().ok_or_else(|| Error::InvalidData("Empty file with k-mer counts!".to_owned()))??;
+        let first = lines.next().ok_or_else(|| Error::InvalidData("Empty file with k-mer counts!".to_owned()))?
+            .map_err(add_path!(!))?;
         let k = match first.split_once('=') {
             Some(("k", v)) => v.parse().map_err(|_| Error::ParsingError(format!("Cannot parse line {}", first)))?,
             _ => return Err(Error::InvalidData(
@@ -274,7 +275,7 @@ impl KmerCounts {
         for &contig_len in contig_lengths.iter() {
             let curr_counts = lines.next()
                 .ok_or_else(|| Error::InvalidData(
-                    "File with k-mer counts does not contain enough contigs".to_owned()))??
+                    "File with k-mer counts does not contain enough contigs".to_owned()))?.map_err(add_path!(!))?
                 .split(' ')
                 .map(str::parse)
                 .collect::<Result<Vec<_>, _>>()
@@ -286,7 +287,7 @@ impl KmerCounts {
             counts.push(curr_counts);
         }
         match lines.next() {
-            Some(Err(e)) => Err(e)?,
+            Some(Err(e)) => Err(Error::Io(e, vec![]))?,
             Some(Ok(s)) if s.is_empty() => Ok(Self { k, counts }),
             None => Ok(Self { k, counts }),
             _ => Err(Error::InvalidData("Too many k-mer counts!".to_owned())),
@@ -381,12 +382,12 @@ impl JfKmerGetter {
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
         let handle = std::thread::spawn(move || -> Result<(), Error> {
             for seq in seqs.iter() {
-                seq::write_fasta(&mut child_stdin, b"", seq)?;
+                seq::write_fasta(&mut child_stdin, b"", seq).map_err(add_path!(!))?;
             }
             Ok(())
         });
 
-        let output = child.wait_with_output()?;
+        let output = child.wait_with_output().map_err(add_path!(!))?;
         if !output.status.success() {
             return Err(Error::SubprocessFail(output));
         }

@@ -24,11 +24,11 @@ pub enum Error {
     JsonLoad(String),
 }
 
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e, Vec::new())
-    }
-}
+// impl From<io::Error> for Error {
+//     fn from(e: io::Error) -> Self {
+//         Self::Io(e, Vec::new())
+//     }
+// }
 
 #[cfg(feature = "gurobi")]
 impl From<grb::Error> for Error {

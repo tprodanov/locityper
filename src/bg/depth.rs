@@ -20,7 +20,7 @@ use crate::{
             nbinom::{NBinom, RegularizedEstimator},
         },
     },
-    err::{Error, validate_param},
+    err::{Error, validate_param, add_path},
     model::windows::WindowGetter,
 };
 use super::{
@@ -406,12 +406,13 @@ impl ReadDepth {
 
         let windows = count_reads(alignments.iter().copied(), interval, window_size, params.boundary_size);
         let (windows, gc_contents) = if let Some(dir) = out_dir {
-            let dbg_writer = ext::sys::create_gzip(&dir.join("counts.csv.gz"))?;
+            let counts_filename = dir.join("counts.csv.gz");
+            let dbg_writer = ext::sys::create_gzip(&counts_filename)?;
             filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, window_size, neighb_size,
-                0.01 * params.kmer_perc, dbg_writer)?
+                0.01 * params.kmer_perc, dbg_writer).map_err(add_path!(counts_filename))?
         } else {
             filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, window_size, neighb_size,
-                0.01 * params.kmer_perc, io::sink())?
+                0.01 * params.kmer_perc, io::sink()).map_err(add_path!(!))?
         };
         assert!(windows.len() > 0, "ReadDepth: no applicable windows!");
 
@@ -421,7 +422,8 @@ impl ReadDepth {
         let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth[0])).collect();
 
         let ploidy = f64::from(params.ploidy);
-        let dbg_writer = out_dir.map(|dirname| ext::sys::create_gzip(&dirname.join("depth.csv.gz"))).transpose()?;
+        let dbg_filename = out_dir.map(|dirname| dirname.join("depth.csv.gz"));
+        let dbg_writer = dbg_filename.as_ref().map(|filename| ext::sys::create_gzip(filename)).transpose()?;
         let distributions: Vec<NBinom>;
         if seq_info.technology().has_gc_bias() {
             let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
@@ -429,14 +431,15 @@ impl ReadDepth {
             distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy).collect();
             if let Some(writer) = dbg_writer {
                 write_summary(&gc_bins, &depth, &loess_means, &loess_vars, &blurred_means, &blurred_vars,
-                    &distributions, writer)?;
+                    &distributions, writer).map_err(add_path!(dbg_filename.as_ref().unwrap()))?;
             }
         } else {
             let mean = F64Ext::mean(&depth);
             let var = F64Ext::fast_variance(&depth, mean);
             let distr = estimate_nbinoms(&[mean], &[var], subsampling_rate, ploidy).next().unwrap();
             if let Some(writer) = dbg_writer {
-                write_summary_without_gc(depth.len(), mean, var, &distr, writer)?;
+                write_summary_without_gc(depth.len(), mean, var, &distr, writer)
+                    .map_err(add_path!(dbg_filename.unwrap()))?;
             }
             distributions = vec![distr; GC_BINS];
         }
