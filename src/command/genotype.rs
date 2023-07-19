@@ -298,7 +298,7 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> O
 fn load_priors(path: &Path) -> Result<FnvHashMap<String, FnvHashMap<String, f64>>, Error> {
     let mut res: FnvHashMap<String, FnvHashMap<String, f64>> = FnvHashMap::default();
     for line in ext::sys::open(path)?.lines() {
-        let line = line?;
+        let line = line.map_err(add_path!(path))?;
         if line.starts_with('#') {
             continue;
         }
@@ -375,9 +375,9 @@ fn load_loci(
 
     let mut loci = Vec::new();
     let mut total_entries = 0;
-    for entry in fs::read_dir(&db_loci_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+    for entry in fs::read_dir(&db_loci_dir).map_err(add_path!(db_loci_dir))? {
+        let entry = entry.map_err(add_path!(!))?;
+        if !entry.file_type().map_err(add_path!(entry.path()))?.is_dir() {
             continue;
         }
 
@@ -425,8 +425,9 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
     let mut writers = Vec::with_capacity(n_filt_loci);
     let mut total_seqs = 0;
     for locus in filt_loci.iter() {
-        let mut fasta_reader = fastx::Reader::from_path(&locus.db_locus_dir.join(paths::LOCUS_FASTA_ALL))?;
-        let locus_all_seqs = fasta_reader.read_all()?;
+        let fasta_path = locus.db_locus_dir.join(paths::LOCUS_FASTA_ALL);
+        let mut fasta_reader = fastx::Reader::from_path(&fasta_path)?;
+        let locus_all_seqs = fasta_reader.read_all().map_err(add_path!(fasta_path))?;
         total_seqs += locus_all_seqs.len();
         targets.add(locus_all_seqs.iter().map(NamedSeq::seq));
         writers.push(ext::sys::create_gzip(&locus.tmp_reads_filename)?);
@@ -437,18 +438,19 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let reader = fastx::Reader::from_path(&args.input[0])?;
-        targets.recruit(reader, writers, args.threads)?;
+        targets.recruit(reader, writers, args.threads).map_err(add_path!(args.input[0]))?;
     } else if args.interleaved {
         let reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
-        targets.recruit(reader, writers, args.threads)?;
+        targets.recruit(reader, writers, args.threads).map_err(add_path!(args.input[0]))?;
     } else {
         let reader = fastx::PairedEndReaders::new(
             fastx::Reader::from_path(&args.input[0])?,
             fastx::Reader::from_path(&args.input[1])?);
-        targets.recruit(reader, writers, args.threads)?;
+        targets.recruit(reader, writers, args.threads).map_err(add_path!(args.input[0], args.input[1]))?;
     }
     for locus in filt_loci.iter() {
-        fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)?;
+        fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)
+            .map_err(add_path!(locus.tmp_reads_filename, &locus.reads_filename))?;
     }
     Ok(())
 }
@@ -507,7 +509,7 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
     let n_locs = min(30000, locus.set.len() * 30).to_string();
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, seq_info, &n_locs, args);
-    let mut child = mapping_cmd.spawn()?;
+    let mut child = mapping_cmd.spawn().map_err(add_path!(!))?;
     let child_stdout = child.stdout.take().unwrap();
 
     let mut samtools_cmd = Command::new(&args.samtools);
@@ -516,15 +518,16 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
         .stdin(Stdio::from(child_stdout));
 
     log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
-    let samtools_output = samtools_cmd.output()?;
-    let bwa_output = child.wait_with_output()?;
+    let samtools_output = samtools_cmd.output().map_err(add_path!(!))?;
+    let bwa_output = child.wait_with_output().map_err(add_path!(!))?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     if !bwa_output.status.success() {
         return Err(Error::SubprocessFail(bwa_output));
     } else if !samtools_output.status.success() {
         return Err(Error::SubprocessFail(samtools_output));
     }
-    fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)?;
+    fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
+        .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;
     Ok(())
 }
 
@@ -546,8 +549,9 @@ fn analyze_locus(
     let contigs = locus.set.contigs();
 
     let all_alns = if args.debug {
-        let mut reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
-        writeln!(reads_writer, "{}", locs::CSV_HEADER)?;
+        let reads_filename = locus.out_dir.join("reads.csv.gz");
+        let mut reads_writer = ext::sys::create_gzip(&reads_filename)?;
+        writeln!(reads_writer, "{}", locs::CSV_HEADER).map_err(add_path!(reads_filename))?;
         AllAlignments::load(bam_reader, contigs, bg_distr, &args.assgn_params, reads_writer)?
     } else {
         AllAlignments::load(bam_reader, contigs, bg_distr, &args.assgn_params, io::sink())?
@@ -555,10 +559,11 @@ fn analyze_locus(
 
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
     if args.debug || scheme.has_dbg_output() {
-        let mut windows_writer = ext::sys::create_gzip(&locus.out_dir.join("windows.bed.gz"))?;
-        writeln!(windows_writer, "#{}", ContigWindows::BED_HEADER)?;
+        let windows_filename = locus.out_dir.join("windows.bed.gz");
+        let mut windows_writer = ext::sys::create_gzip(&windows_filename)?;
+        writeln!(windows_writer, "#{}", ContigWindows::BED_HEADER).map_err(add_path!(windows_filename))?;
         for curr_windows in contig_windows.iter() {
-            curr_windows.write_to(&mut windows_writer, &contigs)?;
+            curr_windows.write_to(&mut windows_writer, &contigs).map_err(add_path!(windows_filename))?;
         }
     }
 

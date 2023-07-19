@@ -7,7 +7,7 @@ use std::{
     ops::{Shl, Shr, BitOr, BitAnd},
 };
 use crate::{
-    Error,
+    err::{Error, add_path},
     seq::{self, ContigId},
 };
 
@@ -377,7 +377,7 @@ impl JfKmerGetter {
         let mut child = Command::new(&self.jf_exe)
             .args(&["query", "-s", "/dev/stdin"]).arg(&self.jf_db)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn()?;
+            .spawn().map_err(add_path!(self.jf_exe))?;
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
         let handle = std::thread::spawn(move || -> Result<(), Error> {
             for seq in seqs.iter() {

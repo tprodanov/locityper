@@ -19,7 +19,7 @@ use crate::{
         rand::XoshiroRng,
     },
     math::{self, Ln, Phred},
-    err::{Error, validate_param},
+    err::{Error, validate_param, add_path},
     bg::ser::json_get,
     seq::{ContigId, ContigNames},
     model::{
@@ -537,7 +537,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                     *lik = prior + solver.solve(&mut assgn, &mut self.rng)?;
                     if stage.write {
                         assgn.write_depth(&mut self.depth_writer,
-                            &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1))?;
+                            &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1)).map_err(add_path!(!))?;
                         if debug {
                             selected.update(&assgn);
                         }
@@ -545,7 +545,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                 }
                 if debug {
                     write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, contigs_str),
-                        &assgn, all_alns, selected.fractions())?;
+                        &assgn, all_alns, selected.fractions()).map_err(add_path!(!))?;
                 }
 
                 if let Err(_) = self.sender.send((ix, mean(&liks))) {

@@ -12,7 +12,7 @@ use std::{
 use bio::io::fasta::IndexedReader;
 use colored::Colorize;
 use crate::{
-    err::{Error, validate_param},
+    err::{Error, validate_param, add_path},
     seq::{
         Interval, ContigNames,
         kmers::{JfKmerGetter, Kmer},
@@ -167,18 +167,19 @@ fn extract_bg_region<R: Read + Seek>(
     kmer_getter: &JfKmerGetter,
 ) -> Result<(), Error>
 {
-    let seq = region.fetch_seq(fasta)?;
+    let seq = region.fetch_seq(fasta).map_err(add_path!(!))?;
     let bg_dir = db_path.join(paths::BG_DIR);
     ext::sys::mkdir(&bg_dir)?;
     let bed_filename = bg_dir.join(paths::BG_BED);
-    let mut bed_writer = io::BufWriter::new(fs::File::create(bed_filename)?);
-    writeln!(bed_writer, "{}", region.bed_fmt())?;
+    let mut bed_writer = io::BufWriter::new(fs::File::create(&bed_filename).map_err(add_path!(bed_filename))?);
+    writeln!(bed_writer, "{}", region.bed_fmt()).map_err(add_path!(bed_filename))?;
     std::mem::drop(bed_writer);
 
     log::info!("Calculating k-mer counts on the background region.");
     let kmer_counts = kmer_getter.fetch_one(seq)?;
-    let mut kmers_out = ext::sys::create_gzip(&bg_dir.join(paths::KMERS))?;
-    kmer_counts.save(&mut kmers_out)?;
+    let kmers_filename = bg_dir.join(paths::KMERS);
+    let mut kmers_out = ext::sys::create_gzip(&kmers_filename)?;
+    kmer_counts.save(&mut kmers_out).map_err(add_path!(kmers_filename))?;
     Ok(())
 }
 
@@ -202,7 +203,7 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
     log::debug!("    {}", ext::fmt::command(&command));
 
     let start = Instant::now();
-    let output = command.output()?;
+    let output = command.output().map_err(add_path!(!))?;
     log::debug!("    Finished in {:?}", start.elapsed());
     if output.status.success() {
         Ok(jf_path)
@@ -216,7 +217,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     // unwrap as args.database was previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
     // Directory is not empty.
-    if db_path.exists() && db_path.read_dir()?.next().is_some() {
+    if db_path.exists() && db_path.read_dir().map_err(add_path!(db_path))?.next().is_some() {
         log::error!("Output directory {} is not empty.", ext::fmt::path(db_path));
         log::warn!("Please remove it manually or select a different path.");
         std::process::exit(1);

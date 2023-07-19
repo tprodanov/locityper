@@ -419,8 +419,8 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
         }
     }
 
-    let mut params_file = io::BufWriter::new(fs::File::create(&params_path)?);
-    args.params.save().write_pretty(&mut params_file, 4)?;
+    let mut params_file = io::BufWriter::new(fs::File::create(&params_path).map_err(add_path!(params_path))?);
+    args.params.save().write_pretty(&mut params_file, 4).map_err(add_path!(params_path))?;
     Ok(bg_dir)
 }
 
@@ -530,7 +530,7 @@ fn run_mapping(
 
     let start = Instant::now();
     let mut mapping = create_mapping_command(args, seq_info, ref_filename);
-    let mut mapping_child = mapping.spawn()?;
+    let mut mapping_child = mapping.spawn().map_err(add_path!(!))?;
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut guard = ext::sys::ChildGuard::new(mapping_child);
@@ -549,7 +549,7 @@ fn run_mapping(
         .arg("-o").arg(&tmp_bam)
         .stdin(Stdio::from(mapping_stdout.unwrap()));
     log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&mapping), ext::fmt::command(&samtools));
-    let output = samtools.output()?;
+    let output = samtools.output().map_err(add_path!(!))?;
     log::debug!("");
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     if !output.status.success() {
@@ -558,9 +558,9 @@ fn run_mapping(
     if let Some(handle) = handle {
         // handle.join() returns Result<Result<(), crate::Error>, Any>.
         // expect unwraps the outer Err, then ? returns the inner Err, if any.
-        handle.join().expect("Process failed for unknown reason")?;
+        handle.join().expect("Process failed for unknown reason").map_err(add_path!(!))?;
     }
-    fs::rename(&tmp_bam, out_bam)?;
+    fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
     guard.disarm();
     Ok(())
 }
@@ -760,14 +760,14 @@ impl RefData {
 
         // Load and parse background region coordinates.
         let bed_filename = db_path.join(paths::BG_BED);
-        let bed_contents = fs::read_to_string(&bed_filename)?;
+        let bed_contents = fs::read_to_string(&bed_filename).map_err(add_path!(bed_filename))?;
         let bg_intervals: Vec<_> = bed_contents.split('\n')
             .filter(|s| !s.starts_with('#') && s.contains('\t')).collect();
         if bg_intervals.len() != 1 {
             return Err(Error::InvalidData(format!("Incorrect number of regions in {}", ext::fmt::path(&bed_filename))));
         }
         let interval = Interval::parse_bed(&mut bg_intervals[0].split('\t'), &ref_contigs)?;
-        let sequence = interval.fetch_seq(&mut ref_fasta)?;
+        let sequence = interval.fetch_seq(&mut ref_fasta).map_err(add_path!(ref_filename))?;
 
         // Load k-mer counts for the background region.
         let kmers_filename = db_path.join(paths::KMERS);
@@ -787,9 +787,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
 
     let bg_distr = estimate_bg_distrs(&args, &out_bg_dir, &ref_data)?;
-    let mut distr_file = ext::sys::create_gzip(&out_bg_dir.join(paths::BG_DISTR))?;
-    bg_distr.save().write_pretty(&mut distr_file, 4)?;
+    let distr_filename = out_bg_dir.join(paths::BG_DISTR);
+    let mut distr_file = ext::sys::create_gzip(&distr_filename)?;
+    bg_distr.save().write_pretty(&mut distr_file, 4).map_err(add_path!(distr_filename))?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
-    fs::File::create(out_bg_dir.join(paths::SUCCESS))?;
+    ext::sys::touch(out_bg_dir.join(paths::SUCCESS))?;
     Ok(())
 }

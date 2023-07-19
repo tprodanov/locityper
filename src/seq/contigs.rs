@@ -8,7 +8,7 @@ use std::{
 use fnv::FnvHashMap;
 use bio::io::fasta::{self, FastaRead};
 use crate::{
-    Error,
+    err::{Error, add_path},
     ext::{self, vec::VecOrNone},
     seq::kmers::KmerCounts,
 };
@@ -130,10 +130,11 @@ impl ContigNames {
     pub fn load_indexed_fasta(
         tag: impl Into<String>,
         filename: &(impl AsRef<Path> + fmt::Debug),
-    ) -> io::Result<(Arc<Self>, fasta::IndexedReader<File>)>
+    ) -> Result<(Arc<Self>, fasta::IndexedReader<File>), Error>
     {
         let fasta = fasta::IndexedReader::from_file(&filename)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+            .map_err(add_path!(filename))?;
         let contigs = ContigNames::from_index(tag, &fasta.index);
         Ok((Arc::new(contigs), fasta))
     }

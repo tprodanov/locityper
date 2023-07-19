@@ -1,12 +1,12 @@
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 /// General enum, representing possible errors.
 #[derive(Debug)]
 pub enum Error {
-    Io(io::Error, Option<PathBuf>),
+    Io(io::Error, Vec<PathBuf>),
     /// Solver finished with an error: `(solver_name, error_description)`.
     Solver(&'static str, String),
     /// Error, produced by an argument parser.
@@ -26,7 +26,7 @@ pub enum Error {
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
-        Self::Io(e, None)
+        Self::Io(e, Vec::new())
     }
 }
 
@@ -66,14 +66,6 @@ impl Error {
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {
         Self::Solver(solver_name, s.into())
     }
-
-    pub fn io(e: io::Error, filename: impl AsRef<Path>) -> Self {
-        Self::Io(e, Some(filename.as_ref().to_owned()))
-    }
-
-    pub fn io_unkn(e: io::Error) -> Self {
-        Self::Io(e, None)
-    }
 }
 
 macro_rules! validate_param {
@@ -89,10 +81,19 @@ pub(crate) use validate_param;
 
 macro_rules! add_path {
     (!) => {
-        |e| $crate::Error::Io(e, None)
+        |e| $crate::Error::Io(e, Vec::new())
     };
     ($path:expr) => {
-        |e| $crate::Error::Io(e, Some(std::convert::AsRef::<std::path::Path>::as_ref(&$path).to_owned()))
+        |e| $crate::Error::Io(e, vec![std::convert::AsRef::<std::path::Path>::as_ref(&$path).to_owned()])
+    };
+    ($($path:expr),+) => {
+        |e| {
+            let mut v = Vec::new();
+            $(
+                v.push(std::convert::AsRef::<std::path::Path>::as_ref(&$path).to_owned());
+            )*
+            $crate::Error::Io(e, v)
+        }
     };
 }
 pub(crate) use add_path;

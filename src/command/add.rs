@@ -15,7 +15,7 @@ use htslib::bcf::{
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use crate::{
-    err::{Error, validate_param},
+    err::{Error, validate_param, add_path},
     algo::bisect,
     ext::{
         self,
@@ -232,7 +232,8 @@ fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf])
 
     for filename in bed_files.iter() {
         for line in ext::sys::open(filename)?.lines() {
-            let interval = NamedInterval::parse_bed(&mut line?.split('\t'), contigs)?;
+            let line = line.map_err(add_path!(filename))?;
+            let interval = NamedInterval::parse_bed(&mut line.split('\t'), contigs)?;
             if !interval.is_name_explicit() {
                 return Err(Error::InvalidInput(format!("Interval '{}' has no name", interval)));
             }
@@ -427,18 +428,23 @@ fn process_haplotypes(
 {
     let tag = locus.name();
     log::info!("    [{}] Writing {} haplotypes to {}/", tag, entries.len(), ext::fmt::path(locus_dir));
-    let mut bed_writer = File::create(locus_dir.join(paths::LOCUS_BED))?;
-    writeln!(bed_writer, "{}", locus.bed_fmt())?;
+    let locus_bed = locus_dir.join(paths::LOCUS_BED);
+    let mut bed_writer = File::create(&locus_bed).map_err(add_path!(locus_bed))?;
+    writeln!(bed_writer, "{}", locus.bed_fmt()).map_err(add_path!(locus_bed))?;
     std::mem::drop(bed_writer);
 
     log::info!("    [{}] Calculating haplotype divergence", tag);
-    let paf_writer = ext::sys::create_gzip(&locus_dir.join(paths::LOCUS_PAF))?;
-    let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)?;
+    let paf_filename = locus_dir.join(paths::LOCUS_PAF);
+    let paf_writer = ext::sys::create_gzip(&paf_filename)?;
+    let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)
+        .map_err(add_path!(paf_filename))?;
     check_divergencies(tag, &entries, divergences.iter().copied());
 
     log::info!("    [{}] Clustering haploypes", tag);
-    let nwk_writer = io::BufWriter::new(File::create(&locus_dir.join(paths::LOCUS_DENDROGRAM))?);
-    let keep_seqs = cluster_haplotypes(nwk_writer, &entries, divergences, args.max_divergence)?;
+    let nwk_filename = locus_dir.join(paths::LOCUS_DENDROGRAM);
+    let nwk_writer = io::BufWriter::new(File::create(&nwk_filename).map_err(add_path!(nwk_filename))?);
+    let keep_seqs = cluster_haplotypes(nwk_writer, &entries, divergences, args.max_divergence)
+        .map_err(add_path!(nwk_filename))?;
     let n_filtered = keep_seqs.iter().fold(0, |sum, &keep| sum + usize::from(keep));
     if n_filtered == entries.len() {
         log::info!("        Keep all sequences after clustering");
@@ -448,12 +454,14 @@ fn process_haplotypes(
 
     let filt_fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
     let mut filt_fasta_writer = ext::sys::create_gzip(&filt_fasta_filename)?;
-    let mut all_fasta_writer = ext::sys::create_gzip(&locus_dir.join(paths::LOCUS_FASTA_ALL))?;
+    let locus_fasta = locus_dir.join(paths::LOCUS_FASTA_ALL);
+    let mut all_fasta_writer = ext::sys::create_gzip(&locus_fasta)?;
     let mut filt_seqs = Vec::with_capacity(n_filtered);
     for (&keep, entry) in keep_seqs.iter().zip(entries.into_iter()) {
-        seq::write_fasta(&mut all_fasta_writer, entry.name().as_bytes(), entry.seq())?;
+        seq::write_fasta(&mut all_fasta_writer, entry.name().as_bytes(), entry.seq()).map_err(add_path!(locus_fasta))?;
         if keep {
-            seq::write_fasta(&mut filt_fasta_writer, entry.name().as_bytes(), entry.seq())?;
+            seq::write_fasta(&mut filt_fasta_writer, entry.name().as_bytes(), entry.seq())
+                .map_err(add_path!(locus_fasta))?;
             filt_seqs.push(entry.take_seq());
         }
     }
@@ -461,10 +469,10 @@ fn process_haplotypes(
 
     log::info!("    [{}] Counting k-mers", tag);
     let kmer_counts = kmer_getter.fetch(filt_seqs)?;
-    let mut kmers_writer = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
-    kmer_counts.save(&mut kmers_writer)?;
-
-    File::create(locus_dir.join(paths::SUCCESS))?;
+    let kmers_filename = locus_dir.join(paths::KMERS);
+    let mut kmers_writer = ext::sys::create_gzip(&kmers_filename)?;
+    kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
+    ext::sys::touch(locus_dir.join(paths::SUCCESS))?;
     Ok(())
 }
 
@@ -489,7 +497,7 @@ where R: Read + Seek,
     // Add extra half-window to each sides.
     let halfw = args.moving_window / 2;
     let outer_interv = inner_interv.expand(args.max_expansion + halfw, args.max_expansion + halfw);
-    let outer_seq = outer_interv.fetch_seq(fasta_file)?;
+    let outer_seq = outer_interv.fetch_seq(fasta_file).map_err(add_path!(args.reference.as_ref().unwrap()))?;
 
     let vcf_rid = vcf_file.header().name2rid(outer_interv.contig_name().as_bytes())?;
     vcf_file.fetch(vcf_rid, u64::from(outer_interv.start()), Some(u64::from(outer_interv.end())))?;
