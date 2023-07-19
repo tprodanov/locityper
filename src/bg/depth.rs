@@ -94,7 +94,7 @@ fn filter_windows(
     mut dbg_writer: impl Write,
 ) -> io::Result<(Vec<WindowCounts>, Vec<f64>)>
 {
-    writeln!(dbg_writer, "start\tgc\tkmer_perc\tkeep\tdepth1\tdepth2")?;
+    writeln!(dbg_writer, "start\tgc\tkmer_cdf1\tkeep\tdepth1\tdepth2")?;
     log::debug!("    Total windows:   {:7}", windows.len());
     let seq_len = ref_seq.len();
     let k = kmer_counts_collection.k();
@@ -102,7 +102,6 @@ fn filter_windows(
     let kmer_counts = kmer_counts_collection.get_first();
     let left_padding = (neighb_size - window_size) / 2;
     let right_padding = neighb_size - window_size - left_padding;
-    let mut kmer_buffer = Vec::with_capacity((neighb_size + 1 - k) as usize);
 
     let mut have_ns = 0;
     let mut have_common_kmers = 0;
@@ -113,7 +112,7 @@ fn filter_windows(
         let end_ix = min((window.end + right_padding - seq_shift) as usize, seq_len);
         let window_seq = &ref_seq[start_ix..end_ix];
         let mut keep = true;
-        let mut kmer_abund = 0;
+        let mut inv_quant1 = f64::NAN;
         let mut gc_content = f64::NAN;
         if seq::has_n(window_seq) {
             have_ns += 1;
@@ -121,17 +120,18 @@ fn filter_windows(
         } else {
             let end_ix2 = (end_ix + 1).checked_sub(k as usize).unwrap();
             assert!(end_ix2 > start_ix);
-            kmer_buffer.clear();
-            kmer_buffer.extend_from_slice(&kmer_counts[start_ix..end_ix2]);
-            kmer_abund = VecExt::quantile(&mut kmer_buffer, kmer_perc);
+            // Inverse quantile (1) - what percentage of k-mer counts is <= 1.
+            // This calculation is actually faster than quantile, as it does not require sorting.
+            inv_quant1 = kmer_counts[start_ix..end_ix2].iter().filter(|&&x| x <= 1).count() as f64
+                / (end_ix2 - start_ix) as f64;
             gc_content = seq::gc_content(window_seq);
-            if kmer_abund > 1 {
+            if inv_quant1 < kmer_perc {
                 have_common_kmers += 1;
                 keep = false;
             }
         }
 
-        writeln!(dbg_writer, "{}\t{:.1}\t{}\t{}\t{}\t{}", window.start, gc_content, kmer_abund,
+        writeln!(dbg_writer, "{}\t{:.1}\t{}\t{}\t{}\t{}", window.start, gc_content, inv_quant1,
             if keep { 'T' } else { 'F' }, window.depth[0], window.depth[1])?;
         if keep {
             sel_windows.push(window);
