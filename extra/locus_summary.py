@@ -31,9 +31,7 @@ def process_locus(dir, out):
 
     with gzip.open(os.path.join(dir, 'kmers.gz'), 'rt') as inp:
         next(inp)
-        kmers = list(map(int, next(inp).strip().split()))
-        kmer_quart = np.quantile(kmers, q=np.linspace(0, 1, num=5))
-        kmer_quart = ','.join(map('{:.0f}'.format, kmer_quart))
+        kmers = np.fromiter(map(int, next(inp).strip().split()), dtype=np.uint16)
 
     with gzip.open(os.path.join(dir, 'haplotypes.fa.gz'), 'rt') as inp:
         m = sum(line.startswith('>') for line in inp)
@@ -42,8 +40,14 @@ def process_locus(dir, out):
     n = len(haplotypes)
     assert n * (n - 1) / 2 == len(divergencies)
     aver_dist = np.mean(divergencies)
-    out.write(f'{name}\t{chrom}:{start+1}-{end}\t{end-start}\t{n}\t{m}\t{kmer_quart}\t{aver_dist:.7}\n')
+    out.write(f'{name}\t{chrom}:{start+1}-{end}\t{end-start}\t{n}\t{m}\t{aver_dist:.7f}')
+    for i in range(1, N_CDFS + 1):
+        out.write('\t{:.4f}'.format(np.mean(kmers <= i)))
+    out.write('\n')
     out.flush()
+
+
+N_CDFS = 5
 
 
 def main():
@@ -57,7 +61,10 @@ def main():
     args = parser.parse_args()
 
     out = open_stream(args.output, 'w')
-    out.write('locus\tregion\tlength\thaplotypes\tfilt_haplotypes\tkmer_quart\taver_dist\n')
+    out.write('locus\tregion\tlength\thaplotypes\tfilt_haplotypes\taver_dist')
+    for i in range(1, N_CDFS + 1):
+        out.write(f'\tcdf{i}')
+    out.write('\n')
 
     if args.loci is not None:
         with open(args.loci) as inp:
