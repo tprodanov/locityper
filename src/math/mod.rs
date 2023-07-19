@@ -119,14 +119,39 @@ impl Phred {
     }
 }
 
-/// Number of non-fractional digits in the 10-base representation of x.
-pub fn num_digits(x: u64) -> usize {
-    (x as f64).log10().floor() as usize + 1
+/// Index of the leading in the 10-base representation of x.
+pub fn num_digits(x: f64) -> i32 {
+    x.abs().log10().floor() as i32 + 1
 }
 
 /// Round the number to the corresponding number of significant digits.
-pub fn round_signif(val: f64, digits: u8) -> f64 {
+pub fn round_signif(x: impl Into<f64>, digits: u8) -> f64 {
     assert!(digits > 0, "Number of significant digits cannot be zero");
-    let coef = 10.0_f64.powf(val.abs().max(1e-16).log10().floor() + 1.0 - f64::from(digits));
-    coef * (val / coef).round()
+    let x = x.into();
+    if x == 0.0 {
+        0.0
+    } else {
+        let shift = num_digits(x) - i32::from(digits);
+        let fct = 10_f64.powi(shift);
+        (x / fct).round() * fct
+    }
+}
+
+/// Converts number into string with the corresponding number of significant digits.
+/// Is not very fast.
+pub fn fmt_signif(x: impl Into<f64>, digits: u8) -> String {
+    assert!(digits > 0, "Number of significant digits cannot be zero");
+    let x = x.into();
+    if x == 0.0 {
+        "0".to_owned()
+    } else {
+        let shift = num_digits(x) - i32::from(digits);
+        let fct = 10_f64.powi(shift);
+        if shift < 0 {
+            format!("{:.prec$}", x, prec = (-shift) as usize)
+                .trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            (((x / fct).round() * fct).round() as i64).to_string()
+        }
+    }
 }

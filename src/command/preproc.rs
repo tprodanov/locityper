@@ -250,68 +250,75 @@ fn print_help(extended: bool) {
         {EMPTY}    hifi         : PacBio HiFi,\n\
         {EMPTY}  pb  | pacbio   : PacBio CLR,\n\
         {EMPTY}  ont | nanopore : Oxford Nanopore.",
-        "-t, --technology".green(), "STR".yellow(), defaults.params.technology);
+        "-t, --technology".green(), "STR".yellow(), super::fmt_def(defaults.params.technology));
 
     if extended {
         println!("\n{}", "Insert size and error profile estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
-            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), defaults.params.min_mapq);
+            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.params.min_mapq));
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
-            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.max_clipping);
+            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(defaults.max_clipping));
         println!("    {:KEY$} {:VAL$}\n\
             {EMPTY}  Two confidence levels: for filtering insert size [{}]\n\
             {EMPTY}  and alignment edit distance [{}].",
             "-C, --conf-lvl".green(), "FLOAT [FLOAT]".yellow(),
-            defaults.bg_params.ins_conf_level, defaults.bg_params.err_conf_level);
+            super::fmt_def_f64(defaults.bg_params.ins_conf_level),
+            super::fmt_def_f64(defaults.bg_params.err_conf_level));
         println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
             {EMPTY}  read mappings missed due to higher error rate [{}].",
-            "-m, --err-mult".green(), "FLOAT".yellow(), defaults.bg_params.err_rate_mult);
+            "-m, --err-mult".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.bg_params.err_rate_mult));
 
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
-            "-p, --ploidy".green(), "INT".yellow(), defaults.bg_params.depth.ploidy);
+            "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.bg_params.depth.ploidy));
         println!("    {:KEY$} {:VAL$}\n\
             {EMPTY}  Subsample input reads by a factor of {} [{}]\n\
             {EMPTY}  Use all reads for {} or if alignment file ({}) is provided.\n\
             {EMPTY}  Second value sets the subsampling seed (optional).",
-            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(), defaults.params.subsampling_rate,
+            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(defaults.params.subsampling_rate),
             "-s 1".green(), "-a".green());
         println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [auto].\n\
             {EMPTY}  Default: half of the mean read length.",
             "-w, --window".green(), "INT".yellow());
         println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region [{}].",
-            "    --boundary".green(), "INT".yellow(), "INT".yellow(), defaults.bg_params.depth.boundary_size);
+            "    --boundary".green(), "INT".yellow(), "INT".yellow(),
+            super::fmt_def(defaults.bg_params.depth.boundary_size));
         println!("    {:KEY$} {:VAL$}  Ignore windows, where less than {}% k-mers are unique [{}].",
-            "    --kmer-perc".green(), "FLOAT".yellow(), "FLOAT".yellow(), defaults.bg_params.depth.kmer_perc);
+            "    --kmer-perc".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(defaults.bg_params.depth.kmer_perc));
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
             {EMPTY}  each GC-content [{}]. Smaller values lead to less robust estimates,\n\
             {EMPTY}  larger values - to similar estimates across different GC-contents.",
-            "    --frac-windows".green(), "FLOAT".yellow(), defaults.bg_params.depth.frac_windows);
+            "    --frac-windows".green(), "FLOAT".yellow(),
+            super::fmt_def_f64(defaults.bg_params.depth.frac_windows));
         println!("    {:KEY$} {}\n\
             {EMPTY}  Read depth estimates are blured for windows with extreme GC-content\n\
             {EMPTY}  (less than {} windows with smaller/larger GC). There, read depth\n\
             {EMPTY}  is set to the last non-extreme depth, while variance is increased\n\
             {EMPTY}  by a {} factor for each addition GC value [{} {}].",
             "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
-            defaults.bg_params.depth.min_tail_obs, defaults.bg_params.depth.tail_var_mult);
+            super::fmt_def(defaults.bg_params.depth.min_tail_obs),
+            super::fmt_def_f64(defaults.bg_params.depth.tail_var_mult));
     }
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
-        "-@, --threads".green(), "INT".yellow(), defaults.threads);
+        "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun everything ({}); do not rerun\n\
         {EMPTY}  read mapping ({}); do not rerun ({}).",
         "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
-        "all".underline(), "part".underline(), "none".underline());
+        "all".yellow(), "part".yellow(), "none".yellow());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
     if extended {
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
-            "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
+            "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
         println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
-            "    --minimap".green(), "EXE".yellow(), defaults.minimap.display());
+            "    --minimap".green(), "EXE".yellow(), super::fmt_def(defaults.minimap.display()));
         println!("    {:KEY$} {:VAL$}  Samtools executable    [{}].",
-            "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
+            "    --samtools".green(), "EXE".yellow(), super::fmt_def(defaults.samtools.display()));
     }
 
     println!("\n{}", "Other parameters:".bold());

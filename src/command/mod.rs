@@ -97,7 +97,7 @@ fn fmt_def(val: impl fmt::Display) -> impl fmt::Display {
 }
 
 fn fmt_def_f64(val: f64) -> impl fmt::Display {
-    fmt_def(crate::math::round_signif(val, 3))
+    crate::math::fmt_signif(val, 6).cyan()
 }
 
 /// Re-runing mode.

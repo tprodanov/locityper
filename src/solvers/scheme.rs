@@ -587,7 +587,7 @@ impl<'a, W: Write> Helper<'a, W> {
             stage_ix: 0,
             solved_genotypes: 0,
             curr_genotypes: total_genotypes,
-            num_width: math::num_digits(total_genotypes as u64),
+            num_width: math::num_digits(total_genotypes as f64) as usize,
 
             likelihoods: vec![f64::NEG_INFINITY; total_genotypes],
             best_lik: f64::NEG_INFINITY,
@@ -610,7 +610,7 @@ impl<'a, W: Write> Helper<'a, W> {
         if self.curr_genotypes < rem_ixs.len() {
             rem_ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].total_cmp(&self.likelihoods[i]));
             rem_ixs.truncate(self.curr_genotypes);
-            self.num_width = math::num_digits(self.curr_genotypes as u64);
+            self.num_width = math::num_digits(self.curr_genotypes as f64) as usize;
         }
 
         self.solved_genotypes = 0;

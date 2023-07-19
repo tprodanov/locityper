@@ -132,36 +132,36 @@ fn print_help() {
 
     println!("\n{}", "Haplotype extraction parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Reference genome name [{}].",
-        "-g, --genome".green(), "STR".yellow(), defaults.ref_name);
+        "-g, --genome".green(), "STR".yellow(), super::fmt_def(defaults.ref_name));
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
-        "-e, --expand".green(), "INT".yellow(), "INT".yellow(), defaults.max_expansion);
+        "-e, --expand".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.max_expansion));
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
         {EMPTY}  moving windows of size {} bp [{}].",
-        "-w, --window".green(), "INT".yellow(), "INT".yellow(), defaults.moving_window);
+        "-w, --window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.moving_window));
     println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
         {EMPTY}  (relative to the haplotype length). Variants that have no known variation\n\
         {EMPTY}  in the input VCF pangenome are ignored.",
-        "-u, --unavail".green(), "FLOAT".yellow(), defaults.unavail_rate);
+        "-u, --unavail".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unavail_rate));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
 
     println!("\n{}", "Haplotype clustering parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
-        "-M, --mismatch".green(), "INT".yellow(), defaults.penalties.mismatch);
+        "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
     println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
-        "-O, --gap-open".green(), "INT".yellow(), defaults.penalties.gap_opening);
+        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_opening));
     println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
-        "-E, --gap-extend".green(), "INT".yellow(), defaults.penalties.gap_extension);
+        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extension));
     println!("    {:KEY$} {:VAL$}  Sequence divergence threshold, used for haplotypes clustering [{}].",
-        "-D, --divergence".green(), "FLOAT".yellow(), defaults.max_divergence);
+        "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
-        "-@, --threads".green(), "INT".yellow(), defaults.threads);
+        "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
-        "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
+        "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");

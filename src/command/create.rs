@@ -74,7 +74,7 @@ fn print_help() {
 
     println!("\n{}", "Optional parameters:".bold());
     println!("    {:KEY$} {:VAL$}  k-mer size [{}].",
-        "-k, --kmer".green(), "INT".yellow(), defaults.kmer_size);
+        "-k, --kmer".green(), "INT".yellow(), super::fmt_def(defaults.kmer_size));
     println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region. Must not be\n\
         {EMPTY}  duplicated in the genome. Defaults to: chr17:72062001-76562000 (GRCh38).",
         "-b, --bg-region".green(), "STR".yellow());
@@ -82,9 +82,9 @@ fn print_help() {
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
-        "-@, --threads".green(), "INT".yellow(), defaults.threads);
+        "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
-        "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
+        "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
