@@ -125,8 +125,8 @@ pub fn num_digits(x: u64) -> usize {
 }
 
 /// Round the number to the corresponding number of significant digits.
-pub fn round_significant(val: f64, digits: u8) -> f64 {
+pub fn round_signif(val: f64, digits: u8) -> f64 {
     assert!(digits > 0, "Number of significant digits cannot be zero");
-    let coef = 10.0_f64.powf(val.log10().floor() + 1.0 - f64::from(digits));
+    let coef = 10.0_f64.powf(val.abs().max(1e-16).log10().floor() + 1.0 - f64::from(digits));
     coef * (val / coef).round()
 }

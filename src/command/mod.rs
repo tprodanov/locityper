@@ -4,11 +4,34 @@ mod add;
 mod preproc;
 mod genotype;
 
+use std::{
+    fs, fmt,
+    path::Path,
+    str::FromStr,
+};
 use colored::Colorize;
-
-use crate::Error;
+use crate::{Error, ext};
 
 const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
+
+pub fn run(argv: &[String]) -> Result<(), Error> {
+    if argv.len() <= 1 {
+        print_help();
+        std::process::exit(1);
+    }
+    match &argv[1] as &str {
+        "c" | "create" => create::run(&argv[2..])?,
+        "a" | "add" => add::run(&argv[2..])?,
+        "p" | "preproc" | "preprocess" => preproc::run(&argv[2..])?,
+        "g" | "genotype" => genotype::run(&argv[2..])?,
+
+        "h" | "help" | "--help" | "-h" => print_help(),
+        "V" | "version" | "--version" | "-V" => print_version(),
+        "cite" => print_citation(),
+        cmd => panic!("Unknown command {}", cmd),
+    }
+    Ok(())
+}
 
 fn print_version() {
     println!("{} {}", PKG_NAME.underline(), format!("v{}", env!("CARGO_PKG_VERSION")).green());
@@ -68,21 +91,96 @@ fn flag() -> impl std::fmt::Display {
     "░░░".yellow().dimmed()
 }
 
-pub fn run(argv: &[String]) -> Result<(), Error> {
-    if argv.len() <= 1 {
-        print_help();
-        std::process::exit(1);
-    }
-    match &argv[1] as &str {
-        "c" | "create" => create::run(&argv[2..])?,
-        "a" | "add" => add::run(&argv[2..])?,
-        "p" | "preproc" | "preprocess" => preproc::run(&argv[2..])?,
-        "g" | "genotype" => genotype::run(&argv[2..])?,
+/// Format default value for the help message.
+fn fmt_def(val: impl fmt::Display) -> impl fmt::Display {
+    val.to_string().cyan()
+}
 
-        "h" | "help" | "--help" | "-h" => print_help(),
-        "V" | "version" | "--version" | "-V" => print_version(),
-        "cite" => print_citation(),
-        cmd => panic!("Unknown command {}", cmd),
+fn fmt_def_f64(val: f64) -> impl fmt::Display {
+    fmt_def(crate::math::round_signif(val, 3))
+}
+
+/// Re-runing mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rerun {
+    /// Complete rerun analysis.
+    All,
+    /// Use some existing evaluations.
+    Part,
+    /// Skip successfully complete analyses.
+    None,
+}
+
+impl Rerun {
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Part => "part",
+            Self::None => "none",
+        }
     }
-    Ok(())
+
+    /// Converts boolean flag `force` into either `All` or `None` rerun mode.
+    fn from_force(force: bool) -> Self {
+        if force { Self::All } else { Self::None }
+    }
+
+    /// Creates/cleans output directory and returns true if further analysis is needed.
+    /// Depending on the rerun mode,
+    ///     if none:
+    ///         if `success_file` exists, does nothing and returns false.
+    ///         otherwise: return true.
+    ///     if part:  always returns true, and
+    ///         if `success_file` exists, removes it.
+    ///     if all: always returns true and always clears output directory.
+    fn need_analysis(self, dir: &Path) -> Result<bool, Error> {
+        if !dir.exists() {
+            fs::create_dir(dir)?;
+            return Ok(true);
+        }
+
+        if self == Self::All {
+            log::warn!("Clearing directory {}", ext::fmt::path(&dir));
+            fs::remove_dir_all(&dir)?;
+            fs::create_dir(dir)?;
+            return Ok(true);
+        }
+
+        let success_file = dir.join(paths::SUCCESS);
+        if success_file.exists() {
+            if self == Self::None {
+                log::info!("Skipping directory {} (successfully completed)", ext::fmt::path(&dir));
+                return Ok(false);
+            } else {
+                fs::remove_file(&success_file)?;
+                return Ok(true);
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl FromStr for Rerun {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "all" | "full" => Ok(Self::All),
+            "part" | "partial" => Ok(Self::Part),
+            "none" | "no" => Ok(Self::None),
+            _ => Err(format!("Unknown rerun mode {:?} (allowed modes: all, part, none)", s)),
+        }
+    }
+}
+
+impl fmt::Display for Rerun {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.to_str())
+    }
+}
+
+impl fmt::Debug for Rerun {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }

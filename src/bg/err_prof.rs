@@ -147,7 +147,7 @@ impl ErrorProfile {
             conf_lvl: params.err_conf_level,
         };
 
-        let read_len = math::round_significant(mean_read_len, 2).round() as u32;
+        let read_len = math::round_signif(mean_read_len, 2).round() as u32;
         log::info!("    Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
             err_prof.allowed_edit_dist(read_len), read_len, 100.0 * err_prof.conf_lvl);
         err_prof

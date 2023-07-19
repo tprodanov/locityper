@@ -43,7 +43,7 @@ struct Args {
 
     interleaved: bool,
     threads: u16,
-    force: bool,
+    rerun: super::Rerun,
     strobealign: PathBuf,
     minimap: PathBuf,
     samtools: PathBuf,
@@ -67,7 +67,7 @@ impl Default for Args {
 
             interleaved: false,
             threads: 8,
-            force: false,
+            rerun: super::Rerun::None,
             strobealign: PathBuf::from("strobealign"),
             minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
@@ -131,66 +131,72 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
         "    --subset-loci".green(), "STR+".yellow());
     println!("    {:KEY$} {:VAL$}  Optional: genotype priors. Contains three columns:\n\
-        {EMPTY}  <locus>  <genotype (through comma)> <log10(prior)>.\n\
+        {EMPTY}  <locus>  <genotype (through comma)>  <log10(prior)>.\n\
         {EMPTY}  Missing genotypes are removed from the analysis.",
         "    --priors".green(), "FILE".yellow());
 
     println!("\n{}", "Read recruitment:".bold());
     println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than {}) [{}].",
-        "-k, --recr-kmer".green(), "INT".yellow(), recruit::Minimizer::MAX_KMER_SIZE, defaults.recr_params.minimizer_k);
+        "-k, --recr-kmer".green(), "INT".yellow(), recruit::Minimizer::MAX_KMER_SIZE,
+        super::fmt_def(defaults.recr_params.minimizer_k));
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
-        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), defaults.recr_params.minimizer_w);
+        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.recr_params.minimizer_w));
     println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
         {EMPTY}  of minimizers matching one of the targets [{}].",
-        "-m, --matches-frac".green(), "FLOAT".yellow(), defaults.recr_params.matches_frac);
+        "-m, --matches-frac".green(), "FLOAT".yellow(),
+        super::fmt_def_f64(f64::from(defaults.recr_params.matches_frac)));
     println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
         {EMPTY}  May impact runtime in multi-threaded read recruitment.",
-        "-c, --chunk-size".green(), "INT".yellow(), defaults.recr_params.chunk_size);
+        "-c, --chunk-size".green(), "INT".yellow(), super::fmt_def(defaults.recr_params.chunk_size));
 
     println!("\n{}", "Locus genotyping:".bold());
     println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
-        "-p, --ploidy".green(), "INT".yellow(), defaults.ploidy);
+        "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
     println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
         {EMPTY}  Please see README for information on the file content.",
         "-S, --solvers".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
         {EMPTY}  read alignment likelihoods [{}].",
-        "-C, --dp-contrib".green(), "FLOAT".yellow(), defaults.assgn_params.depth_contrib);
+        "-C, --dp-contrib".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_contrib));
     println!("    {} {}  Compare window probability to have copy number 1 against two\n\
         {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
         "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
-        defaults.assgn_params.alt_cn.0, defaults.assgn_params.alt_cn.1);
+        super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
     println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
         {EMPTY}  the best alignment [{}].",
-        "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(), Ln::to_log10(defaults.assgn_params.prob_diff));
+        "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+        super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_diff)));
     println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
         "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-        Ln::to_log10(defaults.assgn_params.unmapped_penalty));
+        super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
     println!("    {:KEY$} {} \n\
         {EMPTY}  Contig windows receive different weight depending on average k-mer\n\
         {EMPTY}  frequency. Windows with values under {} [{}] receive full weight.\n\
         {EMPTY}  Windows with values equal to {} [{}] receive half weight.",
-        "    --rare-kmer".green(), "FLOAT FLOAT".yellow(), "FLOAT_1".yellow(), defaults.assgn_params.rare_kmer,
-        "FLOAT_2".yellow(), defaults.assgn_params.semicommon_kmer);
-    println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [auto].",
-        "    --tweak".green(), "INT".yellow(), "INT".yellow());
+        "    --rare-kmer".green(), "FLOAT FLOAT".yellow(),
+        "FLOAT_1".yellow(), super::fmt_def(defaults.assgn_params.rare_kmer),
+        "FLOAT_2".yellow(), super::fmt_def(defaults.assgn_params.semicommon_kmer));
+    println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
+        "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
-        "-@, --threads".green(), "INT".yellow(), defaults.threads);
-    println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
-        "-F, --force".green(), super::flag());
+        "-@, --threads".green(), "INT".yellow(), defaults.threads.to_string().cyan());
+    println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun all loci ({}); do not rerun\n\
+        {EMPTY}  read recruitment ({}); do not rerun completed loci ({}).",
+        "    --rerun".green(), "STR".yellow(), defaults.rerun.to_str().cyan(),
+        "all".yellow(), "part".yellow(), "none".yellow());
     println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
         {EMPTY}  input and product version.",
         "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
-        "    --strobealign".green(), "EXE".yellow(), defaults.strobealign.display());
+        "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
     println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
-        "    --minimap".green(), "EXE".yellow(), defaults.minimap.display());
+        "    --minimap".green(), "EXE".yellow(), super::fmt_def(defaults.minimap.display()));
     println!("    {:KEY$} {:VAL$}  Samtools executable    [{}].",
-        "    --samtools".green(), "EXE".yellow(), defaults.samtools.display());
+        "    --samtools".green(), "EXE".yellow(), super::fmt_def(defaults.samtools.display()));
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -244,7 +250,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
-            Short('F') | Long("force") => args.force = true,
+            Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
             Long("debug") => args.debug = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
@@ -340,13 +346,9 @@ struct LocusData {
 }
 
 impl LocusData {
-    fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path, force: bool) -> io::Result<Self> {
-        let out_dir = out_loci_dir.join(set.tag());
-        if out_dir.exists() && force {
-            fs::remove_dir_all(&out_dir)?;
-        }
-        ext::sys::mkdir(&out_dir)?;
-        Ok(Self {
+    fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
+    let out_dir = out_loci_dir.join(set.tag());
+        Self {
             db_locus_dir: db_locus_dir.to_owned(),
             tmp_reads_filename: out_dir.join("reads.tmp.fq.gz"),
             reads_filename: out_dir.join("reads.fq.gz"),
@@ -354,26 +356,22 @@ impl LocusData {
             aln_filename: out_dir.join("aln.bam"),
             lik_filename: out_dir.join("lik.csv.gz"),
             set, out_dir,
-        })
+        }
     }
 }
 
 /// Loads all loci from the database. If `subset_loci` is not empty, only loads loci that are contained in it.
-/// If `force`, delete old data in the corresponding output directories.
 fn load_loci(
     db_path: &Path,
     out_path: &Path,
     subset_loci: &FnvHashSet<String>,
-    force: bool
-) -> io::Result<Vec<LocusData>>
+    rerun: super::Rerun,
+) -> Result<Vec<LocusData>, Error>
 {
     log::info!("Loading database.");
     let db_loci_dir = db_path.join(paths::LOCI_DIR);
     let out_loci_dir = out_path.join(paths::LOCI_DIR);
     ext::sys::mkdir(&out_loci_dir)?;
-    if force {
-        log::warn!("Force flag is set: overwriting output directories {}/*", ext::fmt::path(&out_loci_dir));
-    }
 
     let mut loci = Vec::new();
     let mut total_entries = 0;
@@ -389,7 +387,12 @@ fn load_loci(
             let fasta_filename = path.join(paths::LOCUS_FASTA);
             let kmers_filename = path.join(paths::KMERS);
             match ContigSet::load(name, &fasta_filename, &kmers_filename, ()) {
-                Ok(set) => loci.push(LocusData::new(set, &path, &out_loci_dir, force)?),
+                Ok(set) => {
+                    let locus_data = LocusData::new(set, &path, &out_loci_dir);
+                    if rerun.need_analysis(&locus_data.out_dir)? {
+                        loci.push(locus_data);
+                    }
+                },
                 Err(e) => log::error!("Could not load locus information from {}: {:?}", ext::fmt::path(&path), e),
             }
         }
@@ -593,7 +596,9 @@ fn analyze_locus(
         debug: args.debug,
         all_alns, contig_windows, genotypes,
     };
-    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)
+    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
+    fs::File::create(locus.out_dir.join(paths::SUCCESS))?;
+    Ok(())
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -615,7 +620,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         args.minimap = ext::sys::find_exe(args.minimap)?;
     }
 
-    let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.force)?;
+    let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.rerun)?;
     recruit_reads(&loci, &args)?;
 
     let scheme = match args.solvers.as_ref() {

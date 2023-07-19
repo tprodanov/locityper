@@ -1,7 +1,7 @@
 use std::{
     cmp::max,
     io::{self, BufRead, Read, Seek, Write},
-    fs::{self, File},
+    fs::File,
     sync::Arc,
     path::{Path, PathBuf},
 };
@@ -464,7 +464,7 @@ fn process_haplotypes(
     let mut kmers_writer = ext::sys::create_gzip(&locus_dir.join(paths::KMERS))?;
     kmer_counts.save(&mut kmers_writer)?;
 
-    File::create(locus_dir.join("success"))?;
+    File::create(locus_dir.join(paths::SUCCESS))?;
     Ok(())
 }
 
@@ -480,19 +480,11 @@ fn add_locus<R>(
 ) -> Result<bool, Error>
 where R: Read + Seek,
 {
-    log::info!("Analyzing locus {}", locus);
     let dir = loci_dir.join(locus.name());
-    let ok_file = dir.join("success");
-    if dir.exists() {
-        if args.force || !ok_file.exists() {
-            log::warn!("    Clearing directory {}", ext::fmt::path(&dir));
-            fs::remove_dir_all(&dir)?;
-        } else {
-            log::warn!("    Skipping locus {}", locus);
-            return Ok(true);
-        }
+    if !super::Rerun::from_force(args.force).need_analysis(&dir)? {
+        return Ok(true);
     }
-    ext::sys::mkdir(&dir)?;
+    log::info!("Analyzing locus {}", locus);
     let inner_interv = locus.interval();
     // Add extra half-window to each sides.
     let halfw = args.moving_window / 2;

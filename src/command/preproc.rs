@@ -125,7 +125,7 @@ struct Args {
 
     interleaved: bool,
     threads: u16,
-    force: bool,
+    rerun: super::Rerun,
     strobealign: PathBuf,
     minimap: PathBuf,
     samtools: PathBuf,
@@ -150,7 +150,7 @@ impl Default for Args {
 
             interleaved: false,
             threads: 8,
-            force: false,
+            rerun: super::Rerun::None,
             debug: false,
             strobealign: PathBuf::from("strobealign"),
             minimap: PathBuf::from("minimap2"),
@@ -299,8 +299,10 @@ fn print_help(extended: bool) {
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
-    println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
-        "-F, --force".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun everything ({}); do not rerun\n\
+        {EMPTY}  read mapping ({}); do not rerun ({}).",
+        "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
+        "all".underline(), "part".underline(), "none".underline());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
     if extended {
@@ -373,7 +375,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
-            Short('F') | Long("force") => args.force = true,
+            Long("rerun") => args.rerun = parser.value()?.parse()?,
             Long("debug") => args.debug = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
@@ -403,16 +405,12 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
 
     let bg_dir = out_dir.join(paths::BG_DIR);
     let params_path = bg_dir.join(paths::PREPROC_PARAMS);
-    if bg_dir.exists() {
-        if args.force || !bg_dir.join(paths::BG_DISTR).exists() {
-            log::warn!("Clearing output directory {}", ext::fmt::path(&bg_dir));
-            fs::remove_dir_all(&bg_dir)?;
-        } else if args.params.need_rerun(!args.input.is_empty(), &params_path) {
-            log::error!("Please rerun with -F/--force");
+    if !args.rerun.need_analysis(&bg_dir)? {
+        if args.params.need_rerun(!args.input.is_empty(), &params_path) {
+            log::error!("Please rerun with {} or {}", "--rerun part".red(), "--rerun all".red());
             std::process::exit(1);
         }
     }
-    ext::sys::mkdir(&bg_dir)?;
 
     let mut params_file = io::BufWriter::new(fs::File::create(&params_path)?);
     args.params.save().write_pretty(&mut params_file, 4)?;
@@ -774,15 +772,17 @@ impl RefData {
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let timer = Instant::now();
     let args = parse_args(argv)?.validate()?;
-    let out_dir = create_out_dir(&args)?;
+    // `args.output`/bg
+    let out_bg_dir = create_out_dir(&args)?;
 
     log::info!("Loading background non-duplicated region into memory");
     let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
     let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
 
-    let bg_distr = estimate_bg_distrs(&args, &out_dir, &ref_data)?;
-    let mut distr_file = ext::sys::create_gzip(&out_dir.join(paths::BG_DISTR))?;
+    let bg_distr = estimate_bg_distrs(&args, &out_bg_dir, &ref_data)?;
+    let mut distr_file = ext::sys::create_gzip(&out_bg_dir.join(paths::BG_DISTR))?;
     bg_distr.save().write_pretty(&mut distr_file, 4)?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
+    fs::File::create(out_bg_dir.join(paths::SUCCESS))?;
     Ok(())
 }

@@ -27,7 +27,6 @@ struct Args {
     kmer_size: u8,
     bg_region: Option<String>,
     threads: u16,
-    force: bool,
     jellyfish: PathBuf,
 }
 
@@ -39,7 +38,6 @@ impl Default for Args {
             kmer_size: 25,
             bg_region: None,
             threads: 8,
-            force: false,
             jellyfish: PathBuf::from("jellyfish"),
         }
     }
@@ -85,8 +83,6 @@ fn print_help() {
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), defaults.threads);
-    println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
-        "-F, --force".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), defaults.jellyfish.display());
 
@@ -108,7 +104,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('k') | Long("kmer") => args.kmer_size = parser.value()?.parse()?,
             Short('b') | Long("bg") | Long("bg-region") => args.bg_region = Some(parser.value()?.parse()?),
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
-            Short('F') | Long("force") => args.force = true,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -220,11 +215,11 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     // unwrap as args.database was previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
-    if db_path.exists() {
-        if args.force {
-            log::warn!("Completely removing output directory {}", ext::fmt::path(db_path));
-            fs::remove_dir_all(db_path)?;
-        }
+    // Directory is not empty.
+    if db_path.exists() && db_path.read_dir()?.next().is_some() {
+        log::error!("Output directory {} is not empty.", ext::fmt::path(db_path));
+        log::warn!("Please remove it manually or select a different path.");
+        std::process::exit(1);
     }
     ext::sys::mkdir(db_path)?;
 
