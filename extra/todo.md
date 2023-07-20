@@ -15,3 +15,4 @@ Improve `locityper add`:
 * Automatically stop extending if there are Ns,
 * Reduce window size,
 * Write locus summary in a text file.
+* Improve Greedy solver.

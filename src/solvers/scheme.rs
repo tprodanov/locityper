@@ -171,6 +171,8 @@ impl Stage {
 #[derive(Clone)]
 pub struct Scheme(Vec<Stage>);
 
+const DEFAULT_FRAC2: f64 = 0.05;
+
 impl Default for Scheme {
     #[cfg(feature = "highs")]
     fn default() -> Self {
@@ -186,7 +188,7 @@ impl Default for Scheme {
             // Then, run HiGHS solver on the best 3%.
             Stage {
                 solver: Box::new(super::HighsSolver::default()),
-                fraction: 0.03,
+                fraction: DEFAULT_FRAC2,
                 write: false,
                 attempts: 5,
                 aver_power: 1.0, // Take arithmetic mean of all likelihoods.
@@ -194,7 +196,29 @@ impl Default for Scheme {
         ])
     }
 
-    #[cfg(not(feature = "highs"))]
+    #[cfg(all(not(feature = "highs"), feature = "gurobi"))]
+    fn default() -> Self {
+        Self(vec![
+            // First, run Greedy solver on all haplotypes.
+            Stage {
+                solver: Box::new(super::SimAnneal::default()),
+                fraction: 1.0,
+                write: false,
+                attempts: 5,
+                aver_power: f64::INFINITY, // Take maximum across all random attempts.
+            },
+            // Then, run HiGHS solver on the best 3%.
+            Stage {
+                solver: Box::new(super::GurobiSolver::default()),
+                fraction: DEFAULT_FRAC2,
+                write: false,
+                attempts: 5,
+                aver_power: 1.0, // Take arithmetic mean of all likelihoods.
+            },
+        ])
+    }
+
+    #[cfg(all(not(feature = "highs"), not(feature = "gurobi")))]
     fn default() -> Self {
         Self(vec![
             // First, run Greedy solver on all haplotypes.
@@ -208,7 +232,7 @@ impl Default for Scheme {
             // Then, run HiGHS solver on the best 3%.
             Stage {
                 solver: Box::new(super::SimAnneal::default()),
-                fraction: 0.03,
+                fraction: DEFAULT_FRAC2,
                 write: false,
                 attempts: 10,
                 aver_power: 1.0, // Take arithmetic mean of all likelihoods.
