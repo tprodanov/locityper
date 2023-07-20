@@ -4,13 +4,13 @@ use std::{
     path::{Path, PathBuf},
     ffi::OsStr,
     process::Child,
+    mem::ManuallyDrop,
 };
 use flate2::{
     bufread::MultiGzDecoder,
     write::GzEncoder,
     Compression,
 };
-use lz4_flex::frame as lz4;
 use crate::err::{Error, add_path};
 
 /// Finds an executable, and returns Error, if executable is not available.
@@ -34,7 +34,7 @@ pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
             Ok(Box::new(BufReader::new(MultiGzDecoder::new(stream))))
         } else if two_bytes[0] == 0x04 && two_bytes[1] == 0x22 {
             // lz4 magic number
-            Ok(Box::new(lz4::FrameDecoder::new(stream)))
+            Ok(Box::new(BufReader::new(lz4::Decoder::new(stream).map_err(add_path!(filename))?)))
         } else {
             Ok(Box::new(stream))
         }
@@ -55,10 +55,44 @@ pub fn create_gzip(filename: &Path) -> Result<BufWriter<GzEncoder<File>>, Error>
     Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
 }
 
+pub struct AutoFinishLz4<W: Write> {
+    encoder: ManuallyDrop<lz4::Encoder<W>>,
+}
+
+impl<W: io::Write> Drop for AutoFinishLz4<W> {
+    fn drop(&mut self) {
+        let encoder = unsafe { ManuallyDrop::take(&mut self.encoder) };
+        if let Err(e) = encoder.finish().1 {
+            log::error!("Lz4 encoder panicked on drop: {:?}", e);
+        }
+    }
+}
+
+impl<W: Write> Write for AutoFinishLz4<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.encoder.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.encoder.flush()
+    }
+}
+
 /// Creates an lz4 compressed file.
-pub fn create_lz4(filename: &Path) -> Result<lz4::AutoFinishEncoder<File>, Error> {
-    let file = File::create(filename).map_err(add_path!(filename))?;
-    Ok(lz4::FrameEncoder::new(file).auto_finish())
+fn create_lz4(filename: &Path, level: u32) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
+    let file = create_file(filename)?;
+    let encoder = lz4::EncoderBuilder::new().level(level).build(file).map_err(add_path!(filename))?;
+    Ok(AutoFinishLz4 {
+        encoder: ManuallyDrop::new(encoder),
+    })
+}
+
+pub fn create_lz4_fast(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
+    create_lz4(filename, 1)
+}
+
+pub fn create_lz4_slow(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
+    create_lz4(filename, 9)
 }
 
 /// Creates buffered output file.

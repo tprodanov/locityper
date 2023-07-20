@@ -613,10 +613,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
 
     let bg_path = out_dir.join(paths::BG_DIR).join(paths::BG_DISTR);
-    let bg_stream = io::BufReader::new(fs::File::open(&bg_path).map_err(add_path!(bg_path))?);
-    let bg_stream = lz4_flex::frame::FrameDecoder::new(bg_stream);
-    let bg_distr = BgDistr::load(&json::parse(
-        &io::read_to_string(bg_stream).map_err(add_path!(bg_path))?)?)?;
+    let mut bg_stream = ext::sys::open(&bg_path)?;
+    let mut bg_str = String::new();
+    bg_stream.read_to_string(&mut bg_str).map_err(add_path!(bg_path))?;
+    let bg_distr = BgDistr::load(&json::parse(&bg_str)?)?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");

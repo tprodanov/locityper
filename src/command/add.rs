@@ -435,7 +435,7 @@ fn process_haplotypes(
 
     log::info!("    [{}] Calculating haplotype divergence", tag);
     let paf_filename = locus_dir.join(paths::LOCUS_PAF);
-    let paf_writer = ext::sys::create_lz4(&paf_filename)?;
+    let paf_writer = ext::sys::create_lz4_slow(&paf_filename)?;
     let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)
         .map_err(add_path!(paf_filename))?;
     check_divergencies(tag, &entries, divergences.iter().copied());
@@ -470,7 +470,7 @@ fn process_haplotypes(
     log::info!("    [{}] Counting k-mers", tag);
     let kmer_counts = kmer_getter.fetch(filt_seqs)?;
     let kmers_filename = locus_dir.join(paths::KMERS);
-    let mut kmers_writer = ext::sys::create_lz4(&kmers_filename)?;
+    let mut kmers_writer = ext::sys::create_lz4_slow(&kmers_filename)?;
     kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
     super::write_success_file(locus_dir.join(paths::SUCCESS))?;
     Ok(())

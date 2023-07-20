@@ -37,7 +37,7 @@ impl Default for Params {
         Self {
             minimizer_k: 15,
             minimizer_w: 10,
-            matches_frac: 0.3,
+            matches_frac: 0.5,
             chunk_size: 10000,
         }
     }
@@ -50,7 +50,7 @@ impl Params {
         validate_param!(1 < self.minimizer_w && self.minimizer_w <= kmers::MAX_MINIMIZER_W,
             "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
         validate_param!(self.matches_frac > 0.0 && self.matches_frac <= 1.0,
-            "Matches ratio ({:.5}) cannot be zero, and cannot be over 1.", self.matches_frac);
+            "Matches ratio ({:.5}) cannot be zero, and cannot be over 1", self.matches_frac);
         validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
         Ok(())
     }
