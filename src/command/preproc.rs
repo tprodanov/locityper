@@ -789,7 +789,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bg_distr = estimate_bg_distrs(&args, &out_bg_dir, &ref_data)?;
     let distr_filename = out_bg_dir.join(paths::BG_DISTR);
-    let mut distr_file = ext::sys::create_gzip(&distr_filename)?;
+    let mut distr_file = ext::sys::create_lz4(&distr_filename)?;
     bg_distr.save().write_pretty(&mut distr_file, 4).map_err(add_path!(distr_filename))?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
     super::write_success_file(out_bg_dir.join(paths::SUCCESS))?;

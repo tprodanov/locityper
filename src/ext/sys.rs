@@ -10,6 +10,7 @@ use flate2::{
     write::GzEncoder,
     Compression,
 };
+use lz4_flex::frame as lz4;
 use crate::err::{Error, add_path};
 
 /// Finds an executable, and returns Error, if executable is not available.
@@ -17,21 +18,23 @@ pub fn find_exe(p: impl AsRef<Path>) -> Result<PathBuf, Error> {
     which::which(p.as_ref()).map_err(|_| Error::NoExec(p.as_ref().to_owned()))
 }
 
-/// Returns
-/// - stdin if filename is `-`,
-/// - gzip reader if filename ends with `.gz`,
-/// - regular text file otherwise.
+/// Returns stdin if filename is `-`.
+/// Otherwise, tries to guess input format (gzip OR lz4 OR no compression).
 pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
-        Ok(Box::new(BufReader::new(stdin())))
+        return Ok(Box::new(BufReader::new(stdin())));
     } else {
+        // Guess file format (gz | lz4 | no compression).
         let mut stream = BufReader::new(File::open(filename).map_err(add_path!(filename))?);
         let mut two_bytes = [0_u8; 2];
         let bytes_read = stream.read(&mut two_bytes).map_err(add_path!(filename))?;
         stream.seek_relative(-(bytes_read as i64)).map_err(add_path!(filename))?;
-        // Check gzip magic number.
         if two_bytes[0] == 0x1f && two_bytes[1] == 0x8b {
+            // gzip magic number
             Ok(Box::new(BufReader::new(MultiGzDecoder::new(stream))))
+        } else if two_bytes[0] == 0x04 && two_bytes[1] == 0x22 {
+            // lz4 magic number
+            Ok(Box::new(lz4::FrameDecoder::new(stream)))
         } else {
             Ok(Box::new(stream))
         }
@@ -46,10 +49,16 @@ pub fn load_json(filename: &Path) -> Result<json::JsonValue, Error> {
         format!("Failed parsing {}: invalid JSON format", filename.display())))
 }
 
-/// Creates a gzip file.
+/// Creates a gzip compressed file.
 pub fn create_gzip(filename: &Path) -> Result<BufWriter<GzEncoder<File>>, Error> {
     let file = File::create(filename).map_err(add_path!(filename))?;
     Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
+}
+
+/// Creates an lz4 compressed file.
+pub fn create_lz4(filename: &Path) -> Result<lz4::AutoFinishEncoder<File>, Error> {
+    let file = File::create(filename).map_err(add_path!(filename))?;
+    Ok(lz4::FrameEncoder::new(file).auto_finish())
 }
 
 /// Creates buffered output file.

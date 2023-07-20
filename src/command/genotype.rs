@@ -384,9 +384,7 @@ fn load_loci(
         total_entries += 1;
         let path = entry.path();
         if let Some(name) = locus_name_matches(&path, subset_loci) {
-            let fasta_filename = path.join(paths::LOCUS_FASTA);
-            let kmers_filename = path.join(paths::KMERS);
-            match ContigSet::load(name, &fasta_filename, &kmers_filename, ()) {
+            match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS), ()) {
                 Ok(set) => {
                     let locus_data = LocusData::new(set, &path, &out_loci_dir);
                     if rerun.need_analysis(&locus_data.out_dir)? {
@@ -528,6 +526,7 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
     }
     fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
         .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;
+    fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
     Ok(())
 }
 
@@ -615,7 +614,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bg_path = out_dir.join(paths::BG_DIR).join(paths::BG_DISTR);
     let bg_stream = io::BufReader::new(fs::File::open(&bg_path).map_err(add_path!(bg_path))?);
-    let bg_stream = flate2::bufread::GzDecoder::new(bg_stream);
+    let bg_stream = lz4_flex::frame::FrameDecoder::new(bg_stream);
     let bg_distr = BgDistr::load(&json::parse(
         &io::read_to_string(bg_stream).map_err(add_path!(bg_path))?)?)?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;

@@ -177,7 +177,7 @@ fn extract_bg_region<R: Read + Seek>(
     log::info!("Calculating k-mer counts on the background region.");
     let kmer_counts = kmer_getter.fetch_one(seq)?;
     let kmers_filename = bg_dir.join(paths::KMERS);
-    let mut kmers_out = ext::sys::create_gzip(&kmers_filename)?;
+    let mut kmers_out = ext::sys::create_lz4(&kmers_filename)?;
     kmer_counts.save(&mut kmers_out).map_err(add_path!(kmers_filename))?;
     Ok(())
 }
