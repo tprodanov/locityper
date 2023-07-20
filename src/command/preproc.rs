@@ -417,6 +417,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
             log::error!("Please rerun with {} or {}", "--rerun part".red(), "--rerun all".red());
             std::process::exit(1);
         }
+        std::process::exit(0);
     }
 
     let mut params_file = ext::sys::create_file(&params_path)?;

@@ -16,3 +16,4 @@ Improve `locityper add`:
 * Reduce window size,
 * Write locus summary in a text file.
 * Improve Greedy solver.
+* Use `lz4` compression instead of `gzip`.

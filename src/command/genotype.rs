@@ -368,7 +368,7 @@ fn load_loci(
     rerun: super::Rerun,
 ) -> Result<Vec<LocusData>, Error>
 {
-    log::info!("Loading database.");
+    log::info!("Loading database");
     let db_loci_dir = db_path.join(paths::LOCI_DIR);
     let out_loci_dir = out_path.join(paths::LOCI_DIR);
     ext::sys::mkdir(&out_loci_dir)?;
