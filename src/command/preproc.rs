@@ -419,7 +419,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
         }
     }
 
-    let mut params_file = io::BufWriter::new(fs::File::create(&params_path).map_err(add_path!(params_path))?);
+    let mut params_file = ext::sys::create_file(&params_path)?;
     args.params.save().write_pretty(&mut params_file, 4).map_err(add_path!(params_path))?;
     Ok(bg_dir)
 }

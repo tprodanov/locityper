@@ -350,8 +350,8 @@ impl LocusData {
     let out_dir = out_loci_dir.join(set.tag());
         Self {
             db_locus_dir: db_locus_dir.to_owned(),
-            tmp_reads_filename: out_dir.join("reads.tmp.fq.gz"),
-            reads_filename: out_dir.join("reads.fq.gz"),
+            tmp_reads_filename: out_dir.join("reads.tmp.fq"),
+            reads_filename: out_dir.join("reads.fq"),
             tmp_aln_filename: out_dir.join("aln.tmp.bam"),
             aln_filename: out_dir.join("aln.bam"),
             lik_filename: out_dir.join("lik.csv.gz"),
@@ -430,7 +430,7 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
         let locus_all_seqs = fasta_reader.read_all().map_err(add_path!(fasta_path))?;
         total_seqs += locus_all_seqs.len();
         targets.add(locus_all_seqs.iter().map(NamedSeq::seq));
-        writers.push(ext::sys::create_gzip(&locus.tmp_reads_filename)?);
+        writers.push(ext::sys::create_file(&locus.tmp_reads_filename)?);
     }
     log::info!("Collected {} minimizers across {} loci and {} sequences", targets.total_minimizers(),
         n_filt_loci, total_seqs);

@@ -1,8 +1,7 @@
 //! Create a new database.
 
 use std::{
-    fs,
-    io::{self, Read, Write, Seek},
+    io::{Read, Write, Seek},
     cmp::max,
     sync::Arc,
     process::Command,
@@ -171,7 +170,7 @@ fn extract_bg_region<R: Read + Seek>(
     let bg_dir = db_path.join(paths::BG_DIR);
     ext::sys::mkdir(&bg_dir)?;
     let bed_filename = bg_dir.join(paths::BG_BED);
-    let mut bed_writer = io::BufWriter::new(fs::File::create(&bed_filename).map_err(add_path!(bed_filename))?);
+    let mut bed_writer = ext::sys::create_file(&bed_filename)?;
     writeln!(bed_writer, "{}", region.bed_fmt()).map_err(add_path!(bed_filename))?;
     std::mem::drop(bed_writer);
 

@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Read, BufRead, BufReader, Write, BufWriter, stdin, stdout},
+    io::{self, Read, BufRead, BufReader, Write, BufWriter, stdin},
     fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
@@ -46,19 +46,15 @@ pub fn load_json(filename: &Path) -> Result<json::JsonValue, Error> {
         format!("Failed parsing {}: invalid JSON format", filename.display())))
 }
 
-/// Creates a buffered file OR stdout if filename is `-`.
-pub fn create_uncompressed(filename: &Path) -> Result<Box<dyn Write>, Error> {
-    if filename == OsStr::new("-") {
-        Ok(Box::new(BufWriter::new(stdout())))
-    } else {
-        Ok(Box::new(BufWriter::new(File::create(filename).map_err(add_path!(filename))?)))
-    }
-}
-
 /// Creates a gzip file.
 pub fn create_gzip(filename: &Path) -> Result<BufWriter<GzEncoder<File>>, Error> {
     let file = File::create(filename).map_err(add_path!(filename))?;
     Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
+}
+
+/// Creates buffered output file.
+pub fn create_file(filename: &Path) -> Result<BufWriter<File>, Error> {
+    File::create(filename).map(BufWriter::new).map_err(add_path!(filename))
 }
 
 /// Finds all filenames with appropriate extension in the directory.

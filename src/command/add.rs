@@ -442,7 +442,7 @@ fn process_haplotypes(
 
     log::info!("    [{}] Clustering haploypes", tag);
     let nwk_filename = locus_dir.join(paths::LOCUS_DENDROGRAM);
-    let nwk_writer = io::BufWriter::new(File::create(&nwk_filename).map_err(add_path!(nwk_filename))?);
+    let nwk_writer = ext::sys::create_file(&nwk_filename)?;
     let keep_seqs = cluster_haplotypes(nwk_writer, &entries, divergences, args.max_divergence)
         .map_err(add_path!(nwk_filename))?;
     let n_filtered = keep_seqs.iter().fold(0, |sum, &keep| sum + usize::from(keep));
