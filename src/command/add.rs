@@ -472,7 +472,7 @@ fn process_haplotypes(
     let kmers_filename = locus_dir.join(paths::KMERS);
     let mut kmers_writer = ext::sys::create_gzip(&kmers_filename)?;
     kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
-    ext::sys::touch(locus_dir.join(paths::SUCCESS))?;
+    super::write_success_file(locus_dir.join(paths::SUCCESS))?;
     Ok(())
 }
 

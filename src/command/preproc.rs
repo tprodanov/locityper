@@ -791,6 +791,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut distr_file = ext::sys::create_gzip(&distr_filename)?;
     bg_distr.save().write_pretty(&mut distr_file, 4).map_err(add_path!(distr_filename))?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
-    ext::sys::touch(out_bg_dir.join(paths::SUCCESS))?;
+    super::write_success_file(out_bg_dir.join(paths::SUCCESS))?;
     Ok(())
 }

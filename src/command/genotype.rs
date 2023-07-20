@@ -602,7 +602,7 @@ fn analyze_locus(
     };
     let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
-    ext::sys::touch(locus.out_dir.join(paths::SUCCESS))?;
+    super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     Ok(())
 }
 

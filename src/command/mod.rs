@@ -187,3 +187,21 @@ impl fmt::Debug for Rerun {
         fmt::Display::fmt(self, f)
     }
 }
+
+// /// Writes command line arguments, current version and time.
+// fn write_command(filename: impl AsRef<Path>) -> Result<(), Error> {
+//     let mut s = String::new();
+//     for (i, arg) in std::env::args().enumerate() {
+//         if i > 0 {
+//             s.push(' ');
+//         }
+//         s.push_str(&ext::fmt::path(Path::new(&arg)));
+//     }
+//     write!(s, "\n{} v{}\n", PKG_NAME, env!("CARGO_PKG_VERSION")).unwrap();
+//     writeln!(s, "{:?}", chrono::offset::Local::now()).unwrap();
+//     fs::write(&filename, s).map_err(add_path!(filename))
+// }
+
+fn write_success_file(filename: impl AsRef<Path>) -> Result<(), Error> {
+    fs::write(&filename, const_format::formatcp!("v{}\n", env!("CARGO_PKG_VERSION"))).map_err(add_path!(filename))
+}

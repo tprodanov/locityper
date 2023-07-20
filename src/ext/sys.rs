@@ -116,12 +116,6 @@ pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut write
     Ok(())
 }
 
-/// Just open the file, and do nothing else.
-pub fn touch(filename: impl AsRef<Path>) -> Result<(), Error> {
-    File::create(&filename).map_err(add_path!(filename))?;
-    Ok(())
-}
-
 /// RAII child wrapper, that kills the child if it gets dropped.
 pub struct ChildGuard {
     child: Child,

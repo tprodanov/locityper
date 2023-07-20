@@ -26,7 +26,7 @@ pub fn command(cmd: &Command) -> String {
     std::iter::once(cmd.get_program())
         .chain(cmd.get_args())
         .map(OsStr::as_ref)
-        .map(self::path)
+        .map(path)
         .collect::<Vec<_>>()
         .join(" ")
 }

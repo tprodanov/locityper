@@ -234,6 +234,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     extract_bg_region(&region, &mut fasta, &db_path, &kmer_getter)?;
 
     ext::sys::mkdir(&db_path.join(paths::LOCI_DIR))?;
+    super::write_success_file(db_path.join(paths::BG_DIR).join(paths::SUCCESS))?;
     log::info!("Success!");
     Ok(())
 }
