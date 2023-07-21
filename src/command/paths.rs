@@ -26,7 +26,7 @@ pub(super) const LOCUS_DENDROGRAM: &'static str = "all_haplotypes.nwk";
 /// Preprocessing parameters are stored in `output/bg/PREPROC_PARAMS`.
 pub(super) const PREPROC_PARAMS: &'static str = "params.json";
 /// Background distributions are stored in `output/bg/BG_DISTR`.
-pub(super) const BG_DISTR: &'static str = "distr.lz4";
+pub(super) const BG_DISTR: &'static str = "distr.gz";
 
 /// File, created on the successful completion.
 pub(super) const SUCCESS: &'static str = "success";
