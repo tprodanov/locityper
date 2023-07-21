@@ -37,7 +37,7 @@ impl Default for Params {
         Self {
             minimizer_k: 15,
             minimizer_w: 10,
-            matches_frac: 0.5,
+            matches_frac: 0.7,
             chunk_size: 10000,
         }
     }
@@ -66,7 +66,7 @@ struct Stats {
 }
 
 // Update frequency in seconds.
-const UPDATE_SECS: u64 = 5;
+const UPDATE_SECS: u64 = 10;
 
 impl Stats {
     fn new() -> Self {

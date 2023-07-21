@@ -92,12 +92,13 @@ pub fn create_lz4_fast(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>
 }
 
 pub fn create_lz4_slow(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
-    create_lz4(filename, 9)
+    create_lz4(filename, 7)
 }
 
 /// Creates buffered output file.
 pub fn create_file(filename: &Path) -> Result<BufWriter<File>, Error> {
-    File::create(filename).map(BufWriter::new).map_err(add_path!(filename))
+    File::create(filename).map_err(add_path!(filename))
+        .map(|w| BufWriter::with_capacity(131_072, w)) // Set buffer capacity to 128 kb.
 }
 
 /// Finds all filenames with appropriate extension in the directory.

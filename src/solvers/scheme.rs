@@ -658,7 +658,7 @@ impl<'a, W: Write> Helper<'a, W> {
         self.solved_genotypes += 1;
         let now_dur = self.timer.elapsed();
         // Update frequency in seconds.
-        const UPDATE_SECS: u64 = 2;
+        const UPDATE_SECS: u64 = 10;
         if (now_dur - self.last_msg).as_secs() >= UPDATE_SECS {
             let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
             log::debug!("        [{:width$}/{},  {:.4} s/tuple]  Best: {} -> {:11.2}", self.solved_genotypes,

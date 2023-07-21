@@ -428,7 +428,10 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
         let locus_all_seqs = fasta_reader.read_all().map_err(add_path!(fasta_path))?;
         total_seqs += locus_all_seqs.len();
         targets.add(locus_all_seqs.iter().map(NamedSeq::seq));
-        writers.push(ext::sys::create_file(&locus.tmp_reads_filename)?);
+        // Output files with a large buffer (4 Mb).
+        const BUFFER: usize = 4_194_304;
+        writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))
+            .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
     log::info!("Collected {} minimizers across {} loci and {} sequences", targets.total_minimizers(),
         n_filt_loci, total_seqs);
