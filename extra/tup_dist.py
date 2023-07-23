@@ -102,7 +102,7 @@ def main():
         out.write('# target: {}\n'.format(args.target))
         out.write('# tag: {}\n'.format(args.tag))
         out.write('# power: {}\n'.format(args.power))
-        out.write('query\tdist\n')
+        out.write('genotype\tdist\n')
         for query, score in sorted(results.items(), key=lambda t: t[1]):
             out.write('{}\t{:.10f}\n'.format(query, score))
 

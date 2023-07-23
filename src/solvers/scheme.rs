@@ -25,8 +25,8 @@ use crate::{
     model::{
         Params,
         locs::{AllAlignments, Pair},
-        windows::{ContigWindows, MultiContigWindows},
-        assgn::{ReadAssignment, SelectedCounter},
+        windows::{ContigWindows, GenotypeWindows},
+        assgn::{GenotypeAlignments, ReadAssignment, SelectedCounter},
         dp_cache::CachedDepthDistrs,
     },
 };
@@ -39,13 +39,13 @@ const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\tlik\tselected";
 fn write_alns(
     f: &mut impl io::Write,
     prefix: &str,
-    assgn: &ReadAssignment,
+    gt_alns: &GenotypeAlignments,
     all_alns: &AllAlignments,
     mut selected: impl Iterator<Item = f64>,
 ) -> io::Result<()> {
     for (rp, paired_alns) in all_alns.iter().enumerate() {
         let hash = paired_alns.name_hash();
-        for curr_windows in assgn.possible_read_alns(rp) {
+        for curr_windows in gt_alns.possible_read_alns(rp) {
             write!(f, "{}\t{:X}\t", prefix, hash)?;
             let aln_ix = curr_windows.aln_ix();
             if aln_ix == u32::MAX {
@@ -323,27 +323,29 @@ fn solve_single_thread(
 
         for &ix in rem_ixs.iter() {
             let prior = data.priors[ix];
-            let mcontig_windows = MultiContigWindows::new(&data.genotypes[ix], &data.contig_windows);
+            let gt_windows = GenotypeWindows::new(&data.genotypes[ix], &data.contig_windows);
             let contigs_str = data.contigs.get_names(data.genotypes[ix].iter().copied());
-            let mut assgn = ReadAssignment::new(mcontig_windows, &data.all_alns, &data.cached_distrs, &data.params);
+            let mut gt_alns = GenotypeAlignments::new(gt_windows, &data.all_alns, &data.cached_distrs, &data.params);
             if stage.write && data.debug {
-                selected.reset(&assgn);
+                selected.reset(&gt_alns);
             }
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
-                assgn.define_read_windows(tweak, rng);
-                *lik = prior + solver.solve(&mut assgn, rng)?;
+                gt_alns.define_read_windows(tweak, rng);
+                let assgns = solver.solve(&gt_alns, rng)?;
+                *lik = prior + assgns.likelihood();
                 if stage.write {
-                    assgn.write_depth(&mut depth_writer, &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1))
-                        .map_err(add_path!(!))?;
+                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1);
+                    assgns.write_depth(&mut depth_writer, &prefix).map_err(add_path!(!))?;
                     if data.debug {
-                        selected.update(&assgn);
+                        selected.update(&assgns);
                     }
                 }
             }
             if stage.write && data.debug {
-                write_alns(&mut aln_writer, &format!("{}\t{}", stage_ix + 1, contigs_str), &assgn, &data.all_alns,
-                    selected.fractions()).map_err(add_path!(!))?;
+                let prefix = format!("{}\t{}", stage_ix + 1, contigs_str);
+                write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, selected.fractions())
+                    .map_err(add_path!(!))?;
             }
             helper.update(ix, contigs_str, mean(&liks))?;
         }
@@ -549,28 +551,29 @@ impl<W: Write, U: Write> Worker<W, U> {
             let mean = F64Ext::generalized_ln_mean(stage.aver_power);
             for ix in task.into_iter() {
                 let prior = priors[ix];
-                let mcontig_windows = MultiContigWindows::new(&genotypes[ix], contig_windows);
+                let gt_windows = GenotypeWindows::new(&genotypes[ix], contig_windows);
                 let contigs_str = contigs.get_names(genotypes[ix].iter().copied());
 
                 // Actually calling genotypes.
-                let mut assgn = ReadAssignment::new(mcontig_windows, all_alns, cached_distrs, params);
+                let mut gt_alns = GenotypeAlignments::new(gt_windows, all_alns, cached_distrs, params);
                 if debug {
-                    selected.reset(&assgn);
+                    selected.reset(&gt_alns);
                 }
                 for (attempt, lik) in liks.iter_mut().enumerate() {
-                    assgn.define_read_windows(tweak, &mut self.rng);
-                    *lik = prior + solver.solve(&mut assgn, &mut self.rng)?;
+                    gt_alns.define_read_windows(tweak, &mut self.rng);
+                    let assgns = solver.solve(&gt_alns, &mut self.rng)?;
+                    *lik = prior + assgns.likelihood();
                     if stage.write {
-                        assgn.write_depth(&mut self.depth_writer,
-                            &format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1)).map_err(add_path!(!))?;
+                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1);
+                        assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
                         if debug {
-                            selected.update(&assgn);
+                            selected.update(&assgns);
                         }
                     }
                 }
                 if debug {
                     write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, contigs_str),
-                        &assgn, all_alns, selected.fractions()).map_err(add_path!(!))?;
+                        &gt_alns, all_alns, selected.fractions()).map_err(add_path!(!))?;
                 }
 
                 if let Err(_) = self.sender.send((ix, mean(&liks))) {

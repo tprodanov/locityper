@@ -16,4 +16,8 @@ Improve `locityper add`:
 * Reduce window size,
 * Write locus summary in a text file.
 * Improve Greedy solver.
-* Use `lz4` compression instead of `gzip`.
+
+In advance, check if at least 1/3 of the reads have good alignment scores. How?
+Just select best 1/3 and rank haplotypes.
+
+Make read filtering stricter

@@ -8,47 +8,24 @@ use crate::{
     Error,
     model::{
         windows::REG_WINDOW_SHIFT,
-        assgn::ReadAssignment,
+        assgn::{GenotypeAlignments, ReadAssignment},
     },
     ext::rand::XoshiroRng,
 };
 
-/// Gurobi ILP solver.
-#[derive(Clone, Default)]
-pub struct GurobiSolver;
-
-/// Query read assignments from the ILP solution, and set them to `assignments`.
-fn set_assignments(
-    model: &Model,
-    assignment_vars: &[Var],
-    assignments: &mut ReadAssignment,
-) -> Result<(), Error> {
-    let vals = model.get_obj_attr_batch(attr::X, assignment_vars.iter().copied())?;
-    let mut i = 0;
-    assignments.try_init_assignments::<_, Error>(|locs| {
-        let j = i + locs.len();
-        let new_assgn = vals[i..j].iter().position(|&v| v >= 0.9999 && v <= 1.0001)
-            .ok_or_else(|| Error::solver("Gurobi", "Cannot identify read assignment (output is not 0/1)"))?;
-        i = j;
-        Ok(new_assgn)
-    })?;
-    assert_eq!(i, vals.len(), "Numbers of total read assignments do not match");
-    Ok(())
-}
-
-fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error> {
+fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error> {
     let mut env = Env::empty()?;
     env.set(parameter::IntParam::OutputFlag, 0)?;
     let mut model = Model::with_env("", &env.start()?)?;
     model.set_param(parameter::IntParam::Threads, 1)?;
 
-    let total_windows = assignments.contig_windows().total_windows() as usize;
+    let total_windows = gt_alns.total_windows();
     let mut window_depth = vec![(0_u32, 0_u32); total_windows];
     let mut window_depth_constrs = vec![LinExpr::new(); total_windows];
     let mut objective = LinExpr::new();
     let mut assignment_vars = Vec::new();
-    for rp in 0..assignments.total_reads() {
-        let read_alns = assignments.possible_read_alns(rp);
+    for rp in 0..gt_alns.total_reads() {
+        let read_alns = gt_alns.possible_read_alns(rp);
         if read_alns.len() == 1 {
             let loc = &read_alns[0];
             for w in loc.windows().into_iter() {
@@ -80,10 +57,10 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
         model.add_constr(&format!("R{:x}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
     }
 
-    let depth_contrib = assignments.depth_contrib();
+    let depth_contrib = gt_alns.depth_contrib();
     let mut depth_vars = Vec::new();
     for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
-        let depth_distr = assignments.depth_distr(w);
+        let depth_distr = gt_alns.depth_distr(w);
         let (trivial_reads, non_trivial_reads) = window_depth[w];
         if non_trivial_reads == 0 {
             objective.add_constant(depth_contrib * depth_distr.ln_pmf(trivial_reads));
@@ -107,25 +84,51 @@ fn define_model(assignments: &ReadAssignment) -> Result<(Model, Vec<Var>), Error
     Ok((model, assignment_vars))
 }
 
-// GurobiSolver implements Solver and not MultiTrySolver, as the latter cannot store information between steps.
+/// Query read assignments from the ILP solution, and create `ReadAssignment`.
+fn get_assignments<'a>(
+    gt_alns: &'a GenotypeAlignments,
+    model: &Model,
+    assignment_vars: &[Var],
+) -> Result<ReadAssignment<'a>, Error> {
+    let vals = model.get_obj_attr_batch(attr::X, assignment_vars.iter().copied())?;
+    let mut i = 0;
+    let assgns = ReadAssignment::try_new::<_, Error>(gt_alns, |locs| {
+        let j = i + locs.len();
+        let new_assgn = vals[i..j].iter().position(|&v| v >= 0.9999 && v <= 1.0001)
+            .ok_or_else(|| Error::solver("Gurobi", "Cannot identify read assignment (output is not 0/1)"))?;
+        i = j;
+        Ok(new_assgn)
+    })?;
+    assert_eq!(i, vals.len(), "Numbers of total read assignments do not match");
+    Ok(assgns)
+}
+
+/// Gurobi ILP solver.
+#[derive(Clone, Default)]
+pub struct GurobiSolver;
 
 impl super::Solver for GurobiSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
-        let (mut model, vars) = define_model(assignments)?;
+    fn solve_nontrivial<'a>(
+        &self,
+        gt_alns: &'a GenotypeAlignments,
+        rng: &mut XoshiroRng,
+    ) -> Result<ReadAssignment<'a>, Error>
+    {
+        let (mut model, vars) = define_model(gt_alns)?;
         model.set_param(parameter::IntParam::Seed, rng.gen::<i32>().abs())?;
         model.optimize()?;
         let status = model.status()?;
         if status != Status::Optimal {
             log::error!("Gurobi achieved non-optimal status {:?}", status);
         }
-        set_assignments(&model, &vars, assignments)?;
+        let assgns = get_assignments(gt_alns, &model, &vars)?;
         let ilp_lik = model.get_attr(attr::ObjVal)?;
-        let assgn_lik = assignments.likelihood();
+        let assgn_lik = assgns.likelihood();
         if (assgn_lik - ilp_lik).abs() > 1e-5 {
             log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, assgn_lik);
         }
-        Ok(())
+        Ok(assgns)
     }
 }
 

@@ -4,7 +4,7 @@ use crate::{
     Error,
     model::{
         windows::REG_WINDOW_SHIFT,
-        assgn::ReadAssignment,
+        assgn::{GenotypeAlignments, ReadAssignment},
     },
     ext::vec::F64Ext,
     bg::ser::json_get,
@@ -36,8 +36,8 @@ impl HighsSolver {
         self
     }
 
-    fn define_model(&self, assignments: &mut ReadAssignment) -> RowProblem {
-        let total_windows = assignments.contig_windows().total_windows() as usize;
+    fn define_model(&self, gt_alns: &GenotypeAlignments) -> RowProblem {
+        let total_windows = gt_alns.total_windows();
         // Number of trivial and non-trivial reads mapped to a window.
         let mut window_depth = vec![(0_u32, 0_u32); total_windows];
         let mut window_depth_constrs: Vec<Vec<(Col, f64)>> = vec![Vec::new(); total_windows];
@@ -45,8 +45,8 @@ impl HighsSolver {
         // let mut const_term = 0.0;
         let mut problem = RowProblem::default();
         let mut assgn_constr = Vec::new();
-        for rp in 0..assignments.total_reads() {
-            let read_alns = assignments.possible_read_alns(rp);
+        for rp in 0..gt_alns.total_reads() {
+            let read_alns = gt_alns.possible_read_alns(rp);
             if read_alns.len() == 1 {
                 for w in read_alns[0].windows().into_iter() {
                     window_depth[w as usize].0 += 1;
@@ -76,10 +76,10 @@ impl HighsSolver {
             assgn_constr.clear();
         }
 
-        let depth_contrib = assignments.depth_contrib();
+        let depth_contrib = gt_alns.depth_contrib();
         let mut depth_constr1 = Vec::new();
         for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
-            let depth_distr = assignments.depth_distr(w);
+            let depth_distr = gt_alns.depth_distr(w);
             let (trivial_reads, non_trivial_reads) = window_depth[w];
             if non_trivial_reads == 0 {
                 // const_term += depth_distr.ln_pmf(trivial_reads);
@@ -100,25 +100,16 @@ impl HighsSolver {
         }
         problem
     }
-
-    /// Query read assignments from the ILP solution, and set them to `assignments`.
-    fn set_assignments(&self, assignments: &mut ReadAssignment, vals: &[f64]) {
-        let mut i = 0;
-        assignments.init_assignments(|locs| {
-            let j = i + locs.len();
-            // Take argmax because HiGHS does not always output reasonable solutions,
-            // this way we always have a read assignment.
-            let new_assgn = F64Ext::argmax(&vals[i..j]).0;
-            i = j;
-            new_assgn
-        })
-    }
 }
 
 impl super::Solver for HighsSolver {
     /// Distribute reads between several haplotypes in a best way.
-    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, _rng: &mut XoshiroRng) -> Result<(), Error> {
-        let problem = self.define_model(assignments);
+    fn solve_nontrivial<'a>(
+        &self,
+        gt_alns: &'a GenotypeAlignments,
+        _rng: &mut XoshiroRng
+    ) -> Result<ReadAssignment<'a>, Error> {
+        let problem = self.define_model(gt_alns);
         let mut model = problem.optimise(Sense::Maximise);
         model.set_option("parallel", "off");
         model.set_option("presolve", "on");
@@ -130,9 +121,18 @@ impl super::Solver for HighsSolver {
             return Err(Error::solver(HIGHS_NAME,
                 format!("Model finished with non-optimal status {:?}", solved_model.status())));
         }
-        let solution = solved_model.get_solution();
-        self.set_assignments(assignments, solution.columns());
-        Ok(())
+
+        let sol = solved_model.get_solution();
+        let sol = sol.columns();
+        let mut i = 0;
+        Ok(ReadAssignment::new(gt_alns, |locs| {
+            let j = i + locs.len();
+            // Take argmax because HiGHS does not always output reasonable solutions,
+            // this way we always have a read assignment.
+            let new_assgn = F64Ext::argmax(&sol[i..j]).0;
+            i = j;
+            new_assgn
+        }))
     }
 }
 

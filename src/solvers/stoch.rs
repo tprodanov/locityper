@@ -2,14 +2,8 @@ use std::fmt;
 use rand::Rng;
 use crate::{
     Error,
-    ext::{
-        vec::IterExt,
-        rand::XoshiroRng,
-    },
-    model::{
-        windows::ReadWindows,
-        assgn::{ReadAssignment, ReassignmentTarget},
-    },
+    ext::rand::XoshiroRng,
+    model::assgn::{GenotypeAlignments, ReadAssignment, ReassignmentTarget},
     bg::ser::json_get,
 };
 use super::Solver;
@@ -49,16 +43,22 @@ impl GreedySolver {
 }
 
 impl Solver for GreedySolver {
-    /// Single greedy iteration to find the best read assignment.
-    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
-        assignments.init_assignments(|alns| rng.gen_range(0..alns.len()));
+    /// Stochastic greedy algorithm to find the best read assignment.
+    fn solve_nontrivial<'a>(
+        &self,
+        gt_alns: &'a GenotypeAlignments,
+        rng: &mut XoshiroRng,
+    ) -> Result<ReadAssignment<'a>, Error>
+    {
+        // 0 - index of the best alignment.
+        let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
         let mut curr_plato = 0;
 
         while curr_plato <= self.plato_size {
             let mut best_target = None;
             let mut best_improv = 0.0;
             for _ in 0..self.sample_size {
-                let target = ReassignmentTarget::random(assignments, rng);
+                let target = ReassignmentTarget::random(&assignments, rng);
                 let improv = assignments.calculate_improvement(&target);
                 if improv > best_improv {
                     best_target = Some(target);
@@ -72,7 +72,7 @@ impl Solver for GreedySolver {
                 curr_plato += 1;
             }
         }
-        Ok(())
+        Ok(assignments)
     }
 }
 
@@ -148,7 +148,7 @@ impl SimAnneal {
         let mut neg_count: u32 = 0;
         const INIT_ITERS: u32 = 100;
         for _ in 0..INIT_ITERS {
-            let diff = assignments.calculate_improvement(&ReassignmentTarget::random(assignments, rng));
+            let diff = assignments.calculate_improvement(&ReassignmentTarget::random(&assignments, rng));
             if diff < 0.0 {
                 neg_sum += diff;
                 neg_count += 1;
@@ -167,17 +167,22 @@ impl SimAnneal {
 }
 
 impl Solver for SimAnneal {
-    /// Run simulated annealing once to find the best read assignment.
-    fn solve_nontrivial(&self, assignments: &mut ReadAssignment, rng: &mut XoshiroRng) -> Result<(), Error> {
-        assignments.init_assignments(
-            |possible_alns| IterExt::argmax(possible_alns.iter().map(ReadWindows::ln_prob)).0);
-        let coeff = self.find_temperature_coeff(assignments, rng);
+    /// Run simulated annealing to find the best read assignment.
+    fn solve_nontrivial<'a>(
+        &self,
+        gt_alns: &'a GenotypeAlignments,
+        rng: &mut XoshiroRng,
+    ) -> Result<ReadAssignment<'a>, Error>
+    {
+        // 0 - index of the best alignment.
+        let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
+        let coeff = self.find_temperature_coeff(&assignments, rng);
 
         let mut curr_temp = 1.0 / coeff;
         let cooling_temp = self.cooling_temp / coeff;
         let mut curr_plato = 0;
         while curr_plato <= self.plato_size {
-            let target = ReassignmentTarget::random(assignments, rng);
+            let target = ReassignmentTarget::random(&assignments, rng);
             if Self::accept_change(assignments.calculate_improvement(&target), curr_temp, rng) {
                 assignments.reassign(&target);
                 curr_plato = 0;
@@ -186,7 +191,7 @@ impl Solver for SimAnneal {
             }
             curr_temp -= cooling_temp;
         }
-        Ok(())
+        Ok(assignments)
     }
 }
 

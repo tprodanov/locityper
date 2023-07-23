@@ -71,13 +71,13 @@ pub(crate) const BOUNDARY_WINDOW: u32 = 1;
 /// Regular windows have indices starting with 2.
 pub(crate) const REG_WINDOW_SHIFT: u32 = 2;
 
-/// Alignment of a read pair to a specific multi-contig windows.
-pub struct ReadWindows {
+/// Alignment of a read pair to a genotype.
+pub struct ReadGtAlns {
     /// Index in the list of read-pair alignments.
     aln_ix: u32,
     /// ln-probability of this location.
     ln_prob: f64,
-    /// Index of the contig (within multi-contig windows).
+    /// Index of the contig (within the genotype).
     contig_ix: Option<u8>,
     /// Middle of the first read alignment.
     middle1: Option<u32>,
@@ -88,7 +88,7 @@ pub struct ReadWindows {
     windows: [u32; 2],
 }
 
-impl ReadWindows {
+impl ReadGtAlns {
     fn new(aln_ix: u32, contig_ix: u8, paln: &PairAlignment) -> Self {
         Self {
             aln_ix,
@@ -111,7 +111,7 @@ impl ReadWindows {
         }
     }
 
-    pub fn define_windows_determ(&mut self, mcontigs: &MultiContigWindows) {
+    pub fn define_windows_determ(&mut self, mcontigs: &GenotypeWindows) {
         if let Some(i) = self.contig_ix {
             let contig = &mcontigs.by_contig[i as usize];
             let shift = mcontigs.wshifts[i as usize];
@@ -119,7 +119,7 @@ impl ReadWindows {
         }
     }
 
-    pub fn define_windows_random(&mut self, mcontigs: &MultiContigWindows, tweak: u32, rng: &mut impl Rng) {
+    pub fn define_windows_random(&mut self, mcontigs: &GenotypeWindows, tweak: u32, rng: &mut impl Rng) {
         if let Some(i) = self.contig_ix {
             let contig = &mcontigs.by_contig[i as usize];
             let shift = mcontigs.wshifts[i as usize];
@@ -265,7 +265,7 @@ impl ContigWindows {
 }
 
 /// Stores the contigs and windows corresponding to the windows.
-pub struct MultiContigWindows {
+pub struct GenotypeWindows {
     by_contig: Vec<ContigWindows>,
     /// Start index for each contig id (length: n-contigs + 1).
     /// Contig with index `i` will have windows between `wshifts[i]..wshifts[i + 1]`.
@@ -273,7 +273,7 @@ pub struct MultiContigWindows {
     window: u32,
 }
 
-impl MultiContigWindows {
+impl GenotypeWindows {
     pub fn new(contig_ids: &[ContigId], contig_windows: &[ContigWindows]) -> Self {
         let n = contig_ids.len();
         let mut by_contig = Vec::<ContigWindows>::with_capacity(n);
@@ -298,12 +298,6 @@ impl MultiContigWindows {
     pub fn n_contigs(&self) -> usize {
         self.by_contig.len()
     }
-
-    /// Total number of windows in the contig group.
-    pub fn total_windows(&self) -> u32 {
-        *self.wshifts.last().unwrap()
-    }
-
     pub fn window_size(&self) -> u32 {
         self.window
     }
@@ -327,12 +321,12 @@ impl MultiContigWindows {
     /// Returns the number of added alignments.
     ///
     /// Output pair-alignments with ln-probability worse than `best_prob - prob_diff` are discarded.
-    /// Remaining alignments have random order, probabilities are not normalized.
+    /// Remaining alignments are sorted from best likelihood to worst.
     ///
     /// Any alignments that were in the vector before, stay as they are and in the same order.
-    pub fn read_windows(&self,
+    pub fn extend_read_gt_alns(&self,
         groupped_alns: &GrouppedAlignments,
-        out_alns: &mut Vec<ReadWindows>,
+        out_alns: &mut Vec<ReadGtAlns>,
         prob_diff: f64,
     ) -> usize {
         let start_len = out_alns.len();
@@ -347,30 +341,29 @@ impl MultiContigWindows {
                 let ln_prob = aln.ln_prob();
                 if ln_prob >= thresh_prob {
                     thresh_prob = thresh_prob.max(ln_prob - prob_diff);
-                    out_alns.push(ReadWindows::new(aln_ix as u32, contig_ix, aln));
+                    out_alns.push(ReadGtAlns::new(aln_ix as u32, contig_ix, aln));
                 }
             }
         }
 
-        // As threshold was updated during the for-loop, some alignments in the beginning may need to removed.
-        let mut i = start_len;
-        while i < out_alns.len() {
-            if out_alns[i].ln_prob < thresh_prob {
-                out_alns.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
         if unmapped_prob >= thresh_prob {
-            out_alns.push(ReadWindows::both_unmapped(unmapped_prob));
+            out_alns.push(ReadGtAlns::both_unmapped(unmapped_prob));
         }
-        out_alns.len() - start_len
+        let stop_ix = {
+            let slice = &mut out_alns[start_len..];
+            // Reverse sort.
+            slice.sort_unstable_by(|a, b| b.ln_prob.total_cmp(&a.ln_prob));
+            slice.partition_point(|aln| aln.ln_prob >= thresh_prob)
+        };
+        out_alns.truncate(stop_ix);
+        stop_ix - start_len
     }
 
     pub(crate) fn get_distributions(&self, cached_distrs: &CachedDepthDistrs) -> Vec<DistrBox> {
         const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
             "Constants were changed!");
-        let mut distrs: Vec<DistrBox> = Vec::with_capacity(self.total_windows() as usize);
+        let total_windows = *self.wshifts.last().unwrap();
+        let mut distrs: Vec<DistrBox> = Vec::with_capacity(total_windows as usize);
         distrs.push(Box::new(cached_distrs.unmapped_distr()));
         distrs.push(Box::new(cached_distrs.boundary_distr()));
 
