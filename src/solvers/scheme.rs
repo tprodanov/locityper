@@ -323,8 +323,7 @@ fn solve_single_thread(
 
         for &ix in rem_ixs.iter() {
             let prior = data.priors[ix];
-            let gt_windows = GenotypeWindows::new(&data.genotypes[ix], &data.contig_windows);
-            let contigs_str = data.contigs.get_names(data.genotypes[ix].iter().copied());
+            let gt_windows = GenotypeWindows::new(&data.contigs, &data.genotypes[ix], &data.contig_windows);
             let mut gt_alns = GenotypeAlignments::new(gt_windows, &data.all_alns, &data.cached_distrs, &data.params);
             if stage.write && data.debug {
                 selected.reset(&gt_alns);
@@ -335,7 +334,7 @@ fn solve_single_thread(
                 let assgns = solver.solve(&gt_alns, rng)?;
                 *lik = prior + assgns.likelihood();
                 if stage.write {
-                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1);
+                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.gt_name(), attempt + 1);
                     assgns.write_depth(&mut depth_writer, &prefix).map_err(add_path!(!))?;
                     if data.debug {
                         selected.update(&assgns);
@@ -343,11 +342,11 @@ fn solve_single_thread(
                 }
             }
             if stage.write && data.debug {
-                let prefix = format!("{}\t{}", stage_ix + 1, contigs_str);
+                let prefix = format!("{}\t{}", stage_ix + 1, gt_alns.gt_name());
                 write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, selected.fractions())
                     .map_err(add_path!(!))?;
             }
-            helper.update(ix, contigs_str, mean(&liks))?;
+            helper.update(ix, gt_alns.gt_name(), mean(&liks))?;
         }
         helper.finish_stage();
     }
@@ -502,8 +501,8 @@ impl MainWorker {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, lik) = receiver.recv().expect("Genotyping worker has failed!");
-                        let contigs_str = contigs.get_names(genotypes[ix].iter().copied());
-                        helper.update(ix, contigs_str, lik)?;
+                        let gt_name = contigs.get_names(genotypes[ix].iter().copied());
+                        helper.update(ix, &gt_name, lik)?;
                         *jobs -= 1;
                     }
                 }
@@ -551,11 +550,9 @@ impl<W: Write, U: Write> Worker<W, U> {
             let mean = F64Ext::generalized_ln_mean(stage.aver_power);
             for ix in task.into_iter() {
                 let prior = priors[ix];
-                let gt_windows = GenotypeWindows::new(&genotypes[ix], contig_windows);
-                let contigs_str = contigs.get_names(genotypes[ix].iter().copied());
-
-                // Actually calling genotypes.
+                let gt_windows = GenotypeWindows::new(contigs, &genotypes[ix], contig_windows);
                 let mut gt_alns = GenotypeAlignments::new(gt_windows, all_alns, cached_distrs, params);
+
                 if debug {
                     selected.reset(&gt_alns);
                 }
@@ -564,7 +561,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = prior + assgns.likelihood();
                     if stage.write {
-                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, contigs_str, attempt + 1);
+                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.gt_name(), attempt + 1);
                         assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
                         if debug {
                             selected.update(&assgns);
@@ -572,7 +569,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                     }
                 }
                 if debug {
-                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, contigs_str),
+                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt_alns.gt_name()),
                         &gt_alns, all_alns, selected.fractions()).map_err(add_path!(!))?;
                 }
 
@@ -648,15 +645,15 @@ impl<'a, W: Write> Helper<'a, W> {
             self.curr_genotypes, stage.attempts, stage.aver_power);
     }
 
-    fn update(&mut self, ix: usize, tuple_str: String, lik: f64) -> Result<(), Error> {
-        writeln!(self.lik_writer, "{}\t{}\t{:.3}", self.stage_ix + 1, &tuple_str, Ln::to_log10(lik))
+    fn update(&mut self, ix: usize, gt_name: &str, lik: f64) -> Result<(), Error> {
+        writeln!(self.lik_writer, "{}\t{}\t{:.3}", self.stage_ix + 1, gt_name, Ln::to_log10(lik))
             .map_err(add_path!(!))?;
         let stored_lik = &mut self.likelihoods[ix];
         *stored_lik = stored_lik.max(lik);
         if lik > self.best_lik {
             self.best_lik = lik;
             self.best_ix = ix;
-            self.best_str = tuple_str;
+            self.best_str = gt_name.to_owned();
         }
         self.solved_genotypes += 1;
         let now_dur = self.timer.elapsed();

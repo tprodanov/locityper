@@ -267,14 +267,17 @@ impl ContigWindows {
 /// Stores the contigs and windows corresponding to the windows.
 pub struct GenotypeWindows {
     by_contig: Vec<ContigWindows>,
+    /// All contig names, connected through comma.
+    name: String,
     /// Start index for each contig id (length: n-contigs + 1).
     /// Contig with index `i` will have windows between `wshifts[i]..wshifts[i + 1]`.
     wshifts: Vec<u32>,
+    /// Window size.
     window: u32,
 }
 
 impl GenotypeWindows {
-    pub fn new(contig_ids: &[ContigId], contig_windows: &[ContigWindows]) -> Self {
+    pub fn new(contigs: &ContigNames, contig_ids: &[ContigId], contig_windows: &[ContigWindows]) -> Self {
         let n = contig_ids.len();
         let mut by_contig = Vec::<ContigWindows>::with_capacity(n);
         let mut wshifts = Vec::with_capacity(n + 1);
@@ -289,6 +292,7 @@ impl GenotypeWindows {
         }
         assert!(by_contig.len() < 256, "Multi-contig collection cannot contain more than 256 entries");
         Self {
+            name: contigs.get_names(by_contig.iter().map(|el| el.contig_id)),
             window: by_contig[0].window_size(),
             by_contig, wshifts,
         }
@@ -302,13 +306,12 @@ impl GenotypeWindows {
         self.window
     }
 
-    pub fn ids(&self) -> impl Iterator<Item = ContigId> + '_ {
-        self.by_contig.iter().map(|el| el.contig_id)
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    /// Returns string with all contig names through a comma.
-    pub fn ids_str(&self, contigs: &ContigNames) -> String {
-        contigs.get_names(self.ids())
+    pub fn ids(&self) -> impl Iterator<Item = ContigId> + '_ {
+        self.by_contig.iter().map(|el| el.contig_id)
     }
 
     /// Returns window shift for the `i`-th contig.

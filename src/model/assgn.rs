@@ -139,6 +139,11 @@ impl GenotypeAlignments {
         self.depth_contrib
     }
 
+    /// Returns the name of the genotype.
+    pub fn gt_name(&self) -> &str {
+        self.gt_windows.name()
+    }
+
     /// Define read windows by randomly moving read middle by at most `tweak` bp to either side.
     pub fn define_read_windows(&mut self, tweak: u32, rng: &mut impl Rng) {
         if tweak == 0 {
@@ -209,6 +214,11 @@ impl<'a> ReadAssignment<'a> {
         };
         assgn.recalc_likelihood();
         Ok(assgn)
+    }
+
+    /// Returns the name of the genotype.
+    pub fn gt_name(&self) -> &str {
+        self.gt_alns.gt_name()
     }
 
     /// Returns the total likelihood of the read assignment.
