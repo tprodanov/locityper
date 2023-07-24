@@ -21,3 +21,4 @@ In advance, check if at least 1/3 of the reads have good alignment scores. How?
 Just select best 1/3 and rank haplotypes.
 
 Make read filtering stricter
+- Do we need `rem_ixs` in `scheme`?

@@ -60,6 +60,23 @@ impl Default for SelectParams {
     }
 }
 
+impl SelectParams {
+    fn validate(&self) -> Result<(), Error> {
+        validate_param!(0.0 < self.haplotype_frac && self.haplotype_frac <= 1.0,
+            "Haplotype fraction ({}) must be within (0, 1]", self.haplotype_frac);
+        validate_param!(0.0 < self.genotype_frac && self.genotype_frac <= 1.0,
+            "Genotype fraction ({}) must be within (0, 1]", self.genotype_frac);
+        validate_param!(self.keep_haplotypes > 1,
+            "Number of kept haplotypes ({}) must be at least 2", self.keep_haplotypes);
+        validate_param!(self.keep_genotypes > 1,
+            "Number of kept genotypes ({}) must be at least 2", self.keep_genotypes);
+        validate_param!(0.0 < self.haplotype_aln_coef && self.haplotype_aln_coef < 2.0,
+            "Fraction of read alignments multiplier (--hap-alns {}) must be reasonably close to 1",
+            self.haplotype_aln_coef);
+        Ok(())
+    }
+}
+
 struct Args {
     input: Vec<PathBuf>,
     database: Option<PathBuf>,
@@ -128,6 +145,7 @@ impl Args {
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
+        self.select_params.validate()?;
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -589,7 +607,7 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
 }
 
 /// Generates all read alignments to all genotypes (unless they have prior -inf or are not in the priors file).
-fn genotype_read_alignments(
+fn select_genotypes_alns(
     contigs: &ContigNames,
     contig_windows: &[ContigWindows],
     all_alns: &AllAlignments,
@@ -598,7 +616,7 @@ fn genotype_read_alignments(
     args: &Args,
 ) -> Result<Vec<Option<GenotypeAlignments>>, Error>
 {
-    log::info!("    Selecting read pairs alignments for each genotype");
+    log::info!("    [{}] Selecting read pairs alignments for each genotype", contigs.tag());
     let ploidy = usize::from(args.ploidy);
     if let Some(priors_map) = opt_priors {
         let mut all_gt_alns = Vec::new();
@@ -636,9 +654,43 @@ fn genotype_read_alignments(
 //     Ok(())
 // }
 
-// fn filter_genotypes(
-
-// )
+/// Filter genotypes based on read alignments alone (without accounting for read depth).
+fn filter_genotypes(
+    tag: &str,
+    mut all_gt_alns: Vec<Option<GenotypeAlignments>>,
+    mut lik_writer: impl Write,
+    params: &SelectParams,
+) -> Result<Vec<Option<GenotypeAlignments>>, Error>
+{
+    let n = all_gt_alns.len();
+    let m = (((n as f64) * params.genotype_frac) as usize).clamp(params.keep_genotypes, n);
+    if m >= n {
+        return Ok(all_gt_alns);
+    }
+    log::info!("    [{}] Filtering genotypes based on read alignment likelihood", tag);
+    // Vector (index, score);
+    let mut scores = Vec::with_capacity(n);
+    for (i, gt_alns) in all_gt_alns.iter().enumerate() {
+        let gt_alns = gt_alns.as_ref().expect("All genotype alignments must be defined at this point");
+        let score = gt_alns.max_aln_lik();
+        writeln!(lik_writer, "0b\t{}\t{:.3}", gt_alns.genotype().name(), score).map_err(add_path!(!))?;
+        scores.push((i, score));
+    }
+    // Decreasing sort by score.
+    scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    let thresh = scores[m - 1].1;
+    let pp = scores.partition_point(|(_, score)| *score >= thresh);
+    assert!(m <= pp);
+    log::debug!("        Selected {} genotypes out of {}", pp, n);
+    let worst = scores[n - 1];
+    let best = scores[0];
+    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1} ({:.1}%)",
+        all_gt_alns[worst.0].as_ref().unwrap().genotype().name(), Ln::to_log10(worst.1),
+        all_gt_alns[best.0].as_ref().unwrap().genotype().name(), Ln::to_log10(best.1),
+        Ln::to_log10(thresh),
+        if worst.1 != best.1 { 100.0 * (thresh - worst.1) / (best.1 - worst.1) } else { f64::NAN });
+    Ok(scores[..pp].iter().map(|&(i, _)| all_gt_alns[i].take()).collect())
+}
 
 fn analyze_locus(
     locus: &LocusData,
@@ -666,6 +718,10 @@ fn analyze_locus(
         AllAlignments::load(bam_reader, contigs, bg_distr, &args.assgn_params, io::sink())?
     };
 
+    let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
+    writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
+    // TODO: select haplotypes here.
+
     let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
     if args.debug || scheme.has_dbg_output() {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
@@ -676,10 +732,11 @@ fn analyze_locus(
         }
     }
 
-    let gt_alns = genotype_read_alignments(contigs, &contig_windows, &all_alns, opt_priors, cached_distrs, args)?;
+    let gt_alns = select_genotypes_alns(contigs, &contig_windows, &all_alns, opt_priors, cached_distrs, args)?;
     if gt_alns.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
+    let gt_alns = filter_genotypes(contigs.tag(), gt_alns, &mut lik_writer, &args.select_params)?;
     let data = scheme::Data {
         scheme: scheme.clone(),
         contigs: Arc::clone(&contigs),
@@ -687,7 +744,6 @@ fn analyze_locus(
         tweak: args.assgn_params.tweak.unwrap(),
         all_alns,
     };
-    let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     scheme::solve(data, gt_alns, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     Ok(())

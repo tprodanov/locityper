@@ -591,8 +591,7 @@ struct Helper<'a, W> {
 }
 
 impl<'a, W: Write> Helper<'a, W> {
-    fn new(scheme: &'a Scheme, tag: &'a str, mut lik_writer: W, total_genotypes: usize) -> Result<Self, Error> {
-        writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(!))?;
+    fn new(scheme: &'a Scheme, tag: &'a str, lik_writer: W, total_genotypes: usize) -> Result<Self, Error> {
         Ok(Self {
             scheme, tag, lik_writer,
 
