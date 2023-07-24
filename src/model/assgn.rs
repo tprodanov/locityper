@@ -3,11 +3,13 @@ use std::{
 };
 use rand::Rng;
 use crate::{
+    Error,
     math::Ln,
+    seq::{ContigId, ContigNames},
 };
 use super::{
     locs::AllAlignments,
-    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadGtAlns, GenotypeWindows},
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadGtAlns, ContigWindows, GenotypeWindows},
     dp_cache::{CachedDepthDistrs, DistrBox},
 };
 
@@ -63,18 +65,24 @@ pub struct GenotypeAlignments {
 
     /// Read pair indices that have > 1 possible read location (length <= n_reads).
     non_trivial_reads: Vec<usize>,
+
+    /// Prior knowledge on the genotype likelihood.
+    prior: f64,
 }
 
 impl GenotypeAlignments {
     /// Creates an instance that stores read assignments to given contigs.
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
-        gt_windows: GenotypeWindows,
+        contigs: &ContigNames,
+        contig_ids: &[ContigId],
+        contig_windows: &[ContigWindows],
         all_alns: &AllAlignments,
         cached_distrs: &CachedDepthDistrs,
         params: &super::Params,
     ) -> Self
     {
+        let gt_windows = GenotypeWindows::new(contigs, contig_ids, contig_windows);
         let mut ix = 0;
         let mut alns = Vec::new();
         let mut read_ixs = vec![ix];
@@ -95,6 +103,7 @@ impl GenotypeAlignments {
         Self {
             depth_distrs: gt_windows.get_distributions(cached_distrs),
             depth_contrib: params.depth_contrib,
+            prior: 0.0,
             gt_windows, alns, read_ixs, non_trivial_reads,
         }
     }
@@ -158,6 +167,27 @@ impl GenotypeAlignments {
     pub fn depth_distr(&self, window: usize) -> &DistrBox {
         &self.depth_distrs[window]
     }
+
+    /// Returns maximum achievable alignment likelihood (without read depth component).
+    /// However, this calculation includes the prior, if available.
+    pub fn max_aln_lik(&self) -> f64 {
+        // This works as read alignments are sorted by likelihood for each read pair.
+        self.read_ixs[..self.read_ixs.len() - 1].iter().map(|&i| self.alns[i].ln_prob()).sum::<f64>()
+            + self.prior
+    }
+
+    pub fn prior(&self) -> f64 {
+        self.prior
+    }
+
+    pub fn set_prior(&mut self, prior: f64) -> Result<(), Error> {
+        if prior > 0.0 || !prior.is_normal() {
+            Err(Error::InvalidInput(format!("Genotype prior ({}) must be within (-inf, 0].", prior)))
+        } else {
+            self.prior = prior;
+            Ok(())
+        }
+    }
 }
 
 /// Read assignment to a vector of contigs and the corresponding likelihoods.
@@ -193,8 +223,8 @@ impl<'a> ReadAssignment<'a> {
     {
         let mut depth = vec![0; gt_alns.total_windows()];
         // TODO: Replace with `array_windows`, once stable.
-        let read_assgn = gt_alns.read_ixs.windows(2).map(|ij| {
-            let [i, j]: [usize; 2] = ij.try_into().unwrap();
+        let mut i = 0;
+        let read_assgn = gt_alns.read_ixs[1..].iter().map(|&j| {
             let m = j - i;
             let mut assgn = 0;
             if m > 1 {
@@ -204,6 +234,7 @@ impl<'a> ReadAssignment<'a> {
             for w in gt_alns.alns[i + assgn].windows().into_iter() {
                 depth[w as usize] += 1;
             }
+            i = j;
             Ok(assgn as u16)
         }).collect::<Result<Vec<_>, E>>()?;
 
@@ -221,9 +252,15 @@ impl<'a> ReadAssignment<'a> {
         self.gt_alns.gt_name()
     }
 
+    /// Returns the total likelihood of the read assignment, including prior.
+    /// Equal to `prior + depth_contrib * depth_lik + aln_lik`
+    pub fn likelihood(&self) -> f64 {
+        self.gt_alns.prior + self.gt_alns.depth_contrib * self.depth_lik + self.aln_lik
+    }
+
     /// Returns the total likelihood of the read assignment.
     /// Equal to `depth_contrib * depth_lik + aln_lik`
-    pub fn likelihood(&self) -> f64 {
+    pub fn likelihood_wo_proir(&self) -> f64 {
         self.gt_alns.depth_contrib * self.depth_lik + self.aln_lik
     }
 

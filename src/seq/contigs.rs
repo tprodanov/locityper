@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
     path::Path,
 };
+use smallvec::{smallvec, SmallVec};
 use fnv::FnvHashMap;
 use bio::io::fasta::{self, FastaRead};
 use crate::{
@@ -281,3 +282,13 @@ impl ContigSet {
         &self.kmer_counts
     }
 }
+
+/// Genotype: a tuple of contigs.
+pub struct Genotype {
+    ids: SmallVec<[ContigId; 4]>,
+    name: String,
+}
+
+// impl Genotype {
+//     pub fn new()
+// }

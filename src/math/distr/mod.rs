@@ -19,7 +19,7 @@ pub use bayes::BayesCalc;
 pub use betabinom::BetaBinomial;
 
 /// Discrete distribution with a single argument.
-pub trait DiscretePmf {
+pub trait DiscretePmf: Send {
     /// Returns ln-probability of `k`.
     fn ln_pmf(&self, k: u32) -> f64;
 }
@@ -83,7 +83,7 @@ pub trait WithQuantile: DiscreteCdf + WithMoments {
 
 impl<T, U> DiscretePmf for U
 where T: DiscretePmf + ?Sized,
-      U: Deref<Target = T>,
+      U: Deref<Target = T> + Send,
 {
     fn ln_pmf(&self, k: u32) -> f64 {
         self.deref().ln_pmf(k)

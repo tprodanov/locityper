@@ -15,7 +15,7 @@ use crate::{
     math::Ln,
     seq::{
         recruit, fastx,
-        ContigId, ContigSet, NamedSeq,
+        ContigId, ContigNames, ContigSet, NamedSeq,
         kmers::Kmer,
     },
     bg::{BgDistr, JsonSer, Technology, SequencingInfo},
@@ -26,11 +26,40 @@ use crate::{
         locs::{self, AllAlignments},
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
+        assgn::GenotypeAlignments,
     },
     solvers::scheme,
 };
 use htslib::bam;
 use super::paths;
+
+/// Filter haplotypes and genotypes before assigning reads.
+struct SelectParams {
+    /// Keep this fraction of best haplotypes.
+    haplotype_frac: f64,
+    /// Keep at least this number of haplotypes.
+    keep_haplotypes: usize,
+    /// Rank haplotypes based on the top X read alignments, where X = haplotype_aln_coef / ploidy`.
+    haplotype_aln_coef: f64,
+
+    /// Keep this fraction of best genotypes based only on read alignment probabilities.
+    genotype_frac: f64,
+    /// Keep at least this number of genotypes.
+    keep_genotypes: usize,
+}
+
+impl Default for SelectParams {
+    fn default() -> Self {
+        Self {
+            haplotype_frac: 0.3,
+            keep_haplotypes: 5,
+            haplotype_aln_coef: 0.8,
+
+            genotype_frac: 0.3,
+            keep_genotypes: 10,
+        }
+    }
+}
 
 struct Args {
     input: Vec<PathBuf>,
@@ -51,6 +80,7 @@ struct Args {
     debug: bool,
 
     recr_params: recruit::Params,
+    select_params: SelectParams,
     assgn_params: AssgnParams,
 }
 
@@ -75,6 +105,7 @@ impl Default for Args {
             debug: false,
 
             recr_params: Default::default(),
+            select_params: Default::default(),
             assgn_params: Default::default(),
         }
     }
@@ -149,19 +180,9 @@ fn print_help() {
         {EMPTY}  May impact runtime in multi-threaded read recruitment.",
         "-c, --chunk-size".green(), "INT".yellow(), super::fmt_def(defaults.recr_params.chunk_size));
 
-    println!("\n{}", "Locus genotyping:".bold());
+    println!("\n{}", "Model parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
         "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
-    println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
-        {EMPTY}  Please see README for information on the file content.",
-        "-S, --solvers".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
-        {EMPTY}  read alignment likelihoods [{}].",
-        "-C, --dp-contrib".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_contrib));
-    println!("    {} {}  Compare window probability to have copy number 1 against two\n\
-        {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
-        "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
-        super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
     println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
         {EMPTY}  the best alignment [{}].",
         "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
@@ -176,6 +197,33 @@ fn print_help() {
         "    --rare-kmer".green(), "FLOAT FLOAT".yellow(),
         "FLOAT_1".yellow(), super::fmt_def(defaults.assgn_params.rare_kmer),
         "FLOAT_2".yellow(), super::fmt_def(defaults.assgn_params.semicommon_kmer));
+    println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
+        {EMPTY}  read alignment likelihoods [{}].",
+        "-C, --dp-contrib".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_contrib));
+    println!("    {} {}  Compare window probability to have copy number 1 against two\n\
+        {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
+        "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
+        super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
+
+    println!("\n{}", "Pre-filtering:".bold());
+    println!("    {:KEY$} {:VAL$}  Select this fraction of the best haplotypes [{}].",
+        "    --hap-fraction".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.select_params.haplotype_frac));
+    println!("    {:KEY$} {:VAL$}  Keep at least this number of haplotypes [{}].",
+        "    --keep-haps".green(), "INT".yellow(), super::fmt_def(defaults.select_params.keep_haplotypes));
+    println!("    {:KEY$} {:VAL$}  Rank haplotypes based on the top {} alignments\n\
+        {EMPTY}  where {} = {}/ploidy [{}].",
+        "    --hap-alns".green(), "FLOAT".yellow(), "X".yellow(), "X".yellow(), "FLOAT".yellow(),
+        super::fmt_def_f64(defaults.select_params.haplotype_aln_coef));
+    println!("    {:KEY$} {:VAL$}  Select this fraction of best genotypes [{}] based on\n\
+        {EMPTY}  read alignment likelihoods alone (without read depth).",
+        "    --gt-fraction".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.select_params.genotype_frac));
+    println!("    {:KEY$} {:VAL$}  Keep at least this number of genotypes [{}].",
+        "    --keep-gts".green(), "INT".yellow(), super::fmt_def(defaults.select_params.keep_genotypes));
+
+    println!("\n{}", "Locus genotyping:".bold());
+    println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
+        {EMPTY}  Please see README for information on the file content.",
+        "-S, --solvers".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
         "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
 
@@ -247,6 +295,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     Some(val.parse()?)
                 };
             }
+
+            Long("hap-fraction") | Long("hap-frac") => args.select_params.haplotype_frac = parser.value()?.parse()?,
+            Long("keep-haps") | Long("keep-hap") | Long("keep-haplotypes") =>
+                args.select_params.keep_haplotypes = parser.value()?.parse()?,
+            Long("hap-alns") | Long("hap-aln") => args.select_params.haplotype_aln_coef = parser.value()?.parse()?,
+            Long("gt-frac") | Long("gt-fraction") => args.select_params.genotype_frac = parser.value()?.parse()?,
+            Long("keep-gts") | Long("keep-gt") | Long("keep-genotypes") =>
+                args.select_params.keep_genotypes = parser.value()?.parse()?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -533,11 +589,67 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
     Ok(())
 }
 
+/// Generates all genotypes (unless they have prior -inf or are not in the priors file).
+fn load_genotypes(
+    contigs: &ContigNames,
+    contig_windows: &[ContigWindows],
+    all_alns: &AllAlignments,
+    opt_priors: Option<&FnvHashMap<String, f64>>,
+    cached_distrs: &CachedDepthDistrs,
+    args: &Args,
+) -> Result<(Tuples<ContigId>, Vec<Option<GenotypeAlignments>>), Error>
+{
+    log::info!("    Selecting read pairs alignments for each genotype");
+    let ploidy = usize::from(args.ploidy);
+    let mut genotypes: Tuples<ContigId>;
+    let mut all_gt_alns: Vec<Option<GenotypeAlignments>>;
+    if let Some(priors_map) = opt_priors {
+        genotypes = Tuples::new(ploidy);
+        all_gt_alns = Vec::new();
+        for (genotype, &prior) in priors_map.iter() {
+            match contigs.parse_ids(genotype) {
+                Ok(tuple) =>
+                    if tuple.len() != ploidy {
+                        log::error!("Cannot parse genotype {:?} (invalid ploidy)", genotype);
+                    } else if prior.is_finite() {
+                        let mut gt_alns = GenotypeAlignments::new(contigs, &tuple, contig_windows,
+                            all_alns, cached_distrs, &args.assgn_params);
+                        gt_alns.set_prior(prior)?;
+                        all_gt_alns.push(Some(gt_alns));
+                        genotypes.push(&tuple);
+                    },
+                _ => log::error!("Cannot parse genotype {:?} (invalid contig or ploidy)", genotype),
+            }
+        }
+    } else {
+        let contig_ids: Vec<_> = contigs.ids().collect();
+        genotypes = ext::vec::Tuples::repl_combinations(&contig_ids, ploidy);
+        all_gt_alns = genotypes.iter().map(|gt| Some(GenotypeAlignments::new(contigs, gt, contig_windows,
+                all_alns, cached_distrs, &args.assgn_params)))
+            .collect()
+    }
+    Ok((genotypes, all_gt_alns))
+}
+
+// fn select_haplotypes(
+//     all_alns: &AllAlignments,
+//     select_params: &SelectParams,
+//     dbg_writer: &mut impl Write,
+// ) -> io::Result<()>
+// {
+
+//     Ok(())
+// }
+
+// fn filter_genotypes(
+
+// )
+
 fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
     scheme: &scheme::Scheme,
-    cached_distrs: &Arc<CachedDepthDistrs>,
+    cached_distrs: &CachedDepthDistrs,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
@@ -569,41 +681,19 @@ fn analyze_locus(
         }
     }
 
-    let ploidy = usize::from(args.ploidy);
-    let mut genotypes: Tuples<ContigId>;
-    let mut priors: Vec<f64>;
-    if let Some(priors_map) = opt_priors {
-        genotypes = Tuples::new(ploidy);
-        priors = Vec::new();
-        for (genotype, &prior) in priors_map.iter() {
-            match contigs.parse_ids(genotype) {
-                Ok(tuple) if tuple.len() == ploidy && prior.is_finite() => {
-                    genotypes.push(&tuple);
-                    priors.push(prior);
-                }
-                _ => log::error!("Cannot parse genotype {:?} (invalid contig or ploidy)", genotype),
-            }
-        }
-    } else {
-        let contig_ids: Vec<_> = contigs.ids().collect();
-        genotypes = ext::vec::Tuples::repl_combinations(&contig_ids, ploidy);
-        priors = vec![0.0; genotypes.len()]
-    }
+    let (genotypes, gt_alns) = load_genotypes(contigs, &contig_windows, &all_alns, opt_priors, cached_distrs, args)?;
     if genotypes.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
-
     let data = scheme::Data {
         scheme: scheme.clone(),
-        params: args.assgn_params.clone(),
         contigs: Arc::clone(&contigs),
-        cached_distrs: Arc::clone(&cached_distrs),
-        priors: Arc::new(priors),
         debug: args.debug,
-        all_alns, contig_windows, genotypes,
+        tweak: args.assgn_params.tweak.unwrap(),
+        genotypes, all_alns,
     };
     let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
-    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
+    scheme::solve(data, gt_alns, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     Ok(())
 }
@@ -636,7 +726,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         Some(filename) => scheme::Scheme::from_json(&ext::sys::load_json(filename)?)?,
         None => scheme::Scheme::default(),
     };
-    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn));
+    let cached_distrs = CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn);
 
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {

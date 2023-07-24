@@ -21,3 +21,6 @@ In advance, check if at least 1/3 of the reads have good alignment scores. How?
 Just select best 1/3 and rank haplotypes.
 
 Make read filtering stricter
+
+- Use `itertools` for zip3, and for combinations, combinations with replacement.
+- Use separate `Genotype` struct to store tuple of contigs, including parsing and formatting.
