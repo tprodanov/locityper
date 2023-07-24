@@ -15,7 +15,7 @@ use crate::{
     math::Ln,
     seq::{
         recruit, fastx, NamedSeq,
-        contigs::{ContigNames, ContigSet, Genotype},
+        contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
     },
     bg::{BgDistr, JsonSer, Technology, SequencingInfo},
@@ -223,7 +223,8 @@ fn print_help() {
         super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
 
     println!("\n{}", "Pre-filtering:".bold());
-    println!("    {:KEY$} {:VAL$}  Select this fraction of the best haplotypes [{}].",
+    println!("    {:KEY$} {:VAL$}  Select this fraction of the best haplotypes [{}].\n\
+        {EMPTY}  Haplotype filtering is skipped if priors are provided.",
         "    --hap-fraction".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.select_params.haplotype_frac));
     println!("    {:KEY$} {:VAL$}  Keep at least this number of haplotypes [{}].",
         "    --keep-haps".green(), "INT".yellow(), super::fmt_def(defaults.select_params.keep_haplotypes));
@@ -608,8 +609,9 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
 
 /// Generates all read alignments to all genotypes (unless they have prior -inf or are not in the priors file).
 fn select_genotypes_alns(
+    contig_ids: &[ContigId],
     contigs: &ContigNames,
-    contig_windows: &[ContigWindows],
+    contig_windows: &[Option<ContigWindows>],
     all_alns: &AllAlignments,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     cached_distrs: &CachedDepthDistrs,
@@ -619,6 +621,8 @@ fn select_genotypes_alns(
     log::info!("    [{}] Selecting read pairs alignments for each genotype", contigs.tag());
     let ploidy = usize::from(args.ploidy);
     if let Some(priors_map) = opt_priors {
+        assert_eq!(contig_ids.len(), contigs.len(),
+            "All contig IDs must be present when priors are provided");
         let mut all_gt_alns = Vec::new();
         for (genotype_s, &prior) in priors_map.iter() {
             match Genotype::parse(genotype_s, contigs) {
@@ -637,22 +641,64 @@ fn select_genotypes_alns(
         }
         Ok(all_gt_alns)
     } else {
-        let contig_ids: Vec<_> = contigs.ids().collect();
         let genotypes = Genotype::generate_all(&contig_ids, contigs, ploidy);
         Ok(genotypes.into_iter().map(|gt| Some(GenotypeAlignments::new(gt, contig_windows,
                 all_alns, cached_distrs, &args.assgn_params))).collect())
     }
 }
 
-// fn select_haplotypes(
-//     all_alns: &AllAlignments,
-//     select_params: &SelectParams,
-//     dbg_writer: &mut impl Write,
-// ) -> io::Result<()>
-// {
+fn select_haplotypes(
+    contigs: &ContigNames,
+    all_alns: &AllAlignments,
+    mut lik_writer: impl Write,
+    params: &SelectParams,
+    ploidy: u8,
+    debug: bool,
+) -> io::Result<Vec<ContigId>>
+{
+    let n = contigs.len();
+    let m = (((n as f64) * params.haplotype_frac) as usize).clamp(params.keep_haplotypes, n);
+    let n_reads = all_alns.n_reads();
+    assert!(n_reads != 0);
+    if m == n && !debug {
+        return Ok(contigs.ids().collect());
+    }
+    let n_best_reads = (((n_reads as f64) * params.haplotype_aln_coef / f64::from(ploidy)).ceil() as usize)
+        .clamp(1, n_reads);
+    log::info!("    [{}] Filtering haplotypes based on the best {} reads out of {}",
+        contigs.tag(), n_best_reads, n_reads);
 
-//     Ok(())
-// }
+    // Vector of vectors: contig id -> read pair -> best aln prob.
+    let mut best_aln_probs = vec![Vec::<f64>::with_capacity(n_reads); n];
+    for read_alns in all_alns.iter() {
+        for (contig_probs, best_prob) in best_aln_probs.iter_mut().zip(read_alns.best_for_each_contig(contigs)) {
+            contig_probs.push(best_prob);
+        }
+    }
+
+    let mut scores = Vec::with_capacity(n);
+    for (id, contig_probs) in contigs.ids().zip(best_aln_probs.iter_mut()) {
+        contig_probs.sort_unstable_by(|a, b| b.total_cmp(&a));
+        let score: f64 = contig_probs[..n_best_reads].iter().copied().sum();
+        writeln!(lik_writer, "0a\t{}\t{:.3}", contigs.get_name(id), score)?;
+        scores.push((id, score));
+    }
+
+    // Decreasing sort by score.
+    scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    let thresh = scores[m - 1].1;
+    let pp = scores.partition_point(|(_, score)| *score >= thresh);
+    assert!(m <= pp);
+    log::debug!("        Selected {} haplotypes out of {}", pp, n);
+    let worst = scores[n - 1];
+    let best = scores[0];
+    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1} ({:.1}%)",
+        contigs.get_name(worst.0), Ln::to_log10(worst.1),
+        contigs.get_name(best.0), Ln::to_log10(best.1),
+        Ln::to_log10(thresh),
+        if worst.1 != best.1 { 100.0 * (thresh - worst.1) / (best.1 - worst.1) } else { f64::NAN });
+    Ok(scores[..pp].iter().map(|&(id, _)| id).collect())
+}
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
 fn filter_genotypes(
@@ -660,11 +706,13 @@ fn filter_genotypes(
     mut all_gt_alns: Vec<Option<GenotypeAlignments>>,
     mut lik_writer: impl Write,
     params: &SelectParams,
-) -> Result<Vec<Option<GenotypeAlignments>>, Error>
+    debug: bool,
+) -> io::Result<Vec<Option<GenotypeAlignments>>>
 {
     let n = all_gt_alns.len();
     let m = (((n as f64) * params.genotype_frac) as usize).clamp(params.keep_genotypes, n);
-    if m >= n {
+    // Need to run anyway in case of `debug`, so that we output all values.
+    if m == n && !debug {
         return Ok(all_gt_alns);
     }
     log::info!("    [{}] Filtering genotypes based on read alignment likelihood", tag);
@@ -673,7 +721,7 @@ fn filter_genotypes(
     for (i, gt_alns) in all_gt_alns.iter().enumerate() {
         let gt_alns = gt_alns.as_ref().expect("All genotype alignments must be defined at this point");
         let score = gt_alns.max_aln_lik();
-        writeln!(lik_writer, "0b\t{}\t{:.3}", gt_alns.genotype().name(), score).map_err(add_path!(!))?;
+        writeln!(lik_writer, "0b\t{}\t{:.3}", gt_alns.genotype().name(), Ln::to_log10(score))?;
         scores.push((i, score));
     }
     // Decreasing sort by score.
@@ -720,23 +768,32 @@ fn analyze_locus(
 
     let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
-    // TODO: select haplotypes here.
+    let contig_ids = if opt_priors.is_none() {
+        select_haplotypes(contigs, &all_alns, &mut lik_writer, &args.select_params, args.ploidy, args.debug)
+            .map_err(add_path!(locus.lik_filename))?
+    } else {
+        contigs.ids().collect()
+    };
 
-    let contig_windows = ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params);
+    let contig_windows = ContigWindows::new_all(&contig_ids, &locus.set, bg_distr.depth(), &args.assgn_params);
     if args.debug || scheme.has_dbg_output() {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let mut windows_writer = ext::sys::create_gzip(&windows_filename)?;
         writeln!(windows_writer, "#{}", ContigWindows::BED_HEADER).map_err(add_path!(windows_filename))?;
-        for curr_windows in contig_windows.iter() {
-            curr_windows.write_to(&mut windows_writer, &contigs).map_err(add_path!(windows_filename))?;
+        for opt_windows in contig_windows.iter() {
+            if let Some(curr_windows) = opt_windows {
+                curr_windows.write_to(&mut windows_writer, &contigs).map_err(add_path!(windows_filename))?;
+            }
         }
     }
 
-    let gt_alns = select_genotypes_alns(contigs, &contig_windows, &all_alns, opt_priors, cached_distrs, args)?;
+    let gt_alns = select_genotypes_alns(&contig_ids, contigs, &contig_windows, &all_alns, opt_priors,
+        cached_distrs, args)?;
     if gt_alns.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
-    let gt_alns = filter_genotypes(contigs.tag(), gt_alns, &mut lik_writer, &args.select_params)?;
+    let gt_alns = filter_genotypes(contigs.tag(), gt_alns, &mut lik_writer, &args.select_params, args.debug)
+        .map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
         scheme: scheme.clone(),
         contigs: Arc::clone(&contigs),

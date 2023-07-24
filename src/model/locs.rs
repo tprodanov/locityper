@@ -292,6 +292,20 @@ impl GrouppedAlignments {
         (i, &self.alns[i..j])
     }
 
+    /// Returns best alignment probability for each contig.
+    pub fn best_for_each_contig(&self, contigs: &ContigNames) -> impl Iterator<Item = f64> + '_ {
+        let n = self.alns.len();
+        let mut i = 0;
+        contigs.ids().map(move |id| {
+            let mut best = self.unmapped_prob;
+            while i < n && self.alns[i].contig_id() == id {
+                best = best.max(self.alns[i].ln_prob());
+                i += 1;
+            }
+            best
+        })
+    }
+
     /// Return `i`-th alignment of all alignments for the read pair.
     pub fn ith_aln(&self, i: usize) -> &PairAlignment {
         &self.alns[i]
