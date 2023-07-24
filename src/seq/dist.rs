@@ -3,9 +3,6 @@ use std::{
     sync::Arc,
     io::{self, Write},
 };
-use crate::{
-    ext::vec::Tuples,
-};
 use super::{
     NamedSeq,
     wfa::{Aligner, Penalties},
@@ -45,8 +42,9 @@ fn divergences_multithread(
 ) -> io::Result<Vec<f64>> {
     let threads = usize::from(threads);
     let seqs = Arc::new(entries.iter().map(|entry| entry.seq.clone()).collect::<Vec<Vec<u8>>>());
-    let n = seqs.len();
-    let pairs = Arc::new(Tuples::combinations(&(0..n).collect::<Vec<_>>(), 2));
+    let n = seqs.len() as u32;
+    let pairs: Arc<Vec<(u32, u32)>> = Arc::new(
+        (0..n - 1).flat_map(|i| (i + 1..n).map(move |j| (i, j))).collect());
     let n_pairs = pairs.len();
     let mut handles = Vec::with_capacity(threads);
 
@@ -66,8 +64,8 @@ fn divergences_multithread(
             handles.push(thread::spawn(move || {
                 assert!(start < end);
                 let aligner = Aligner::new(&penalties);
-                pairs.iter_range(start..end)
-                    .map(|pair| aligner.align(&seqs[pair[0]], &seqs[pair[1]]))
+                pairs[start..end].iter()
+                    .map(|&(i, j)| aligner.align(&seqs[i as usize], &seqs[j as usize]))
                     .collect::<Vec<_>>()
             }));
         }
@@ -75,18 +73,15 @@ fn divergences_multithread(
     }
     assert_eq!(start, n_pairs);
 
-    let mut ix = 0;
+    let mut pairs_iter = pairs.iter();
     let mut divergences = Vec::with_capacity(n_pairs);
     for handle in handles.into_iter() {
         for (cigar, score) in handle.join().expect("Worker process failed") {
-            match &pairs[ix] {
-                [i, j] => divergences.push(write_paf(&mut paf_writer, &entries[*j], &entries[*i], score, &cigar)?),
-                _ => unreachable!(),
-            }
-            ix += 1;
+            let &(i, j) = pairs_iter.next().expect("Number of solutions does not match the number of tasks");
+            divergences.push(write_paf(&mut paf_writer, &entries[j as usize], &entries[i as usize], score, &cigar)?);
         }
     }
-    assert_eq!(ix, n_pairs);
+    assert!(pairs_iter.next().is_none(), "Number of solutions does not match the number of tasks");
     Ok(divergences)
 }
 

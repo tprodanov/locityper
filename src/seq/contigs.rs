@@ -1,11 +1,11 @@
 use std::{
-    fmt::{self, Write as FmtWrite},
+    fmt,
     io::{self, BufRead},
     fs::File,
     sync::Arc,
     path::Path,
 };
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 use fnv::FnvHashMap;
 use bio::io::fasta::{self, FastaRead};
 use crate::{
@@ -159,18 +159,6 @@ impl ContigNames {
         &self.names[id.ix()]
     }
 
-    /// Returns contig names, joined with a comma.
-    pub fn get_names(&self, ids: impl Iterator<Item = ContigId>) -> String {
-        let mut s = String::new();
-        for id in ids {
-            if !s.is_empty() {
-                write!(s, ",").unwrap();
-            }
-            write!(s, "{}", self.names[id.ix()]).unwrap();
-        }
-        s
-    }
-
     /// Get contig length from an id.
     pub fn get_len(&self, id: ContigId) -> u32 {
         self.lengths[id.ix()]
@@ -185,11 +173,6 @@ impl ContigNames {
     pub fn try_get_id(&self, name: &str) -> Result<ContigId, Error> {
         self.name_to_id.get(name).copied()
             .ok_or_else(|| Error::ParsingError(format!("Unknown contig {:?}", name)))
-    }
-
-    /// Parses genotype (contig names through comma).
-    pub fn parse_ids(&self, genotype: &str) -> Result<Vec<ContigId>, Error> {
-        genotype.split(',').map(|name| self.try_get_id(name)).collect()
     }
 
     /// Returns iterator over all contig IDs.
@@ -283,12 +266,67 @@ impl ContigSet {
     }
 }
 
+type GtStorage = SmallVec<[ContigId; 4]>;
+
 /// Genotype: a tuple of contigs.
+#[derive(Clone)]
 pub struct Genotype {
-    ids: SmallVec<[ContigId; 4]>,
+    ids: GtStorage,
     name: String,
 }
 
-// impl Genotype {
-//     pub fn new()
-// }
+impl Genotype {
+    pub fn new(ids_iter: impl Iterator<Item = ContigId>, contigs: &ContigNames) -> Self {
+        let mut ids = GtStorage::new();
+        let mut name = String::new();
+        for id in ids_iter {
+            if !name.is_empty() {
+                name.push(',');
+            }
+            name.push_str(contigs.get_name(id));
+            ids.push(id);
+        }
+        assert!(!ids.is_empty(), "Empty genotypes are not allowed");
+        Self { ids, name }
+    }
+
+    /// Returns contigs within the genotype (they can repeat).
+    pub fn ids(&self) -> &[ContigId] {
+        &self.ids
+    }
+
+    /// Returns genotype ploidy (number of contigs).
+    pub fn ploidy(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Returns genotype name (all contig names through comma).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Parses genotype (contig names through comma).
+    pub fn parse(s: &str, contigs: &ContigNames) -> Result<Self, Error> {
+        let ids = s.split(',').map(|name| contigs.try_get_id(name))
+            .collect::<Result<GtStorage, Error>>()?;
+        assert!(!ids.is_empty(), "Empty genotypes are not allowed");
+        Ok(Self {
+            ids,
+            name: s.to_owned(),
+        })
+    }
+
+    /// Generates all genotype of given ploidy.
+    pub fn generate_all(avail_ids: &[ContigId], contigs: &ContigNames, ploidy: usize) -> Vec<Self> {
+        let mut res = Vec::with_capacity(ext::vec::count_combinations_with_repl(avail_ids.len(), ploidy));
+        ext::vec::gen_combinations_with_repl(avail_ids, ploidy,
+            |ids| res.push(Self::new(ids.iter().copied(), contigs)));
+        res
+    }
+}
+
+impl fmt::Display for Genotype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}

@@ -14,13 +14,12 @@ use crate::{
     err::{Error, validate_param, add_path},
     math::Ln,
     seq::{
-        recruit, fastx,
-        ContigId, ContigNames, ContigSet, NamedSeq,
+        recruit, fastx, NamedSeq,
+        contigs::{ContigNames, ContigSet, Genotype},
         kmers::Kmer,
     },
     bg::{BgDistr, JsonSer, Technology, SequencingInfo},
     ext,
-    ext::vec::Tuples,
     model::{
         Params as AssgnParams,
         locs::{self, AllAlignments},
@@ -589,46 +588,42 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
     Ok(())
 }
 
-/// Generates all genotypes (unless they have prior -inf or are not in the priors file).
-fn load_genotypes(
+/// Generates all read alignments to all genotypes (unless they have prior -inf or are not in the priors file).
+fn genotype_read_alignments(
     contigs: &ContigNames,
     contig_windows: &[ContigWindows],
     all_alns: &AllAlignments,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     cached_distrs: &CachedDepthDistrs,
     args: &Args,
-) -> Result<(Tuples<ContigId>, Vec<Option<GenotypeAlignments>>), Error>
+) -> Result<Vec<Option<GenotypeAlignments>>, Error>
 {
     log::info!("    Selecting read pairs alignments for each genotype");
     let ploidy = usize::from(args.ploidy);
-    let mut genotypes: Tuples<ContigId>;
-    let mut all_gt_alns: Vec<Option<GenotypeAlignments>>;
     if let Some(priors_map) = opt_priors {
-        genotypes = Tuples::new(ploidy);
-        all_gt_alns = Vec::new();
-        for (genotype, &prior) in priors_map.iter() {
-            match contigs.parse_ids(genotype) {
-                Ok(tuple) =>
-                    if tuple.len() != ploidy {
-                        log::error!("Cannot parse genotype {:?} (invalid ploidy)", genotype);
+        let mut all_gt_alns = Vec::new();
+        for (genotype_s, &prior) in priors_map.iter() {
+            match Genotype::parse(genotype_s, contigs) {
+                Ok(genotype) =>
+                    if genotype.ploidy() != ploidy {
+                        log::error!("Cannot parse genotype {:?} (expected ploidy {})", genotype_s, ploidy);
                     } else if prior.is_finite() {
-                        let mut gt_alns = GenotypeAlignments::new(contigs, &tuple, contig_windows,
+                        let mut gt_alns = GenotypeAlignments::new(genotype, contig_windows,
                             all_alns, cached_distrs, &args.assgn_params);
                         gt_alns.set_prior(prior)?;
                         all_gt_alns.push(Some(gt_alns));
-                        genotypes.push(&tuple);
                     },
-                _ => log::error!("Cannot parse genotype {:?} (invalid contig or ploidy)", genotype),
+                Err(Error::ParsingError(e)) => log::error!("Cannot parse genotype {:?} ({})", genotype_s, e),
+                Err(e) => log::error!("Cannot parse genotype {:?} ({:?})", genotype_s, e),
             }
         }
+        Ok(all_gt_alns)
     } else {
         let contig_ids: Vec<_> = contigs.ids().collect();
-        genotypes = ext::vec::Tuples::repl_combinations(&contig_ids, ploidy);
-        all_gt_alns = genotypes.iter().map(|gt| Some(GenotypeAlignments::new(contigs, gt, contig_windows,
-                all_alns, cached_distrs, &args.assgn_params)))
-            .collect()
+        let genotypes = Genotype::generate_all(&contig_ids, contigs, ploidy);
+        Ok(genotypes.into_iter().map(|gt| Some(GenotypeAlignments::new(gt, contig_windows,
+                all_alns, cached_distrs, &args.assgn_params))).collect())
     }
-    Ok((genotypes, all_gt_alns))
 }
 
 // fn select_haplotypes(
@@ -681,8 +676,8 @@ fn analyze_locus(
         }
     }
 
-    let (genotypes, gt_alns) = load_genotypes(contigs, &contig_windows, &all_alns, opt_priors, cached_distrs, args)?;
-    if genotypes.is_empty() {
+    let gt_alns = genotype_read_alignments(contigs, &contig_windows, &all_alns, opt_priors, cached_distrs, args)?;
+    if gt_alns.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
     let data = scheme::Data {
@@ -690,7 +685,7 @@ fn analyze_locus(
         contigs: Arc::clone(&contigs),
         debug: args.debug,
         tweak: args.assgn_params.tweak.unwrap(),
-        genotypes, all_alns,
+        all_alns,
     };
     let lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     scheme::solve(data, gt_alns, lik_writer, &locus.out_dir, &mut rng, args.threads)?;

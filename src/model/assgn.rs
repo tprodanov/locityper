@@ -5,7 +5,7 @@ use rand::Rng;
 use crate::{
     Error,
     math::Ln,
-    seq::{ContigId, ContigNames},
+    seq::contigs::Genotype,
 };
 use super::{
     locs::AllAlignments,
@@ -71,18 +71,17 @@ pub struct GenotypeAlignments {
 }
 
 impl GenotypeAlignments {
-    /// Creates an instance that stores read assignments to given contigs.
+    /// Creates an instance that stores read assignments to a given genotype.
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
-        contigs: &ContigNames,
-        contig_ids: &[ContigId],
+        genotype: Genotype,
         contig_windows: &[ContigWindows],
         all_alns: &AllAlignments,
         cached_distrs: &CachedDepthDistrs,
         params: &super::Params,
     ) -> Self
     {
-        let gt_windows = GenotypeWindows::new(contigs, contig_ids, contig_windows);
+        let gt_windows = GenotypeWindows::new(genotype, contig_windows);
         let mut ix = 0;
         let mut alns = Vec::new();
         let mut read_ixs = vec![ix];
@@ -148,9 +147,9 @@ impl GenotypeAlignments {
         self.depth_contrib
     }
 
-    /// Returns the name of the genotype.
-    pub fn gt_name(&self) -> &str {
-        self.gt_windows.name()
+    /// Returns the genotype.
+    pub fn genotype(&self) -> &Genotype {
+        self.gt_windows.genotype()
     }
 
     /// Define read windows by randomly moving read middle by at most `tweak` bp to either side.
@@ -247,9 +246,9 @@ impl<'a> ReadAssignment<'a> {
         Ok(assgn)
     }
 
-    /// Returns the name of the genotype.
-    pub fn gt_name(&self) -> &str {
-        self.gt_alns.gt_name()
+    /// Returns the genotype.
+    pub fn genotype(&self) -> &Genotype {
+        self.gt_alns.genotype()
     }
 
     /// Returns the total likelihood of the read assignment, including prior.
@@ -355,7 +354,7 @@ impl<'a> ReadAssignment<'a> {
     /// Last line:      `prefix  summary      key=value key=value ...`. (key-value pairs separated by space).
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
         let gt_windows = &self.gt_alns.gt_windows;
-        for i in 0..gt_windows.n_contigs() {
+        for i in 0..gt_windows.genotype().ploidy() {
             let wshift = gt_windows.get_wshift(i) as usize;
             let wshift_end = gt_windows.get_wshift(i + 1) as usize;
             for w in wshift..wshift_end {

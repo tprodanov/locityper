@@ -15,19 +15,16 @@ use json::JsonValue;
 use crate::{
     ext::{
         self,
-        vec::{F64Ext, Tuples},
+        vec::F64Ext,
         rand::XoshiroRng,
     },
     math::{self, Ln, Phred},
     err::{Error, validate_param, add_path},
     bg::ser::json_get,
-    seq::{ContigId, ContigNames},
+    seq::contigs::ContigNames,
     model::{
-        Params,
         locs::{AllAlignments, Pair},
-        windows::{ContigWindows, GenotypeWindows},
         assgn::{GenotypeAlignments, ReadAssignment, SelectedCounter},
-        dp_cache::CachedDepthDistrs,
     },
 };
 use super::Solver;
@@ -291,8 +288,6 @@ pub struct Data {
     /// Solving scheme.
     pub scheme: Scheme,
     pub contigs: Arc<ContigNames>,
-    /// Genotypes, for which likelihoods need to be calculated.
-    pub genotypes: Tuples<ContigId>,
     pub all_alns: AllAlignments,
     pub tweak: u32,
     pub debug: bool,
@@ -307,7 +302,7 @@ fn solve_single_thread(
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let total_genotypes = data.genotypes.len();
+    let total_genotypes = all_gt_alns.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
     let mut rem_ixs = (0..total_genotypes).collect();
 
@@ -329,7 +324,7 @@ fn solve_single_thread(
                 let assgns = solver.solve(&gt_alns, rng)?;
                 *lik = assgns.likelihood();
                 if stage.write {
-                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.gt_name(), attempt + 1);
+                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.genotype().name(), attempt + 1);
                     assgns.write_depth(&mut depth_writer, &prefix).map_err(add_path!(!))?;
                     if data.debug {
                         selected.update(&assgns);
@@ -337,11 +332,11 @@ fn solve_single_thread(
                 }
             }
             if stage.write && data.debug {
-                let prefix = format!("{}\t{}", stage_ix + 1, gt_alns.gt_name());
+                let prefix = format!("{}\t{}", stage_ix + 1, gt_alns.genotype().name());
                 write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, selected.fractions())
                     .map_err(add_path!(!))?;
             }
-            helper.update(ix, gt_alns.gt_name(), mean(&liks))?;
+            helper.update(ix, gt_alns.genotype().name(), mean(&liks))?;
         }
         helper.finish_stage();
     }
@@ -386,7 +381,6 @@ fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
     Ok(())
 }
 
-// `gt_alns`: Read alignments to all genotypes, in the same order as `data,genotypes`.
 pub fn solve(
     data: Data,
     gt_alns: Vec<Option<GenotypeAlignments>>,
@@ -396,11 +390,12 @@ pub fn solve(
     mut threads: u16,
 ) -> Result<(), Error>
 {
-    if usize::from(threads) > data.genotypes.len() {
-        threads = data.genotypes.len() as u16;
+    let n_gts = gt_alns.len();
+    if usize::from(threads) > n_gts {
+        threads = n_gts as u16;
     }
     log::info!("    [{}] Genotyping complex locus in {} stages and {} threads across {} possible genotypes",
-        data.contigs.tag(), data.scheme.len(), threads, data.genotypes.len());
+        data.contigs.tag(), data.scheme.len(), threads, n_gts);
     let has_dbg_output = data.scheme.has_dbg_output();
     let (mut depth_writers, depth_filenames) = create_debug_files(
         &locus_dir.join("depth."), threads, has_dbg_output)?;
@@ -472,8 +467,7 @@ impl MainWorker {
         let n_workers = self.handles.len();
         let scheme = &self.data.scheme;
         let contigs = &self.data.contigs;
-        let genotypes = &self.data.genotypes;
-        let total_genotypes = genotypes.len();
+        let total_genotypes = self.gt_alns.len();
         let mut helper = Helper::new(&scheme, contigs.tag(), lik_writer, total_genotypes)?;
         let mut rem_jobs = Vec::with_capacity(n_workers);
         let mut rem_ixs = (0..total_genotypes).collect();
@@ -503,7 +497,7 @@ impl MainWorker {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, gt_alns, lik) = receiver.recv().expect("Genotyping worker has failed!");
-                        helper.update(ix, gt_alns.gt_name(), lik)?;
+                        helper.update(ix, gt_alns.genotype().name(), lik)?;
                         // Do not remove assert!
                         assert!(self.gt_alns[ix].replace(gt_alns).is_none(), "Solved genotype twice");
                         *jobs -= 1;
@@ -555,7 +549,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = assgns.likelihood();
                     if stage.write {
-                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.gt_name(), attempt + 1);
+                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.genotype().name(), attempt + 1);
                         assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
                         if debug {
                             selected.update(&assgns);
@@ -563,7 +557,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                     }
                 }
                 if debug {
-                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt_alns.gt_name()),
+                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt_alns.genotype().name()),
                         &gt_alns, all_alns, selected.fractions()).map_err(add_path!(!))?;
                 }
                 if let Err(_) = self.sender.send((ix, gt_alns, mean(&liks))) {

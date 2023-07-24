@@ -1,6 +1,6 @@
 use std::{
     fmt::{self, Write},
-    ops::{Add, Sub, Range, Index},
+    ops::{Add, Sub},
 };
 use crate::math::Ln;
 
@@ -258,7 +258,7 @@ where T: fmt::Debug
 
 /// Count the number of combinations.
 /// Taken from https://stackoverflow.com/questions/65561566/number-of-combinations-permutations.
-fn count_combinations(n: u64, r: u64) -> u64 {
+pub fn count_combinations(n: usize, r: usize) -> usize {
     if r > n {
         0
     } else {
@@ -267,154 +267,49 @@ fn count_combinations(n: u64, r: u64) -> u64 {
 }
 
 /// Count the number of combinations with replacement.
-fn count_repl_combinations(n: u64, r: u64) -> u64 {
+pub fn count_combinations_with_repl(n: usize, r: usize) -> usize {
     count_combinations(n + r - 1, r)
 }
 
-/// Structure that stores tuples of fixed size.
-#[derive(Clone)]
-pub struct Tuples<T> {
-    /// Linear storage of all tuples.
-    data: Vec<T>,
-    /// Size of a single tuple.
-    tup_len: usize,
-}
-
-impl<T> Tuples<T> {
-    pub fn new(tup_len: usize) -> Self {
-        assert!(tup_len > 0, "Cannot construct tuples with empty length.");
-        Self {
-            data: Vec::new(),
-            tup_len,
+fn recursive_combinations_with_repl<T, F>(
+    v: &[T],
+    buffer: &mut [T],
+    start: usize,
+    depth: usize,
+    size: usize,
+    action: &mut F,
+)
+where T: Copy,
+      F: FnMut(&[T]),
+{
+    if depth + 1 == size {
+        for &el in &v[start..] {
+            buffer[depth] = el;
+            action(buffer);
         }
-    }
-
-    pub fn with_capacity(tup_len: usize, capacity: usize) -> Self {
-        assert!(tup_len > 0, "Cannot construct tuples with empty length.");
-        Self {
-            data: Vec::with_capacity(capacity * tup_len),
-            tup_len,
+    } else {
+        for (i, &el) in v[start..].iter().enumerate() {
+            buffer[depth] = el;
+            recursive_combinations_with_repl(v, buffer, start + i, depth + 1, size, action);
         }
-    }
-
-    pub fn from_vec(data: Vec<T>, tup_len: usize) -> Self {
-        assert!(data.len() % tup_len == 0, "Vector length ({}) does not divide tuple length ({})",
-            data.len(), tup_len);
-        Self { data, tup_len }
-    }
-
-    /// Returns the number of tuples in the set.
-    pub fn len(&self) -> usize {
-        self.data.len() / self.tup_len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Returns tuple length.
-    pub fn tup_len(&self) -> usize {
-        self.tup_len
-    }
-
-    /// Iterates over all tuples in the set.
-    pub fn iter(&self) -> std::slice::ChunksExact<'_, T> {
-        self.data.chunks_exact(self.tup_len)
-    }
-
-    /// Iterates over tuples with indices `i..j`.
-    pub fn iter_range(&self, ixs: Range<usize>) -> std::slice::ChunksExact<'_, T> {
-        self.data[ixs.start * self.tup_len..ixs.end * self.tup_len].chunks_exact(self.tup_len)
-    }
-
-    /// Returns iterator over all tuple contents consecutively, same as chaining all tuples.
-    pub fn iter_inner(&self) -> std::slice::Iter<'_, T> {
-        self.data.iter()
     }
 }
 
-impl<T: Copy> Tuples<T> {
-    fn init_combinations(&mut self, v: &[T], subtuple: &mut [T], depth: usize, start_ix: usize) {
-        let rem = self.tup_len.checked_sub(depth + 1).unwrap();
-        if rem == 0 {
-            for &el in &v[start_ix..] {
-                self.data.extend_from_slice(subtuple);
-                self.data.push(el);
-            }
-        } else {
-            for (i, &el) in v[start_ix..v.len() - rem].iter().enumerate() {
-                subtuple[depth] = el;
-                self.init_combinations(v, subtuple, depth + 1, start_ix + i + 1);
-            }
+/// Generates combinations with replacement, and calls `action` for each generated slice.
+pub fn gen_combinations_with_repl<T, F>(v: &[T], size: usize, mut action: F)
+where T: Copy,
+      F: FnMut(&[T]),
+{
+    if v.is_empty() || size == 0 {
+        // Do nothing.
+    } else if size == 1 {
+        let mut buffer = [v[0]];
+        for &el in v {
+            buffer[0] = el;
+            action(&buffer);
         }
-    }
-
-    fn init_repl_combinations(&mut self, v: &[T], subtuple: &mut [T], depth: usize, start_ix: usize) {
-        if depth + 1 == self.tup_len {
-            for &el in &v[start_ix..] {
-                self.data.extend_from_slice(subtuple);
-                self.data.push(el);
-            }
-        } else {
-            for (i, &el) in v[start_ix..].iter().enumerate() {
-                subtuple[depth] = el;
-                self.init_repl_combinations(v, subtuple, depth + 1, start_ix + i);
-            }
-        }
-    }
-
-    /// Stores all tuples of size `tup_len`, constructed from vector `v` through all combinations *without* replacement.
-    pub fn combinations(v: &[T], tup_len: usize) -> Self {
-        assert!(!v.is_empty(), "Cannot construct combinations on an empty vector or empty tuple size");
-        let count = usize::try_from(count_combinations(v.len() as u64, tup_len as u64)).unwrap();
-        assert!(count < 10_000_000, "Number of possible tuples ({}) is too great", count);
-        let mut res = Tuples::with_capacity(tup_len, count);
-        if count == 0 {
-            return res;
-        }
-
-        let mut subtuple = vec![v[0]; tup_len - 1];
-        if tup_len == 1 {
-            res.data.extend_from_slice(v);
-        } else {
-            res.init_combinations(v, &mut subtuple, 0, 0);
-        }
-        assert_eq!(res.len(), count);
-        res
-    }
-
-    /// Stores all tuples of size `tup_len`, constructed from vector `v` through all combinations *with* replacement.
-    pub fn repl_combinations(v: &[T], tup_len: usize) -> Self {
-        assert!(!v.is_empty(), "Cannot construct combinations on an empty vector or empty tuple size");
-        let count = usize::try_from(count_repl_combinations(v.len() as u64, tup_len as u64)).unwrap();
-        assert!(count < 10_000_000, "Number of possible tuples ({}) is too great", count);
-        let mut res = Tuples::with_capacity(tup_len, count);
-        if count == 0 {
-            return res;
-        }
-
-        let mut subtuple = vec![v[0]; tup_len - 1];
-        if tup_len == 1 {
-            res.data.extend_from_slice(v);
-        } else {
-            res.init_repl_combinations(v, &mut subtuple, 0, 0);
-        }
-        assert_eq!(res.len(), count);
-        res
-    }
-
-    pub fn push(&mut self, v: &[T]) {
-        assert_eq!(v.len(), self.tup_len);
-        self.data.extend_from_slice(v);
-    }
-}
-
-impl<T> Index<usize> for Tuples<T> {
-    type Output = [T];
-
-    fn index(&self, index: usize) -> &[T] {
-        let i = index * self.tup_len;
-        let j = i + self.tup_len;
-        &self.data[i..j]
+    } else {
+        let mut buffer = vec![v[0]; size];
+        recursive_combinations_with_repl(v, &mut buffer, 0, 0, size, &mut action);
     }
 }

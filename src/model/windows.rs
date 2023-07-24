@@ -7,7 +7,8 @@ use crate::{
     ext::vec::F64Ext,
     bg::depth::ReadDepth,
     seq::{
-        self, ContigId, ContigNames, ContigSet, Interval,
+        self, Interval,
+        contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::KmerCounts,
     },
 };
@@ -266,9 +267,8 @@ impl ContigWindows {
 
 /// Stores the contigs and windows corresponding to the windows.
 pub struct GenotypeWindows {
+    genotype: Genotype,
     by_contig: Vec<ContigWindows>,
-    /// All contig names, connected through comma.
-    name: String,
     /// Start index for each contig id (length: n-contigs + 1).
     /// Contig with index `i` will have windows between `wshifts[i]..wshifts[i + 1]`.
     wshifts: Vec<u32>,
@@ -277,14 +277,14 @@ pub struct GenotypeWindows {
 }
 
 impl GenotypeWindows {
-    pub fn new(contigs: &ContigNames, contig_ids: &[ContigId], contig_windows: &[ContigWindows]) -> Self {
-        let n = contig_ids.len();
+    pub fn new(genotype: Genotype, contig_windows: &[ContigWindows]) -> Self {
+        let n = genotype.ploidy();
         let mut by_contig = Vec::<ContigWindows>::with_capacity(n);
         let mut wshifts = Vec::with_capacity(n + 1);
         let mut curr_wshift = REG_WINDOW_SHIFT;
         wshifts.push(curr_wshift);
 
-        for &id in contig_ids.iter() {
+        for &id in genotype.ids() {
             let curr_contig = contig_windows[id.ix()].clone();
             curr_wshift += curr_contig.n_windows();
             wshifts.push(curr_wshift);
@@ -292,26 +292,17 @@ impl GenotypeWindows {
         }
         assert!(by_contig.len() < 256, "Multi-contig collection cannot contain more than 256 entries");
         Self {
-            name: contigs.get_names(by_contig.iter().map(|el| el.contig_id)),
             window: by_contig[0].window_size(),
-            by_contig, wshifts,
+            genotype, by_contig, wshifts,
         }
     }
 
-    /// Total number of contigs. Can be less than ploidy, as contigs can be repeated.
-    pub fn n_contigs(&self) -> usize {
-        self.by_contig.len()
+    pub fn genotype(&self) -> &Genotype {
+        &self.genotype
     }
+
     pub fn window_size(&self) -> u32 {
         self.window
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn ids(&self) -> impl Iterator<Item = ContigId> + '_ {
-        self.by_contig.iter().map(|el| el.contig_id)
     }
 
     /// Returns window shift for the `i`-th contig.
@@ -337,7 +328,7 @@ impl GenotypeWindows {
         let unmapped_prob = groupped_alns.unmapped_prob();
         // Current threshold, is updated during the for-loop.
         let mut thresh_prob = unmapped_prob - prob_diff;
-        for (i, contig_id) in self.ids().enumerate() {
+        for (i, &contig_id) in self.genotype.ids().iter().enumerate() {
             let contig_ix = u8::try_from(i).unwrap();
             let (start_ix, alns) = groupped_alns.contig_alns(contig_id);
             for (aln_ix, aln) in (start_ix..).zip(alns) {
