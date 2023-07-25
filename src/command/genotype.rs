@@ -29,115 +29,9 @@ use crate::{
         dp_cache::CachedDepthDistrs,
         assgn::GenotypeAlignments,
     },
-    solvers::scheme,
+    solvers::scheme::{self, Scheme, FilterParams},
 };
 use super::paths;
-
-struct SelectSubparams {
-    /// Boundaries on the smallest and largest number of haplotypes/genotypes.
-    min_size: usize,
-    max_size: usize,
-    /// Relative score threshold (between the minimum and maximum score).
-    score_thresh: f64,
-}
-
-impl SelectSubparams {
-    fn validate(&self, prefix: &'static str) -> Result<(), Error> {
-        validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
-            "{}: score threshold ({}) must be within [0, 1]", prefix, self.score_thresh);
-        validate_param!(self.min_size > 1,
-            "{}: minimal size ({}) must be at least 2", prefix, self.min_size);
-        validate_param!(self.min_size <= self.max_size,
-            "{}: min size ({}) must be <= the max size ({})",
-            prefix, self.min_size, self.max_size);
-        Ok(())
-    }
-
-    fn set_sizes(&mut self, mut values: lexopt::ValuesIter) -> Result<(), lexopt::Error> {
-        let val1 = values.next().expect("First value must be present");
-        self.min_size = if val1 == "inf" || val1 == "Inf" {
-            usize::MAX
-        } else {
-            val1.parse()?
-        };
-
-        self.max_size = if let Some(val2) = values.next() {
-            if val2 == "inf" || val2 == "Inf" {
-                usize::MAX
-            } else {
-                val2.parse()?
-            }
-        } else {
-            usize::MAX
-        };
-        Ok(())
-    }
-
-    fn disable(&mut self) {
-        self.min_size = usize::MAX;
-        self.max_size = usize::MAX;
-    }
-
-    /// Finds partition point and score threshold based on the decreasing list of scores.
-    fn get_partition<T>(&self, scores: &[(T, f64)]) -> (usize, f64) {
-        let n = scores.len();
-        let best = scores[0].1;
-        let worst = scores[n - 1].1;
-        let range = best - worst;
-
-        let mut thresh = worst + range * self.score_thresh;
-        let mut m = scores.partition_point(|(_, score)| *score >= thresh);
-        if self.min_size >= n {
-            thresh = worst;
-            m = n;
-        } else if m < self.min_size {
-            thresh = scores[self.min_size - 1].1;
-            m = scores.partition_point(|(_, score)| *score >= thresh);
-        } else if m > self.max_size {
-            thresh = scores[self.max_size - 1].1;
-            m = scores.partition_point(|(_, score)| *score >= thresh);
-        }
-        // m can still be over max_size, but we do not want to discard entries with equal scores.
-        (m, thresh)
-    }
-}
-
-/// Filter haplotypes and genotypes before assigning reads.
-struct SelectParams {
-    /// Rank haplotypes based on the top X read alignments, where X = haplotype_aln_coef / ploidy`.
-    nreads_mult: f64,
-    haplotype: SelectSubparams,
-    genotype: SelectSubparams,
-}
-
-impl Default for SelectParams {
-    fn default() -> Self {
-        Self {
-            nreads_mult: 0.8,
-            haplotype: SelectSubparams {
-                min_size: 5,
-                max_size: 100,
-                score_thresh: 0.9,
-            },
-            genotype: SelectSubparams {
-                min_size: 10,
-                max_size: 1000,
-                score_thresh: 0.9,
-            },
-        }
-    }
-}
-
-impl SelectParams {
-    fn validate(&self) -> Result<(), Error> {
-        validate_param!(0.0 < self.nreads_mult && self.nreads_mult < 2.0,
-            "Number of reads multiplier ({}) must be reasonably close to 1",
-            self.nreads_mult);
-        self.haplotype.validate("Haplotype filtering")?;
-        self.genotype.validate("Genotype filtering")?;
-        Ok(())
-    }
-}
 
 struct Args {
     input: Vec<PathBuf>,
@@ -158,7 +52,7 @@ struct Args {
     debug: bool,
 
     recr_params: recruit::Params,
-    select_params: SelectParams,
+    filt_params: FilterParams,
     assgn_params: AssgnParams,
 }
 
@@ -183,7 +77,7 @@ impl Default for Args {
             debug: false,
 
             recr_params: Default::default(),
-            select_params: Default::default(),
+            filt_params: Default::default(),
             assgn_params: Default::default(),
         }
     }
@@ -207,7 +101,7 @@ impl Args {
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
-        self.select_params.validate()?;
+        self.filt_params.validate()?;
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -284,26 +178,26 @@ fn print_help() {
         "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
         super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
 
-    let sel_defaults = &defaults.select_params;
+    let filt_defaults = &defaults.filt_params;
     println!("\n{}", "Pre-filtering:".bold());
     println!("    {:KEY$} {:VAL$}  Skip pre-filtering (same as {} or {}).\n\
         {EMPTY}  Note: haplotype filtering is always skipped if priors are set.",
         "    --no-filtering".green(), super::flag(), "--n-haps inf".underline(), "--n-gts inf".underline());
     println!("    {:KEY$} {:VAL$}  Rank haplotypes based on the top {}/ploidy read alignments [{}].",
         "    --nreads-mult".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-        super::fmt_def_f64(sel_defaults.nreads_mult));
+        super::fmt_def_f64(filt_defaults.nreads_mult));
     println!("    {:KEY$} {:VAL$}\n\
         {EMPTY}  Score threshold for haplotype [{}] and genotype [{}] filtering.\n\
         {EMPTY}  Values range from 0 (use all) to 1 (only entries with the best score).",
         "    --score-thresh".green(), "FLOAT [FLOAT]".yellow(),
-        super::fmt_def_f64(sel_defaults.haplotype.score_thresh),
-        super::fmt_def_f64(sel_defaults.genotype.score_thresh));
+        super::fmt_def_f64(filt_defaults.haplotype.score_thresh),
+        super::fmt_def_f64(filt_defaults.genotype.score_thresh));
     println!("    {}    {}  Minimum and maximum number of haplotypes after filtering [{} {}].",
         "    -n-haps".green(), "INT [INT]".yellow(),
-        super::fmt_def(sel_defaults.haplotype.min_size), super::fmt_def(sel_defaults.haplotype.max_size));
+        super::fmt_def(filt_defaults.haplotype.min_size), super::fmt_def(filt_defaults.haplotype.max_size));
     println!("    {}     {}  Minimum and maximum number of genotypes after filtering [{} {}].",
         "    -n-gts".green(), "INT [INT]".yellow(),
-        super::fmt_def(sel_defaults.genotype.min_size), super::fmt_def(sel_defaults.genotype.max_size));
+        super::fmt_def(filt_defaults.genotype.min_size), super::fmt_def(filt_defaults.genotype.max_size));
 
     println!("\n{}", "Locus genotyping:".bold());
     println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
@@ -382,24 +276,24 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
 
             Long("no-filt") | Long("no-filter") | Long("no-filtering") => {
-                args.select_params.haplotype.disable();
-                args.select_params.genotype.disable();
+                args.filt_params.haplotype.disable();
+                args.filt_params.genotype.disable();
             }
             Long("nreads-mult") | Long("nreads-multiplier") =>
-                args.select_params.nreads_mult = parser.value()?.parse()?,
+                args.filt_params.nreads_mult = parser.value()?.parse()?,
             Long("score-thresh") | Long("score-threshold") => {
                 let mut values = parser.values()?;
-                args.select_params.haplotype.score_thresh = values.next()
+                args.filt_params.haplotype.score_thresh = values.next()
                     .expect("At least one value must be present").parse()?;
-                args.select_params.genotype.score_thresh = values.next()
+                args.filt_params.genotype.score_thresh = values.next()
                     .map(|v| v.parse())
                     .transpose()?
-                    .unwrap_or(args.select_params.haplotype.score_thresh);
+                    .unwrap_or(args.filt_params.haplotype.score_thresh);
             }
             Long("n-haps") | Long("n-haplotypes") =>
-                args.select_params.haplotype.set_sizes(parser.values()?)?,
+                args.filt_params.haplotype.set_sizes(parser.values()?)?,
             Long("n-gts") | Long("n-genotypes") =>
-                args.select_params.genotype.set_sizes(parser.values()?)?,
+                args.filt_params.genotype.set_sizes(parser.values()?)?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -819,7 +713,7 @@ fn generate_genotypes(
 fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
-    scheme: &scheme::Scheme,
+    scheme: &Scheme,
     cached_distrs: &CachedDepthDistrs,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
@@ -846,7 +740,7 @@ fn analyze_locus(
     let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
     let contig_ids: Vec<ContigId> = /* if opt_priors.is_none() {
-        select_haplotypes(contigs, &all_alns, &mut lik_writer, &args.select_params, args.ploidy, args.debug)
+        select_haplotypes(contigs, &all_alns, &mut lik_writer, &args.filt_params, args.ploidy, args.debug)
             .map_err(add_path!(locus.lik_filename))?
     } else */ {
         contigs.ids().collect()
@@ -868,7 +762,7 @@ fn analyze_locus(
         }
     }
 
-    // let gt_alns = filter_genotypes(gt_alns, &mut lik_writer, &args.select_params, args.debug)
+    // let gt_alns = filter_genotypes(gt_alns, &mut lik_writer, &args.filt_params, args.debug)
     //     .map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
         scheme: scheme.clone(),
@@ -909,8 +803,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     recruit_reads(&loci, &args)?;
 
     let scheme = match args.solvers.as_ref() {
-        Some(filename) => scheme::Scheme::from_json(&ext::sys::load_json(filename)?)?,
-        None => scheme::Scheme::default(),
+        Some(filename) => Scheme::from_json(&ext::sys::load_json(filename)?)?,
+        None => Scheme::default(),
     };
     let cached_distrs = CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn);
 
