@@ -424,7 +424,7 @@ impl AllAlignments {
         mut dbg_writer: impl Write,
     ) -> Result<Self, Error>
     {
-        log::info!("[{}] Loading read alignments", contigs.tag());
+        log::info!("    Loading read alignments");
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
