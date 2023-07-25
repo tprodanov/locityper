@@ -21,10 +21,13 @@ use crate::{
     math::{self, Ln, Phred},
     err::{Error, validate_param, add_path},
     bg::ser::json_get,
-    seq::contigs::ContigNames,
+    seq::contigs::{ContigNames, Genotype},
     model::{
+        Params as AssgnParams,
         locs::{AllAlignments, Pair},
         assgn::{GenotypeAlignments, ReadAssignment, SelectedCounter},
+        windows::ContigWindows,
+        dp_cache::CachedDepthDistrs,
     },
 };
 use super::Solver;
@@ -288,43 +291,53 @@ pub struct Data {
     /// Solving scheme.
     pub scheme: Scheme,
     pub contigs: Arc<ContigNames>,
+    /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
-    pub tweak: u32,
+    /// Cached read depth distributions.
+    pub cached_distrs: Arc<CachedDepthDistrs>,
+    pub contig_windows: Vec<Option<ContigWindows>>,
+
+    /// Genotypes and their priors.
+    pub gt_priors: Vec<(Genotype, f64)>,
+
+    pub params: AssgnParams,
     pub debug: bool,
 }
 
 fn solve_single_thread(
     data: Data,
-    mut all_gt_alns: Vec<Option<GenotypeAlignments>>,
     lik_writer: impl Write,
     mut depth_writer: impl Write,
     mut aln_writer: impl Write,
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let total_genotypes = all_gt_alns.len();
+    let tweak = data.params.tweak.unwrap();
+    let total_genotypes = data.gt_priors.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
     let mut rem_ixs = (0..total_genotypes).collect();
 
     let mut selected = SelectedCounter::default();
     for (stage_ix, stage) in data.scheme.iter().enumerate() {
-        helper.start_stage(stage_ix, &mut rem_ixs, &mut all_gt_alns);
+        helper.start_stage(stage_ix, &mut rem_ixs);
         let solver = &stage.solver;
         let mean = F64Ext::generalized_ln_mean(stage.aver_power);
         let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
 
         for &ix in rem_ixs.iter() {
-            let gt_alns = all_gt_alns[ix].as_mut().expect("Genotype alignments must be present");
+            let (gt, prior) = &data.gt_priors[ix];
+            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows,
+                &data.all_alns, &data.cached_distrs, &data.params);
             if stage.write && data.debug {
-                selected.reset(gt_alns);
+                selected.reset(&gt_alns);
             }
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
-                gt_alns.define_read_windows(data.tweak, rng);
+                gt_alns.define_read_windows(tweak, rng);
                 let assgns = solver.solve(&gt_alns, rng)?;
-                *lik = assgns.likelihood();
+                *lik = *prior + assgns.likelihood();
                 if stage.write {
-                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.genotype().name(), attempt + 1);
+                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                     assgns.write_depth(&mut depth_writer, &prefix).map_err(add_path!(!))?;
                     if data.debug {
                         selected.update(&assgns);
@@ -332,11 +345,11 @@ fn solve_single_thread(
                 }
             }
             if stage.write && data.debug {
-                let prefix = format!("{}\t{}", stage_ix + 1, gt_alns.genotype().name());
+                let prefix = format!("{}\t{}", stage_ix + 1, gt);
                 write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, selected.fractions())
                     .map_err(add_path!(!))?;
             }
-            helper.update(ix, gt_alns.genotype().name(), mean(&liks))?;
+            helper.update(ix, gt.name(), mean(&liks))?;
         }
         helper.finish_stage();
     }
@@ -383,14 +396,13 @@ fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
 
 pub fn solve(
     data: Data,
-    gt_alns: Vec<Option<GenotypeAlignments>>,
     lik_writer: impl Write,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
     mut threads: u16,
 ) -> Result<(), Error>
 {
-    let n_gts = gt_alns.len();
+    let n_gts = data.gt_priors.len();
     if usize::from(threads) > n_gts {
         threads = n_gts as u16;
     }
@@ -406,9 +418,9 @@ pub fn solve(
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
     if threads == 1 {
-        solve_single_thread(data, gt_alns, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
+        solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
     } else {
-        let main_worker = MainWorker::new(Arc::new(data), gt_alns, rng, threads, depth_writers, aln_writers);
+        let main_worker = MainWorker::new(Arc::new(data), rng, threads, depth_writers, aln_writers);
         main_worker.run(lik_writer)?;
     }
     merge_dbg_files(&depth_filenames)?;
@@ -416,14 +428,13 @@ pub fn solve(
     Ok(())
 }
 
-/// Task, sent to the workers: stage index and a vector of (genotype index, genotype alignments).
-type Task = (usize, Vec<(usize, GenotypeAlignments)>);
-/// Tuple index, returned genotype alignments and calculated likelihood.
-type Solution = (usize, GenotypeAlignments, f64);
+/// Task, sent to the workers: stage index and a vector of genotype indices.
+type Task = (usize, Vec<usize>);
+/// Genotype index and calculated likelihood.
+type Solution = (usize, f64);
 
 struct MainWorker {
     data: Arc<Data>,
-    gt_alns: Vec<Option<GenotypeAlignments>>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
     handles: Vec<thread::JoinHandle<Result<(), Error>>>,
@@ -432,7 +443,6 @@ struct MainWorker {
 impl MainWorker {
     fn new(
         data: Arc<Data>,
-        gt_alns: Vec<Option<GenotypeAlignments>>,
         rng: &mut XoshiroRng,
         threads: u16,
         depth_writers: Vec<impl Write + Send + 'static>,
@@ -460,20 +470,21 @@ impl MainWorker {
             receivers.push(sol_receiver);
             handles.push(thread::spawn(|| worker.run()));
         }
-        MainWorker { data, gt_alns, senders, receivers, handles }
+        MainWorker { data, senders, receivers, handles }
     }
 
-    fn run(mut self, lik_writer: impl Write) -> Result<(), Error> {
+    fn run(self, lik_writer: impl Write) -> Result<(), Error> {
         let n_workers = self.handles.len();
         let scheme = &self.data.scheme;
         let contigs = &self.data.contigs;
-        let total_genotypes = self.gt_alns.len();
+        let gt_priors = &self.data.gt_priors;
+        let total_genotypes = gt_priors.len();
         let mut helper = Helper::new(&scheme, contigs.tag(), lik_writer, total_genotypes)?;
         let mut rem_jobs = Vec::with_capacity(n_workers);
         let mut rem_ixs = (0..total_genotypes).collect();
 
         for stage_ix in 0..scheme.len() {
-            helper.start_stage(stage_ix, &mut rem_ixs, &mut self.gt_alns);
+            helper.start_stage(stage_ix, &mut rem_ixs);
             rem_jobs.clear();
             let m = rem_ixs.len();
             let mut start = 0;
@@ -484,9 +495,7 @@ impl MainWorker {
                 let rem_workers = n_workers - i;
                 // Ceiling division.
                 let curr_jobs = ((m - start) + rem_workers - 1) / rem_workers;
-                let task = rem_ixs[start..start + curr_jobs].iter()
-                    .map(|&i| (i, self.gt_alns[i].take().expect("Genotype alignments were dropped")))
-                    .collect();
+                let task = rem_ixs[start..start + curr_jobs].to_vec();
                 sender.send((stage_ix, task)).expect("Genotyping worker has failed!");
                 start += curr_jobs;
                 rem_jobs.push(curr_jobs);
@@ -496,10 +505,8 @@ impl MainWorker {
             while helper.solved_genotypes < m {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
-                        let (ix, gt_alns, lik) = receiver.recv().expect("Genotyping worker has failed!");
-                        helper.update(ix, gt_alns.genotype().name(), lik)?;
-                        // Do not remove assert!
-                        assert!(self.gt_alns[ix].replace(gt_alns).is_none(), "Solved genotype twice");
+                        let (ix, lik) = receiver.recv().expect("Genotyping worker has failed!");
+                        helper.update(ix, gt_priors[ix].0.name(), lik)?;
                         *jobs -= 1;
                     }
                 }
@@ -526,8 +533,12 @@ struct Worker<W, U> {
 
 impl<W: Write, U: Write> Worker<W, U> {
     fn run(mut self) -> Result<(), Error> {
+        let gt_priors = &self.data.gt_priors;
         let all_alns = &self.data.all_alns;
-        let tweak = self.data.tweak;
+        let contig_windows = &self.data.contig_windows;
+        let cached_distrs = &self.data.cached_distrs;
+        let params = &self.data.params;
+        let tweak = params.tweak.unwrap();
 
         // Block thread and wait for the shipment.
         while let Ok((stage_ix, task)) = self.receiver.recv() {
@@ -540,16 +551,18 @@ impl<W: Write, U: Write> Worker<W, U> {
             let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
             let mut selected = SelectedCounter::default();
             let mean = F64Ext::generalized_ln_mean(stage.aver_power);
-            for (ix, mut gt_alns) in task.into_iter() {
+            for ix in task.into_iter() {
+                let (gt, prior) = &gt_priors[ix];
+                let mut gt_alns = GenotypeAlignments::new(gt.clone(), contig_windows, all_alns, cached_distrs, params);
                 if debug {
                     selected.reset(&gt_alns);
                 }
                 for (attempt, lik) in liks.iter_mut().enumerate() {
                     gt_alns.define_read_windows(tweak, &mut self.rng);
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
-                    *lik = assgns.likelihood();
+                    *lik = *prior + assgns.likelihood();
                     if stage.write {
-                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, assgns.genotype().name(), attempt + 1);
+                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                         assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
                         if debug {
                             selected.update(&assgns);
@@ -557,10 +570,10 @@ impl<W: Write, U: Write> Worker<W, U> {
                     }
                 }
                 if debug {
-                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt_alns.genotype().name()),
+                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt),
                         &gt_alns, all_alns, selected.fractions()).map_err(add_path!(!))?;
                 }
-                if let Err(_) = self.sender.send((ix, gt_alns, mean(&liks))) {
+                if let Err(_) = self.sender.send((ix, mean(&liks))) {
                     log::error!("Read recruitment: main thread stopped before the child thread.");
                     break;
                 }
@@ -611,14 +624,8 @@ impl<'a, W: Write> Helper<'a, W> {
         })
     }
 
-    /// Does several things: logs the start of the stage, truncates the list of indices,
-    /// and drops discarded genotype alignments.
-    fn start_stage(
-        &mut self,
-        stage_ix: usize,
-        rem_ixs: &mut Vec<usize>,
-        gt_alns: &mut [Option<GenotypeAlignments>],
-    ) {
+    /// Does several things: logs the start of the stage and truncates the list of indices.
+    fn start_stage(&mut self, stage_ix: usize, rem_ixs: &mut Vec<usize>) {
         self.stage_start = self.timer.elapsed();
         self.stage_ix = stage_ix;
         let stage = &self.scheme.0[stage_ix];
@@ -628,10 +635,6 @@ impl<'a, W: Write> Helper<'a, W> {
             .clamp(1, self.curr_genotypes);
         if self.curr_genotypes < rem_ixs.len() {
             rem_ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].total_cmp(&self.likelihoods[i]));
-            for &i in rem_ixs[self.curr_genotypes..].iter() {
-                // Do not remove this assert!
-                assert!(gt_alns[i].take().is_some(), "Genotype alignments are already dropped");
-            }
             rem_ixs.truncate(self.curr_genotypes);
             self.num_width = math::num_digits(self.curr_genotypes as f64) as usize;
         }

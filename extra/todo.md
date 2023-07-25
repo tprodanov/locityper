@@ -22,3 +22,6 @@ Just select best 1/3 and rank haplotypes.
 
 Make read filtering stricter
 - Do we need `rem_ixs` in `scheme`?
+
+Assigning read pair alignments to genotypes in parallel.
+Remove `cached_distrs` from GenotypeAlignemnts.

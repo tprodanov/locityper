@@ -686,149 +686,141 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
     Ok(())
 }
 
-/// Generates all read alignments to all genotypes (unless they have prior -inf or are not in the priors file).
-fn distribute_alns_to_gts(
+/// Generates the list of genotypes and their priors.
+fn generate_genotypes(
     contig_ids: &[ContigId],
     contigs: &ContigNames,
-    contig_windows: &[Option<ContigWindows>],
-    all_alns: &AllAlignments,
     opt_priors: Option<&FnvHashMap<String, f64>>,
-    cached_distrs: &CachedDepthDistrs,
-    args: &Args,
-) -> Result<Vec<Option<GenotypeAlignments>>, Error>
+    ploidy: usize,
+) -> Result<Vec<(Genotype, f64)>, Error>
 {
-    log::info!("    Selecting read pairs alignments for each genotype");
-    let ploidy = usize::from(args.ploidy);
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
             "All contig IDs must be present when priors are provided");
-        let mut all_gt_alns = Vec::new();
-        for (genotype_s, &prior) in priors_map.iter() {
-            match Genotype::parse(genotype_s, contigs) {
-                Ok(genotype) =>
-                    if genotype.ploidy() != ploidy {
-                        log::error!("Cannot parse genotype {:?} (expected ploidy {})", genotype_s, ploidy);
-                    } else if prior.is_finite() {
-                        let mut gt_alns = GenotypeAlignments::new(genotype, contig_windows,
-                            all_alns, cached_distrs, &args.assgn_params);
-                        gt_alns.set_prior(prior)?;
-                        all_gt_alns.push(Some(gt_alns));
-                    },
-                Err(Error::ParsingError(e)) => log::error!("Cannot parse genotype {:?} ({})", genotype_s, e),
-                Err(e) => log::error!("Cannot parse genotype {:?} ({:?})", genotype_s, e),
+        let mut gt_priors = Vec::with_capacity(priors_map.len());
+        for (s, &prior) in priors_map.iter() {
+            let gt = Genotype::parse(s, contigs)?;
+            if prior > 0.0 || prior.is_nan() {
+                return Err(Error::InvalidInput(format!("Invalid prior {} for genotype {}", prior, s)));
+            } else if gt.ploidy() != ploidy {
+                return Err(Error::InvalidInput(format!(
+                    "Cannot load prior for genotype {} (expected ploidy {})", s, ploidy)));
+            } else if prior.is_finite() {
+                gt_priors.push((gt, Ln::from_log10(prior)));
             }
         }
-        Ok(all_gt_alns)
+        Ok(gt_priors)
     } else {
-        let genotypes = Genotype::generate_all(&contig_ids, contigs, ploidy);
-        Ok(genotypes.into_iter().map(|gt| Some(GenotypeAlignments::new(gt, contig_windows,
-                all_alns, cached_distrs, &args.assgn_params))).collect())
+        let mut gt_priors = Vec::with_capacity(ext::vec::count_combinations_with_repl(contig_ids.len(), ploidy));
+        ext::vec::gen_combinations_with_repl(&contig_ids, ploidy,
+            |ids| gt_priors.push((Genotype::new(ids, contigs), 0.0)));
+        Ok(gt_priors)
     }
 }
 
-// ln(10^-50).
-const MIN_SCORE_RANGE: f64 = -115.12925464970229;
+// // ln(10^-50).
+// const MIN_SCORE_RANGE: f64 = -115.12925464970229;
 
-fn select_haplotypes(
-    contigs: &ContigNames,
-    all_alns: &AllAlignments,
-    mut lik_writer: impl Write,
-    params: &SelectParams,
-    ploidy: u8,
-    debug: bool,
-) -> io::Result<Vec<ContigId>>
-{
-    let n = contigs.len();
-    if params.haplotype.min_size >= n && !debug {
-        return Ok(contigs.ids().collect());
-    }
-    let n_reads = all_alns.n_reads();
-    assert!(n_reads != 0);
-    let n_best_reads = (((n_reads as f64) * params.nreads_mult / f64::from(ploidy)).ceil() as usize)
-        .clamp(1, n_reads);
-    log::info!("    Filtering haplotypes based on the best {} reads out of {}", n_best_reads, n_reads);
+// fn select_haplotypes(
+//     contigs: &ContigNames,
+//     all_alns: &AllAlignments,
+//     mut lik_writer: impl Write,
+//     params: &SelectParams,
+//     ploidy: u8,
+//     debug: bool,
+// ) -> io::Result<Vec<ContigId>>
+// {
+//     let n = contigs.len();
+//     if params.haplotype.min_size >= n && !debug {
+//         return Ok(contigs.ids().collect());
+//     }
+//     let n_reads = all_alns.n_reads();
+//     assert!(n_reads != 0);
+//     let n_best_reads = (((n_reads as f64) * params.nreads_mult / f64::from(ploidy)).ceil() as usize)
+//         .clamp(1, n_reads);
+//     log::info!("    Filtering haplotypes based on the best {} reads out of {}", n_best_reads, n_reads);
 
-    // Vector of vectors: contig id -> read pair -> best aln prob.
-    let mut best_aln_probs = vec![Vec::<f64>::with_capacity(n_reads); n];
-    for read_alns in all_alns.iter() {
-        for (contig_probs, best_prob) in best_aln_probs.iter_mut().zip(read_alns.best_for_each_contig(contigs)) {
-            contig_probs.push(best_prob);
-        }
-    }
+//     // Vector of vectors: contig id -> read pair -> best aln prob.
+//     let mut best_aln_probs = vec![Vec::<f64>::with_capacity(n_reads); n];
+//     for read_alns in all_alns.iter() {
+//         for (contig_probs, best_prob) in best_aln_probs.iter_mut().zip(read_alns.best_for_each_contig(contigs)) {
+//             contig_probs.push(best_prob);
+//         }
+//     }
 
-    let mut scores = Vec::with_capacity(n);
-    for (id, contig_probs) in contigs.ids().zip(best_aln_probs.iter_mut()) {
-        contig_probs.sort_unstable_by(|a, b| b.total_cmp(&a));
-        let score: f64 = contig_probs[..n_best_reads].iter().copied().sum();
-        writeln!(lik_writer, "0a\t{}\t{:.3}", contigs.get_name(id), score)?;
-        scores.push((id, score));
-    }
+//     let mut scores = Vec::with_capacity(n);
+//     for (id, contig_probs) in contigs.ids().zip(best_aln_probs.iter_mut()) {
+//         contig_probs.sort_unstable_by(|a, b| b.total_cmp(&a));
+//         let score: f64 = contig_probs[..n_best_reads].iter().copied().sum();
+//         writeln!(lik_writer, "0a\t{}\t{:.3}", contigs.get_name(id), score)?;
+//         scores.push((id, score));
+//     }
 
-    // Decreasing sort by score.
-    scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    let best = scores[0];
-    let worst = scores[n - 1];
-    let range = best.1 - worst.1;
-    if range < MIN_SCORE_RANGE {
-        log::warn!("        Difference between haplotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
-        return Ok(contigs.ids().collect());
-    }
-    let (m, thresh) = params.haplotype.get_partition(&scores);
-    log::debug!("        Selected {} haplotypes out of {}, relative score thresh {:.3}", m, n,
-        (thresh - worst.1) / range);
-    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
-        contigs.get_name(worst.0), Ln::to_log10(worst.1),
-        contigs.get_name(best.0), Ln::to_log10(best.1), Ln::to_log10(thresh));
-    Ok(scores[..m].iter().map(|&(id, _)| id).collect())
-}
+//     // Decreasing sort by score.
+//     scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+//     let best = scores[0];
+//     let worst = scores[n - 1];
+//     let range = best.1 - worst.1;
+//     if range < MIN_SCORE_RANGE {
+//         log::warn!("        Difference between haplotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
+//         return Ok(contigs.ids().collect());
+//     }
+//     let (m, thresh) = params.haplotype.get_partition(&scores);
+//     log::debug!("        Selected {} haplotypes out of {}, relative score thresh {:.3}", m, n,
+//         (thresh - worst.1) / range);
+//     log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
+//         contigs.get_name(worst.0), Ln::to_log10(worst.1),
+//         contigs.get_name(best.0), Ln::to_log10(best.1), Ln::to_log10(thresh));
+//     Ok(scores[..m].iter().map(|&(id, _)| id).collect())
+// }
 
-/// Filter genotypes based on read alignments alone (without accounting for read depth).
-fn filter_genotypes(
-    mut all_gt_alns: Vec<Option<GenotypeAlignments>>,
-    mut lik_writer: impl Write,
-    params: &SelectParams,
-    debug: bool,
-) -> io::Result<Vec<Option<GenotypeAlignments>>>
-{
-    let n = all_gt_alns.len();
-    // Need to run anyway in case of `debug`, so that we output all values.
-    if params.genotype.min_size >= n && !debug {
-        return Ok(all_gt_alns);
-    }
-    log::info!("    Filtering genotypes based on read alignment likelihood");
-    // Vector (index, score);
-    let mut scores = Vec::with_capacity(n);
-    for (i, gt_alns) in all_gt_alns.iter().enumerate() {
-        let gt_alns = gt_alns.as_ref().expect("All genotype alignments must be defined at this point");
-        let score = gt_alns.max_aln_lik();
-        writeln!(lik_writer, "0b\t{}\t{:.3}", gt_alns.genotype().name(), Ln::to_log10(score))?;
-        scores.push((i, score));
-    }
+// /// Filter genotypes based on read alignments alone (without accounting for read depth).
+// fn filter_genotypes(
+//     mut all_gt_alns: Vec<Option<GenotypeAlignments>>,
+//     mut lik_writer: impl Write,
+//     params: &SelectParams,
+//     debug: bool,
+// ) -> io::Result<Vec<Option<GenotypeAlignments>>>
+// {
+//     let n = all_gt_alns.len();
+//     // Need to run anyway in case of `debug`, so that we output all values.
+//     if params.genotype.min_size >= n && !debug {
+//         return Ok(all_gt_alns);
+//     }
+//     log::info!("    Filtering genotypes based on read alignment likelihood");
+//     // Vector (index, score);
+//     let mut scores = Vec::with_capacity(n);
+//     for (i, gt_alns) in all_gt_alns.iter().enumerate() {
+//         let gt_alns = gt_alns.as_ref().expect("All genotype alignments must be defined at this point");
+//         let score = gt_alns.max_aln_lik();
+//         writeln!(lik_writer, "0b\t{}\t{:.3}", gt_alns.genotype().name(), Ln::to_log10(score))?;
+//         scores.push((i, score));
+//     }
 
-    // Decreasing sort by score.
-    scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    let best = scores[0];
-    let worst = scores[n - 1];
-    let range = best.1 - worst.1;
-    if range < MIN_SCORE_RANGE {
-        log::warn!("        Difference between genotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
-        return Ok(all_gt_alns);
-    }
-    let (m, thresh) = params.genotype.get_partition(&scores);
-    log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
-        (thresh - worst.1) / range);
-    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
-        all_gt_alns[worst.0].as_ref().unwrap().genotype().name(), Ln::to_log10(worst.1),
-        all_gt_alns[best.0].as_ref().unwrap().genotype().name(), Ln::to_log10(best.1),
-        Ln::to_log10(thresh));
-    Ok(scores[..m].iter().map(|&(i, _)| all_gt_alns[i].take()).collect())
-}
+//     // Decreasing sort by score.
+//     scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+//     let best = scores[0];
+//     let worst = scores[n - 1];
+//     let range = best.1 - worst.1;
+//     if range < MIN_SCORE_RANGE {
+//         log::warn!("        Difference between genotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
+//         return Ok(all_gt_alns);
+//     }
+//     let (m, thresh) = params.genotype.get_partition(&scores);
+//     log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
+//         (thresh - worst.1) / range);
+//     log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
+//         all_gt_alns[worst.0].as_ref().unwrap().genotype().name(), Ln::to_log10(worst.1),
+//         all_gt_alns[best.0].as_ref().unwrap().genotype().name(), Ln::to_log10(best.1),
+//         Ln::to_log10(thresh));
+//     Ok(scores[..m].iter().map(|&(i, _)| all_gt_alns[i].take()).collect())
+// }
 
 fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
     scheme: &scheme::Scheme,
-    cached_distrs: &CachedDepthDistrs,
+    cached_distrs: &Arc<CachedDepthDistrs>,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
@@ -853,13 +845,17 @@ fn analyze_locus(
 
     let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
-    let contig_ids = if opt_priors.is_none() {
+    let contig_ids: Vec<ContigId> = /* if opt_priors.is_none() {
         select_haplotypes(contigs, &all_alns, &mut lik_writer, &args.select_params, args.ploidy, args.debug)
             .map_err(add_path!(locus.lik_filename))?
-    } else {
+    } else */ {
         contigs.ids().collect()
     };
 
+    let gt_priors = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
+    if gt_priors.is_empty() {
+        return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
+    }
     let contig_windows = ContigWindows::new_all(&contig_ids, &locus.set, bg_distr.depth(), &args.assgn_params);
     if args.debug || scheme.has_dbg_output() {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
@@ -872,21 +868,18 @@ fn analyze_locus(
         }
     }
 
-    let gt_alns = distribute_alns_to_gts(&contig_ids, contigs, &contig_windows, &all_alns, opt_priors,
-        cached_distrs, args)?;
-    if gt_alns.is_empty() {
-        return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
-    }
-    let gt_alns = filter_genotypes(gt_alns, &mut lik_writer, &args.select_params, args.debug)
-        .map_err(add_path!(locus.lik_filename))?;
+
+    // let gt_alns = filter_genotypes(gt_alns, &mut lik_writer, &args.select_params, args.debug)
+    //     .map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
         scheme: scheme.clone(),
         contigs: Arc::clone(&contigs),
+        cached_distrs: Arc::clone(cached_distrs),
+        params: args.assgn_params.clone(),
         debug: args.debug,
-        tweak: args.assgn_params.tweak.unwrap(),
-        all_alns,
+        all_alns, gt_priors, contig_windows,
     };
-    scheme::solve(data, gt_alns, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
+    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));
     Ok(())
@@ -920,7 +913,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         Some(filename) => scheme::Scheme::from_json(&ext::sys::load_json(filename)?)?,
         None => scheme::Scheme::default(),
     };
-    let cached_distrs = CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn);
+    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn));
 
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {

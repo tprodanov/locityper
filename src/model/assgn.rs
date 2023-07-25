@@ -65,9 +65,6 @@ pub struct GenotypeAlignments {
 
     /// Read pair indices that have > 1 possible read location (length <= n_reads).
     non_trivial_reads: Vec<usize>,
-
-    /// Prior knowledge on the genotype likelihood.
-    prior: f64,
 }
 
 impl GenotypeAlignments {
@@ -102,7 +99,6 @@ impl GenotypeAlignments {
         Self {
             depth_distrs: gt_windows.get_distributions(cached_distrs),
             depth_contrib: params.depth_contrib,
-            prior: 0.0,
             gt_windows, alns, read_ixs, non_trivial_reads,
         }
     }
@@ -147,10 +143,10 @@ impl GenotypeAlignments {
         self.depth_contrib
     }
 
-    /// Returns the genotype.
-    pub fn genotype(&self) -> &Genotype {
-        self.gt_windows.genotype()
-    }
+    // /// Returns the genotype.
+    // pub fn genotype(&self) -> &Genotype {
+    //     self.gt_windows.genotype()
+    // }
 
     /// Define read windows by randomly moving read middle by at most `tweak` bp to either side.
     pub fn define_read_windows(&mut self, tweak: u32, rng: &mut impl Rng) {
@@ -168,24 +164,9 @@ impl GenotypeAlignments {
     }
 
     /// Returns maximum achievable alignment likelihood (without read depth component).
-    /// However, this calculation includes the prior, if available.
     pub fn max_aln_lik(&self) -> f64 {
         // This works as read alignments are sorted by likelihood for each read pair.
         self.read_ixs[..self.read_ixs.len() - 1].iter().map(|&i| self.alns[i].ln_prob()).sum::<f64>()
-            + self.prior
-    }
-
-    pub fn prior(&self) -> f64 {
-        self.prior
-    }
-
-    pub fn set_prior(&mut self, prior: f64) -> Result<(), Error> {
-        if prior > 0.0 || !prior.is_normal() {
-            Err(Error::InvalidInput(format!("Genotype prior ({}) must be within (-inf, 0].", prior)))
-        } else {
-            self.prior = prior;
-            Ok(())
-        }
     }
 }
 
@@ -246,20 +227,14 @@ impl<'a> ReadAssignment<'a> {
         Ok(assgn)
     }
 
-    /// Returns the genotype.
-    pub fn genotype(&self) -> &Genotype {
-        self.gt_alns.genotype()
-    }
-
-    /// Returns the total likelihood of the read assignment, including prior.
-    /// Equal to `prior + depth_contrib * depth_lik + aln_lik`
-    pub fn likelihood(&self) -> f64 {
-        self.gt_alns.prior + self.gt_alns.depth_contrib * self.depth_lik + self.aln_lik
-    }
+    // /// Returns the genotype.
+    // pub fn genotype(&self) -> &Genotype {
+    //     self.gt_alns.genotype()
+    // }
 
     /// Returns the total likelihood of the read assignment.
     /// Equal to `depth_contrib * depth_lik + aln_lik`
-    pub fn likelihood_wo_proir(&self) -> f64 {
+    pub fn likelihood(&self) -> f64 {
         self.gt_alns.depth_contrib * self.depth_lik + self.aln_lik
     }
 

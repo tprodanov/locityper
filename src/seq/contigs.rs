@@ -276,15 +276,14 @@ pub struct Genotype {
 }
 
 impl Genotype {
-    pub fn new(ids_iter: impl Iterator<Item = ContigId>, contigs: &ContigNames) -> Self {
-        let mut ids = GtStorage::new();
+    pub fn new(ids: &[ContigId], contigs: &ContigNames) -> Self {
+        let ids: GtStorage = ids.iter().copied().collect();
         let mut name = String::new();
-        for id in ids_iter {
+        for &id in ids.iter() {
             if !name.is_empty() {
                 name.push(',');
             }
             name.push_str(contigs.get_name(id));
-            ids.push(id);
         }
         assert!(!ids.is_empty(), "Empty genotypes are not allowed");
         Self { ids, name }
@@ -314,14 +313,6 @@ impl Genotype {
             ids,
             name: s.to_owned(),
         })
-    }
-
-    /// Generates all genotype of given ploidy.
-    pub fn generate_all(avail_ids: &[ContigId], contigs: &ContigNames, ploidy: usize) -> Vec<Self> {
-        let mut res = Vec::with_capacity(ext::vec::count_combinations_with_repl(avail_ids.len(), ploidy));
-        ext::vec::gen_combinations_with_repl(avail_ids, ploidy,
-            |ids| res.push(Self::new(ids.iter().copied(), contigs)));
-        res
     }
 }
 
