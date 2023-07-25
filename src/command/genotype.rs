@@ -10,6 +10,8 @@ use std::{
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use fnv::{FnvHashSet, FnvHashMap};
+use lexopt::ValueExt;
+use htslib::bam;
 use crate::{
     err::{Error, validate_param, add_path},
     math::Ln,
@@ -29,50 +31,110 @@ use crate::{
     },
     solvers::scheme,
 };
-use htslib::bam;
 use super::paths;
+
+struct SelectSubparams {
+    /// Boundaries on the smallest and largest number of haplotypes/genotypes.
+    min_size: usize,
+    max_size: usize,
+    /// Relative score threshold (between the minimum and maximum score).
+    score_thresh: f64,
+}
+
+impl SelectSubparams {
+    fn validate(&self, prefix: &'static str) -> Result<(), Error> {
+        validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
+            "{}: score threshold ({}) must be within [0, 1]", prefix, self.score_thresh);
+        validate_param!(self.min_size > 1,
+            "{}: minimal size ({}) must be at least 2", prefix, self.min_size);
+        validate_param!(self.min_size <= self.max_size,
+            "{}: min size ({}) must be <= the max size ({})",
+            prefix, self.min_size, self.max_size);
+        Ok(())
+    }
+
+    fn set_sizes(&mut self, mut values: lexopt::ValuesIter) -> Result<(), lexopt::Error> {
+        let val1 = values.next().expect("First value must be present");
+        self.min_size = if val1 == "inf" || val1 == "Inf" {
+            usize::MAX
+        } else {
+            val1.parse()?
+        };
+
+        self.max_size = if let Some(val2) = values.next() {
+            if val2 == "inf" || val2 == "Inf" {
+                usize::MAX
+            } else {
+                val2.parse()?
+            }
+        } else {
+            usize::MAX
+        };
+        Ok(())
+    }
+
+    fn disable(&mut self) {
+        self.min_size = usize::MAX;
+        self.max_size = usize::MAX;
+    }
+
+    /// Finds partition point and score threshold based on the decreasing list of scores.
+    fn get_partition<T>(&self, scores: &[(T, f64)]) -> (usize, f64) {
+        let n = scores.len();
+        let best = scores[0].1;
+        let worst = scores[n - 1].1;
+        let range = best - worst;
+
+        let mut thresh = worst + range * self.score_thresh;
+        let mut m = scores.partition_point(|(_, score)| *score >= thresh);
+        if self.min_size >= n {
+            thresh = worst;
+            m = n;
+        } else if m < self.min_size {
+            thresh = scores[self.min_size - 1].1;
+            m = scores.partition_point(|(_, score)| *score >= thresh);
+        } else if m > self.max_size {
+            thresh = scores[self.max_size - 1].1;
+            m = scores.partition_point(|(_, score)| *score >= thresh);
+        }
+        // m can still be over max_size, but we do not want to discard entries with equal scores.
+        (m, thresh)
+    }
+}
 
 /// Filter haplotypes and genotypes before assigning reads.
 struct SelectParams {
-    /// Keep this fraction of best haplotypes.
-    haplotype_frac: f64,
-    /// Keep at least this number of haplotypes.
-    keep_haplotypes: usize,
     /// Rank haplotypes based on the top X read alignments, where X = haplotype_aln_coef / ploidy`.
-    haplotype_aln_coef: f64,
-
-    /// Keep this fraction of best genotypes based only on read alignment probabilities.
-    genotype_frac: f64,
-    /// Keep at least this number of genotypes.
-    keep_genotypes: usize,
+    nreads_mult: f64,
+    haplotype: SelectSubparams,
+    genotype: SelectSubparams,
 }
 
 impl Default for SelectParams {
     fn default() -> Self {
         Self {
-            haplotype_frac: 0.3,
-            keep_haplotypes: 5,
-            haplotype_aln_coef: 0.8,
-
-            genotype_frac: 0.3,
-            keep_genotypes: 10,
+            nreads_mult: 0.8,
+            haplotype: SelectSubparams {
+                min_size: 5,
+                max_size: 100,
+                score_thresh: 0.9,
+            },
+            genotype: SelectSubparams {
+                min_size: 10,
+                max_size: 1000,
+                score_thresh: 0.9,
+            },
         }
     }
 }
 
 impl SelectParams {
     fn validate(&self) -> Result<(), Error> {
-        validate_param!(0.0 < self.haplotype_frac && self.haplotype_frac <= 1.0,
-            "Haplotype fraction ({}) must be within (0, 1]", self.haplotype_frac);
-        validate_param!(0.0 < self.genotype_frac && self.genotype_frac <= 1.0,
-            "Genotype fraction ({}) must be within (0, 1]", self.genotype_frac);
-        validate_param!(self.keep_haplotypes > 1,
-            "Number of kept haplotypes ({}) must be at least 2", self.keep_haplotypes);
-        validate_param!(self.keep_genotypes > 1,
-            "Number of kept genotypes ({}) must be at least 2", self.keep_genotypes);
-        validate_param!(0.0 < self.haplotype_aln_coef && self.haplotype_aln_coef < 2.0,
-            "Fraction of read alignments multiplier (--hap-alns {}) must be reasonably close to 1",
-            self.haplotype_aln_coef);
+        validate_param!(0.0 < self.nreads_mult && self.nreads_mult < 2.0,
+            "Number of reads multiplier ({}) must be reasonably close to 1",
+            self.nreads_mult);
+        self.haplotype.validate("Haplotype filtering")?;
+        self.genotype.validate("Genotype filtering")?;
         Ok(())
     }
 }
@@ -222,21 +284,26 @@ fn print_help() {
         "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
         super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
 
+    let sel_defaults = &defaults.select_params;
     println!("\n{}", "Pre-filtering:".bold());
-    println!("    {:KEY$} {:VAL$}  Select this fraction of the best haplotypes [{}].\n\
-        {EMPTY}  Haplotype filtering is skipped if priors are provided.",
-        "    --hap-fraction".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.select_params.haplotype_frac));
-    println!("    {:KEY$} {:VAL$}  Keep at least this number of haplotypes [{}].",
-        "    --keep-haps".green(), "INT".yellow(), super::fmt_def(defaults.select_params.keep_haplotypes));
-    println!("    {:KEY$} {:VAL$}  Rank haplotypes based on the top {} alignments\n\
-        {EMPTY}  where {} = {}/ploidy [{}].",
-        "    --hap-alns".green(), "FLOAT".yellow(), "X".yellow(), "X".yellow(), "FLOAT".yellow(),
-        super::fmt_def_f64(defaults.select_params.haplotype_aln_coef));
-    println!("    {:KEY$} {:VAL$}  Select this fraction of best genotypes [{}] based on\n\
-        {EMPTY}  read alignment likelihoods alone (without read depth).",
-        "    --gt-fraction".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.select_params.genotype_frac));
-    println!("    {:KEY$} {:VAL$}  Keep at least this number of genotypes [{}].",
-        "    --keep-gts".green(), "INT".yellow(), super::fmt_def(defaults.select_params.keep_genotypes));
+    println!("    {:KEY$} {:VAL$}  Skip pre-filtering (same as {} or {}).\n\
+        {EMPTY}  Note: haplotype filtering is always skipped if priors are set.",
+        "    --skip-filt".green(), super::flag(), "--n-haps inf".underline(), "--n-gts inf".underline());
+    println!("    {:KEY$} {:VAL$}  Rank haplotypes based on the top {}/ploidy read alignments [{}].",
+        "    --nreads-mult".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+        super::fmt_def_f64(sel_defaults.nreads_mult));
+    println!("    {:KEY$} {:VAL$}\n\
+        {EMPTY}  Score threshold for haplotype [{}] and genotype [{}] filtering.\n\
+        {EMPTY}  Values range from 0 (use all) to 1 (only entries with the best score).",
+        "    --score-thresh".green(), "FLOAT [FLOAT]".yellow(),
+        super::fmt_def_f64(sel_defaults.haplotype.score_thresh),
+        super::fmt_def_f64(sel_defaults.genotype.score_thresh));
+    println!("    {}    {}  Minimum and maximum number of haplotypes after filtering [{} {}].",
+        "    -n-haps".green(), "INT [INT]".yellow(),
+        super::fmt_def(sel_defaults.haplotype.min_size), super::fmt_def(sel_defaults.haplotype.max_size));
+    println!("    {}     {}  Minimum and maximum number of genotypes after filtering [{} {}].",
+        "    -n-gts".green(), "INT [INT]".yellow(),
+        super::fmt_def(sel_defaults.genotype.min_size), super::fmt_def(sel_defaults.genotype.max_size));
 
     println!("\n{}", "Locus genotyping:".bold());
     println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
@@ -314,13 +381,25 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 };
             }
 
-            Long("hap-fraction") | Long("hap-frac") => args.select_params.haplotype_frac = parser.value()?.parse()?,
-            Long("keep-haps") | Long("keep-hap") | Long("keep-haplotypes") =>
-                args.select_params.keep_haplotypes = parser.value()?.parse()?,
-            Long("hap-alns") | Long("hap-aln") => args.select_params.haplotype_aln_coef = parser.value()?.parse()?,
-            Long("gt-frac") | Long("gt-fraction") => args.select_params.genotype_frac = parser.value()?.parse()?,
-            Long("keep-gts") | Long("keep-gt") | Long("keep-genotypes") =>
-                args.select_params.keep_genotypes = parser.value()?.parse()?,
+            Long("skip-filter") | Long("skip-filting") => {
+                args.select_params.haplotype.disable();
+                args.select_params.genotype.disable();
+            }
+            Long("nreads-mult") | Long("nreads-multiplier") =>
+                args.select_params.nreads_mult = parser.value()?.parse()?,
+            Long("score-thresh") | Long("score-threshold") => {
+                let mut values = parser.values()?;
+                args.select_params.haplotype.score_thresh = values.next()
+                    .expect("At least one value must be present").parse()?;
+                args.select_params.genotype.score_thresh = values.next()
+                    .map(|v| v.parse())
+                    .transpose()?
+                    .unwrap_or(args.select_params.haplotype.score_thresh);
+            }
+            Long("n-haps") | Long("n-haplotypes") =>
+                args.select_params.haplotype.set_sizes(parser.values()?)?,
+            Long("n-gts") | Long("n-genotypes") =>
+                args.select_params.genotype.set_sizes(parser.values()?)?,
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -647,6 +726,9 @@ fn distribute_alns_to_gts(
     }
 }
 
+// ln(10^-50).
+const MIN_SCORE_RANGE: f64 = -115.12925464970229;
+
 fn select_haplotypes(
     contigs: &ContigNames,
     all_alns: &AllAlignments,
@@ -657,13 +739,12 @@ fn select_haplotypes(
 ) -> io::Result<Vec<ContigId>>
 {
     let n = contigs.len();
-    let m = (((n as f64) * params.haplotype_frac) as usize).clamp(params.keep_haplotypes, n);
-    let n_reads = all_alns.n_reads();
-    assert!(n_reads != 0);
-    if m == n && !debug {
+    if params.haplotype.min_size >= n && !debug {
         return Ok(contigs.ids().collect());
     }
-    let n_best_reads = (((n_reads as f64) * params.haplotype_aln_coef / f64::from(ploidy)).ceil() as usize)
+    let n_reads = all_alns.n_reads();
+    assert!(n_reads != 0);
+    let n_best_reads = (((n_reads as f64) * params.nreads_mult / f64::from(ploidy)).ceil() as usize)
         .clamp(1, n_reads);
     log::info!("    Filtering haplotypes based on the best {} reads out of {}", n_best_reads, n_reads);
 
@@ -685,18 +766,20 @@ fn select_haplotypes(
 
     // Decreasing sort by score.
     scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    let thresh = scores[m - 1].1;
-    let pp = scores.partition_point(|(_, score)| *score >= thresh);
-    assert!(m <= pp);
-    log::debug!("        Selected {} haplotypes out of {}", pp, n);
-    let worst = scores[n - 1];
     let best = scores[0];
-    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1} ({:.1}%)",
+    let worst = scores[n - 1];
+    let range = best.1 - worst.1;
+    if range < MIN_SCORE_RANGE {
+        log::warn!("        Difference between haplotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
+        return Ok(contigs.ids().collect());
+    }
+    let (m, thresh) = params.haplotype.get_partition(&scores);
+    log::debug!("        Selected {} haplotypes out of {}, relative score thresh {:.3}", m, n,
+        (thresh - worst.1) / range);
+    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
         contigs.get_name(worst.0), Ln::to_log10(worst.1),
-        contigs.get_name(best.0), Ln::to_log10(best.1),
-        Ln::to_log10(thresh),
-        if worst.1 != best.1 { 100.0 * (thresh - worst.1) / (best.1 - worst.1) } else { f64::NAN });
-    Ok(scores[..pp].iter().map(|&(id, _)| id).collect())
+        contigs.get_name(best.0), Ln::to_log10(best.1), Ln::to_log10(thresh));
+    Ok(scores[..m].iter().map(|&(id, _)| id).collect())
 }
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
@@ -708,9 +791,8 @@ fn filter_genotypes(
 ) -> io::Result<Vec<Option<GenotypeAlignments>>>
 {
     let n = all_gt_alns.len();
-    let m = (((n as f64) * params.genotype_frac) as usize).clamp(params.keep_genotypes, n);
     // Need to run anyway in case of `debug`, so that we output all values.
-    if m == n && !debug {
+    if params.genotype.min_size >= n && !debug {
         return Ok(all_gt_alns);
     }
     log::info!("    Filtering genotypes based on read alignment likelihood");
@@ -722,20 +804,24 @@ fn filter_genotypes(
         writeln!(lik_writer, "0b\t{}\t{:.3}", gt_alns.genotype().name(), Ln::to_log10(score))?;
         scores.push((i, score));
     }
+
     // Decreasing sort by score.
     scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    let thresh = scores[m - 1].1;
-    let pp = scores.partition_point(|(_, score)| *score >= thresh);
-    assert!(m <= pp);
-    log::debug!("        Selected {} genotypes out of {}", pp, n);
-    let worst = scores[n - 1];
     let best = scores[0];
-    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1} ({:.1}%)",
+    let worst = scores[n - 1];
+    let range = best.1 - worst.1;
+    if range < MIN_SCORE_RANGE {
+        log::warn!("        Difference between genotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
+        return Ok(all_gt_alns);
+    }
+    let (m, thresh) = params.genotype.get_partition(&scores);
+    log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
+        (thresh - worst.1) / range);
+    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
         all_gt_alns[worst.0].as_ref().unwrap().genotype().name(), Ln::to_log10(worst.1),
         all_gt_alns[best.0].as_ref().unwrap().genotype().name(), Ln::to_log10(best.1),
-        Ln::to_log10(thresh),
-        if worst.1 != best.1 { 100.0 * (thresh - worst.1) / (best.1 - worst.1) } else { f64::NAN });
-    Ok(scores[..pp].iter().map(|&(i, _)| all_gt_alns[i].take()).collect())
+        Ln::to_log10(thresh));
+    Ok(scores[..m].iter().map(|&(i, _)| all_gt_alns[i].take()).collect())
 }
 
 fn analyze_locus(
