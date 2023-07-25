@@ -304,8 +304,7 @@ impl GenotypeWindows {
         wshifts.push(curr_wshift);
 
         for &id in genotype.ids() {
-            let curr_contig = contig_windows[id.ix()].as_ref()
-                .expect("Contig windows unavailable").to_owned();
+            let curr_contig = contig_windows[id.ix()].as_ref().expect("Contig windows unavailable").clone();
             curr_wshift += curr_contig.n_windows();
             wshifts.push(curr_wshift);
             by_contig.push(curr_contig);

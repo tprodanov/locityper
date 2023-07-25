@@ -99,15 +99,17 @@ where T: DiscreteCdf + Clone + ?Sized,
 
 impl<T: DiscreteCdf + WithMoments> WithQuantile for T {}
 
-/// Box, storing a distribution.
-pub type DistrBox = Box<dyn DiscretePmf + Send + Sync>;
-
-/// We cannot force all `DiscretePmf` to be `Clone`, but we can create a separate trait for cloning Boxes.
-pub trait DistrBoxClone: DiscretePmf {
+/// Extended trait for distribution, that can be send between threads.
+pub trait ExtDistr : DiscretePmf + Send + Sync {
+    /// Allow to clone boxes of this type.
     fn clone_box(&self) -> DistrBox;
 }
 
-impl<T: DiscretePmf + Clone + Send + Sync + 'static> DistrBoxClone for T {
+pub type DistrBox = Box<dyn ExtDistr>;
+
+impl<T> ExtDistr for T
+where T: DiscretePmf + Clone + Send + Sync + 'static
+{
     fn clone_box(&self) -> DistrBox {
         Box::new(self.clone())
     }
@@ -115,6 +117,6 @@ impl<T: DiscretePmf + Clone + Send + Sync + 'static> DistrBoxClone for T {
 
 impl Clone for DistrBox {
     fn clone(&self) -> Self {
-        self.clone_box()
+        self.as_ref().clone_box()
     }
 }

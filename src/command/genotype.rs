@@ -711,7 +711,7 @@ fn filter_genotypes(
     let (m, thresh) = params.genotype.get_partition(&scores);
     log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
         (thresh - worst.1) / range);
-    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
+    log::debug!("        Worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
         gt_priors[worst.0].0, Ln::to_log10(worst.1), gt_priors[best.0].0, Ln::to_log10(best.1), Ln::to_log10(thresh));
     Ok(scores[..m].iter().map(|&(i, _)| gt_priors[i].clone()).collect())
 }

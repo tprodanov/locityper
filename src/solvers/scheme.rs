@@ -783,7 +783,7 @@ impl<'a, W: Write> Helper<'a, W> {
         const UPDATE_SECS: u64 = 10;
         if (now_dur - self.last_msg).as_secs() >= UPDATE_SECS {
             let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
-            log::debug!("        [{:width$}/{},  {:.4} s/tuple]  Best: {} -> {:11.2}", self.solved_genotypes,
+            log::debug!("        [{:width$}/{},  {:.4} s/gt]  Best: {} -> {:11.2}", self.solved_genotypes,
                 self.curr_genotypes, speed, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
             self.last_msg = now_dur;
         }
