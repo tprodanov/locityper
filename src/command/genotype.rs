@@ -608,7 +608,7 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
 }
 
 /// Generates all read alignments to all genotypes (unless they have prior -inf or are not in the priors file).
-fn select_genotypes_alns(
+fn distribute_alns_to_gts(
     contig_ids: &[ContigId],
     contigs: &ContigNames,
     contig_windows: &[Option<ContigWindows>],
@@ -618,7 +618,7 @@ fn select_genotypes_alns(
     args: &Args,
 ) -> Result<Vec<Option<GenotypeAlignments>>, Error>
 {
-    log::info!("    [{}] Selecting read pairs alignments for each genotype", contigs.tag());
+    log::info!("    Selecting read pairs alignments for each genotype");
     let ploidy = usize::from(args.ploidy);
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
@@ -665,8 +665,7 @@ fn select_haplotypes(
     }
     let n_best_reads = (((n_reads as f64) * params.haplotype_aln_coef / f64::from(ploidy)).ceil() as usize)
         .clamp(1, n_reads);
-    log::info!("    [{}] Filtering haplotypes based on the best {} reads out of {}",
-        contigs.tag(), n_best_reads, n_reads);
+    log::info!("    Filtering haplotypes based on the best {} reads out of {}", n_best_reads, n_reads);
 
     // Vector of vectors: contig id -> read pair -> best aln prob.
     let mut best_aln_probs = vec![Vec::<f64>::with_capacity(n_reads); n];
@@ -702,7 +701,6 @@ fn select_haplotypes(
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
 fn filter_genotypes(
-    tag: &str,
     mut all_gt_alns: Vec<Option<GenotypeAlignments>>,
     mut lik_writer: impl Write,
     params: &SelectParams,
@@ -715,7 +713,7 @@ fn filter_genotypes(
     if m == n && !debug {
         return Ok(all_gt_alns);
     }
-    log::info!("    [{}] Filtering genotypes based on read alignment likelihood", tag);
+    log::info!("    Filtering genotypes based on read alignment likelihood");
     // Vector (index, score);
     let mut scores = Vec::with_capacity(n);
     for (i, gt_alns) in all_gt_alns.iter().enumerate() {
@@ -751,9 +749,10 @@ fn analyze_locus(
 ) -> Result<(), Error>
 {
     log::info!("Analyzing {}", locus.set.tag());
+    let timer = Instant::now();
     map_reads(locus, bg_distr.seq_info(), &args)?;
 
-    log::info!("    [{}] Calculating read alignment probabilities", locus.set.tag());
+    log::info!("    Calculating read alignment probabilities");
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
@@ -787,12 +786,12 @@ fn analyze_locus(
         }
     }
 
-    let gt_alns = select_genotypes_alns(&contig_ids, contigs, &contig_windows, &all_alns, opt_priors,
+    let gt_alns = distribute_alns_to_gts(&contig_ids, contigs, &contig_windows, &all_alns, opt_priors,
         cached_distrs, args)?;
     if gt_alns.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
-    let gt_alns = filter_genotypes(contigs.tag(), gt_alns, &mut lik_writer, &args.select_params, args.debug)
+    let gt_alns = filter_genotypes(gt_alns, &mut lik_writer, &args.select_params, args.debug)
         .map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
         scheme: scheme.clone(),
@@ -803,6 +802,7 @@ fn analyze_locus(
     };
     scheme::solve(data, gt_alns, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
+    log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }
 

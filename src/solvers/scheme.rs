@@ -394,8 +394,8 @@ pub fn solve(
     if usize::from(threads) > n_gts {
         threads = n_gts as u16;
     }
-    log::info!("    [{}] Genotyping complex locus in {} stages and {} threads across {} possible genotypes",
-        data.contigs.tag(), data.scheme.len(), threads, n_gts);
+    log::info!("    Genotyping complex locus in {} stages and {} threads across {} possible genotypes",
+        data.scheme.len(), threads, n_gts);
     let has_dbg_output = data.scheme.has_dbg_output();
     let (mut depth_writers, depth_filenames) = create_debug_files(
         &locus_dir.join("depth."), threads, has_dbg_output)?;
@@ -638,9 +638,8 @@ impl<'a, W: Write> Helper<'a, W> {
 
         self.solved_genotypes = 0;
         self.last_msg = self.stage_start;
-        log::info!("    [{}] Stage {:>3}.  {}.  {} genotypes, {} attempts, averaging power: {:.0}",
-            self.tag, LATIN_NUMS[stage_ix], stage.solver,
-            self.curr_genotypes, stage.attempts, stage.aver_power);
+        log::info!("    Stage {:>3}.  {}.  {} genotypes, {} attempts, averaging power: {:.0}",
+            LATIN_NUMS[stage_ix], stage.solver, self.curr_genotypes, stage.attempts, stage.aver_power);
     }
 
     fn update(&mut self, ix: usize, gt_name: &str, lik: f64) -> Result<(), Error> {
@@ -668,7 +667,7 @@ impl<'a, W: Write> Helper<'a, W> {
 
     fn finish_stage(&mut self) {
         self.last_msg = self.timer.elapsed();
-        log::info!("    [{}] Stage {:>3} finished in {}.  Best: {} -> {:11.2}", self.tag, LATIN_NUMS[self.stage_ix],
+        log::info!("    Stage {:>3} finished in {}.  Best: {} -> {:11.2}", LATIN_NUMS[self.stage_ix],
             ext::fmt::Duration(self.last_msg - self.stage_start), self.best_str, Ln::to_log10(self.best_lik));
     }
 
@@ -677,7 +676,7 @@ impl<'a, W: Write> Helper<'a, W> {
         let norm_fct = Ln::sum(&self.likelihoods);
         self.likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
         let quality = Phred::from_likelihoods(&mut self.likelihoods, self.best_ix);
-        log::info!("    [{}] Overall best: {}  (Quality = {:.1}, Confidence = {:.4}%)", self.tag, self.best_str,
+        log::info!("    Best genotype for {}: {}  (Quality = {:.1}, Confidence = {:.4}%)", self.tag, self.best_str,
             quality, self.likelihoods[self.best_ix].exp() * 100.0);
         (self.best_ix, quality)
     }

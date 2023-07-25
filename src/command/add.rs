@@ -427,20 +427,20 @@ fn process_haplotypes(
 ) -> Result<(), Error>
 {
     let tag = locus.name();
-    log::info!("    [{}] Writing {} haplotypes to {}/", tag, entries.len(), ext::fmt::path(locus_dir));
+    log::info!("    Writing {} haplotypes to {}/", entries.len(), ext::fmt::path(locus_dir));
     let locus_bed = locus_dir.join(paths::LOCUS_BED);
     let mut bed_writer = File::create(&locus_bed).map_err(add_path!(locus_bed))?;
     writeln!(bed_writer, "{}", locus.bed_fmt()).map_err(add_path!(locus_bed))?;
     std::mem::drop(bed_writer);
 
-    log::info!("    [{}] Calculating haplotype divergence", tag);
+    log::info!("    Calculating haplotype divergence");
     let paf_filename = locus_dir.join(paths::LOCUS_PAF);
     let paf_writer = ext::sys::create_lz4_slow(&paf_filename)?;
     let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)
         .map_err(add_path!(paf_filename))?;
     check_divergencies(tag, &entries, divergences.iter().copied());
 
-    log::info!("    [{}] Clustering haploypes", tag);
+    log::info!("    Clustering haploypes");
     let nwk_filename = locus_dir.join(paths::LOCUS_DENDROGRAM);
     let nwk_writer = ext::sys::create_file(&nwk_filename)?;
     let keep_seqs = cluster_haplotypes(nwk_writer, &entries, divergences, args.max_divergence)
@@ -467,7 +467,7 @@ fn process_haplotypes(
     }
     std::mem::drop((filt_fasta_writer, all_fasta_writer));
 
-    log::info!("    [{}] Counting k-mers", tag);
+    log::info!("    Counting k-mers");
     let kmer_counts = kmer_getter.fetch(filt_seqs)?;
     let kmers_filename = locus_dir.join(paths::KMERS);
     let mut kmers_writer = ext::sys::create_lz4_slow(&kmers_filename)?;
@@ -535,8 +535,8 @@ where R: Read + Seek,
     let new_locus;
     if new_start != inner_start || new_end != inner_end {
         new_locus = locus.with_new_range(new_start, new_end);
-        log::info!("    [{}] Extending locus by {} bp left and {} bp right. New locus: {}",
-            locus.name(), inner_start - new_start, new_end - inner_end, new_locus.interval());
+        log::info!("    Extending locus by {} bp left and {} bp right. New locus: {}",
+            inner_start - new_start, new_end - inner_end, new_locus.interval());
         assert!(new_locus.is_name_explicit());
     } else {
         new_locus = locus.clone();
@@ -548,7 +548,7 @@ where R: Read + Seek,
         return Ok(false);
     }
 
-    log::info!("    [{}] Reconstructing haplotypes", new_locus.name());
+    log::info!("    Reconstructing haplotypes");
     let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
         vcf_file.header(), args.unavail_rate);
     match reconstruction {
