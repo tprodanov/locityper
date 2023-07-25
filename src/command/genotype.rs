@@ -10,7 +10,6 @@ use std::{
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use fnv::{FnvHashSet, FnvHashMap};
-use lexopt::ValueExt;
 use htslib::bam;
 use crate::{
     err::{Error, validate_param, add_path},
@@ -27,7 +26,6 @@ use crate::{
         locs::{self, AllAlignments},
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
-        assgn::GenotypeAlignments,
     },
     solvers::scheme::{self, Scheme, FilterParams},
 };
@@ -600,7 +598,7 @@ fn generate_genotypes(
                 return Err(Error::InvalidInput(format!(
                     "Cannot load prior for genotype {} (expected ploidy {})", s, ploidy)));
             } else if prior.is_finite() {
-                gt_priors.push((gt, Ln::from_log10(prior)));
+                gt_priors.push((gt, prior));
             }
         }
         Ok(gt_priors)
@@ -612,8 +610,8 @@ fn generate_genotypes(
     }
 }
 
-// // ln(10^-50).
-// const MIN_SCORE_RANGE: f64 = -115.12925464970229;
+// ln(10^-50).
+const MIN_SCORE_RANGE: f64 = -115.12925464970229;
 
 // fn select_haplotypes(
 //     contigs: &ContigNames,
@@ -645,7 +643,7 @@ fn generate_genotypes(
 //     let mut scores = Vec::with_capacity(n);
 //     for (id, contig_probs) in contigs.ids().zip(best_aln_probs.iter_mut()) {
 //         contig_probs.sort_unstable_by(|a, b| b.total_cmp(&a));
-//         let score: f64 = contig_probs[..n_best_reads].iter().copied().sum();
+//         let score: f64 = contig_probs[..n_best_reads].iter().sum();
 //         writeln!(lik_writer, "0a\t{}\t{:.3}", contigs.get_name(id), score)?;
 //         scores.push((id, score));
 //     }
@@ -668,47 +666,55 @@ fn generate_genotypes(
 //     Ok(scores[..m].iter().map(|&(id, _)| id).collect())
 // }
 
-// /// Filter genotypes based on read alignments alone (without accounting for read depth).
-// fn filter_genotypes(
-//     mut all_gt_alns: Vec<Option<GenotypeAlignments>>,
-//     mut lik_writer: impl Write,
-//     params: &SelectParams,
-//     debug: bool,
-// ) -> io::Result<Vec<Option<GenotypeAlignments>>>
-// {
-//     let n = all_gt_alns.len();
-//     // Need to run anyway in case of `debug`, so that we output all values.
-//     if params.genotype.min_size >= n && !debug {
-//         return Ok(all_gt_alns);
-//     }
-//     log::info!("    Filtering genotypes based on read alignment likelihood");
-//     // Vector (index, score);
-//     let mut scores = Vec::with_capacity(n);
-//     for (i, gt_alns) in all_gt_alns.iter().enumerate() {
-//         let gt_alns = gt_alns.as_ref().expect("All genotype alignments must be defined at this point");
-//         let score = gt_alns.max_aln_lik();
-//         writeln!(lik_writer, "0b\t{}\t{:.3}", gt_alns.genotype().name(), Ln::to_log10(score))?;
-//         scores.push((i, score));
-//     }
+/// Filter genotypes based on read alignments alone (without accounting for read depth).
+fn filter_genotypes(
+    contig_ids: &[ContigId],
+    gt_priors: Vec<(Genotype, f64)>,
+    all_alns: &AllAlignments,
+    mut lik_writer: impl Write,
+    params: &FilterParams,
+    debug: bool,
+) -> io::Result<Vec<(Genotype, f64)>>
+{
+    let n = gt_priors.len();
+    // Need to run anyway in case of `debug`, so that we output all values.
+    if params.genotype.min_size.0 >= n && !debug {
+        return Ok(gt_priors);
+    }
+    log::info!("    Filtering genotypes based on read alignment likelihood");
 
-//     // Decreasing sort by score.
-//     scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-//     let best = scores[0];
-//     let worst = scores[n - 1];
-//     let range = best.1 - worst.1;
-//     if range < MIN_SCORE_RANGE {
-//         log::warn!("        Difference between genotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
-//         return Ok(all_gt_alns);
-//     }
-//     let (m, thresh) = params.genotype.get_partition(&scores);
-//     log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
-//         (thresh - worst.1) / range);
-//     log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
-//         all_gt_alns[worst.0].as_ref().unwrap().genotype().name(), Ln::to_log10(worst.1),
-//         all_gt_alns[best.0].as_ref().unwrap().genotype().name(), Ln::to_log10(best.1),
-//         Ln::to_log10(thresh));
-//     Ok(scores[..m].iter().map(|&(i, _)| all_gt_alns[i].take()).collect())
-// }
+    let best_aln_matrix = all_alns.best_aln_matrix(contig_ids);
+    // Vector (genotype index, score).
+    let mut scores = Vec::with_capacity(n);
+    let mut gt_best_probs = vec![0.0_f64; all_alns.n_reads()];
+    for (i, (gt, prior)) in gt_priors.iter().enumerate() {
+        let gt_ids = gt.ids();
+        gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
+        for id in gt_ids[1..].iter() {
+            gt_best_probs.iter_mut().zip(&best_aln_matrix[id.ix()])
+                .for_each(|(best_prob, &curr_prob)| *best_prob = best_prob.max(curr_prob));
+        }
+        let score = *prior + gt_best_probs.iter().sum::<f64>();
+        writeln!(lik_writer, "0\t{}\t{:.3}", gt, Ln::to_log10(score))?;
+        scores.push((i, score));
+    }
+
+    // Decreasing sort by score.
+    scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    let best = scores[0];
+    let worst = scores[n - 1];
+    let range = best.1 - worst.1;
+    if range < MIN_SCORE_RANGE {
+        log::warn!("        Difference between genotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
+        return Ok(gt_priors);
+    }
+    let (m, thresh) = params.genotype.get_partition(&scores);
+    log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
+        (thresh - worst.1) / range);
+    log::debug!("        Scores: worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
+        gt_priors[worst.0].0, Ln::to_log10(worst.1), gt_priors[best.0].0, Ln::to_log10(best.1), Ln::to_log10(thresh));
+    Ok(scores[..m].iter().map(|&(i, _)| gt_priors[i].clone()).collect())
+}
 
 fn analyze_locus(
     locus: &LocusData,
@@ -762,8 +768,8 @@ fn analyze_locus(
         }
     }
 
-    // let gt_alns = filter_genotypes(gt_alns, &mut lik_writer, &args.filt_params, args.debug)
-    //     .map_err(add_path!(locus.lik_filename))?;
+    let gt_priors = filter_genotypes(&contig_ids, gt_priors, &all_alns, &mut lik_writer,
+        &args.filt_params, args.debug).map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
         scheme: scheme.clone(),
         contigs: Arc::clone(&contigs),

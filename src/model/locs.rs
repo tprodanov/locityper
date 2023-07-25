@@ -1,6 +1,7 @@
 use std::{
     sync::Arc,
     io::Write,
+    cmp::Ordering,
 };
 use htslib::bam;
 use nohash::IntSet;
@@ -292,14 +293,18 @@ impl GrouppedAlignments {
         (i, &self.alns[i..j])
     }
 
-    /// Returns best alignment probability for each contig.
-    pub fn best_for_each_contig(&self, contigs: &ContigNames) -> impl Iterator<Item = f64> + '_ {
+    /// Returns best alignment probability for each contig (must be sorted).
+    pub fn best_for_each_contig<'a>(&'a self, contig_ids: &'a [ContigId]) -> impl Iterator<Item = f64> + 'a {
         let n = self.alns.len();
         let mut i = 0;
-        contigs.ids().map(move |id| {
+        contig_ids.iter().map(move |id| {
             let mut best = self.unmapped_prob;
-            while i < n && self.alns[i].contig_id() == id {
-                best = best.max(self.alns[i].ln_prob());
+            while i < n {
+                match self.alns[i].contig_id().cmp(id) {
+                    Ordering::Less => {}
+                    Ordering::Equal => best = best.max(self.alns[i].ln_prob()),
+                    Ordering::Greater => break,
+                }
                 i += 1;
             }
             best
@@ -478,8 +483,19 @@ impl AllAlignments {
         self.0.len()
     }
 
-    /// Returns iterator over `GrouppedAlignments` for all read pairs.
     pub fn iter(&self) -> std::slice::Iter<'_, GrouppedAlignments> {
         self.0.iter()
+    }
+
+    /// Returns matrix `contig_id -> read pair -> best aln prob`.
+    pub fn best_aln_matrix(&self, contig_ids: &[ContigId]) -> Vec<Vec<f64>> {
+        let mut best_aln_probs = vec![Vec::<f64>::with_capacity(self.n_reads()); contig_ids.len()];
+        for read_alns in self.0.iter() {
+            for (contig_probs, best_prob) in best_aln_probs.iter_mut()
+                    .zip(read_alns.best_for_each_contig(contig_ids)) {
+                contig_probs.push(best_prob);
+            }
+        }
+        best_aln_probs
     }
 }

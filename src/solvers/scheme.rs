@@ -2,8 +2,7 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    thread,
-    fmt::{self, Write as FmtWrite},
+    thread, fmt,
     io::{self, Write},
     time::{Instant, Duration},
     path::{Path, PathBuf},
