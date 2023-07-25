@@ -4,7 +4,7 @@ use crate::{
     Error,
     bg::ser::JsonSer,
 };
-use super::{DiscretePmf, DiscreteCdf, WithMoments, DistrBoxClone};
+use super::{DiscretePmf, DiscreteCdf, WithMoments};
 
 /// Distribution with a fixed number of cached `ln_pmf` values.
 #[derive(Clone)]

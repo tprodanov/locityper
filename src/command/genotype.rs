@@ -873,9 +873,10 @@ fn analyze_locus(
     let data = scheme::Data {
         scheme: scheme.clone(),
         contigs: Arc::clone(&contigs),
+        contig_windows: Arc::new(contig_windows),
         params: args.assgn_params.clone(),
         debug: args.debug,
-        all_alns, gt_priors, contig_windows,
+        all_alns, gt_priors,
     };
     scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;

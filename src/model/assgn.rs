@@ -3,7 +3,6 @@ use std::{
 };
 use rand::Rng;
 use crate::{
-    Error,
     math::{
         Ln,
         distr::DistrBox,

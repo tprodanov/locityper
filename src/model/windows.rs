@@ -5,7 +5,6 @@ use std::{
 use rand::Rng;
 use crate::{
     ext::vec::F64Ext,
-    bg::depth::ReadDepth,
     seq::{
         self, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},

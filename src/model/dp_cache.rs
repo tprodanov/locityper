@@ -34,7 +34,7 @@ impl<D: DiscretePmf> WeightedDistr<D> {
     }
 }
 
-impl<D: DiscretePmf + Clone> DiscretePmf for WeightedDistr<D> {
+impl<D: DiscretePmf + Clone + Sync> DiscretePmf for WeightedDistr<D> {
     fn ln_pmf(&self, k: u32) -> f64 {
         self.inner.ln_pmf(k) * self.weight
     }

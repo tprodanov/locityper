@@ -2,24 +2,18 @@ use std::ops::Deref;
 
 pub mod uniform;
 pub mod nbinom;
-pub mod mnom;
-pub mod mixure;
-pub mod chimeric;
 pub mod lincache;
 pub mod bayes;
 pub mod betabinom;
 
 pub use uniform::Uniform;
 pub use nbinom::NBinom;
-pub use mnom::Multinomial;
-pub use mixure::Mixure;
-pub use chimeric::Chimeric;
 pub use lincache::LinearCache;
 pub use bayes::BayesCalc;
 pub use betabinom::BetaBinomial;
 
 /// Discrete distribution with a single argument.
-pub trait DiscretePmf: Send + DistrBoxClone {
+pub trait DiscretePmf {
     /// Returns ln-probability of `k`.
     fn ln_pmf(&self, k: u32) -> f64;
 }
@@ -109,11 +103,11 @@ impl<T: DiscreteCdf + WithMoments> WithQuantile for T {}
 pub type DistrBox = Box<dyn DiscretePmf + Send + Sync>;
 
 /// We cannot force all `DiscretePmf` to be `Clone`, but we can create a separate trait for cloning Boxes.
-pub trait DistrBoxClone {
+pub trait DistrBoxClone: DiscretePmf {
     fn clone_box(&self) -> DistrBox;
 }
 
-impl<T: DiscretePmf + Clone + Send + Sync> DistrBoxClone for T {
+impl<T: DiscretePmf + Clone + Send + Sync + 'static> DistrBoxClone for T {
     fn clone_box(&self) -> DistrBox {
         Box::new(self.clone())
     }

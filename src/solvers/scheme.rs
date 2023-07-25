@@ -27,7 +27,6 @@ use crate::{
         locs::{AllAlignments, Pair},
         assgn::{GenotypeAlignments, ReadAssignment, SelectedCounter},
         windows::ContigWindows,
-        dp_cache::AlwaysOneDistr,
     },
 };
 use super::Solver;
@@ -293,7 +292,7 @@ pub struct Data {
     pub contigs: Arc<ContigNames>,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
-    pub contig_windows: Vec<Option<ContigWindows>>,
+    pub contig_windows: Arc<Vec<Option<ContigWindows>>>,
 
     /// Genotypes and their priors.
     pub gt_priors: Vec<(Genotype, f64)>,
