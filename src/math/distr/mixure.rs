@@ -27,7 +27,7 @@ impl<T, U> Mixure<T, U> {
     }
 }
 
-impl<T: DiscretePmf, U: DiscretePmf> DiscretePmf for Mixure<T, U> {
+impl<T: DiscretePmf + Clone, U: DiscretePmf + Clone> DiscretePmf for Mixure<T, U> {
     fn ln_pmf(&self, k: u32) -> f64 {
         Ln::add(self.lnw1 + self.distr1.ln_pmf(k), self.lnw2 + self.distr2.ln_pmf(k))
     }

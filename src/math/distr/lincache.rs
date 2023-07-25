@@ -4,7 +4,7 @@ use crate::{
     Error,
     bg::ser::JsonSer,
 };
-use super::{DiscretePmf, DiscreteCdf, WithMoments};
+use super::{DiscretePmf, DiscreteCdf, WithMoments, DistrBoxClone};
 
 /// Distribution with a fixed number of cached `ln_pmf` values.
 #[derive(Clone)]
@@ -34,7 +34,7 @@ impl<D> LinearCache<D> {
     }
 }
 
-impl<D: DiscretePmf> DiscretePmf for LinearCache<D> {
+impl<D: DiscretePmf + Clone> DiscretePmf for LinearCache<D> {
     /// Returns ln(pmf(k)). Caches values in a certain range.
     fn ln_pmf(&self, k: u32) -> f64 {
         let i = k as usize;

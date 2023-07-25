@@ -11,10 +11,11 @@ use crate::{
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::KmerCounts,
     },
+    math::distr::DistrBox,
 };
 use super::{
     locs::{GrouppedAlignments, PairAlignment},
-    dp_cache::{CachedDepthDistrs, DistrBox},
+    dp_cache::CachedDepthDistrs,
 };
 
 /// Structure that, for predefined region boundaries and window size,
@@ -182,6 +183,8 @@ pub struct ContigWindows {
     window_gcs: Vec<u8>,
     /// k-mer-based window weights.
     window_weights: Vec<f64>,
+    /// Read depth distributions for each window.
+    depth_distrs: Vec<DistrBox>,
 }
 
 impl ContigWindows {
@@ -190,13 +193,13 @@ impl ContigWindows {
         contigs: &ContigNames,
         seq: &[u8],
         kmer_counts: &KmerCounts,
-        depth: &ReadDepth,
+        cached_distrs: &CachedDepthDistrs,
         params: &super::Params,
     ) -> Self
     {
         let contig_len = seq.len() as u32;
-        let window = depth.window_size();
-        let neighb_size = depth.neighb_size();
+        let window = cached_distrs.bg_depth().window_size();
+        let neighb_size = cached_distrs.bg_depth().neighb_size();
         assert!(contig_len > window + 2 * params.boundary_size,
             "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
@@ -224,18 +227,27 @@ impl ContigWindows {
         }
         Self {
             window_getter: WindowGetter::new(start, end, window),
-            contig_id, window_gcs, window_weights
+            depth_distrs: window_gcs.iter().zip(&window_weights)
+                .map(|(&gc, &w)| cached_distrs.get_distribution(gc, w))
+                .collect(),
+            contig_id, window_gcs, window_weights,
         }
     }
 
     /// Creates a set of contig windows for each contig from `ids`.
     /// All missing contig ids are filled with `None`s.
-    pub fn new_all(ids: &[ContigId], set: &ContigSet, depth: &ReadDepth, params: &super::Params) -> Vec<Option<Self>> {
+    pub fn new_all(
+        ids: &[ContigId],
+        set: &ContigSet,
+        cached_distrs: &CachedDepthDistrs,
+        params: &super::Params,
+    ) -> Vec<Option<Self>>
+    {
         let contigs = set.contigs();
         let seqs = set.seqs();
         let mut res = vec![None; contigs.len()];
         for &id in ids {
-            res[id.ix()] = Some(Self::new(id, contigs, &seqs[id.ix()], set.kmer_counts(), depth, params));
+            res[id.ix()] = Some(Self::new(id, contigs, &seqs[id.ix()], set.kmer_counts(), cached_distrs, params));
         }
         res
     }
@@ -246,6 +258,10 @@ impl ContigWindows {
 
     pub fn window_size(&self) -> u32 {
         self.window_getter.window
+    }
+
+    pub fn depth_distrs(&self) -> &[DistrBox] {
+        &self.depth_distrs
     }
 
     /// Returns window range within the contig based on the read alignment range.
@@ -358,19 +374,11 @@ impl GenotypeWindows {
         keep_alns
     }
 
-    pub(crate) fn get_distributions(&self, cached_distrs: &CachedDepthDistrs) -> Vec<DistrBox> {
-        const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
-            "Constants were changed!");
-        let total_windows = *self.wshifts.last().unwrap();
-        let mut distrs: Vec<DistrBox> = Vec::with_capacity(total_windows as usize);
-        distrs.push(Box::new(cached_distrs.unmapped_distr()));
-        distrs.push(Box::new(cached_distrs.boundary_distr()));
+    pub fn total_windows(&self) -> u32 {
+        *self.wshifts.last().unwrap()
+    }
 
-        for curr_contig in self.by_contig.iter() {
-            for (&gc_content, &weight) in curr_contig.window_gcs.iter().zip(&curr_contig.window_weights) {
-                distrs.push(cached_distrs.get_distribution(gc_content, weight));
-            }
-        }
-        distrs
+    pub fn contig_windows(&self) -> &[ContigWindows] {
+        &self.by_contig
     }
 }

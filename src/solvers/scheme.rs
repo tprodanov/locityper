@@ -27,7 +27,7 @@ use crate::{
         locs::{AllAlignments, Pair},
         assgn::{GenotypeAlignments, ReadAssignment, SelectedCounter},
         windows::ContigWindows,
-        dp_cache::CachedDepthDistrs,
+        dp_cache::AlwaysOneDistr,
     },
 };
 use super::Solver;
@@ -293,8 +293,6 @@ pub struct Data {
     pub contigs: Arc<ContigNames>,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
-    /// Cached read depth distributions.
-    pub cached_distrs: Arc<CachedDepthDistrs>,
     pub contig_windows: Vec<Option<ContigWindows>>,
 
     /// Genotypes and their priors.
@@ -326,8 +324,7 @@ fn solve_single_thread(
 
         for &ix in rem_ixs.iter() {
             let (gt, prior) = &data.gt_priors[ix];
-            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows,
-                &data.all_alns, &data.cached_distrs, &data.params);
+            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns, &data.params);
             if stage.write && data.debug {
                 selected.reset(&gt_alns);
             }
@@ -536,7 +533,6 @@ impl<W: Write, U: Write> Worker<W, U> {
         let gt_priors = &self.data.gt_priors;
         let all_alns = &self.data.all_alns;
         let contig_windows = &self.data.contig_windows;
-        let cached_distrs = &self.data.cached_distrs;
         let params = &self.data.params;
         let tweak = params.tweak.unwrap();
 
@@ -553,7 +549,7 @@ impl<W: Write, U: Write> Worker<W, U> {
             let mean = F64Ext::generalized_ln_mean(stage.aver_power);
             for ix in task.into_iter() {
                 let (gt, prior) = &gt_priors[ix];
-                let mut gt_alns = GenotypeAlignments::new(gt.clone(), contig_windows, all_alns, cached_distrs, params);
+                let mut gt_alns = GenotypeAlignments::new(gt.clone(), contig_windows, all_alns, params);
                 if debug {
                     selected.reset(&gt_alns);
                 }

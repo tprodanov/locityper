@@ -820,7 +820,7 @@ fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
     scheme: &scheme::Scheme,
-    cached_distrs: &Arc<CachedDepthDistrs>,
+    cached_distrs: &CachedDepthDistrs,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
@@ -856,7 +856,7 @@ fn analyze_locus(
     if gt_priors.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
-    let contig_windows = ContigWindows::new_all(&contig_ids, &locus.set, bg_distr.depth(), &args.assgn_params);
+    let contig_windows = ContigWindows::new_all(&contig_ids, &locus.set, cached_distrs, &args.assgn_params);
     if args.debug || scheme.has_dbg_output() {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let mut windows_writer = ext::sys::create_gzip(&windows_filename)?;
@@ -868,13 +868,11 @@ fn analyze_locus(
         }
     }
 
-
     // let gt_alns = filter_genotypes(gt_alns, &mut lik_writer, &args.select_params, args.debug)
     //     .map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
         scheme: scheme.clone(),
         contigs: Arc::clone(&contigs),
-        cached_distrs: Arc::clone(cached_distrs),
         params: args.assgn_params.clone(),
         debug: args.debug,
         all_alns, gt_priors, contig_windows,
@@ -913,7 +911,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         Some(filename) => scheme::Scheme::from_json(&ext::sys::load_json(filename)?)?,
         None => scheme::Scheme::default(),
     };
-    let cached_distrs = Arc::new(CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn));
+    let cached_distrs = CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn);
 
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {

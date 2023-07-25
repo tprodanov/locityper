@@ -46,7 +46,7 @@ where T: DiscretePmf + DiscreteCdf + Debug,
     }
 }
 
-impl<T: DiscretePmf, U: DiscretePmf> DiscretePmf for Chimeric<T, U> {
+impl<T: DiscretePmf + Clone, U: DiscretePmf + Clone> DiscretePmf for Chimeric<T, U> {
     fn ln_pmf(&self, k: u32) -> f64 {
         if k <= self.partition {
             self.lnw1 + self.distr1.ln_pmf(k)

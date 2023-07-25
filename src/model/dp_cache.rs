@@ -4,7 +4,7 @@ use std::{
 use once_cell::sync::OnceCell;
 use crate::{
     math::{
-        distr::{DiscretePmf, NBinom, LinearCache, BayesCalc},
+        distr::{DistrBox, DiscretePmf, NBinom, LinearCache, BayesCalc},
     },
     bg::{self,
         depth::GC_BINS,
@@ -34,7 +34,7 @@ impl<D: DiscretePmf> WeightedDistr<D> {
     }
 }
 
-impl<D: DiscretePmf> DiscretePmf for WeightedDistr<D> {
+impl<D: DiscretePmf + Clone> DiscretePmf for WeightedDistr<D> {
     fn ln_pmf(&self, k: u32) -> f64 {
         self.inner.ln_pmf(k) * self.weight
     }
@@ -42,8 +42,6 @@ impl<D: DiscretePmf> DiscretePmf for WeightedDistr<D> {
 
 /// Store read depth probabilities for values between 0 and 255 for each GC content.
 const CACHE_SIZE: usize = 256;
-
-pub(super) type DistrBox = Box<dyn DiscretePmf>;
 
 type RegularDistr = BayesCalc<NBinom, NBinom, 2>;
 
@@ -72,16 +70,6 @@ impl CachedDepthDistrs {
         }
     }
 
-    /// Returns a pointer to unmapped distribution (`AlwaysOneDistr`).
-    pub fn unmapped_distr(&self) -> AlwaysOneDistr {
-        AlwaysOneDistr
-    }
-
-    /// Returns a pointer to boundary distribution (`AlwaysOneDistr`).
-    pub fn boundary_distr(&self) -> AlwaysOneDistr {
-        AlwaysOneDistr
-    }
-
     /// Returns read depth distribution in regular windows at GC-content.
     fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
         self.cached[usize::from(gc_content)].get_or_init(|| {
@@ -106,5 +94,9 @@ impl CachedDepthDistrs {
                 Box::new(WeightedDistr::new(regular, weight))
             }
         }
+    }
+
+    pub fn bg_depth(&self) -> &bg::depth::ReadDepth {
+        &self.bg_depth
     }
 }

@@ -19,7 +19,7 @@ pub use bayes::BayesCalc;
 pub use betabinom::BetaBinomial;
 
 /// Discrete distribution with a single argument.
-pub trait DiscretePmf: Send {
+pub trait DiscretePmf: Send + DistrBoxClone {
     /// Returns ln-probability of `k`.
     fn ln_pmf(&self, k: u32) -> f64;
 }
@@ -83,7 +83,7 @@ pub trait WithQuantile: DiscreteCdf + WithMoments {
 
 impl<T, U> DiscretePmf for U
 where T: DiscretePmf + ?Sized,
-      U: Deref<Target = T> + Send,
+      U: Deref<Target = T> + Clone + Send,
 {
     fn ln_pmf(&self, k: u32) -> f64 {
         self.deref().ln_pmf(k)
@@ -91,7 +91,7 @@ where T: DiscretePmf + ?Sized,
 }
 
 impl<T, U> DiscreteCdf for U
-where T: DiscreteCdf + ?Sized,
+where T: DiscreteCdf + Clone + ?Sized,
       U: Deref<Target = T>,
 {
     fn cdf(&self, k: u32) -> f64 {
@@ -104,3 +104,23 @@ where T: DiscreteCdf + ?Sized,
 }
 
 impl<T: DiscreteCdf + WithMoments> WithQuantile for T {}
+
+/// Box, storing a distribution.
+pub type DistrBox = Box<dyn DiscretePmf + Send + Sync>;
+
+/// We cannot force all `DiscretePmf` to be `Clone`, but we can create a separate trait for cloning Boxes.
+pub trait DistrBoxClone {
+    fn clone_box(&self) -> DistrBox;
+}
+
+impl<T: DiscretePmf + Clone + Send + Sync> DistrBoxClone for T {
+    fn clone_box(&self) -> DistrBox {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for DistrBox {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}

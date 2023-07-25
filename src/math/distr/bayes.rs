@@ -3,6 +3,7 @@ use super::DiscretePmf;
 
 /// Bayesian probability calculator for the main hypothesis and several alternative hypotheses.
 /// Here, all priors are equal to 1.
+#[derive(Clone)]
 pub struct BayesCalc<T, U, const N: usize> {
     null_hypoth: T,
     alternative: [U; N],
@@ -14,7 +15,7 @@ impl<T, U, const N: usize> BayesCalc<T, U, N> {
     }
 }
 
-impl<T: DiscretePmf, U: DiscretePmf, const N: usize> DiscretePmf for BayesCalc<T, U, N> {
+impl<T: DiscretePmf + Clone, U: DiscretePmf + Clone, const N: usize> DiscretePmf for BayesCalc<T, U, N> {
     fn ln_pmf(&self, k: u32) -> f64 {
         let null_prob = self.null_hypoth.ln_pmf(k);
         let mut probs = [0.0; N];

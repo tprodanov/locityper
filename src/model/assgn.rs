@@ -4,13 +4,16 @@ use std::{
 use rand::Rng;
 use crate::{
     Error,
-    math::Ln,
+    math::{
+        Ln,
+        distr::DistrBox,
+    },
     seq::contigs::Genotype,
 };
 use super::{
     locs::AllAlignments,
-    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, ReadGtAlns, ContigWindows, GenotypeWindows},
-    dp_cache::{CachedDepthDistrs, DistrBox},
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadGtAlns, ContigWindows, GenotypeWindows},
+    dp_cache::AlwaysOneDistr,
 };
 
 /// Count how many times each alignment was selected for a read.
@@ -43,12 +46,19 @@ impl SelectedCounter {
     }
 }
 
+fn unmapped_distr() -> DistrBox {
+    Box::new(AlwaysOneDistr)
+}
+
+fn boundary_distr() -> DistrBox {
+    Box::new(AlwaysOneDistr)
+}
+
 /// All read alignments to a specific genotype.
 pub struct GenotypeAlignments {
     /// Contigs subset, to which reads the reads are assigned,
     /// plus the number of windows (and shifts) at each window.
     gt_windows: GenotypeWindows,
-
     /// Read depth contribution, relative to read alignment likelihoods.
     depth_contrib: f64,
     /// Read depth distribution at each window (length: `gt_windows.total_windows()`).
@@ -56,13 +66,11 @@ pub struct GenotypeAlignments {
 
     /// A vector of possible read alignments.
     alns: Vec<ReadGtAlns>,
-
     /// Store the start of the read-pair alignments in the `alns` vector.
     /// Length: `n_reads + 1`, first value = `0`, last value = `alns.len()`.
     ///
     /// For read-pair `i`, possible read locations are `alns[read_ixs[i]..read_ixs[i + 1]]`.
     read_ixs: Vec<usize>,
-
     /// Read pair indices that have > 1 possible read location (length <= n_reads).
     non_trivial_reads: Vec<usize>,
 }
@@ -74,7 +82,6 @@ impl GenotypeAlignments {
         genotype: Genotype,
         contig_windows: &[Option<ContigWindows>],
         all_alns: &AllAlignments,
-        cached_distrs: &CachedDepthDistrs,
         params: &super::Params,
     ) -> Self
     {
@@ -96,10 +103,18 @@ impl GenotypeAlignments {
             }
         }
         assert!(read_ixs.len() > 1, "Cannot construct read assignment with 0 alignments.");
+
+        const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
+            "Constants have changed!");
+        let mut depth_distrs = Vec::with_capacity(gt_windows.total_windows() as usize);
+        depth_distrs.push(unmapped_distr());
+        depth_distrs.push(boundary_distr());
+        for contig_windows in gt_windows.contig_windows() {
+            depth_distrs.extend_from_slice(contig_windows.depth_distrs());
+        }
         Self {
-            depth_distrs: gt_windows.get_distributions(cached_distrs),
             depth_contrib: params.depth_contrib,
-            gt_windows, alns, read_ixs, non_trivial_reads,
+            gt_windows, depth_distrs, alns, read_ixs, non_trivial_reads,
         }
     }
 
