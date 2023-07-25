@@ -288,7 +288,7 @@ fn print_help() {
     println!("\n{}", "Pre-filtering:".bold());
     println!("    {:KEY$} {:VAL$}  Skip pre-filtering (same as {} or {}).\n\
         {EMPTY}  Note: haplotype filtering is always skipped if priors are set.",
-        "    --no-filt".green(), super::flag(), "--n-haps inf".underline(), "--n-gts inf".underline());
+        "    --no-filtering".green(), super::flag(), "--n-haps inf".underline(), "--n-gts inf".underline());
     println!("    {:KEY$} {:VAL$}  Rank haplotypes based on the top {}/ploidy read alignments [{}].",
         "    --nreads-mult".green(), "FLOAT".yellow(), "FLOAT".yellow(),
         super::fmt_def_f64(sel_defaults.nreads_mult));
@@ -381,7 +381,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 };
             }
 
-            Long("no-filter") | Long("no-filting") => {
+            Long("no-filt") | Long("no-filter") | Long("no-filtering") => {
                 args.select_params.haplotype.disable();
                 args.select_params.genotype.disable();
             }
