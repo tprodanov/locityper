@@ -68,7 +68,8 @@ kmers1 <- data.frame(kmer = kmers1) |>
 kmers2 <- data.frame(kmer = kmers2) |>
     mutate(pos = 1:n(), freq = as.vector(freq[kmer])) |>
     filter(freq <= args$max_freq)
-kmer_pairs <- inner_join(kmers1, kmers2, by = c('kmer', 'freq'), suffix = c('1', '2'))
+kmer_pairs <- inner_join(
+    kmers1, kmers2, by = c('kmer', 'freq'), suffix = c('1', '2'), relationship = 'many-to-many')
 
 n1 <- length(unique(kmers1$kmer))
 n2 <- length(unique(kmers2$kmer))

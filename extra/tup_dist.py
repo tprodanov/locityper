@@ -81,7 +81,10 @@ def main():
     targets = list(map(str.strip, args.target.split(',')))
     with open_stream(args.paf) as f:
         distances = _load_distances(f, args.tag, targets)
-    assert min(map(len, distances)) > 1
+    if min(map(len, distances)) <= 1:
+        sys.stderr.write(f'    ERROR: Target {args.target} not found\n')
+        exit(1)
+
     counts = list(map(len, distances))
     assert all(counts)
 
