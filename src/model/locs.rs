@@ -2,9 +2,10 @@ use std::{
     sync::Arc,
     io::Write,
     cmp::Ordering,
+    collections::hash_map::Entry,
 };
 use htslib::bam;
-use nohash::IntSet;
+use nohash::{IntSet, IntMap};
 use crate::{
     err::{Error, add_path},
     seq::{
@@ -33,6 +34,9 @@ struct FilteredReader<'a, R: bam::Read> {
     contigs: Arc<ContigNames>,
     boundary: u32,
     err_prof: &'a ErrorProfile,
+    /// Buffer, used for discrard alignments with the same positions.
+    /// Key (contig id << 32 | alignment start), value: index of the previous position.
+    found_alns: IntMap<u64, usize>,
 }
 
 impl<'a, R: bam::Read> FilteredReader<'a, R> {
@@ -46,6 +50,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         Ok(FilteredReader {
             // Reader would return None if there are no more records.
             has_more: reader.read(&mut record).transpose()?.is_some(),
+            found_alns: IntMap::default(),
             reader, record, contigs, err_prof, boundary,
         })
     }
@@ -84,6 +89,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         // Does any alignment have good edit distance?
         let mut any_good = false;
         let mut min_prob = f64::INFINITY;
+        self.found_alns.clear();
         loop {
             let mut aln = Alignment::new_without_name(
                 &self.record, Cigar::from_raw(&self.record), read_end, Arc::clone(&self.contigs), f64::NAN);
@@ -106,10 +112,24 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
                 edit_dist, read_len, if good_dist { '+' } else if medium_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
+
+            let pos_key = u64::from(aln_interval.contig_id().get()) << 32 | u64::from(aln_interval.start());
             aln.set_ln_prob(aln_prob);
 
             if medium_dist {
-                alns.push(aln.take_light_aln());
+                match self.found_alns.entry(pos_key) {
+                    Entry::Occupied(entry) => {
+                        let aln_ix = *entry.get();
+                        // Already seen this alignment.
+                        if aln_prob > alns[aln_ix].ln_prob() {
+                            alns[aln_ix] = aln.take_light_aln();
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        alns.push(aln.take_light_aln());
+                        entry.insert(alns.len());
+                    }
+                }
                 min_prob = aln_prob.min(min_prob);
             }
             if self.reader.read(&mut self.record).transpose()?.is_none() {

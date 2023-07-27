@@ -17,11 +17,5 @@ Improve `locityper add`:
 * Write locus summary in a text file.
 * Improve Greedy solver.
 
-In advance, check if at least 1/3 of the reads have good alignment scores. How?
-Just select best 1/3 and rank haplotypes.
-
-Make read filtering stricter
-- Do we need `rem_ixs` in `scheme`?
-
-Assigning read pair alignments to genotypes in parallel.
-Remove `cached_distrs` from GenotypeAlignemnts.
+Calculate window weights using `inv-CDF(1)`.
+Provide scheme through arguments?
