@@ -2,7 +2,7 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    thread, fmt,
+    thread,
     io::{self, Write},
     time::{Instant, Duration},
     path::{Path, PathBuf},
@@ -12,7 +12,6 @@ use std::{
     },
 };
 use json::JsonValue;
-use lexopt::ValueExt;
 use crate::{
     ext::{
         self,
@@ -31,132 +30,6 @@ use crate::{
     },
 };
 use super::Solver;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UsizeOrInf(pub usize);
-
-impl UsizeOrInf {
-    const INF: Self = Self(usize::MAX);
-}
-
-impl std::str::FromStr for UsizeOrInf {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "inf" || s == "Inf" || s == "INF" {
-            Ok(Self::INF)
-        } else {
-            usize::from_str(s)
-                .map_err(|_| format!("Cannot parse {:?}, possible values: integer or 'inf'", s))
-                .map(Self)
-        }
-    }
-}
-
-impl fmt::Display for UsizeOrInf {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.0 == usize::MAX {
-            f.write_str("inf")
-        } else {
-            write!(f, "{}", self.0)
-        }
-    }
-}
-
-pub struct FilterSubparams {
-    /// Boundaries on the smallest and largest number of haplotypes/genotypes.
-    pub min_size: UsizeOrInf,
-    pub max_size: UsizeOrInf,
-    /// Relative score threshold (between the minimum and maximum score).
-    pub score_thresh: f64,
-}
-
-impl FilterSubparams {
-    pub fn validate(&self, prefix: &'static str) -> Result<(), Error> {
-        validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
-            "{}: score threshold ({}) must be within [0, 1]", prefix, self.score_thresh);
-        validate_param!(self.min_size.0 > 1,
-            "{}: minimal size ({}) must be at least 2", prefix, self.min_size);
-        validate_param!(self.min_size <= self.max_size,
-            "{}: min size ({}) must be <= the max size ({})",
-            prefix, self.min_size, self.max_size);
-        Ok(())
-    }
-
-    pub fn set_sizes(&mut self, mut values: lexopt::ValuesIter) -> Result<(), lexopt::Error> {
-        self.min_size = values.next().expect("First value must be present").parse()?;
-        self.max_size = values.next()
-            .map(|v| v.parse())
-            .transpose()?
-            .unwrap_or(UsizeOrInf::INF);
-        Ok(())
-    }
-
-    pub fn disable(&mut self) {
-        self.min_size = UsizeOrInf::INF;
-        self.max_size = UsizeOrInf::INF;
-    }
-
-    /// Finds partition point and score threshold based on the decreasing list of scores.
-    pub fn get_partition<T>(&self, scores: &[(T, f64)]) -> (usize, f64) {
-        let n = scores.len();
-        let best = scores[0].1;
-        let worst = scores[n - 1].1;
-        let range = best - worst;
-
-        let mut thresh = worst + range * self.score_thresh;
-        let mut m = scores.partition_point(|(_, score)| *score >= thresh);
-        if self.min_size.0 >= n {
-            thresh = worst;
-            m = n;
-        } else if m < self.min_size.0 {
-            thresh = scores[self.min_size.0 - 1].1;
-            m = scores.partition_point(|(_, score)| *score >= thresh);
-        } else if m > self.max_size.0 {
-            thresh = scores[self.max_size.0 - 1].1;
-            m = scores.partition_point(|(_, score)| *score >= thresh);
-        }
-        // m can still be over max_size, but we do not want to discard entries with equal scores.
-        (m, thresh)
-    }
-}
-
-/// Filter haplotypes and genotypes before assigning reads.
-pub struct FilterParams {
-    /// Rank haplotypes based on the top X read alignments, where X = haplotype_aln_coef / ploidy`.
-    pub nreads_mult: f64,
-    pub haplotype: FilterSubparams,
-    pub genotype: FilterSubparams,
-}
-
-impl Default for FilterParams {
-    fn default() -> Self {
-        Self {
-            nreads_mult: 0.8,
-            haplotype: FilterSubparams {
-                min_size: UsizeOrInf(5),
-                max_size: UsizeOrInf(100),
-                score_thresh: 0.9,
-            },
-            genotype: FilterSubparams {
-                min_size: UsizeOrInf(10),
-                max_size: UsizeOrInf(1000),
-                score_thresh: 0.9,
-            },
-        }
-    }
-}
-
-impl FilterParams {
-    pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(0.0 < self.nreads_mult && self.nreads_mult < 2.0,
-            "Number of reads multiplier ({}) must be reasonably close to 1",
-            self.nreads_mult);
-        self.haplotype.validate("Haplotype filtering")?;
-        self.genotype.validate("Genotype filtering")?;
-        Ok(())
-    }
-}
 
 const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\tlik\tselected";
 
@@ -419,7 +292,7 @@ pub struct Data {
     pub contigs: Arc<ContigNames>,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
-    pub contig_windows: Arc<Vec<Option<ContigWindows>>>,
+    pub contig_windows: Arc<Vec<ContigWindows>>,
 
     /// Genotypes and their priors.
     pub gt_priors: Vec<(Genotype, f64)>,

@@ -233,22 +233,13 @@ impl ContigWindows {
         }
     }
 
-    /// Creates a set of contig windows for each contig from `ids`.
-    /// All missing contig ids are filled with `None`s.
-    pub fn new_all(
-        ids: &[ContigId],
-        set: &ContigSet,
-        cached_distrs: &CachedDepthDistrs,
-        params: &super::Params,
-    ) -> Vec<Option<Self>>
-    {
+    /// Creates a set of contig windows for each contig.
+    pub fn new_all(set: &ContigSet, cached_distrs: &CachedDepthDistrs, params: &super::Params) -> Vec<Self> {
         let contigs = set.contigs();
         let seqs = set.seqs();
-        let mut res = vec![None; contigs.len()];
-        for &id in ids {
-            res[id.ix()] = Some(Self::new(id, contigs, &seqs[id.ix()], set.kmer_counts(), cached_distrs, params));
-        }
-        res
+        contigs.ids().zip(seqs)
+            .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), cached_distrs, params))
+            .collect()
     }
 
     pub fn n_windows(&self) -> u32 {
@@ -296,7 +287,7 @@ pub struct GenotypeWindows {
 }
 
 impl GenotypeWindows {
-    pub fn new(genotype: Genotype, contig_windows: &[Option<ContigWindows>]) -> Self {
+    pub fn new(genotype: Genotype, contig_windows: &[ContigWindows]) -> Self {
         let n = genotype.ploidy();
         let mut by_contig = Vec::<ContigWindows>::with_capacity(n);
         let mut wshifts = Vec::with_capacity(n + 1);
@@ -304,7 +295,7 @@ impl GenotypeWindows {
         wshifts.push(curr_wshift);
 
         for &id in genotype.ids() {
-            let curr_contig = contig_windows[id.ix()].as_ref().expect("Contig windows unavailable").clone();
+            let curr_contig = contig_windows[id.ix()].clone();
             curr_wshift += curr_contig.n_windows();
             wshifts.push(curr_wshift);
             by_contig.push(curr_contig);

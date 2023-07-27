@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs, fmt,
     io::{self, Write, BufRead},
     process::{Command, Stdio},
     cmp::{min, max},
@@ -11,6 +11,7 @@ use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use fnv::{FnvHashSet, FnvHashMap};
 use htslib::bam;
+use lexopt::ValueExt;
 use crate::{
     err::{Error, validate_param, add_path},
     math::Ln,
@@ -27,9 +28,136 @@ use crate::{
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
     },
-    solvers::scheme::{self, Scheme, FilterParams},
+    solvers::scheme::{self, Scheme},
 };
 use super::paths;
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UsizeOrInf(pub usize);
+
+impl UsizeOrInf {
+    const INF: Self = Self(usize::MAX);
+}
+
+impl std::str::FromStr for UsizeOrInf {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "inf" || s == "Inf" || s == "INF" {
+            Ok(Self::INF)
+        } else {
+            usize::from_str(s)
+                .map_err(|_| format!("Cannot parse {:?}, possible values: integer or 'inf'", s))
+                .map(Self)
+        }
+    }
+}
+
+impl fmt::Display for UsizeOrInf {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0 == usize::MAX {
+            f.write_str("inf")
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
+pub struct FilterSubparams {
+    /// Boundaries on the smallest and largest number of haplotypes/genotypes.
+    pub min_size: UsizeOrInf,
+    pub max_size: UsizeOrInf,
+    /// Relative score threshold (between the minimum and maximum score).
+    pub score_thresh: f64,
+}
+
+impl FilterSubparams {
+    pub fn validate(&self, prefix: &'static str) -> Result<(), Error> {
+        validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
+            "{}: score threshold ({}) must be within [0, 1]", prefix, self.score_thresh);
+        validate_param!(self.min_size.0 > 1,
+            "{}: minimal size ({}) must be at least 2", prefix, self.min_size);
+        validate_param!(self.min_size <= self.max_size,
+            "{}: min size ({}) must be <= the max size ({})",
+            prefix, self.min_size, self.max_size);
+        Ok(())
+    }
+
+    pub fn set_sizes(&mut self, mut values: lexopt::ValuesIter) -> Result<(), lexopt::Error> {
+        self.min_size = values.next().expect("First value must be present").parse()?;
+        self.max_size = values.next()
+            .map(|v| v.parse())
+            .transpose()?
+            .unwrap_or(UsizeOrInf::INF);
+        Ok(())
+    }
+
+    pub fn disable(&mut self) {
+        self.min_size = UsizeOrInf::INF;
+        self.max_size = UsizeOrInf::INF;
+    }
+
+    /// Finds partition point and score threshold based on the decreasing list of scores.
+    pub fn get_partition<T>(&self, scores: &[(T, f64)]) -> (usize, f64) {
+        let n = scores.len();
+        let best = scores[0].1;
+        let worst = scores[n - 1].1;
+        let range = best - worst;
+
+        let mut thresh = worst + range * self.score_thresh;
+        let mut m = scores.partition_point(|(_, score)| *score >= thresh);
+        if self.min_size.0 >= n {
+            thresh = worst;
+            m = n;
+        } else if m < self.min_size.0 {
+            thresh = scores[self.min_size.0 - 1].1;
+            m = scores.partition_point(|(_, score)| *score >= thresh);
+        } else if m > self.max_size.0 {
+            thresh = scores[self.max_size.0 - 1].1;
+            m = scores.partition_point(|(_, score)| *score >= thresh);
+        }
+        // m can still be over max_size, but we do not want to discard entries with equal scores.
+        (m, thresh)
+    }
+}
+
+/// Filter haplotypes and genotypes before assigning reads.
+pub struct FilterParams {
+    /// Rank haplotypes based on the top X read alignments, where X = haplotype_aln_coef / ploidy`.
+    pub nreads_mult: f64,
+    pub haplotype: FilterSubparams,
+    pub genotype: FilterSubparams,
+}
+
+impl Default for FilterParams {
+    fn default() -> Self {
+        Self {
+            nreads_mult: 0.8,
+            haplotype: FilterSubparams {
+                min_size: UsizeOrInf(5),
+                max_size: UsizeOrInf(100),
+                score_thresh: 0.9,
+            },
+            genotype: FilterSubparams {
+                min_size: UsizeOrInf(10),
+                max_size: UsizeOrInf(1000),
+                score_thresh: 0.9,
+            },
+        }
+    }
+}
+
+impl FilterParams {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_param!(0.0 < self.nreads_mult && self.nreads_mult < 2.0,
+            "Number of reads multiplier ({}) must be reasonably close to 1",
+            self.nreads_mult);
+        self.haplotype.validate("Haplotype filtering")?;
+        self.genotype.validate("Genotype filtering")?;
+        Ok(())
+    }
+}
 
 struct Args {
     input: Vec<PathBuf>,
@@ -734,6 +862,16 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
+    let contig_windows = ContigWindows::new_all(&locus.set, cached_distrs, &args.assgn_params);
+    if args.debug || scheme.has_dbg_output() {
+        let windows_filename = locus.out_dir.join("windows.bed.gz");
+        let mut windows_writer = ext::sys::create_gzip(&windows_filename)?;
+        writeln!(windows_writer, "#{}", ContigWindows::BED_HEADER).map_err(add_path!(windows_filename))?;
+        for curr_windows in contig_windows.iter() {
+            curr_windows.write_to(&mut windows_writer, &contigs).map_err(add_path!(windows_filename))?;
+        }
+    }
+
     let all_alns = if args.debug {
         let reads_filename = locus.out_dir.join("reads.csv.gz");
         let mut reads_writer = ext::sys::create_gzip(&reads_filename)?;
@@ -745,27 +883,11 @@ fn analyze_locus(
 
     let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
-    let contig_ids: Vec<ContigId> = /* if opt_priors.is_none() {
-        select_haplotypes(contigs, &all_alns, &mut lik_writer, &args.filt_params, args.ploidy, args.debug)
-            .map_err(add_path!(locus.lik_filename))?
-    } else */ {
-        contigs.ids().collect()
-    };
 
+    let contig_ids: Vec<ContigId> = contigs.ids().collect();
     let gt_priors = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
     if gt_priors.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
-    }
-    let contig_windows = ContigWindows::new_all(&contig_ids, &locus.set, cached_distrs, &args.assgn_params);
-    if args.debug || scheme.has_dbg_output() {
-        let windows_filename = locus.out_dir.join("windows.bed.gz");
-        let mut windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        writeln!(windows_writer, "#{}", ContigWindows::BED_HEADER).map_err(add_path!(windows_filename))?;
-        for opt_windows in contig_windows.iter() {
-            if let Some(curr_windows) = opt_windows {
-                curr_windows.write_to(&mut windows_writer, &contigs).map_err(add_path!(windows_filename))?;
-            }
-        }
     }
 
     let gt_priors = filter_genotypes(&contig_ids, gt_priors, &all_alns, &mut lik_writer,

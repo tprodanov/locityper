@@ -79,7 +79,7 @@ impl GenotypeAlignments {
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
         genotype: Genotype,
-        contig_windows: &[Option<ContigWindows>],
+        contig_windows: &[ContigWindows],
         all_alns: &AllAlignments,
         params: &super::Params,
     ) -> Self
