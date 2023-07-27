@@ -876,9 +876,9 @@ fn analyze_locus(
         let reads_filename = locus.out_dir.join("reads.csv.gz");
         let mut reads_writer = ext::sys::create_gzip(&reads_filename)?;
         writeln!(reads_writer, "{}", locs::CSV_HEADER).map_err(add_path!(reads_filename))?;
-        AllAlignments::load(bam_reader, contigs, bg_distr, &args.assgn_params, reads_writer)?
+        AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, reads_writer)?
     } else {
-        AllAlignments::load(bam_reader, contigs, bg_distr, &args.assgn_params, io::sink())?
+        AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, io::sink())?
     };
 
     let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;

@@ -20,9 +20,11 @@ use crate::{
     },
     algo::{fnv1a, bisect},
     math::Ln,
+    model::windows::ContigWindows,
 };
 
-pub(crate) const CSV_HEADER: &'static str = "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\tlik";
+pub(crate) const CSV_HEADER: &'static str
+    = "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\tlik\tweighted_lik\tread_name";
 
 /// BAM reader, which stores the next record within.
 /// Contains `read_mate_alns` method, which consecutively reads all records with the same name
@@ -34,6 +36,7 @@ struct FilteredReader<'a, R: bam::Read> {
     contigs: Arc<ContigNames>,
     boundary: u32,
     err_prof: &'a ErrorProfile,
+    contig_windows: &'a [ContigWindows],
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id << 32 | alignment start), value: index of the previous position.
     found_alns: IntMap<u64, usize>,
@@ -44,6 +47,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         mut reader: R,
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
+        contig_windows: &'a [ContigWindows],
         boundary: u32,
     ) -> Result<Self, Error> {
         let mut record = bam::Record::new();
@@ -51,7 +55,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             // Reader would return None if there are no more records.
             has_more: reader.read(&mut record).transpose()?.is_some(),
             found_alns: IntMap::default(),
-            reader, record, contigs, err_prof, boundary,
+            reader, record, contigs, err_prof, contig_windows, boundary,
         })
     }
 
@@ -77,7 +81,8 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name_hash = fnv1a(self.record.qname());
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA", name_hash, read_end).map_err(add_path!(!))?;
+            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA\tNA\t{}", name_hash, read_end, self.curr_name()?)
+                .map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
             return Ok((name_hash, 0.0, false));
@@ -89,6 +94,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         // Does any alignment have good edit distance?
         let mut any_good = false;
         let mut min_prob = f64::INFINITY;
+        let mut weight = f64::NAN;
         self.found_alns.clear();
         loop {
             let mut aln = Alignment::new_without_name(
@@ -100,6 +106,10 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 
             let read_prof = aln.count_region_operations_fast(contig_len);
             let aln_prob = self.err_prof.ln_prob(&read_prof);
+            if self.found_alns.is_empty() {
+                weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
+            }
+            let weighted_prob = aln_prob * weight;
 
             let (edit_dist, read_len) = read_prof.edit_and_read_len();
             let allowed_edit_dist = self.err_prof.allowed_edit_dist(read_len);
@@ -108,29 +118,32 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let medium_dist = 2 * edit_dist < read_len;
             any_good |= good_dist;
 
-            writeln!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}",
+            write!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}\t{:.2}",
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
                 edit_dist, read_len, if good_dist { '+' } else if medium_dist { '~' } else { '-' },
-                Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
+                Ln::to_log10(aln_prob), Ln::to_log10(weighted_prob)).map_err(add_path!(!))?;
+            if self.found_alns.is_empty() {
+                write!(dbg_writer, "\t{}", self.curr_name()?).map_err(add_path!(!))?;
+            }
+            writeln!(dbg_writer).map_err(add_path!(!))?;
 
-            let pos_key = u64::from(aln_interval.contig_id().get()) << 32 | u64::from(aln_interval.start());
-            aln.set_ln_prob(aln_prob);
-
+            let pos_key = u64::from(aln.interval().contig_id().get()) << 32 | u64::from(aln.interval().start());
+            aln.set_ln_prob(weighted_prob);
             if medium_dist {
                 match self.found_alns.entry(pos_key) {
                     Entry::Occupied(entry) => {
                         let aln_ix = *entry.get();
                         // Already seen this alignment.
-                        if aln_prob > alns[aln_ix].ln_prob() {
+                        if weighted_prob > alns[aln_ix].ln_prob() {
                             alns[aln_ix] = aln.take_light_aln();
                         }
                     }
                     Entry::Vacant(entry) => {
-                        alns.push(aln.take_light_aln());
                         entry.insert(alns.len());
+                        alns.push(aln.take_light_aln());
                     }
                 }
-                min_prob = aln_prob.min(min_prob);
+                min_prob = weighted_prob.min(min_prob);
             }
             if self.reader.read(&mut self.record).transpose()?.is_none() {
                 self.has_more = false;
@@ -153,7 +166,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     }
 
     /// Returns the name of the next record.
-    fn next_name(&self) -> Result<&str, Error> {
+    fn curr_name(&self) -> Result<&str, Error> {
         std::str::from_utf8(self.record.qname()).map_err(|_|
             Error::InvalidInput(format!("Read name is not UTF-8: {:?}",
                 String::from_utf8_lossy(self.record.qname()))))
@@ -445,6 +458,7 @@ impl AllAlignments {
         reader: impl bam::Read,
         contigs: &Arc<ContigNames>,
         bg_distr: &BgDistr,
+        contig_windows: &[ContigWindows],
         params: &super::Params,
         mut dbg_writer: impl Write,
     ) -> Result<Self, Error>
@@ -453,7 +467,8 @@ impl AllAlignments {
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), boundary)?;
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(),
+            contig_windows, boundary)?;
 
         let insert_distr = bg_distr.insert_distr();
         let is_paired_end = insert_distr.is_paired_end();
@@ -464,8 +479,7 @@ impl AllAlignments {
         let mut buffer = Vec::with_capacity(16);
         while reader.has_more {
             tmp_alns.clear();
-            let read_name = reader.next_name()?.to_owned();
-            write!(dbg_writer, "{}=", read_name).map_err(add_path!(!))?;
+            let read_name = reader.curr_name()?.to_owned();
             let (hash, min_prob1, mut central) = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut dbg_writer)?;
             if !hashes.insert(hash) {
                 log::warn!("Read {} produced hash collision ({:X}). \

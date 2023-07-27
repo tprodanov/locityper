@@ -18,4 +18,6 @@ Improve `locityper add`:
 * Improve Greedy solver.
 
 Calculate window weights using `inv-CDF(1)`.
+Write window information during `ContigWindows` creation.
+Provide confidence level directly during genotyping.
 Provide scheme through arguments?

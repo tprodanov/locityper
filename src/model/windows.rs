@@ -116,7 +116,10 @@ impl ReadGtAlns {
         if let Some(i) = self.contig_ix {
             let contig = &mcontigs.by_contig[i as usize];
             let shift = mcontigs.wshifts[i as usize];
-            self.windows = [contig.get_window(shift, self.middle1), contig.get_window(shift, self.middle2)];
+            self.windows = [
+                contig.get_shifted_window(shift, self.middle1),
+                contig.get_shifted_window(shift, self.middle2)
+            ];
         }
     }
 
@@ -129,8 +132,8 @@ impl ReadGtAlns {
             let tweak2 = r as u32 % (2 * tweak + 1);
 
             self.windows = [
-                contig.get_window(shift, self.middle1.map(|middle| middle + tweak1)),
-                contig.get_window(shift, self.middle2.map(|middle| middle + tweak2)),
+                contig.get_shifted_window(shift, self.middle1.map(|middle| middle + tweak1)),
+                contig.get_shifted_window(shift, self.middle2.map(|middle| middle + tweak2)),
             ];
         }
     }
@@ -254,8 +257,14 @@ impl ContigWindows {
         &self.depth_distrs
     }
 
+    /// Returns window weight based on the read middle.
+    /// If read is out of bounds, returns 1.0.
+    pub fn get_window_weight(&self, middle: u32) -> f64 {
+        self.window_getter.middle_window(middle).map(|w| self.window_weights[w as usize]).unwrap_or(1.0)
+    }
+
     /// Returns window range within the contig based on the read alignment range.
-    fn get_window(&self, shift: u32, middle: Option<u32>) -> u32 {
+    fn get_shifted_window(&self, shift: u32, middle: Option<u32>) -> u32 {
         match middle {
             Some(middle) => self.window_getter.middle_window(middle).map(|w| w + shift).unwrap_or(BOUNDARY_WINDOW),
             None => UNMAPPED_WINDOW,
