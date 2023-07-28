@@ -23,9 +23,6 @@ use crate::{
     model::windows::ContigWindows,
 };
 
-pub(crate) const CSV_HEADER: &'static str
-    = "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\tlik\tweighted_lik\tread_name";
-
 /// BAM reader, which stores the next record within.
 /// Contains `read_mate_alns` method, which consecutively reads all records with the same name
 /// until the next primary alignment.
@@ -467,6 +464,9 @@ impl AllAlignments {
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
+
+        writeln!(dbg_writer, "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\
+            \tlik\tweighted_lik\tread_name").map_err(add_path!(!))?;
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(),
             contig_windows, boundary)?;
 

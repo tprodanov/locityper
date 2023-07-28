@@ -21,11 +21,9 @@ pub struct Params {
     /// Unmapped reads receive minimum alignment probability for this read PLUS this penalty.
     pub unmapped_penalty: f64,
 
-    /// Average k-mer frequency is calculated for a window in question.
-    /// If the value does not exceed `rare_kmer`, the window received a weight = 1.
-    /// If the value equals to `semicommon_kmer`, weight would be 0.5.
-    pub rare_kmer: f64,
-    pub semicommon_kmer: f64,
+    /// See `windows::WeightCalculator` for more details.
+    pub weight_breakpoint: f64,
+    pub weight_power: f64,
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
     /// None: half window size.
@@ -42,8 +40,9 @@ impl Default for Params {
             depth_contrib: 50.0,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
-            rare_kmer: 3.0,
-            semicommon_kmer: 5.0,
+
+            weight_breakpoint: 0.5,
+            weight_power: 2.0,
 
             tweak: None,
             alt_cn: (0.5, 1.5),
@@ -64,10 +63,11 @@ impl Params {
         }
         validate_param!(self.unmapped_penalty < 0.0 && self.unmapped_penalty.is_normal(),
             "Unmapped penalty ({:.4}) must be negative", Ln::to_log10(self.unmapped_penalty));
-        validate_param!(self.rare_kmer > 1.0, "First k-mer frequency threshold ({:.4}) must be over 1",
-            self.rare_kmer);
-        validate_param!(self.rare_kmer < self.semicommon_kmer,
-            "k-mer frequency thresholds ({:.4}, {:.4}) are non-increasing", self.rare_kmer, self.semicommon_kmer);
+
+        validate_param!(0.0 < self.weight_breakpoint && self.weight_breakpoint < 1.0,
+            "Weight breakpoint ({}) must be within (0, 1)", self.weight_breakpoint);
+        validate_param!(0.5 <= self.weight_power && self.weight_power <= 50.0,
+            "Weight power ({}) must be within [0.5, 50]", self.weight_power);
 
         validate_param!(self.alt_cn.0 > 0.0 && self.alt_cn.0 < 1.0,
             "Alternative copy number #1 ({}) must be in (0, 1).", self.alt_cn.0);

@@ -24,7 +24,7 @@ use crate::{
     ext,
     model::{
         Params as AssgnParams,
-        locs::{self, AllAlignments},
+        locs::AllAlignments,
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
     },
@@ -289,13 +289,13 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
         "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
         super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
-    println!("    {:KEY$} {} \n\
-        {EMPTY}  Contig windows receive different weight depending on average k-mer\n\
-        {EMPTY}  frequency. Windows with values under {} [{}] receive full weight.\n\
-        {EMPTY}  Windows with values equal to {} [{}] receive half weight.",
-        "    --rare-kmer".green(), "FLOAT FLOAT".yellow(),
-        "FLOAT_1".yellow(), super::fmt_def(defaults.assgn_params.rare_kmer),
-        "FLOAT_2".yellow(), super::fmt_def(defaults.assgn_params.semicommon_kmer));
+    println!("    {:KEY$} {}\n\
+        {EMPTY}  Calculate window weight based on the fraction of unique k-mers, and\n\
+        {EMPTY}  * breakpoint (0, 1), {} [{}], where weight 1/2,\n\
+        {EMPTY}  * power [0.5, 50], {} [{}], regulates the slope (bigger - steeper).",
+        "    --weight".green(), "FLOAT [FLOAT]".yellow(),
+        "FLOAT_1".yellow(), super::fmt_def_f64(defaults.assgn_params.weight_breakpoint),
+        "FLOAT_2".yellow(), super::fmt_def_f64(defaults.assgn_params.weight_power));
     println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
         {EMPTY}  read alignment likelihoods [{}].",
         "-C, --dp-contrib".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_contrib));
@@ -388,9 +388,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
-            Long("rare-kmer") => {
-                args.assgn_params.rare_kmer = parser.value()?.parse()?;
-                args.assgn_params.semicommon_kmer = parser.value()?.parse()?;
+            Long("weight") => {
+                let mut values = parser.values()?;
+                args.assgn_params.weight_breakpoint = values.next()
+                    .expect("At least one value must be present").parse()?;
+                args.assgn_params.weight_power = values.next()
+                    .map(|v| v.parse())
+                    .transpose()?
+                    .unwrap_or(2.0);
             }
             Long("tweak") => {
                 let val = parser.value()?;
@@ -862,20 +867,18 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let contig_windows = ContigWindows::new_all(&locus.set, cached_distrs, &args.assgn_params);
-    if args.debug || scheme.has_dbg_output() {
+    let contig_windows = if args.debug || scheme.has_dbg_output() {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
-        let mut windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        writeln!(windows_writer, "#{}", ContigWindows::BED_HEADER).map_err(add_path!(windows_filename))?;
-        for curr_windows in contig_windows.iter() {
-            curr_windows.write_to(&mut windows_writer, &contigs).map_err(add_path!(windows_filename))?;
-        }
-    }
+        let windows_writer = ext::sys::create_gzip(&windows_filename)?;
+        ContigWindows::new_all(&locus.set, cached_distrs, &args.assgn_params, windows_writer)
+            .map_err(add_path!(windows_filename))?
+    } else {
+        ContigWindows::new_all(&locus.set, cached_distrs, &args.assgn_params, io::sink()).map_err(add_path!(!))?
+    };
 
     let all_alns = if args.debug {
         let reads_filename = locus.out_dir.join("reads.csv.gz");
-        let mut reads_writer = ext::sys::create_gzip(&reads_filename)?;
-        writeln!(reads_writer, "{}", locs::CSV_HEADER).map_err(add_path!(reads_filename))?;
+        let reads_writer = ext::sys::create_gzip(&reads_filename)?;
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, reads_writer)?
     } else {
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, io::sink())?

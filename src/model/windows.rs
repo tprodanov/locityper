@@ -4,7 +4,6 @@ use std::{
 };
 use rand::Rng;
 use crate::{
-    ext::vec::F64Ext,
     seq::{
         self, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
@@ -154,31 +153,41 @@ impl ReadGtAlns {
     }
 }
 
-/// Calculates weight of a positive value x.
-/// If x <= c1, returns 1.
-/// If x = c2, returns 0.5 (returns ln 0.5).
-/// For values between c1 and infinity, the weight is distributed according to a sech function.
-/// ```
-/// f(x) = { 1                              if x in [0, c1].
-///         /      x - c1
-///        { sech ------- * ln(2 + sqrt3)   if x > c1.
-///         \     c2 - c1
-/// ```
-fn sech_weight(x: f64, c1: f64, c2: f64) -> f64 {
-    if x <= c1 {
-        return 1.0;
+/// Calculate weight function [0, 1] -> [0, 1].
+struct WeightCalculator {
+    coeff: f64,
+    power: f64,
+}
+
+impl WeightCalculator {
+    /// Creates new calculator based on two parameters:
+    /// - breakpoint in (0, 1): weight(breakpoint) = 1/2.
+    /// - power > 0: determines how fast do the value change near the breakpoint.
+    ///   The bigger the power, the faster the change.
+    fn new(breakpoint: f64, power: f64) -> Self {
+        assert!(0.0 < breakpoint && breakpoint < 1.0 && power > 0.0);
+        Self {
+            coeff: (1.0 - breakpoint).powf(power) / breakpoint.powf(power),
+            power,
+        }
     }
-    // ln(2 + sqrt(3)).
-    const LN2_SQRT3: f64 = 1.31695789692481;
-    let t = (x - c1) / (c2 - c1) * LN2_SQRT3;
-    let expt = t.exp();
-    2.0 * expt / (expt * expt + 1.0)
+
+    /// Calculates weight according to the function $t^2 / (t^2 + 1)$
+    /// where $t = C x^p / (1-x)^p$.
+    fn get(&self, x: f64) -> f64 {
+        if x == 1.0 {
+            1.0
+        } else {
+            let t = self.coeff * x.powf(self.power) / (1.0 - x).powf(self.power);
+            let t2 = t * t;
+            t2 / (t2 + 1.0)
+        }
+    }
 }
 
 /// Set of windows for one contig.
 #[derive(Clone)]
 pub struct ContigWindows {
-    contig_id: ContigId,
     /// Structure, that stores start, end and window.
     window_getter: WindowGetter,
     /// GC-content for each window within contig.
@@ -190,25 +199,27 @@ pub struct ContigWindows {
 }
 
 impl ContigWindows {
-    pub fn new(
+    fn new(
         contig_id: ContigId,
         contigs: &ContigNames,
         seq: &[u8],
         kmer_counts: &KmerCounts,
         cached_distrs: &CachedDepthDistrs,
-        params: &super::Params,
-    ) -> Self
+        weight_calc: &WeightCalculator,
+        boundary: u32,
+        dbg_writer: &mut impl Write,
+    ) -> io::Result<Self>
     {
         let contig_len = seq.len() as u32;
+        let contig_name = contigs.get_name(contig_id);
         let window = cached_distrs.bg_depth().window_size();
         let neighb_size = cached_distrs.bg_depth().neighb_size();
-        assert!(contig_len > window + 2 * params.boundary_size,
+        assert!(contig_len > window + 2 * boundary,
             "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
-        let n_windows = (contig_len - 2 * params.boundary_size) / window;
+        let n_windows = (contig_len - 2 * boundary) / window;
         let sum_len = n_windows * window;
-        let start = (contig_len - sum_len) / 2;
-        let end = start + sum_len;
+        let reg_start = (contig_len - sum_len) / 2;
 
         let k = kmer_counts.k();
         let halfk = k / 2;
@@ -219,29 +230,45 @@ impl ContigWindows {
         let left_padding = (neighb_size - window) / 2;
         let right_padding = neighb_size - window - left_padding;
         for i in 0..n_windows {
-            let padded_start = (start + i * window).saturating_sub(left_padding);
-            let padded_end = (start + (i + 1) * window + right_padding).min(contig_len);
-            window_gcs.push(seq::gc_content(&seq[padded_start as usize..padded_end as usize]).round() as u8);
+            let start = reg_start + i * window;
+            let end = start + window;
+            let padded_start = start.saturating_sub(left_padding);
+            let padded_end = (end + right_padding).min(contig_len);
+            let gc = seq::gc_content(&seq[padded_start as usize..padded_end as usize]).round() as u8;
+            window_gcs.push(gc);
 
-            let mean_kmer_freq = F64Ext::mean(&contig_kmer_counts[
-                padded_start.saturating_sub(halfk) as usize..min(padded_end - halfk, contig_len - k + 1) as usize]);
-            window_weights.push(sech_weight(mean_kmer_freq, params.rare_kmer, params.semicommon_kmer));
+            // What is the biggest quantile that still produces 1?
+            let kmer_start = padded_start.saturating_sub(halfk) as usize;
+            let kmer_end = min(padded_end - halfk, contig_len - k + 1) as usize;
+            let inv_cdf1 = contig_kmer_counts[kmer_start..kmer_end].iter().filter(|&&x| x <= 1).count() as f64
+                / (kmer_end - kmer_start) as f64;
+            let weight = weight_calc.get(inv_cdf1);
+            window_weights.push(weight);
+            writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}", contig_name, start, end, gc, inv_cdf1, weight)?;
         }
-        Self {
-            window_getter: WindowGetter::new(start, end, window),
+        Ok(Self {
+            window_getter: WindowGetter::new(reg_start, reg_start + sum_len, window),
             depth_distrs: window_gcs.iter().zip(&window_weights)
                 .map(|(&gc, &w)| cached_distrs.get_distribution(gc, w))
                 .collect(),
-            contig_id, window_gcs, window_weights,
-        }
+            window_gcs, window_weights,
+        })
     }
 
     /// Creates a set of contig windows for each contig.
-    pub fn new_all(set: &ContigSet, cached_distrs: &CachedDepthDistrs, params: &super::Params) -> Vec<Self> {
+    pub fn new_all(
+        set: &ContigSet,
+        cached_distrs: &CachedDepthDistrs,
+        params: &super::Params,
+        mut dbg_writer: impl Write,
+    ) -> io::Result<Vec<Self>> {
         let contigs = set.contigs();
         let seqs = set.seqs();
+        let weight_calc = WeightCalculator::new(params.weight_breakpoint, params.weight_power);
+        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tweight")?;
         contigs.ids().zip(seqs)
-            .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), cached_distrs, params))
+            .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), cached_distrs,
+                &weight_calc, params.boundary_size, &mut dbg_writer))
             .collect()
     }
 
@@ -269,18 +296,6 @@ impl ContigWindows {
             Some(middle) => self.window_getter.middle_window(middle).map(|w| w + shift).unwrap_or(BOUNDARY_WINDOW),
             None => UNMAPPED_WINDOW,
         }
-    }
-
-    pub const BED_HEADER: &'static str = "contig\tstart\tend\tgc\tweight";
-
-    /// Writes windows for this contig in a BED format (see `BED_HEADER`).
-    pub fn write_to(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
-        let name = contigs.get_name(self.contig_id);
-        for (i, (&gc, &weight)) in self.window_gcs.iter().zip(&self.window_weights).enumerate() {
-            let start = self.window_getter.start + i as u32 * self.window_getter.window;
-            writeln!(f, "{}\t{}\t{}\t{}\t{:.5}", name, start, start + self.window_getter.window, gc, weight)?;
-        }
-        Ok(())
     }
 }
 
