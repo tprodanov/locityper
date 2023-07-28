@@ -40,8 +40,11 @@ pub fn group_mates<'a>(alns: &'a [Alignment]) -> Result<Vec<(usize, usize)>, Err
 
 /// Allow read-pair orientation, if at least 5% pairs support it.
 const ORIENT_THRESH: f64 = 0.05;
-/// Multiply max_size by 4 to get cache size.
-const CACHE_SIZE_MULT: usize = 4;
+
+fn cache_size(distr: &NBinom) -> usize {
+    const MAX_CACHE_SIZE: usize = 65536;
+    MAX_CACHE_SIZE.min(distr.quantile(0.99999) as usize)
+}
 
 /// Insert size distribution.
 #[derive(Debug, Clone)]
@@ -50,8 +53,6 @@ pub struct InsertDistr {
     orient_allowed: [bool; 2],
     /// Cached insert size distribution.
     distr: Option<LinearCache<NBinom>>,
-    /// Minimum and maximum allowed insert sizes.
-    conf_interval: (u32, u32),
     /// ln-probability at the mode of the insert size distribution.
     mode_prob: f64,
 }
@@ -61,7 +62,6 @@ impl InsertDistr {
         Self {
             orient_allowed: [false; 2],
             distr: None,
-            conf_interval: (0, 0),
             mode_prob: f64::NAN,
         }
     }
@@ -75,7 +75,6 @@ impl InsertDistr {
     pub fn estimate(
         alignments: &[Alignment],
         pair_ixs: &[(usize, usize)],
-        params: &super::Params,
         out_dir: Option<&Path>,
     ) -> Result<Self, Error>
     {
@@ -130,9 +129,9 @@ impl InsertDistr {
                 if orient_allowed[i] { "allowed" } else { "forbidden" });
         }
 
-        let max_size = INS_QUANTILE_MULT * F64Ext::interpol_quantile(&mut insert_sizes, INS_QUANTILE);
+        let est_limit = INS_QUANTILE_MULT * F64Ext::interpol_quantile(&mut insert_sizes, INS_QUANTILE);
         // Find index after the limiting value.
-        let m = bisect::right(&insert_sizes, &max_size);
+        let m = bisect::right(&insert_sizes, &est_limit);
         let lim_insert_sizes = &insert_sizes[..m];
 
         let mean = F64Ext::mean(lim_insert_sizes);
@@ -141,18 +140,12 @@ impl InsertDistr {
         let distr = RegularizedEstimator::default().estimate(mean, var);
         log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", distr.mean(), distr.variance().sqrt());
 
-        let quantile = 0.5 * (1.0 - params.ins_conf_level);
-        let min_size = (distr.quantile(quantile) - 1e-8).floor().max(0.0) as u32;
-        let max_size = (distr.quantile(1.0 - quantile) + 1e-8).ceil() as u32;
-        log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
-            min_size, max_size, 100.0 * params.ins_conf_level);
-        let distr = distr.cached(max_size as usize * CACHE_SIZE_MULT);
-
+        let size = cache_size(&distr);
+        let distr = distr.cached(size);
         Ok(Self {
             orient_allowed,
             mode_prob: distr.ln_pmf(distr.inner().mode()),
             distr: Some(distr),
-            conf_interval: (min_size, max_size),
         })
     }
 
@@ -165,9 +158,14 @@ impl InsertDistr {
         }
     }
 
-    /// Returns true if given insert size is within the predefined confidence interval.
-    pub fn in_conf_interval(&self, insert_size: u32) -> bool {
-        self.conf_interval.0 <= insert_size && insert_size <= self.conf_interval.1
+    /// Returns insert size confidence interval for the correspoding level between 0 and 1.
+    pub fn confidence_interval(&self, level: f64) -> (u32, u32) {
+        let quantile = 0.5 * (1.0 - level);
+        let distr = self.distr.as_ref().expect("Cannot get confidence interval for unpaired reads");
+        (
+            (distr.quantile(quantile) - 1e-8).floor().max(0.0) as u32,
+            (distr.quantile(1.0 - quantile) + 1e-8).ceil() as u32,
+        )
     }
 
     /// Returns true if the reads are paired-end, false if single-end.
@@ -175,7 +173,7 @@ impl InsertDistr {
         self.distr.is_some()
     }
 
-    /// Returns worst available probability at one of the confidence interval edges.
+    /// Returns penalty of unpaired reads: probability at the mode of the distrbution.
     pub fn insert_penalty(&self) -> f64 {
         self.mode_prob
     }
@@ -189,29 +187,28 @@ impl JsonSer for InsertDistr {
                 ff_allowed: self.orient_allowed[1],
                 n: distr.inner().n(),
                 p: distr.inner().p(),
-                min_size: self.conf_interval.0,
-                max_size: self.conf_interval.1,
             }
         } else {
             json::object!{
-                max_size: 0,
+                n: -1.0,
             }
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> max_size (as_u32));
-        if max_size == 0 {
+        json_get!(obj -> n (as_f64));
+        if n < 0.0 {
             return Ok(Self::undefined());
         }
-        json_get!(obj -> n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool), min_size (as_u32));
+        json_get!(obj -> p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
 
-        let distr = NBinom::new(n, p).cached(max_size as usize * CACHE_SIZE_MULT);
+        let distr = NBinom::new(n, p);
+        let size = cache_size(&distr);
+        let distr = distr.cached(size);
         Ok(Self {
             orient_allowed: [fr_allowed, ff_allowed],
             mode_prob: distr.ln_pmf(distr.inner().mode()),
             distr: Some(distr),
-            conf_interval: (min_size, max_size),
         })
     }
 }

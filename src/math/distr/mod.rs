@@ -117,6 +117,6 @@ where T: DiscretePmf + Clone + Send + Sync + 'static
 
 impl Clone for DistrBox {
     fn clone(&self) -> Self {
-        self.as_ref().clone_box()
+        self.deref().clone_box()
     }
 }

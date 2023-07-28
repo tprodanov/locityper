@@ -35,8 +35,8 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             depth: Default::default(),
-            ins_conf_level: 0.999,
-            err_conf_level: 0.99,
+            ins_conf_level: 0.995,
+            err_conf_level: 0.995,
             err_rate_mult: 1.0,
         }
     }

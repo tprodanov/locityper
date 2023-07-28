@@ -641,14 +641,18 @@ fn estimate_bg_from_paired(
 {
     // Group reads into pairs, and estimate insert size from them.
     let pair_ixs = insertsz::group_mates(&alns)?;
-    let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, &args.bg_params, opt_out_dir)?;
+    let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, opt_out_dir)?;
+    let (min_insert, max_insert) = insert_distr.confidence_interval(args.bg_params.ins_conf_level);
+    log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
+        min_insert, max_insert, crate::math::fmt_signif(100.0 * args.bg_params.ins_conf_level, 5));
 
     // Estimate error profile from read pairs with appropriate insert size.
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
     for &(i, j) in pair_ixs.iter() {
         let first = &alns[i];
         let second = &alns[j];
-        if insert_distr.in_conf_interval(first.insert_size(second.deref())) {
+        let insert = first.insert_size(second.deref());
+        if min_insert <= insert && insert <= max_insert {
             errprof_alns.push(first);
             errprof_alns.push(second);
         }
