@@ -23,6 +23,26 @@ use crate::{
     model::windows::ContigWindows,
 };
 
+struct MateSummary {
+    name_hash: u64,
+    weight: f64,
+    min_prob: f64,
+    any_central: bool,
+    mapped: bool,
+}
+
+impl MateSummary {
+    fn unmapped(name_hash: u64) -> Self {
+        Self {
+            name_hash,
+            weight: f64::NAN,
+            min_prob: 0.0,
+            any_central: false,
+            mapped: false,
+        }
+    }
+}
+
 /// BAM reader, which stores the next record within.
 /// Contains `read_mate_alns` method, which consecutively reads all records with the same name
 /// until the next primary alignment.
@@ -61,19 +81,13 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     /// Basically, the function continue to read until the next primary alignment is found,
     /// which is saved to `self.record`.
     ///
-    /// If best edit distance is too high, does not add any new alignments.
-    /// Otherwise, normalizes all alignment probabilities by the best probability (therefore max is always = 0).
-    ///
-    /// Return triple
-    /// - name_hash,
-    /// - min_prob: smallest ln-probability of all non-discarded probabilities [0 if there are no alignments],
-    /// - any_central: true if at least one alignment is in the central region of the corresponding contig.
+    /// If read is unmapped, or best edit distance is too high, does not add any new alignments.
     fn next_alns(
         &mut self,
         read_end: ReadEnd,
         alns: &mut Vec<LightAlignment>,
         dbg_writer: &mut impl Write,
-    ) -> Result<(u64, f64, bool), Error>
+    ) -> Result<MateSummary, Error>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name_hash = fnv1a(self.record.qname());
@@ -82,7 +96,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 .map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
-            return Ok((name_hash, 0.0, false));
+            return Ok(MateSummary::unmapped(name_hash));
         }
 
         let start_len = alns.len();
@@ -103,11 +117,6 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 
             let read_prof = aln.count_region_operations_fast(contig_len);
             let aln_prob = self.err_prof.ln_prob(&read_prof);
-            if self.found_alns.is_empty() {
-                weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
-            }
-            let weighted_prob = aln_prob * weight;
-
             let (edit_dist, read_len) = read_prof.edit_and_read_len();
             let allowed_edit_dist = self.err_prof.allowed_edit_dist(read_len);
             let good_dist = edit_dist <= allowed_edit_dist;
@@ -115,23 +124,24 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let medium_dist = 2 * edit_dist < read_len;
             any_good |= good_dist;
 
-            write!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}\t{:.2}",
+            write!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}",
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
                 edit_dist, read_len, if good_dist { '+' } else if medium_dist { '~' } else { '-' },
-                Ln::to_log10(aln_prob), Ln::to_log10(weighted_prob)).map_err(add_path!(!))?;
+                Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if self.found_alns.is_empty() {
-                write!(dbg_writer, "\t{}", self.curr_name()?).map_err(add_path!(!))?;
+                weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
+                write!(dbg_writer, "{:.5}\t{}", weight, self.curr_name()?).map_err(add_path!(!))?;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
             let pos_key = u64::from(aln.interval().contig_id().get()) << 32 | u64::from(aln.interval().start());
-            aln.set_ln_prob(weighted_prob);
+            aln.set_ln_prob(aln_prob);
             if medium_dist {
                 match self.found_alns.entry(pos_key) {
                     Entry::Occupied(entry) => {
                         let aln_ix = *entry.get();
                         // Already seen this alignment.
-                        if weighted_prob > alns[aln_ix].ln_prob() {
+                        if aln_prob > alns[aln_ix].ln_prob() {
                             alns[aln_ix] = aln.take_light_aln();
                         }
                     }
@@ -140,7 +150,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                         alns.push(aln.take_light_aln());
                     }
                 }
-                min_prob = weighted_prob.min(min_prob);
+                min_prob = aln_prob.min(min_prob);
             }
             if self.reader.read(&mut self.record).transpose()?.is_none() {
                 self.has_more = false;
@@ -155,10 +165,10 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         Ok(if any_good {
-            (name_hash, min_prob, any_central)
+            MateSummary { name_hash, weight, min_prob, any_central, mapped: true }
         } else {
             alns.truncate(start_len);
-            (name_hash, 0.0, false)
+            MateSummary::unmapped(name_hash)
         })
     }
 
@@ -235,6 +245,7 @@ fn identify_contig_pair_alns(
     min_prob1: f64,
     alns2: &[LightAlignment],
     min_prob2: f64,
+    weight: f64,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     params: &super::Params,
@@ -253,14 +264,15 @@ fn identify_contig_pair_alns(
             let prob = aln1.paired_prob(aln2, insert_distr);
             max_prob1 = max_prob1.max(prob);
             *max_prob2 = max_prob2.max(prob);
-            new_alns.push(PairAlignment::new(Pair::Both(aln1.interval().clone(), aln2.interval().clone()), prob));
+            new_alns.push(PairAlignment::new(Pair::Both(aln1.interval().clone(), aln2.interval().clone()),
+                weight * prob));
         }
 
         // Only add alignment `aln1,unmapped2` if it is better than any existing paired alignment to the same contig.
         let alone_prob1 = aln1.ln_prob() + term1;
         if alone_prob1 >= max_prob1 {
             max_prob1 = alone_prob1;
-            new_alns.push(PairAlignment::new(Pair::First(aln1.interval().clone()), alone_prob1));
+            new_alns.push(PairAlignment::new(Pair::First(aln1.interval().clone()), weight * alone_prob1));
         }
         max_prob = max_prob.max(max_prob1);
     }
@@ -271,11 +283,11 @@ fn identify_contig_pair_alns(
         // Only add alignment `unmapped1,aln2` if it is better than existing `aln1,aln2` pairs.
         if alone_prob2 >= max_prob2 {
             max_prob = max_prob.max(alone_prob2);
-            new_alns.push(PairAlignment::new(Pair::Second(aln2.interval().clone()), alone_prob2));
+            new_alns.push(PairAlignment::new(Pair::Second(aln2.interval().clone()), weight * alone_prob2));
         }
     }
 
-    let thresh_prob = max_prob - params.prob_diff;
+    let thresh_prob = weight * max_prob - params.prob_diff;
     let mut i = start_len;
     while i < new_alns.len() {
         if new_alns[i].ln_prob >= thresh_prob {
@@ -360,16 +372,24 @@ impl GrouppedAlignments {
 /// Input alignments are sorted first by contig, and then by read end.
 fn identify_paired_end_alignments(
     read_name: String,
-    name_hash: u64,
     alns: &[LightAlignment],
-    min_prob1: f64,
-    min_prob2: f64,
+    summary1: &MateSummary,
+    summary2: &MateSummary,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
+    // Penalize unpaired reads by reducing their weight in half.
+    const UNPAIRED_WEIGHT_MULT: f64 = 0.5;
+    let weight = match (summary1.mapped, summary2.mapped) {
+        (false, false) => unreachable!("One of the mates must be aligned"),
+        (true,  false) => UNPAIRED_WEIGHT_MULT * summary1.weight,
+        (false, true ) => UNPAIRED_WEIGHT_MULT * summary2.weight,
+        (true,  true ) => 0.5 * (summary1.weight + summary2.weight), // Use mean weight.
+    };
+
     let mut groupped_alns = Vec::new();
     let n = alns.len();
     let mut i = 0;
@@ -384,12 +404,13 @@ fn identify_paired_end_alignments(
             bisect::right_linear(alns, |aln| aln.sort_key().cmp(&sort_key1), i, n)
         } else { i };
         let k = bisect::right_linear(alns, |aln| aln.sort_key().cmp(&sort_key2), j, n);
-        identify_contig_pair_alns(&mut groupped_alns, &alns[i..j], min_prob1, &alns[j..k], min_prob2,
-            buffer, insert_distr, params);
+        identify_contig_pair_alns(&mut groupped_alns, &alns[i..j], summary1.min_prob, &alns[j..k], summary2.min_prob,
+            weight, buffer, insert_distr, params);
         i = k;
     }
 
-    let both_unmapped = min_prob1 + min_prob2 + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty();
+    let both_unmapped = weight
+        * (summary1.min_prob + summary2.min_prob + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty());
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&groupped_alns, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
@@ -397,7 +418,8 @@ fn identify_paired_end_alignments(
         aln.ln_prob -= norm_fct;
     }
     GrouppedAlignments {
-        read_name, name_hash,
+        read_name,
+        name_hash: summary1.name_hash,
         unmapped_prob: both_unmapped - norm_fct,
         alns: groupped_alns,
     }
@@ -407,29 +429,35 @@ fn identify_paired_end_alignments(
 /// Input alignments are sorted first by contig.
 fn identify_single_end_alignments(
     read_name: String,
-    name_hash: u64,
     alns: &[LightAlignment],
-    min_prob: f64,
+    summary: &MateSummary,
     ln_ncontigs: f64,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
+    let weight = summary.weight;
     let mut groupped_alns = Vec::new();
     let n = alns.len();
     let mut i = 0;
     while i < n {
-        // For the current contig id, first mates will be in i..j, and second mates in j..k.
         let contig_id = alns[i].contig_id();
-        let j = bisect::right_linear(alns, |aln| aln.contig_id().cmp(&contig_id), i, n);
-        let thresh_prob = alns[i..j].iter()
-            .fold(f64::NEG_INFINITY, |m, aln| m.max(aln.ln_prob())) - params.prob_diff;
-        groupped_alns.extend(alns[i..j].iter()
-            .filter(|aln| aln.ln_prob() >= thresh_prob)
-            .map(|aln| PairAlignment::new(Pair::First(aln.interval().clone()), aln.ln_prob())));
+        let mut max_prob = alns[i].ln_prob();
+        let mut j = i + 1;
+        while j < n && alns[j].contig_id() == contig_id {
+            max_prob = max_prob.max(alns[j].ln_prob());
+            j += 1;
+        }
+        let thresh_prob = weight * max_prob - params.prob_diff;
+        for aln in alns[i..j].iter() {
+            let wprob = weight * aln.ln_prob();
+            if wprob >= thresh_prob {
+                groupped_alns.push(PairAlignment::new(Pair::First(aln.interval().clone()), wprob));
+            }
+        }
         i = j;
     }
 
-    let unmapped_prob = min_prob + params.unmapped_penalty;
+    let unmapped_prob = weight * (summary.min_prob + params.unmapped_penalty);
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&groupped_alns, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
@@ -437,7 +465,8 @@ fn identify_single_end_alignments(
         aln.ln_prob -= norm_fct;
     }
     GrouppedAlignments {
-        read_name, name_hash,
+        read_name,
+        name_hash: summary.name_hash,
         unmapped_prob: unmapped_prob - norm_fct,
         alns: groupped_alns,
     }
@@ -466,7 +495,7 @@ impl AllAlignments {
             "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
 
         writeln!(dbg_writer, "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\
-            \tlik\tweighted_lik\tread_name").map_err(add_path!(!))?;
+            \tlik\tweight\tread_name").map_err(add_path!(!))?;
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(),
             contig_windows, boundary)?;
 
@@ -480,32 +509,35 @@ impl AllAlignments {
         while reader.has_more {
             tmp_alns.clear();
             let read_name = reader.curr_name()?.to_owned();
-            let (hash, min_prob1, mut central) = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut dbg_writer)?;
-            if !hashes.insert(hash) {
+            let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut dbg_writer)?;
+            if !hashes.insert(summary1.name_hash) {
                 log::warn!("Read {} produced hash collision ({:X}). \
                     If many such messages, reads appear in an unordered fashion, will lead to errors",
-                    read_name, hash);
+                    read_name, summary1.name_hash);
             }
-            let min_prob2 = if is_paired_end {
-                let (hash2, min_prob2, central2) = reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut dbg_writer)?;
-                if hash != hash2 {
+            let mut central = summary1.any_central;
+            let summary2 = if is_paired_end {
+                let summary2 = reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut dbg_writer)?;
+                if summary1.name_hash != summary2.name_hash {
                     return Err(Error::InvalidData(format!("Read {} with hash {:X} does not have a second read end",
-                        read_name, hash)));
+                        read_name, summary1.name_hash)));
                 }
-                central |= central2;
-                min_prob2
-            } else { 0.0 };
+                central |= summary2.any_central;
+                Some(summary2)
+            } else {
+                None
+            };
             if !central {
                 continue;
             }
 
             let groupped_alns = if is_paired_end {
                 tmp_alns.sort_unstable_by_key(LightAlignment::sort_key);
-                identify_paired_end_alignments(read_name, hash,
-                    &tmp_alns, min_prob1, min_prob2, &mut buffer, insert_distr, ln_ncontigs, params)
+                identify_paired_end_alignments(read_name, &tmp_alns,
+                    &summary1, summary2.as_ref().unwrap(), &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
                 tmp_alns.sort_unstable_by_key(LightAlignment::contig_id);
-                identify_single_end_alignments(read_name, hash, &tmp_alns, min_prob1, ln_ncontigs, params)
+                identify_single_end_alignments(read_name, &tmp_alns, &summary1, ln_ncontigs, params)
             };
             all_alns.push(groupped_alns);
         }
