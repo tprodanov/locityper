@@ -260,11 +260,11 @@ fn print_help(extended: bool) {
             "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(defaults.max_clipping));
         println!("    {:KEY$} {:VAL$}\n\
-            {EMPTY}  Two confidence levels: for filtering insert size [{}]\n\
-            {EMPTY}  and alignment edit distance [{}].",
-            "-C, --conf-lvl".green(), "FLOAT [FLOAT]".yellow(),
-            super::fmt_def_f64(defaults.bg_params.ins_conf_level),
-            super::fmt_def_f64(defaults.bg_params.err_conf_level));
+            {EMPTY}  Two p-value thresholds for filtering recruited reads:\n\
+            {EMPTY}  on insert size [{}], and on edit distance [{}].",
+            "    --pval-thresh".green(), "FLOAT FLOAT".yellow(),
+            super::fmt_def_f64(defaults.bg_params.insert_pval),
+            super::fmt_def_f64(defaults.bg_params.edit_pval));
         println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
             {EMPTY}  read mappings missed due to higher error rate [{}].",
             "-m, --err-mult".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.bg_params.err_rate_mult));
@@ -288,8 +288,8 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Ignore windows, where less than {}% k-mers are unique [{}].",
             "    --kmer-perc".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(defaults.bg_params.depth.kmer_perc));
-        println!("    {:KEY$} {:VAL$}  This fraction of all windows is used to estimate read depth for\n\
-            {EMPTY}  each GC-content [{}]. Smaller values lead to less robust estimates,\n\
+        println!("    {:KEY$} {:VAL$}  This fraction of all windows is used in LOESS during read depth\n\
+            {EMPTY}  estimation [{}]. Smaller values lead to less robust estimates,\n\
             {EMPTY}  larger values - to similar estimates across different GC-contents.",
             "    --frac-windows".green(), "FLOAT".yellow(),
             super::fmt_def_f64(defaults.bg_params.depth.frac_windows));
@@ -323,7 +323,7 @@ fn print_help(extended: bool) {
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show short help message.", "-h, --help".green(), "");
-    println!("    {:KEY$} {:VAL$}  Show extended help message.", "-H, --full-help".green(), "");
+    println!("    {:KEY$} {:VAL$}  Show {} help message.", "-H, --full-help".green(), "", "extended".red());
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
@@ -345,13 +345,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
-            Short('C') | Long("conf-lvl") | Long("conf-level") | Long("confidence-level") => {
-                let mut values = parser.values()?;
-                args.bg_params.ins_conf_level = values.next().expect("At least one value must be present").parse()?;
-                args.bg_params.err_conf_level = values.next()
-                    .map(|v| v.parse())
-                    .transpose()?
-                    .unwrap_or(args.bg_params.ins_conf_level);
+            Long("pval-thresh") | Long("pval-threshold") | Long("pvalue-threshold") => {
+                args.bg_params.insert_pval = parser.value()?.parse()?;
+                args.bg_params.edit_pval = parser.value()?.parse()?;
             }
             Short('m') | Long("err-mult") | Long("err-multiplier") =>
                 args.bg_params.err_rate_mult = parser.value()?.parse()?,
@@ -642,9 +638,10 @@ fn estimate_bg_from_paired(
     // Group reads into pairs, and estimate insert size from them.
     let pair_ixs = insertsz::group_mates(&alns)?;
     let insert_distr = InsertDistr::estimate(&alns, &pair_ixs, opt_out_dir)?;
-    let (min_insert, max_insert) = insert_distr.confidence_interval(args.bg_params.ins_conf_level);
+    let conf_lvl = 1.0 - args.bg_params.insert_pval;
+    let (min_insert, max_insert) = insert_distr.confidence_interval(conf_lvl);
     log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
-        min_insert, max_insert, crate::math::fmt_signif(100.0 * args.bg_params.ins_conf_level, 5));
+        min_insert, max_insert, crate::math::fmt_signif(100.0 * conf_lvl, 5));
 
     // Estimate error profile from read pairs with appropriate insert size.
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
@@ -667,7 +664,7 @@ fn estimate_bg_from_paired(
         let aln2 = chunk[1];
         let (edit1, len1) = aln1.count_region_operations(interval).edit_and_read_len();
         let (edit2, len2) = aln2.count_region_operations(interval).edit_and_read_len();
-        if edit1 <= err_prof.allowed_edit_dist(len1) && edit2 <= err_prof.allowed_edit_dist(len2) {
+        if edit1 <= err_prof.allowed_edit_dist(len1).0 && edit2 <= err_prof.allowed_edit_dist(len2).0 {
             depth_alns.push(aln1.deref());
             depth_alns.push(aln2.deref());
         }
@@ -691,7 +688,7 @@ fn estimate_bg_from_unpaired(
     let filt_alns: Vec<&LightAlignment> = alns.iter()
         .filter(|aln| {
             let (edit, len) = aln.count_region_operations(interval).edit_and_read_len();
-            edit <= err_prof.allowed_edit_dist(len)
+            edit <= err_prof.allowed_edit_dist(len).0
         })
         .map(Deref::deref)
         .collect();

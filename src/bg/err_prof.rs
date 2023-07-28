@@ -94,6 +94,8 @@ where U: TryInto<T> + Copy,
     }
 }
 
+pub const DEF_EDIT_PVAL: (f64, f64) = (0.01, 0.0001);
+
 /// Read error profile.
 /// Basically, each operation is penalized according to its probability in the background data.
 /// This ensures that an alignment with fewer errors receives higher probability than the more errorneous alignment,
@@ -107,10 +109,12 @@ pub struct ErrorProfile {
     oper_probs: OperCounts<f64>,
     /// Distribution of edit distance (n = read length).
     edit_dist_distr: BetaBinomial,
-    /// Maximum edit distance that is in the one-sided Beta-Binomial confidence interval.
-    max_edit_dist: RefCell<IntMap<u32, u32>>,
-    /// Confidence level.
-    conf_lvl: f64,
+
+    /// Two CDF levels (`1 - pval`), specifying edit distance thresholds:
+    /// one for good alignments, second for passable.
+    edit_cdf: (f64, f64),
+    /// For each read length, store two maximum allowed edit distances (good and passable).
+    max_edit_dist: RefCell<IntMap<u32, (u32, u32)>>,
 }
 
 impl ErrorProfile {
@@ -144,13 +148,18 @@ impl ErrorProfile {
             oper_probs,
             edit_dist_distr,
             max_edit_dist: RefCell::default(),
-            conf_lvl: params.err_conf_level,
+            // Set cdf2 = cdf1 so that we do not have to go far.
+            edit_cdf: (1.0 - params.edit_pval, 1.0 - params.edit_pval),
         };
 
         let read_len = math::round_signif(mean_read_len, 2).round() as u32;
         log::info!("    Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
-            err_prof.allowed_edit_dist(read_len), read_len, 100.0 * err_prof.conf_lvl);
+            err_prof.allowed_edit_dist(read_len).0, read_len, 100.0 * err_prof.edit_cdf.0);
         err_prof
+    }
+
+    pub fn set_edit_pvals(&mut self, (pval1, pval2): (f64, f64)) {
+        self.edit_cdf = (1.0 - pval1, 1.0 - pval2);
     }
 
     /// Returns ln-probability for operation counts.
@@ -167,10 +176,10 @@ impl ErrorProfile {
 
     /// Returns the maximum allowed edit distance for the given read length.
     /// Values are cached for future use.
-    pub fn allowed_edit_dist(&self, read_len: u32) -> u32 {
+    pub fn allowed_edit_dist(&self, read_len: u32) -> (u32, u32) {
         let mut cache = self.max_edit_dist.borrow_mut();
         *cache.entry(read_len).or_insert_with(||
-            self.edit_dist_distr.confidence_right_border(read_len, self.conf_lvl))
+            self.edit_dist_distr.inv_cdf2(read_len, self.edit_cdf.0, self.edit_cdf.1))
     }
 }
 
@@ -185,19 +194,18 @@ impl JsonSer for ErrorProfile {
 
             alpha: self.edit_dist_distr.alpha(),
             beta: self.edit_dist_distr.beta(),
-            conf_lvl: self.conf_lvl,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
         json_get!(obj -> matches (as_f64), mismatches (as_f64), insertions (as_f64),
             deletions (as_f64), clipping (as_f64),
-            alpha (as_f64), beta (as_f64), conf_lvl (as_f64));
+            alpha (as_f64), beta (as_f64));
         Ok(Self {
             oper_probs: OperCounts { matches, mismatches, insertions, deletions, clipping },
             edit_dist_distr: BetaBinomial::new(alpha, beta),
             max_edit_dist: RefCell::default(),
-            conf_lvl,
+            edit_cdf: (1.0 - DEF_EDIT_PVAL.0, 1.0 - DEF_EDIT_PVAL.1),
         })
     }
 }

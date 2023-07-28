@@ -282,6 +282,12 @@ fn print_help() {
     println!("\n{}", "Model parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
         "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
+    println!("    {:KEY$} {:VAL$}\n\
+        {EMPTY}  Two p-value thresholds on edit distance:\n\
+        {EMPTY}  for good alignments [{}], and for passable alignments [{}].",
+        "    --edit-pval".green(), "FLOAT FLOAT".yellow(),
+        super::fmt_def_f64(defaults.assgn_params.edit_pvals.0),
+        super::fmt_def_f64(defaults.assgn_params.edit_pvals.1));
     println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
         {EMPTY}  the best alignment [{}].",
         "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
@@ -290,12 +296,12 @@ fn print_help() {
         "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
         super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
     println!("    {:KEY$} {}\n\
-        {EMPTY}  Calculate window weight based on the fraction of unique k-mers, and\n\
-        {EMPTY}  * breakpoint (0, 1), {} [{}], where weight 1/2,\n\
-        {EMPTY}  * power [0.5, 50], {} [{}], regulates the slope (bigger - steeper).",
+        {EMPTY}  Calculate window weight based on the fraction of unique k-mers [{} {}].\n\
+        {EMPTY}  * {} = breakpoint (0, 1). Weight at breakpoint is 1/2,\n\
+        {EMPTY}  * {} = power [0.5, 50]. Regulates sigmoid slope (bigger - steeper).",
         "    --weight".green(), "FLOAT [FLOAT]".yellow(),
-        "FLOAT_1".yellow(), super::fmt_def_f64(defaults.assgn_params.weight_breakpoint),
-        "FLOAT_2".yellow(), super::fmt_def_f64(defaults.assgn_params.weight_power));
+        super::fmt_def_f64(defaults.assgn_params.weight_breakpoint),
+        super::fmt_def_f64(defaults.assgn_params.weight_power), "FLOAT_1".yellow(), "FLOAT_2".yellow());
     println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
         {EMPTY}  read alignment likelihoods [{}].",
         "-C, --dp-contrib".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_contrib));
@@ -405,6 +411,11 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     Some(val.parse()?)
                 };
             }
+            Long("edit-pval") | Long("edit-pvalue") =>
+                args.assgn_params.edit_pvals = (
+                    parser.value()?.parse()?,
+                    parser.value()?.parse()?,
+                ),
 
             Long("no-filt") | Long("no-filter") | Long("no-filtering") => {
                 args.filt_params.haplotype.disable();
@@ -920,8 +931,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut bg_stream = ext::sys::open(&bg_path)?;
     let mut bg_str = String::new();
     bg_stream.read_to_string(&mut bg_str).map_err(add_path!(bg_path))?;
-    let bg_distr = BgDistr::load(&json::parse(&bg_str)?)?;
+    let mut bg_distr = BgDistr::load(&json::parse(&bg_str)?)?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
+    bg_distr.set_edit_pvals(args.assgn_params.edit_pvals);
+
     validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
     if bg_distr.seq_info().technology() == Technology::Illumina {

@@ -189,19 +189,16 @@ impl JsonSer for InsertDistr {
                 p: distr.inner().p(),
             }
         } else {
-            json::object!{
-                n: -1.0,
-            }
+            json::object!{}
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> n (as_f64));
-        if n < 0.0 {
+        if obj.is_empty() {
             return Ok(Self::undefined());
         }
-        json_get!(obj -> p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
 
+        json_get!(obj -> n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
         let distr = NBinom::new(n, p);
         let size = cache_size(&distr);
         let distr = distr.cached(size);

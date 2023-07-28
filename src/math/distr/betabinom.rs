@@ -49,8 +49,8 @@ impl BetaBinomial {
         self.ln_pmf_inner(f64::from(k), n) - (n + 1.0).ln() - self.ln_beta_ab
     }
 
-    /// Returns largest possible `k`, such that `CDF(k) <= conf_level`.
-    pub fn confidence_right_border(&self, n: u32, conf_level: f64) -> u32 {
+    /// Returns largest possible `k`, such that `CDF(k) <= cdf`.
+    pub fn inv_cdf(&self, n: u32, cdf: f64) -> u32 {
         let m = f64::from(n);
         let const_term = -(m + 1.0).ln() - self.ln_beta_ab;
 
@@ -60,11 +60,43 @@ impl BetaBinomial {
             let k = f64::from(i + 1);
             ln_cdf = Ln::add(ln_cdf, self.ln_pmf_inner(k, m) + const_term);
             // Next CDF is out of bounds, return i.
-            if ln_cdf.exp() > conf_level {
+            if ln_cdf.exp() > cdf {
                 return i;
             }
         }
         n
+    }
+
+    /// Returns two inverse-CDF values, `argmin CDF(k) <= cdf1` and `argmin CDF(k) <= cdf2`.
+    /// `cdf1` must not be greater than `cdf2`.
+    pub fn inv_cdf2(&self, n: u32, cdf1: f64, cdf2: f64) -> (u32, u32) {
+        let m = f64::from(n);
+        let const_term = -(m + 1.0).ln() - self.ln_beta_ab;
+
+        // PDF(0). k = 0 will be always applicable, even if it is over p-val threshold.
+        let mut ln_cdf = -ln_beta(m + 1.0, 1.0) + ln_beta(self.alpha, m + self.beta) + const_term;
+        let mut k1 = n;
+        for i in 0..n {
+            let k = f64::from(i + 1);
+            ln_cdf = Ln::add(ln_cdf, self.ln_pmf_inner(k, m) + const_term);
+            // Next CDF is out of bounds, return i.
+            if ln_cdf.exp() > cdf1 {
+                k1 = i;
+                break;
+            }
+        }
+        if ln_cdf.exp() > cdf2 {
+            return (k1, k1);
+        }
+        for i in (k1 + 1)..n {
+            let k = f64::from(i + 1);
+            ln_cdf = Ln::add(ln_cdf, self.ln_pmf_inner(k, m) + const_term);
+            // Next CDF is out of bounds, return i.
+            if ln_cdf.exp() > cdf2 {
+                return (k1, i);
+            }
+        }
+        (k1, n)
     }
 
     /// Use Nelder-Mead to find max-likelihood `alpha` & `beta` for an observed vector of tuples `(k, n, weight)`.

@@ -7,7 +7,10 @@ use std::{
     fmt,
     str::FromStr,
 };
-use crate::err::{Error, validate_param};
+use crate::{
+    math,
+    err::{Error, validate_param},
+};
 use self::ser::json_get;
 pub use {
     depth::{ReadDepth, ReadDepthParams},
@@ -22,10 +25,10 @@ pub struct Params {
     /// Background read depth parameters.
     pub depth: ReadDepthParams,
 
-    /// Confidence level for the insert size.
-    pub ins_conf_level: f64,
-    /// Confidence level for the edit distance.
-    pub err_conf_level: f64,
+    /// p-value threshold for the insert size.
+    pub insert_pval: f64,
+    /// p-value threhsold for the edit distance.
+    pub edit_pval: f64,
     /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
     /// by this value. This will soften overly harsh read alignment penalties.
     pub err_rate_mult: f64,
@@ -35,8 +38,8 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             depth: Default::default(),
-            ins_conf_level: 0.995,
-            err_conf_level: 0.995,
+            insert_pval: 0.001,
+            edit_pval: err_prof::DEF_EDIT_PVAL.0,
             err_rate_mult: 1.0,
         }
     }
@@ -47,9 +50,9 @@ impl Params {
     pub fn validate(&self) -> Result<(), Error> {
         validate_param!(0.2 <= self.err_rate_mult,
             "Error rate multiplier ({:.5}) should not be too low", self.err_rate_mult);
-        for &conf_lvl in &[self.ins_conf_level, self.err_conf_level] {
-            validate_param!(0.5 < conf_lvl && conf_lvl < 1.0,
-                "Confidence level ({}) must be in (0.5, 1).", conf_lvl);
+        for &pval in &[self.insert_pval, self.edit_pval] {
+            validate_param!(0.0 < pval && pval < 0.5,
+                "p-value threshold ({}) must be in (0, 0.5)", pval);
         }
         self.depth.validate()
     }
@@ -92,6 +95,14 @@ impl BgDistr {
 
     pub fn error_profile(&self) -> &ErrorProfile {
         &self.err_prof
+    }
+
+    pub fn set_edit_pvals(&mut self, edit_pvals: (f64, f64)) {
+        self.err_prof.set_edit_pvals(edit_pvals);
+        let read_len = math::round_signif(self.seq_info.mean_read_len(), 2).round() as u32;
+        let (good_dist, passable_dist) = self.err_prof.allowed_edit_dist(read_len);
+        log::info!("    Edit distances for read length {}: {} (good) and {} (passable)",
+            read_len, good_dist, passable_dist);
     }
 }
 

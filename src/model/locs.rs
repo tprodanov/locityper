@@ -118,15 +118,15 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let read_prof = aln.count_region_operations_fast(contig_len);
             let aln_prob = self.err_prof.ln_prob(&read_prof);
             let (edit_dist, read_len) = read_prof.edit_and_read_len();
-            let allowed_edit_dist = self.err_prof.allowed_edit_dist(read_len);
-            let good_dist = edit_dist <= allowed_edit_dist;
+            let (good_dist, passable_dist) = self.err_prof.allowed_edit_dist(read_len);
+            let is_good_dist = edit_dist <= good_dist;
             // Discard all alignments with edit distance over half of the read length.
-            let medium_dist = 2 * edit_dist < read_len;
-            any_good |= good_dist;
+            let is_passable_dist = edit_dist <= passable_dist;
+            any_good |= is_good_dist;
 
             write!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}",
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
-                edit_dist, read_len, if good_dist { '+' } else if medium_dist { '~' } else { '-' },
+                edit_dist, read_len, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if self.found_alns.is_empty() {
                 weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
@@ -136,7 +136,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 
             let pos_key = u64::from(aln.interval().contig_id().get()) << 32 | u64::from(aln.interval().start());
             aln.set_ln_prob(aln_prob);
-            if medium_dist {
+            if is_passable_dist {
                 match self.found_alns.entry(pos_key) {
                     Entry::Occupied(entry) => {
                         let aln_ix = *entry.get();

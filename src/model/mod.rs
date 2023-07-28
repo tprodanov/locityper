@@ -6,6 +6,7 @@ pub mod dp_cache;
 use crate::{
     math::Ln,
     err::{Error, validate_param},
+    bg::err_prof,
 };
 
 /// Read depth model parameters.
@@ -20,6 +21,8 @@ pub struct Params {
     pub prob_diff: f64,
     /// Unmapped reads receive minimum alignment probability for this read PLUS this penalty.
     pub unmapped_penalty: f64,
+    /// Edit distance p-value thresholds, first for good alignments, second for passable.
+    pub edit_pvals: (f64, f64),
 
     /// See `windows::WeightCalculator` for more details.
     pub weight_breakpoint: f64,
@@ -40,6 +43,7 @@ impl Default for Params {
             depth_contrib: 50.0,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
+            edit_pvals: err_prof::DEF_EDIT_PVAL,
 
             weight_breakpoint: 0.5,
             weight_power: 2.0,
@@ -63,6 +67,12 @@ impl Params {
         }
         validate_param!(self.unmapped_penalty < 0.0 && self.unmapped_penalty.is_normal(),
             "Unmapped penalty ({:.4}) must be negative", Ln::to_log10(self.unmapped_penalty));
+        for &pval in &[self.edit_pvals.0, self.edit_pvals.1] {
+            validate_param!(0.0 < pval && pval < 0.5, "p-value threshold ({}) must be within (0, 0.5)", pval);
+        }
+        validate_param!(self.edit_pvals.1 <= self.edit_pvals.0,
+            "Second p-value threshold ({}) must not be greater than the first threshold ({})",
+            self.edit_pvals.1, self.edit_pvals.0);
 
         validate_param!(0.0 < self.weight_breakpoint && self.weight_breakpoint < 1.0,
             "Weight breakpoint ({}) must be within (0, 1)", self.weight_breakpoint);

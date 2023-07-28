@@ -17,7 +17,4 @@ Improve `locityper add`:
 * Write locus summary in a text file.
 * Improve Greedy solver.
 
-Calculate window weights using `inv-CDF(1)`.
-Write window information during `ContigWindows` creation.
-Provide confidence level directly during genotyping.
 Provide scheme through arguments?
