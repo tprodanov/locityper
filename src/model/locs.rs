@@ -130,7 +130,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if self.found_alns.is_empty() {
                 weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
-                write!(dbg_writer, "{:.5}\t{}", weight, self.curr_name()?).map_err(add_path!(!))?;
+                write!(dbg_writer, "\t{:.5}\t{}", weight, self.curr_name()?).map_err(add_path!(!))?;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
