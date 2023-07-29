@@ -45,7 +45,7 @@ impl Default for Params {
             unmapped_penalty: Ln::from_log10(-5.0),
             edit_pvals: err_prof::DEF_EDIT_PVAL,
 
-            weight_breakpoint: 0.5,
+            weight_breakpoint: 0.2,
             weight_power: 2.0,
 
             tweak: None,
