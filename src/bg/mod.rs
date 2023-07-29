@@ -101,7 +101,7 @@ impl BgDistr {
         self.err_prof.set_edit_pvals(edit_pvals);
         let read_len = math::round_signif(self.seq_info.mean_read_len(), 2).round() as u32;
         let (good_dist, passable_dist) = self.err_prof.allowed_edit_dist(read_len);
-        log::info!("    Edit distances for read length {}: {} (good) and {} (passable)",
+        log::info!("Edit distances for read length {}: {} (good) and {} (passable)",
             read_len, good_dist, passable_dist);
     }
 }
