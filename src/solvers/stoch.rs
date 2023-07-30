@@ -1,5 +1,11 @@
-use std::fmt;
-use rand::Rng;
+use std::{
+    fmt,
+    cmp::min,
+};
+use rand::{
+    Rng,
+    seq::SliceRandom,
+};
 use crate::{
     Error,
     ext::rand::XoshiroRng,
@@ -51,15 +57,16 @@ impl Solver for GreedySolver {
     ) -> Result<ReadAssignment<'a>, Error>
     {
         // 0 - index of the best alignment.
+        let non_trivial_ixs = gt_alns.non_trivial_reads();
+        let sample_size = min(self.sample_size, non_trivial_ixs.len());
         let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
         let mut curr_plato = 0;
 
         while curr_plato <= self.plato_size {
             let mut best_target = None;
             let mut best_improv = 0.0;
-            for _ in 0..self.sample_size {
-                let target = ReassignmentTarget::random(&assignments, rng);
-                let improv = assignments.calculate_improvement(&target);
+            for &rp in non_trivial_ixs.choose_multiple(rng, sample_size) {
+                let (target, improv) = assignments.best_read_improvement(rp);
                 if improv > best_improv {
                     best_target = Some(target);
                     best_improv = improv;

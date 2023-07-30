@@ -299,25 +299,56 @@ impl<'a> ReadAssignment<'a> {
             + self.atomic_depth_lik_diff(w3, c3) + self.atomic_depth_lik_diff(w4, c4)
     }
 
+    /// Finds the best improvement, which can be achieved by moving one read pair.
+    pub fn best_read_improvement(&self, read_pair: usize) -> (ReassignmentTarget, f64) {
+        let start_ix = self.gt_alns.read_ixs[read_pair];
+        let end_ix = self.gt_alns.read_ixs[read_pair + 1];
+        assert!(start_ix + 1 < end_ix, "Read has only one possible assignment");
+
+        let old_assgn = self.read_assgn[read_pair];
+        let old_ix = start_ix + usize::from(old_assgn);
+        let old_aln = &self.gt_alns.alns[old_ix];
+        let [w1, w2] = old_aln.windows();
+
+        let mut best_i = 0;
+        let mut best_improv = f64::NEG_INFINITY;
+        for (i, aln) in self.gt_alns.alns[start_ix..end_ix].iter().enumerate() {
+            if i != usize::from(old_assgn) {
+                let [w3, w4] = aln.windows();
+                let improv = aln.ln_prob() + self.gt_alns.depth_contrib * self.depth_lik_diff(w1, w2, w3, w4);
+                if improv > best_improv {
+                    best_improv = improv;
+                    best_i = i;
+                }
+            }
+        }
+        (ReassignmentTarget {
+            read_pair,
+            new_assgn: best_i as u16,
+            old_ix,
+            new_ix: start_ix + best_i,
+        }, best_improv - old_aln.ln_prob())
+    }
+
     /// Calculates improvement, achieved by reassigning read pair `rp` to a new location.
     /// Does not actually performs reassignment.
     pub fn calculate_improvement(&self, target: &ReassignmentTarget) -> f64 {
-        let old_windows = &self.gt_alns.alns[target.old_ix];
-        let new_windows = &self.gt_alns.alns[target.new_ix];
-        let [w1, w2] = old_windows.windows();
-        let [w3, w4] = new_windows.windows();
+        let old_aln = &self.gt_alns.alns[target.old_ix];
+        let new_aln = &self.gt_alns.alns[target.new_ix];
+        let [w1, w2] = old_aln.windows();
+        let [w3, w4] = new_aln.windows();
         self.gt_alns.depth_contrib * self.depth_lik_diff(w1, w2, w3, w4)
-            + new_windows.ln_prob() - old_windows.ln_prob()
+            + new_aln.ln_prob() - old_aln.ln_prob()
     }
 
     /// Reassigns read pair to a new location.
     pub fn reassign(&mut self, target: &ReassignmentTarget) {
-        let old_windows = &self.gt_alns.alns[target.old_ix];
-        let new_windows = &self.gt_alns.alns[target.new_ix];
-        let [w1, w2] = old_windows.windows();
-        let [w3, w4] = new_windows.windows();
+        let old_aln = &self.gt_alns.alns[target.old_ix];
+        let new_aln = &self.gt_alns.alns[target.new_ix];
+        let [w1, w2] = old_aln.windows();
+        let [w3, w4] = new_aln.windows();
         self.depth_lik += self.depth_lik_diff(w1, w2, w3, w4);
-        self.aln_lik += new_windows.ln_prob() - old_windows.ln_prob();
+        self.aln_lik += new_aln.ln_prob() - old_aln.ln_prob();
         self.depth[w3 as usize] += 1;
         self.depth[w4 as usize] += 1;
         self.depth[w1 as usize] -= 1;
