@@ -13,6 +13,7 @@ use std::{
     },
     ops::Deref,
 };
+use rand::{Rng, prelude::SliceRandom};
 use crate::{
     ext::{
         self,
@@ -58,6 +59,7 @@ fn truncate_ixs(
     score_thresh: f64,
     min_size: usize,
     threads: usize,
+    rng: &mut impl Rng,
 ) {
     ixs.sort_unstable_by(|&i, &j| scores[j].total_cmp(&scores[i]));
     let n = ixs.len();
@@ -69,6 +71,7 @@ fn truncate_ixs(
     log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
         gt_priors[ixs[n - 1]].0, Ln::to_log10(worst), gt_priors[ixs[0]].0, Ln::to_log10(best));
     if min_size >= n || worst >= best - MIN_DIST {
+        ixs.shuffle(rng);
         log::debug!("        Keep {}/{} genotypes (100.0%)", n, n);
         return;
     }
@@ -81,9 +84,10 @@ fn truncate_ixs(
         m = ixs.partition_point(|&i| scores[i] >= thresh);
     }
 
-    // Round up to the closest multiple of `threads`.
-    m = (((m + threads - 1) / threads) * threads).min(n);
+    // Increase up to `threads`.
+    m = m.max(threads).min(n);
     ixs.truncate(m);
+    ixs.shuffle(rng);
     log::debug!("        Keep {}/{} genotypes ({:.1}%), threshold: {:.0} ({:.1}%)",
         m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / range);
 }
@@ -97,6 +101,7 @@ fn filter_genotypes(
     params: &AssgnParams,
     debug: bool,
     threads: usize,
+    rng: &mut impl Rng,
 ) -> io::Result<Vec<usize>>
 {
     let n = gt_priors.len();
@@ -124,7 +129,7 @@ fn filter_genotypes(
         scores.push(score);
     }
 
-    truncate_ixs(&mut ixs, &scores, gt_priors, params.score_thresh, params.min_gts.0, threads);
+    truncate_ixs(&mut ixs, &scores, gt_priors, params.score_thresh, params.min_gts.0, threads, rng);
     Ok(ixs)
 }
 
@@ -294,7 +299,7 @@ fn solve_single_thread(
         }
         if stage_ix + 1 < n_stages {
             truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
-                data.assgn_params.min_gts.0, data.threads);
+                data.assgn_params.min_gts.0, data.threads, rng);
         }
         helper.finish_stage();
     }
@@ -362,7 +367,7 @@ pub fn solve(
 
     let rem_ixs = if data.scheme.filter {
         filter_genotypes(&data.contigs, &data.gt_priors, &data.all_alns, &mut lik_writer, &data.assgn_params,
-            data.debug, data.threads).map_err(add_path!(!))?
+            data.debug, data.threads, rng).map_err(add_path!(!))?
     } else {
         (0..n_gts).collect()
     };
@@ -371,7 +376,7 @@ pub fn solve(
         solve_single_thread(rem_ixs, data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
     } else {
         let main_worker = MainWorker::new(Arc::new(data), rng, depth_writers, aln_writers);
-        main_worker.run(rem_ixs, lik_writer)?;
+        main_worker.run(rng, rem_ixs, lik_writer)?;
     }
     merge_dbg_files(&depth_filenames)?;
     merge_dbg_files(&aln_filenames)?;
@@ -422,7 +427,7 @@ impl MainWorker {
         MainWorker { data, senders, receivers, handles }
     }
 
-    fn run(self, mut rem_ixs: Vec<usize>, lik_writer: impl Write) -> Result<(), Error> {
+    fn run(self, rng: &mut impl Rng, mut rem_ixs: Vec<usize>, lik_writer: impl Write) -> Result<(), Error> {
         let n_workers = self.handles.len();
         let data = self.data.deref();
         let scheme = data.scheme.deref();
@@ -461,7 +466,7 @@ impl MainWorker {
             }
             if stage_ix + 1 < n_stages {
                 truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
-                    data.assgn_params.min_gts.0, data.threads);
+                    data.assgn_params.min_gts.0, data.threads, rng);
             }
             helper.finish_stage();
         }
@@ -570,7 +575,6 @@ impl<'a, W: Write> Helper<'a, W> {
         })
     }
 
-    /// Does several things: logs the start of the stage and truncates the list of indices.
     fn start_stage(&mut self, stage_ix: usize, curr_genotypes: usize) {
         self.stage_start = self.timer.elapsed();
         self.stage_ix = stage_ix;
@@ -617,10 +621,10 @@ impl<'a, W: Write> Helper<'a, W> {
 
     /// Returns index of the best tuple, as well as its quality.
     fn finish_overall(mut self) -> (usize, f64) {
+        let best_lik = self.likelihoods[self.best_ix];
         let norm_fct = Ln::sum(&self.likelihoods);
         self.likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
         let quality = Phred::from_likelihoods(&mut self.likelihoods, self.best_ix);
-        let best_lik = self.likelihoods[self.best_ix];
         log::info!("    Best genotype for {}: {}  (Lik = {:.1}, Qual = {:.1}, Conf. = {:.4}%)",
             self.tag, self.best_str, best_lik, quality, best_lik.exp() * 100.0);
         (self.best_ix, quality)
