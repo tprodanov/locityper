@@ -541,6 +541,7 @@ impl AllAlignments {
             };
             all_alns.push(groupped_alns);
         }
+        log::info!("    Loaded {} read{}", all_alns.len(), if is_paired_end { " pairs"} else { "s" });
         Ok(Self(all_alns))
     }
 

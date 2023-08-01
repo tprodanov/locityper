@@ -328,6 +328,10 @@ fn print_help(extended: bool) {
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
+    if argv.is_empty() {
+        print_help(false);
+        std::process::exit(1);
+    }
     use lexopt::prelude::*;
     let mut args = Args::default();
     let mut parser = lexopt::Parser::from_args(argv);
