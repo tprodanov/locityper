@@ -1,19 +1,22 @@
 use std::{
-    ops::{Add, AddAssign},
     fmt,
+    io::Write,
+    ops::{Add, AddAssign},
     cell::RefCell,
     borrow::Borrow,
     collections::HashMap,
+    path::Path,
 };
 use nohash::IntMap;
 use crate::{
-    Error,
+    err::{Error, add_path},
     seq::{
         Interval,
         aln::Alignment,
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
+    ext,
 };
 
 /// Counts of five operation types (=, X, I, D, S).
@@ -108,7 +111,7 @@ pub struct ErrorProfile {
     /// ln-probabilities of different operations.
     oper_probs: OperCounts<f64>,
     /// Distribution of edit distance (n = read length).
-    edit_dist_distr: BetaBinomial,
+    edit_distr: BetaBinomial,
 
     /// Two CDF levels (`1 - pval`), specifying edit distance thresholds:
     /// one for good alignments, second for passable.
@@ -119,12 +122,14 @@ pub struct ErrorProfile {
 
 impl ErrorProfile {
     /// Create error profile from the iterator over CIGARs (with extended operations X/=).
+    /// If `out_dir` is Some, write debug information.
     pub fn estimate<'a>(
         alns: &[impl Borrow<Alignment>],
         region: &Interval,
         mean_read_len: f64,
         params: &super::Params,
-    ) -> ErrorProfile
+        out_dir: Option<&Path>,
+    ) -> Result<Self, Error>
     {
         log::info!("Estimating read error profiles from {} reads", alns.len());
         let mut total_counts = OperCounts::<u64>::default();
@@ -143,10 +148,22 @@ impl ErrorProfile {
         let edit_distances: Vec<_> = edit_distances.into_iter()
             .map(|((k, n), count)| (k, n, count as f64))
             .collect();
-        let edit_dist_distr = BetaBinomial::max_lik_estimate(&edit_distances);
+        let edit_distr = BetaBinomial::max_lik_estimate(&edit_distances);
+
+        if let Some(dir) = out_dir {
+            let dbg_filename = dir.join("edit_dist.csv.gz");
+            let mut dbg_writer = ext::sys::create_gzip(&dbg_filename)?;
+            writeln!(dbg_writer, "edit\tsize\tcount").map_err(add_path!(dbg_filename))?;
+            for (k, n, count) in edit_distances.iter() {
+                writeln!(dbg_writer, "{}\t{}\t{}", k, n, count).map_err(add_path!(dbg_filename))?;
+            }
+            writeln!(dbg_writer, "# alpha = {}, beta = {}", edit_distr.alpha(), edit_distr.beta())
+                .map_err(add_path!(dbg_filename))?;
+        }
+
         let err_prof = Self {
             oper_probs,
-            edit_dist_distr,
+            edit_distr,
             max_edit_dist: RefCell::default(),
             // Set cdf2 = cdf1 so that we do not have to go far.
             edit_cdf: (1.0 - params.edit_pval, 1.0 - params.edit_pval),
@@ -155,7 +172,7 @@ impl ErrorProfile {
         let read_len = math::round_signif(mean_read_len, 2).round() as u32;
         log::info!("    Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
             err_prof.allowed_edit_dist(read_len).0, read_len, 100.0 * err_prof.edit_cdf.0);
-        err_prof
+        Ok(err_prof)
     }
 
     pub fn set_edit_pvals(&mut self, (pval1, pval2): (f64, f64)) {
@@ -179,7 +196,7 @@ impl ErrorProfile {
     pub fn allowed_edit_dist(&self, read_len: u32) -> (u32, u32) {
         let mut cache = self.max_edit_dist.borrow_mut();
         *cache.entry(read_len).or_insert_with(||
-            self.edit_dist_distr.inv_cdf2(read_len, self.edit_cdf.0, self.edit_cdf.1))
+            self.edit_distr.inv_cdf2(read_len, self.edit_cdf.0, self.edit_cdf.1))
     }
 }
 
@@ -192,8 +209,8 @@ impl JsonSer for ErrorProfile {
             deletions: self.oper_probs.deletions,
             clipping: self.oper_probs.clipping,
 
-            alpha: self.edit_dist_distr.alpha(),
-            beta: self.edit_dist_distr.beta(),
+            alpha: self.edit_distr.alpha(),
+            beta: self.edit_distr.beta(),
         }
     }
 
@@ -203,7 +220,7 @@ impl JsonSer for ErrorProfile {
             alpha (as_f64), beta (as_f64));
         Ok(Self {
             oper_probs: OperCounts { matches, mismatches, insertions, deletions, clipping },
-            edit_dist_distr: BetaBinomial::new(alpha, beta),
+            edit_distr: BetaBinomial::new(alpha, beta),
             max_edit_dist: RefCell::default(),
             edit_cdf: (1.0 - DEF_EDIT_PVAL.0, 1.0 - DEF_EDIT_PVAL.1),
         })

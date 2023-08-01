@@ -659,7 +659,8 @@ fn estimate_bg_from_paired(
         }
     }
     let interval = &data.interval;
-    let err_prof = ErrorProfile::estimate(&errprof_alns, interval, seq_info.mean_read_len(), &args.bg_params);
+    let err_prof = ErrorProfile::estimate(&errprof_alns, interval, seq_info.mean_read_len(), &args.bg_params,
+        opt_out_dir)?;
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
     let mut depth_alns: Vec<&LightAlignment> = Vec::with_capacity(errprof_alns.len());
@@ -688,7 +689,7 @@ fn estimate_bg_from_unpaired(
 {
     let insert_distr = InsertDistr::undefined();
     let interval = &data.interval;
-    let err_prof = ErrorProfile::estimate(&alns, interval, seq_info.mean_read_len(), &args.bg_params);
+    let err_prof = ErrorProfile::estimate(&alns, interval, seq_info.mean_read_len(), &args.bg_params, opt_out_dir)?;
     let filt_alns: Vec<&LightAlignment> = alns.iter()
         .filter(|aln| {
             let (edit, len) = aln.count_region_operations(interval).edit_and_read_len();
