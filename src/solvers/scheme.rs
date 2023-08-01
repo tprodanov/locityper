@@ -268,8 +268,12 @@ fn solve_single_thread(
     let mut selected = SelectedCounter::default();
     for (stage_ix, solver) in data.scheme.iter().enumerate() {
         helper.start_stage(stage_ix, rem_ixs.len());
-        let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
+        if stage_ix + 1 < n_stages && rem_ixs.len() <= data.assgn_params.min_gts.0.max(data.threads) {
+            log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
+            continue;
+        }
 
+        let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
         for &ix in rem_ixs.iter() {
             let (gt, prior) = &data.gt_priors[ix];
             let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
@@ -438,8 +442,13 @@ impl MainWorker {
         let n_stages = scheme.stages.len();
         for stage_ix in 0..n_stages {
             helper.start_stage(stage_ix, rem_ixs.len());
-            rem_jobs.clear();
             let m = rem_ixs.len();
+            if stage_ix + 1 < n_stages && m <= data.assgn_params.min_gts.0.max(data.threads) {
+                log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
+                continue;
+            }
+
+            rem_jobs.clear();
             let mut start = 0;
             for (i, sender) in self.senders.iter().enumerate() {
                 if start == m {
