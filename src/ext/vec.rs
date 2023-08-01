@@ -182,8 +182,8 @@ impl std::str::FromStr for Averaging {
         match &s.to_lowercase() as &str {
             "min" | "-inf" => Ok(Self(f64::NEG_INFINITY)),
             "max" | "inf" => Ok(Self(f64::INFINITY)),
-            "a.mean" => Ok(Self(1.0)),
-            "g.mean" => Ok(Self(0.0)),
+            "a.mean" | "arithm.mean" => Ok(Self(1.0)),
+            "g.mean" | "geom.mean" => Ok(Self(0.0)),
             _ => {
                 let val = f64::from_str(s).map_err(|_| format!("Unknown averaging mode {:?}", s))?;
                 if val.is_subnormal() && !val.is_infinite() {
@@ -204,9 +204,9 @@ impl fmt::Display for Averaging {
         } else if self.0 == f64::INFINITY {
             f.write_str("max")
         } else if self.0 == 0.0 {
-            f.write_str("g.mean")
+            f.write_str("geom.mean")
         } else if self.0 == 1.0 {
-            f.write_str("a.mean")
+            f.write_str("arithm.mean")
         } else {
             write!(f, "Hölder({})", self.0)
         }

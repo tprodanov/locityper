@@ -66,10 +66,10 @@ fn truncate_ixs(
     const MIN_DIST: f64 = 11.51;
     let best = scores[ixs[0]];
     let worst = scores[ixs[n - 1]];
-    log::debug!("    {} genotypes, worst: {} ({:.0}), best: {} ({:.0})",
-        n, gt_priors[ixs[n - 1]].0, Ln::to_log10(worst), gt_priors[ixs[0]].0, Ln::to_log10(best));
+    log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
+        gt_priors[ixs[n - 1]].0, Ln::to_log10(worst), gt_priors[ixs[0]].0, Ln::to_log10(best));
     if min_size >= n || worst >= best - MIN_DIST {
-        log::debug!("    Keep all");
+        log::debug!("        Keep {}/{} genotypes (100.0%)", n, n);
         return;
     }
 
@@ -84,8 +84,48 @@ fn truncate_ixs(
     // Round up to the closest multiple of `threads`.
     m = (((m + threads - 1) / threads) * threads).min(n);
     ixs.truncate(m);
-    log::debug!("    Keep {} genotypes ({:.1}%), threshold: {:.0} ({:.1}%)",
-        m, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / range);
+    log::debug!("        Keep {}/{} genotypes ({:.1}%), threshold: {:.0} ({:.1}%)",
+        m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / range);
+}
+
+/// Filter genotypes based on read alignments alone (without accounting for read depth).
+fn filter_genotypes(
+    contigs: &ContigNames,
+    gt_priors: &[(Genotype, f64)],
+    all_alns: &AllAlignments,
+    lik_writer: &mut impl Write,
+    params: &AssgnParams,
+    debug: bool,
+    threads: usize,
+) -> io::Result<Vec<usize>>
+{
+    let n = gt_priors.len();
+    let mut ixs = (0..n).collect();
+    // Need to run anyway in case of `debug`, so that we output all values.
+    if params.min_gts.0 >= n && !debug {
+        return Ok(ixs);
+    }
+    log::info!("*** Filtering genotypes based on read alignment likelihood");
+
+    let contig_ids: Vec<_> = contigs.ids().collect();
+    let best_aln_matrix = all_alns.best_aln_matrix(&contig_ids);
+    // Vector (genotype index, score).
+    let mut scores = Vec::with_capacity(n);
+    let mut gt_best_probs = vec![0.0_f64; all_alns.n_reads()];
+    for (gt, prior) in gt_priors.iter() {
+        let gt_ids = gt.ids();
+        gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
+        for id in gt_ids[1..].iter() {
+            gt_best_probs.iter_mut().zip(&best_aln_matrix[id.ix()])
+                .for_each(|(best_prob, &curr_prob)| *best_prob = best_prob.max(curr_prob));
+        }
+        let score = *prior + gt_best_probs.iter().sum::<f64>();
+        writeln!(lik_writer, "0\t{}\t{:.3}", gt, Ln::to_log10(score))?;
+        scores.push(score);
+    }
+
+    truncate_ixs(&mut ixs, &scores, gt_priors, params.score_thresh, params.min_gts.0, threads);
+    Ok(ixs)
 }
 
 const MAX_STAGES: usize = 10;
@@ -206,6 +246,7 @@ fn write_alns(
 }
 
 fn solve_single_thread(
+    mut rem_ixs: Vec<usize>,
     data: Data,
     lik_writer: impl Write,
     mut depth_writer: impl Write,
@@ -217,14 +258,10 @@ fn solve_single_thread(
     let mean = data.assgn_params.averaging.generate_ln_mean();
     let total_genotypes = data.gt_priors.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
-    let mut rem_ixs = (0..total_genotypes).collect();
 
+    let n_stages = data.scheme.stages.len();
     let mut selected = SelectedCounter::default();
     for (stage_ix, solver) in data.scheme.iter().enumerate() {
-        if stage_ix > 0 || data.scheme.filter {
-            truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
-                data.assgn_params.min_gts.0, data.threads);
-        }
         helper.start_stage(stage_ix, rem_ixs.len());
         let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
 
@@ -254,6 +291,10 @@ fn solve_single_thread(
                     .map_err(add_path!(!))?;
             }
             helper.update(ix, gt.name(), mean(&liks))?;
+        }
+        if stage_ix + 1 < n_stages {
+            truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
+                data.assgn_params.min_gts.0, data.threads);
         }
         helper.finish_stage();
     }
@@ -300,7 +341,7 @@ fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
 
 pub fn solve(
     mut data: Data,
-    lik_writer: impl Write,
+    mut lik_writer: impl Write,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
@@ -319,11 +360,18 @@ pub fn solve(
         &locus_dir.join("alns."), data.threads, data.debug)?;
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
+    let rem_ixs = if data.scheme.filter {
+        filter_genotypes(&data.contigs, &data.gt_priors, &data.all_alns, &mut lik_writer, &data.assgn_params,
+            data.debug, data.threads).map_err(add_path!(!))?
+    } else {
+        (0..n_gts).collect()
+    };
+
     if data.threads == 1 {
-        solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
+        solve_single_thread(rem_ixs, data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
     } else {
         let main_worker = MainWorker::new(Arc::new(data), rng, depth_writers, aln_writers);
-        main_worker.run(lik_writer)?;
+        main_worker.run(rem_ixs, lik_writer)?;
     }
     merge_dbg_files(&depth_filenames)?;
     merge_dbg_files(&aln_filenames)?;
@@ -374,20 +422,16 @@ impl MainWorker {
         MainWorker { data, senders, receivers, handles }
     }
 
-    fn run(self, lik_writer: impl Write) -> Result<(), Error> {
+    fn run(self, mut rem_ixs: Vec<usize>, lik_writer: impl Write) -> Result<(), Error> {
         let n_workers = self.handles.len();
         let data = self.data.deref();
         let scheme = data.scheme.deref();
         let total_genotypes = data.gt_priors.len();
         let mut helper = Helper::new(&scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
         let mut rem_jobs = Vec::with_capacity(n_workers);
-        let mut rem_ixs = (0..total_genotypes).collect();
 
-        for stage_ix in 0..scheme.stages.len() {
-            if stage_ix > 0 || scheme.filter {
-                truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
-                    data.assgn_params.min_gts.0, data.threads);
-            }
+        let n_stages = scheme.stages.len();
+        for stage_ix in 0..n_stages {
             helper.start_stage(stage_ix, rem_ixs.len());
             rem_jobs.clear();
             let m = rem_ixs.len();
@@ -414,6 +458,10 @@ impl MainWorker {
                         *jobs -= 1;
                     }
                 }
+            }
+            if stage_ix + 1 < n_stages {
+                truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
+                    data.assgn_params.min_gts.0, data.threads);
             }
             helper.finish_stage();
         }
@@ -533,7 +581,7 @@ impl<'a, W: Write> Helper<'a, W> {
         }
         self.solved_genotypes = 0;
         self.last_msg = self.stage_start;
-        log::info!("    Stage {:>3}.  {} on {} genotypes",
+        log::info!("*** Stage {:>3}.  {} on {} genotypes",
             LATIN_NUMS[stage_ix], self.scheme.stages[stage_ix], self.curr_genotypes);
     }
 
@@ -553,7 +601,7 @@ impl<'a, W: Write> Helper<'a, W> {
         const UPDATE_SECS: u64 = 10;
         if (now_dur - self.last_msg).as_secs() >= UPDATE_SECS {
             let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
-            log::debug!("        [{:width$}/{},  {:.4} s/gt]  Best: {} -> {:11.2}", self.solved_genotypes,
+            log::debug!("        [{:width$}/{}, {:7.4} s/gt]  Best: {} -> {:8.0}", self.solved_genotypes,
                 self.curr_genotypes, speed, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
             self.last_msg = now_dur;
         }
@@ -562,8 +610,9 @@ impl<'a, W: Write> Helper<'a, W> {
 
     fn finish_stage(&mut self) {
         self.last_msg = self.timer.elapsed();
-        log::info!("    Stage {:>3} finished in {}.  Best: {} -> {:11.2}", LATIN_NUMS[self.stage_ix],
-            ext::fmt::Duration(self.last_msg - self.stage_start), self.best_str, Ln::to_log10(self.best_lik));
+        let speed = (self.last_msg.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
+        log::info!("      * Finished in {} ({:.4} s/gt)",
+            ext::fmt::Duration(self.last_msg - self.stage_start), speed);
     }
 
     /// Returns index of the best tuple, as well as its quality.
@@ -571,8 +620,9 @@ impl<'a, W: Write> Helper<'a, W> {
         let norm_fct = Ln::sum(&self.likelihoods);
         self.likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
         let quality = Phred::from_likelihoods(&mut self.likelihoods, self.best_ix);
-        log::info!("    Best genotype for {}: {}  (Quality = {:.1}, Confidence = {:.4}%)", self.tag, self.best_str,
-            quality, self.likelihoods[self.best_ix].exp() * 100.0);
+        let best_lik = self.likelihoods[self.best_ix];
+        log::info!("    Best genotype for {}: {}  (Lik = {:.1}, Qual = {:.1}, Conf. = {:.4}%)",
+            self.tag, self.best_str, best_lik, quality, best_lik.exp() * 100.0);
         (self.best_ix, quality)
     }
 }
