@@ -7,10 +7,9 @@ use rand::{
     seq::SliceRandom,
 };
 use crate::{
-    Error,
+    err::{Error, validate_param},
     ext::rand::XoshiroRng,
     model::assgn::{GenotypeAlignments, ReadAssignment, ReassignmentTarget},
-    bg::ser::json_get,
 };
 use super::Solver;
 
@@ -36,15 +35,14 @@ impl Default for GreedySolver {
 }
 
 impl GreedySolver {
-    pub fn set_sample_size(&mut self, sample_size: usize) -> &mut Self {
-        assert_ne!(sample_size, 0, "Number of read-pairs (sample_size) cannot be 0.");
+    pub fn set_sample_size(&mut self, sample_size: usize) -> Result<(), Error> {
+        validate_param!(sample_size != 0, "Greedy solver: sample size must be positive");
         self.sample_size = sample_size;
-        self
+        Ok(())
     }
 
-    pub fn set_plato_size(&mut self, plato_size: usize) -> &mut Self {
+    pub fn set_plato_size(&mut self, plato_size: usize) {
         self.plato_size = plato_size;
-        self
     }
 }
 
@@ -85,13 +83,13 @@ impl Solver for GreedySolver {
 
 impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
-    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> sample_size? (as_usize), plato_size? (as_usize));
-        if let Some(val) = sample_size {
-            self.set_sample_size(val);
-        }
-        if let Some(val) = plato_size {
-            self.set_plato_size(val);
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
+        match &key.to_lowercase() as &str {
+            "sample" => self.set_sample_size(val.parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
+            "plato" => self.set_plato_size(val.parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?),
+            _ => log::error!("Greedy solver: unknown parameter {:?}", key),
         }
         Ok(())
     }
@@ -128,22 +126,22 @@ impl Default for SimAnneal {
 }
 
 impl SimAnneal {
-    pub fn set_cooling_temp(&mut self, cooling_temp: f64) -> &mut Self {
-        assert!(cooling_temp > 0.0 && cooling_temp < 1.0,
-            "Cooling temperature ({}) must be within (0, 1).", cooling_temp);
+    pub fn set_cooling_temp(&mut self, cooling_temp: f64) -> Result<(), Error> {
+        validate_param!(cooling_temp > 0.0 && cooling_temp < 1.0,
+            "Cooling temperature ({}) must be within (0, 1)", cooling_temp);
         self.cooling_temp = cooling_temp;
-        self
+        Ok(())
     }
 
-    pub fn set_init_prob(&mut self, init_prob: f64) -> &mut Self {
-        assert!(init_prob > 0.0 && init_prob < 1.0, "Initial probability ({}) must be within (0, 1).", init_prob);
+    pub fn set_init_prob(&mut self, init_prob: f64) -> Result<(), Error> {
+        validate_param!(init_prob > 0.0 && init_prob < 1.0,
+            "Initial probability ({}) must be within (0, 1)", init_prob);
         self.init_prob = init_prob;
-        self
+        Ok(())
     }
 
-    pub fn set_plato_size(&mut self, plato_size: usize) -> &mut Self {
+    pub fn set_plato_size(&mut self, plato_size: usize) {
         self.plato_size = plato_size;
-        self
     }
 
     /// Finds temperature coefficient by checking 100 random reassignments and their probabilities.
@@ -204,16 +202,15 @@ impl Solver for SimAnneal {
 
 impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
-    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> cooling_temp? (as_f64), init_prob? (as_f64), plato_size? (as_usize));
-        if let Some(val) = cooling_temp {
-            self.set_cooling_temp(val);
-        }
-        if let Some(val) = init_prob {
-            self.set_init_prob(val);
-        }
-        if let Some(val) = plato_size {
-            self.set_plato_size(val);
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
+        match &key.to_lowercase() as &str {
+            "cooling" | "coolingtemp" | "cooling_temp" => self.set_cooling_temp(val.parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
+            "init_prob" | "initprob" => self.set_init_prob(val.parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
+            "plato" => self.set_plato_size(val.parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?),
+            _ => log::error!("Sim.Annealing: unknown parameter {:?}", key),
         }
         Ok(())
     }

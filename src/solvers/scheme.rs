@@ -3,6 +3,7 @@
 
 use std::{
     thread,
+    cmp::min,
     io::{self, Write},
     time::{Instant, Duration},
     path::{Path, PathBuf},
@@ -10,17 +11,15 @@ use std::{
         Arc,
         mpsc::{self, Sender, Receiver},
     },
+    ops::Deref,
 };
-use json::JsonValue;
 use crate::{
     ext::{
         self,
-        vec::F64Ext,
         rand::XoshiroRng,
     },
     math::{self, Ln, Phred},
     err::{Error, validate_param, add_path},
-    bg::ser::json_get,
     seq::contigs::{ContigNames, Genotype},
     model::{
         Params as AssgnParams,
@@ -30,6 +29,148 @@ use crate::{
     },
 };
 use super::Solver;
+
+pub struct SchemeParams {
+    pub stages: String,
+    pub greedy_params: Vec<String>,
+    pub anneal_params: Vec<String>,
+    pub highs_params: Vec<String>,
+    pub gurobi_params: Vec<String>,
+}
+
+impl Default for SchemeParams {
+    fn default() -> Self {
+        Self {
+            stages: "filter,anneal,ilp".to_owned(),
+            greedy_params: Vec::new(),
+            anneal_params: Vec::new(),
+            highs_params: Vec::new(),
+            gurobi_params: Vec::new(),
+        }
+    }
+}
+
+/// Sorts indices by score (largest = best), and truncates the list if needed.
+fn truncate_ixs(
+    ixs: &mut Vec<usize>,
+    scores: &[f64],
+    gt_priors: &[(Genotype, f64)],
+    score_thresh: f64,
+    min_size: usize,
+    threads: usize,
+) {
+    ixs.sort_unstable_by(|&i, &j| scores[j].total_cmp(&scores[i]));
+    let n = ixs.len();
+
+    // ~ 10^-5.
+    const MIN_DIST: f64 = 11.51;
+    let best = scores[ixs[0]];
+    let worst = scores[ixs[n - 1]];
+    log::debug!("    {} genotypes, worst: {} ({:.0}), best: {} ({:.0})",
+        n, gt_priors[ixs[n - 1]].0, Ln::to_log10(worst), gt_priors[ixs[0]].0, Ln::to_log10(best));
+    if min_size >= n || worst >= best - MIN_DIST {
+        log::debug!("    Keep all");
+        return;
+    }
+
+    let range = best - worst;
+    let mut thresh = (worst + range * score_thresh).min(best - MIN_DIST);
+    let mut m = ixs.partition_point(|&i| scores[i] >= thresh);
+    if m < min_size {
+        thresh = scores[ixs[min_size - 1]];
+        m = ixs.partition_point(|&i| scores[i] >= thresh);
+    }
+
+    // Round up to the closest multiple of `threads`.
+    m = (((m + threads - 1) / threads) * threads).min(n);
+    ixs.truncate(m);
+    log::debug!("    Keep {} genotypes ({:.1}%), threshold: {:.0} ({:.1}%)",
+        m, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / range);
+}
+
+const MAX_STAGES: usize = 10;
+const LATIN_NUMS: [&'static str; MAX_STAGES] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
+
+/// Solver scheme.
+/// Consists of multiple solvers, each executed on (possibly) smaller subset of genotypes.
+pub struct Scheme {
+    /// Is pre-filtering enabled?
+    filter: bool,
+    stages: Vec<Box<dyn Solver>>,
+}
+
+impl Scheme {
+    pub fn create(params: &SchemeParams) -> Result<Self, Error> {
+        let mut filter = false;
+        let mut stages = Vec::new();
+        for (i, stage) in params.stages.split(',').enumerate() {
+            let (mut solver, solver_params): (Box<dyn Solver>, _) = match &stage.trim().to_lowercase() as &str {
+                "filter" | "filtering" => {
+                    validate_param!(i == 0, "Filtering stage must go first");
+                    filter = true;
+                    continue;
+                }
+                "greedy" => (Box::new(super::GreedySolver::default()), &params.greedy_params),
+                "anneal" | "simanneal" | "annealing" | "simannealing"
+                    => (Box::new(super::SimAnneal::default()), &params.greedy_params),
+                "highs" => {
+                    #[cfg(feature = "highs")]
+                    { (Box::new(super::HighsSolver::default()), &params.highs_params) }
+                    #[cfg(not(feature = "highs"))]
+                    { return Err(Error::RuntimeError(
+                        "HiGHS solver is disabled. Please recompile with `highs` feature.".to_owned())) }
+                }
+                "gurobi" => {
+                    #[cfg(feature = "gurobi")]
+                    { (Box::new(super::GurobiSolver::default()), &params.gurobi_params) }
+                    #[cfg(not(feature = "gurobi"))]
+                    { return Err(Error::RuntimeError(
+                        "Gurobi solver is disabled. Please recompile with `gurobi` feature.".to_owned())) }
+                }
+                "ilp" => {
+                    #[cfg(feature = "highs")]
+                    { (Box::new(super::HighsSolver::default()), &params.highs_params) }
+                    #[cfg(all(not(feature = "highs"), feature = "gurobi"))]
+                    { (Box::new(super::GurobiSolver::default()), &params.gurobi_params) }
+                    #[cfg(all(not(feature = "highs"), not(feature = "gurobi")))]
+                    { return Err(Error::RuntimeError(
+                        "Both ILP solvers are disabled. Please recompile with `gurobi` or `highs` feature."
+                        .to_owned())) }
+                }
+                _ => return Err(Error::InvalidInput(format!("Unknown solver {:?}", stage))),
+            };
+            solver.set_params(solver_params)?;
+            stages.push(solver);
+        }
+        validate_param!(stages.len() <= MAX_STAGES, "Too many solution stages ({}), allowed at most {}",
+            stages.len(), MAX_STAGES);
+        if stages.is_empty() {
+            log::warn!("No stages selected, solving disabled!");
+        }
+        Ok(Self { filter, stages })
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, Box<dyn Solver>> {
+        self.stages.iter()
+    }
+}
+
+/// Various structures, needed for sample genotyping.
+pub struct Data {
+    /// Solving scheme.
+    pub scheme: Arc<Scheme>,
+    pub contigs: Arc<ContigNames>,
+    /// All read alignments, groupped by contigs.
+    pub all_alns: AllAlignments,
+    pub contig_windows: Vec<ContigWindows>,
+
+    /// Genotypes and their priors.
+    pub gt_priors: Vec<(Genotype, f64)>,
+
+    pub assgn_params: AssgnParams,
+    pub debug: bool,
+    pub threads: usize,
+}
 
 const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\tlik\tselected";
 
@@ -64,243 +205,6 @@ fn write_alns(
     Ok(())
 }
 
-fn parse_averaging_mode(val: &JsonValue) -> Result<f64, Error> {
-    if val.is_null() {
-        Ok(0.0)
-    } else if let Some(s) = val.as_str() {
-        match &s.to_lowercase() as &str {
-            "min" | "minimum" | "-inf" | "-infinity" => Ok(f64::NEG_INFINITY),
-            "max" | "maximum" | "inf" | "infinity" => Ok(f64::INFINITY),
-            "mean" | "average" =>
-                Err(Error::InvalidInput(format!("Averaging mode {} is ambiguous, please use 0 or 1", s))),
-            _ => Err(Error::InvalidInput(format!("Unknown averaging mode {}", s))),
-        }
-    } else {
-        val.as_f64().ok_or_else(||
-            Error::InvalidInput(format!("Unknown averaging mode {:?}", val)))
-    }
-}
-
-/// One stage of the scheme: a solver and fraction of haplotypes, on which it is executed.
-#[derive(Clone)]
-struct Stage {
-    solver: Box<dyn Solver>,
-    /// Fraction of best genotypes, used for analysis.
-    fraction: f64,
-    /// Write debug information about read assignments?
-    write: bool,
-    /// Number of attempts.
-    attempts: u16,
-    /// Averaging function: generalized mean with power `p`.
-    aver_power: f64,
-}
-
-impl Stage {
-    fn new<S: Solver + 'static>(solver: S) -> Self {
-        Self {
-            solver: Box::new(solver),
-            fraction: 1.0,
-            write: false,
-            attempts: 5,
-            aver_power: 1.0,
-        }
-    }
-
-    fn set_fraction(&mut self, fraction: f64) -> Result<&mut Self, Error> {
-        validate_param!(fraction >= 0.0 && fraction <= 1.0, "Ratio ({}) must be within [0, 1]", fraction);
-        self.fraction = fraction;
-        Ok(self)
-    }
-
-    fn set_write(&mut self, write: bool) -> &mut Self {
-        self.write = write;
-        self
-    }
-
-    fn set_tries(&mut self, attempts: u16) -> Result<&mut Self, Error> {
-        validate_param!(attempts > 0, "Number of attempts must be over 1");
-        self.attempts = attempts;
-        Ok(self)
-    }
-
-    fn set_aver_power(&mut self, aver_power: f64) -> &mut Self {
-        self.aver_power = aver_power;
-        self
-    }
-
-    fn from_json(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> solver (as_str));
-        let mut stage = match &solver.to_lowercase() as &str {
-            "greedy" => Stage::new(super::GreedySolver::default()),
-            "anneal" | "simanneal" | "simulatedannealing" => Stage::new(super::SimAnneal::default()),
-            "highs" => {
-                #[cfg(feature = "highs")]
-                { Stage::new(super::HighsSolver::default()) }
-                #[cfg(not(feature = "highs"))]
-                panic!("HiGHS feature is disabled. Please recompile with `highs` feature.")
-            }
-            "gurobi" => {
-                #[cfg(feature = "gurobi")]
-                { Stage::new(super::GurobiSolver::default()) }
-                #[cfg(not(feature = "gurobi"))]
-                panic!("Gurobi feature is disabled. Please recompile with `gurobi` feature.")
-            }
-            _ => panic!("Unknown solver '{}'", solver),
-        };
-
-        json_get!(obj -> fraction? (as_f64), write? (as_bool), attempts? (as_u16));
-        stage.solver.set_params(obj)?;
-        if let Some(frac) = fraction {
-            stage.set_fraction(frac)?;
-        }
-        if let Some(write) = write {
-            stage.set_write(write);
-        }
-        if let Some(attempts) = attempts {
-            stage.set_tries(attempts)?;
-        }
-        stage.set_aver_power(parse_averaging_mode(&obj["aver"])?);
-        Ok(stage)
-    }
-}
-
-/// Solver scheme.
-/// Consists of multiple solvers, each executed on (possibly) smaller subset of haplotypes.
-/// First stage must have fraction = 1.
-#[derive(Clone)]
-pub struct Scheme(Vec<Stage>);
-
-const DEFAULT_FRAC2: f64 = 0.05;
-
-impl Default for Scheme {
-    #[cfg(feature = "highs")]
-    fn default() -> Self {
-        Self(vec![
-            // First, run Greedy solver on all haplotypes.
-            Stage {
-                solver: Box::new(super::SimAnneal::default()),
-                fraction: 1.0,
-                write: false,
-                attempts: 5,
-                aver_power: f64::INFINITY, // Take maximum across all random attempts.
-            },
-            // Then, run HiGHS solver on the best 3%.
-            Stage {
-                solver: Box::new(super::HighsSolver::default()),
-                fraction: DEFAULT_FRAC2,
-                write: false,
-                attempts: 5,
-                aver_power: 1.0, // Take arithmetic mean of all likelihoods.
-            },
-        ])
-    }
-
-    #[cfg(all(not(feature = "highs"), feature = "gurobi"))]
-    fn default() -> Self {
-        Self(vec![
-            // First, run Greedy solver on all haplotypes.
-            Stage {
-                solver: Box::new(super::SimAnneal::default()),
-                fraction: 1.0,
-                write: false,
-                attempts: 5,
-                aver_power: f64::INFINITY, // Take maximum across all random attempts.
-            },
-            // Then, run HiGHS solver on the best 3%.
-            Stage {
-                solver: Box::new(super::GurobiSolver::default()),
-                fraction: DEFAULT_FRAC2,
-                write: false,
-                attempts: 5,
-                aver_power: 1.0, // Take arithmetic mean of all likelihoods.
-            },
-        ])
-    }
-
-    #[cfg(all(not(feature = "highs"), not(feature = "gurobi")))]
-    fn default() -> Self {
-        Self(vec![
-            // First, run Greedy solver on all haplotypes.
-            Stage {
-                solver: Box::new(super::GreedySolver::default()),
-                fraction: 1.0,
-                write: false,
-                attempts: 5,
-                aver_power: f64::INFINITY, // Take maximum across all random attempts.
-            },
-            // Then, run HiGHS solver on the best 3%.
-            Stage {
-                solver: Box::new(super::SimAnneal::default()),
-                fraction: DEFAULT_FRAC2,
-                write: false,
-                attempts: 10,
-                aver_power: 1.0, // Take arithmetic mean of all likelihoods.
-            },
-        ])
-    }
-}
-
-const MAX_STAGES: usize = 10;
-const LATIN_NUMS: [&'static str; MAX_STAGES] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
-
-impl Scheme {
-    pub fn from_json(obj: &json::JsonValue) -> Result<Self, Error> {
-        let json_arr = match obj {
-            json::JsonValue::Array(arr) => arr,
-            _ => return Err(Error::JsonLoad(format!("Failed to parse '{}': must be an array", obj))),
-        };
-        if json_arr.len() > MAX_STAGES {
-            return Err(Error::JsonLoad(
-                format!("Cannot create solver scheme: number of stages ({}) is bigger than allowed ({})",
-                json_arr.len(), MAX_STAGES)));
-        }
-        let stages: Vec<_> = json_arr.iter().map(|v| Stage::from_json(v)).collect::<Result<_, _>>()?;
-        if stages.is_empty() {
-            return Err(Error::JsonLoad(format!("Failed to parse '{}': empty array is not allowed", obj)));
-        }
-        for (i, el) in stages.iter().enumerate() {
-            if i == 0 && el.fraction < 1.0 {
-                return Err(Error::JsonLoad(
-                    "Cannot create solver scheme: first fraction is smaller than one".to_owned()));
-            } else if i > 0 && el.fraction > stages[i - 1].fraction {
-                return Err(Error::JsonLoad(
-                    "Cannot create solver scheme: fractions must be non-increasing".to_owned()));
-            }
-        }
-        Ok(Self(stages))
-    }
-
-    /// Returns the number of stages in the scheme.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn iter(&self) -> std::slice::Iter<'_, Stage> {
-        self.0.iter()
-    }
-
-    /// Returns true if debug information is written at any of the stages.
-    pub fn has_dbg_output(&self) -> bool {
-        self.iter().any(|stage| stage.write)
-    }
-}
-
-/// Various structures, needed for sample genotyping.
-pub struct Data {
-    /// Solving scheme.
-    pub scheme: Scheme,
-    pub contigs: Arc<ContigNames>,
-    /// All read alignments, groupped by contigs.
-    pub all_alns: AllAlignments,
-    pub contig_windows: Arc<Vec<ContigWindows>>,
-
-    /// Genotypes and their priors.
-    pub gt_priors: Vec<(Genotype, f64)>,
-
-    pub params: AssgnParams,
-    pub debug: bool,
-}
-
 fn solve_single_thread(
     data: Data,
     lik_writer: impl Write,
@@ -309,22 +213,26 @@ fn solve_single_thread(
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let tweak = data.params.tweak.unwrap();
+    let tweak = data.assgn_params.tweak.unwrap();
+    let mean = data.assgn_params.averaging.generate_ln_mean();
     let total_genotypes = data.gt_priors.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
     let mut rem_ixs = (0..total_genotypes).collect();
 
     let mut selected = SelectedCounter::default();
-    for (stage_ix, stage) in data.scheme.iter().enumerate() {
-        helper.start_stage(stage_ix, &mut rem_ixs);
-        let solver = &stage.solver;
-        let mean = F64Ext::generalized_ln_mean(stage.aver_power);
-        let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
+    for (stage_ix, solver) in data.scheme.iter().enumerate() {
+        if stage_ix > 0 || data.scheme.filter {
+            truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
+                data.assgn_params.min_gts.0, data.threads);
+        }
+        helper.start_stage(stage_ix, rem_ixs.len());
+        let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
 
         for &ix in rem_ixs.iter() {
             let (gt, prior) = &data.gt_priors[ix];
-            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns, &data.params);
-            if stage.write && data.debug {
+            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
+                &data.assgn_params);
+            if data.debug {
                 selected.reset(&gt_alns);
             }
 
@@ -332,7 +240,7 @@ fn solve_single_thread(
                 gt_alns.define_read_windows(tweak, rng);
                 let assgns = solver.solve(&gt_alns, rng)?;
                 *lik = *prior + assgns.likelihood();
-                if stage.write {
+                if data.debug {
                     let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                     assgns.write_depth(&mut depth_writer, &prefix).map_err(add_path!(!))?;
                     if data.debug {
@@ -340,7 +248,7 @@ fn solve_single_thread(
                     }
                 }
             }
-            if stage.write && data.debug {
+            if data.debug {
                 let prefix = format!("{}\t{}", stage_ix + 1, gt);
                 write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, selected.fractions())
                     .map_err(add_path!(!))?;
@@ -354,14 +262,14 @@ fn solve_single_thread(
 }
 
 /// Creates `threads` debug files for writing read assignments, and returns their file names.
-/// If `has_dbg_output` is false, returns a vector of `threads` sink objects + an empty vector of names.
+/// If `debug` is false, returns a vector of `threads` sink objects + an empty vector of names.
 fn create_debug_files(
     prefix: &Path,
-    threads: u16,
-    has_dbg_output: bool,
+    threads: usize,
+    debug: bool,
 ) -> Result<(Vec<Box<dyn Write + Send>>, Vec<PathBuf>), Error>
 {
-    if !has_dbg_output {
+    if !debug {
         return Ok(((0..threads).map(|_| Box::new(io::sink()) as Box<dyn Write + Send>).collect(), vec![]));
     }
     let filenames: Vec<_> = (0..threads).map(|i| if i == 0 {
@@ -370,7 +278,7 @@ fn create_debug_files(
         ext::sys::path_append(prefix, format!("{}.csv.gz", i))
     }).collect();
 
-    let mut writers = Vec::with_capacity(usize::from(threads));
+    let mut writers = Vec::with_capacity(threads);
     for filename in filenames.iter() {
         // Using `for` instead of `collect`, as it becomes hard to cast Box and process Errors at the same time.
         writers.push(Box::new(ext::sys::create_gzip(filename)?) as Box<dyn Write + Send>);
@@ -391,32 +299,30 @@ fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
 }
 
 pub fn solve(
-    data: Data,
+    mut data: Data,
     lik_writer: impl Write,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
-    mut threads: u16,
 ) -> Result<(), Error>
 {
     let n_gts = data.gt_priors.len();
-    if usize::from(threads) > n_gts {
-        threads = n_gts as u16;
-    }
-    log::info!("    Genotyping complex locus in {} stages and {} threads across {} possible genotypes",
-        data.scheme.len(), threads, n_gts);
-    let has_dbg_output = data.scheme.has_dbg_output();
+    assert!(n_gts > 0);
+    data.threads = min(data.threads, n_gts);
+    log::info!("    Genotyping complex locus  across {} possible genotypes", n_gts);
+    log::debug!("        {} stages, {} threads, score thresh: {:.2}, averaging mode: {}",
+        data.scheme.stages.len(), data.threads, data.assgn_params.score_thresh, data.assgn_params.averaging);
     let (mut depth_writers, depth_filenames) = create_debug_files(
-        &locus_dir.join("depth."), threads, has_dbg_output)?;
+        &locus_dir.join("depth."), data.threads, data.debug)?;
     writeln!(depth_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER).map_err(add_path!(!))?;
 
     let (mut aln_writers, aln_filenames) = create_debug_files(
-        &locus_dir.join("alns."), threads, has_dbg_output && data.debug)?;
+        &locus_dir.join("alns."), data.threads, data.debug)?;
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
-    if threads == 1 {
+    if data.threads == 1 {
         solve_single_thread(data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
     } else {
-        let main_worker = MainWorker::new(Arc::new(data), rng, threads, depth_writers, aln_writers);
+        let main_worker = MainWorker::new(Arc::new(data), rng, depth_writers, aln_writers);
         main_worker.run(lik_writer)?;
     }
     merge_dbg_files(&depth_filenames)?;
@@ -440,12 +346,11 @@ impl MainWorker {
     fn new(
         data: Arc<Data>,
         rng: &mut XoshiroRng,
-        threads: u16,
         depth_writers: Vec<impl Write + Send + 'static>,
         aln_writers: Vec<impl Write + Send + 'static>,
     ) -> Self
     {
-        let n_workers = usize::from(threads);
+        let n_workers = data.threads;
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
@@ -471,16 +376,19 @@ impl MainWorker {
 
     fn run(self, lik_writer: impl Write) -> Result<(), Error> {
         let n_workers = self.handles.len();
-        let scheme = &self.data.scheme;
-        let contigs = &self.data.contigs;
-        let gt_priors = &self.data.gt_priors;
-        let total_genotypes = gt_priors.len();
-        let mut helper = Helper::new(&scheme, contigs.tag(), lik_writer, total_genotypes)?;
+        let data = self.data.deref();
+        let scheme = data.scheme.deref();
+        let total_genotypes = data.gt_priors.len();
+        let mut helper = Helper::new(&scheme, data.contigs.tag(), lik_writer, total_genotypes)?;
         let mut rem_jobs = Vec::with_capacity(n_workers);
         let mut rem_ixs = (0..total_genotypes).collect();
 
-        for stage_ix in 0..scheme.len() {
-            helper.start_stage(stage_ix, &mut rem_ixs);
+        for stage_ix in 0..scheme.stages.len() {
+            if stage_ix > 0 || scheme.filter {
+                truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
+                    data.assgn_params.min_gts.0, data.threads);
+            }
+            helper.start_stage(stage_ix, rem_ixs.len());
             rem_jobs.clear();
             let m = rem_ixs.len();
             let mut start = 0;
@@ -502,7 +410,7 @@ impl MainWorker {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, lik) = receiver.recv().expect("Genotyping worker has failed!");
-                        helper.update(ix, gt_priors[ix].0.name(), lik)?;
+                        helper.update(ix, data.gt_priors[ix].0.name(), lik)?;
                         *jobs -= 1;
                     }
                 }
@@ -529,44 +437,39 @@ struct Worker<W, U> {
 
 impl<W: Write, U: Write> Worker<W, U> {
     fn run(mut self) -> Result<(), Error> {
-        let gt_priors = &self.data.gt_priors;
-        let all_alns = &self.data.all_alns;
-        let contig_windows = &self.data.contig_windows;
-        let params = &self.data.params;
-        let tweak = params.tweak.unwrap();
+        let data = self.data.deref();
+        let tweak = data.assgn_params.tweak.unwrap();
+        let scheme = data.scheme.deref();
 
         // Block thread and wait for the shipment.
         while let Ok((stage_ix, task)) = self.receiver.recv() {
-            let stage = &self.data.scheme.0[stage_ix];
-            let solver = &stage.solver;
-            let debug = self.data.debug && stage.write;
+            let solver = &scheme.stages[stage_ix];
             let n = task.len();
             assert_ne!(n, 0, "Received empty task");
 
-            let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
+            let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
             let mut selected = SelectedCounter::default();
-            let mean = F64Ext::generalized_ln_mean(stage.aver_power);
+            let mean = data.assgn_params.averaging.generate_ln_mean();
             for ix in task.into_iter() {
-                let (gt, prior) = &gt_priors[ix];
-                let mut gt_alns = GenotypeAlignments::new(gt.clone(), contig_windows, all_alns, params);
-                if debug {
+                let (gt, prior) = &data.gt_priors[ix];
+                let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
+                    &data.assgn_params);
+                if data.debug {
                     selected.reset(&gt_alns);
                 }
                 for (attempt, lik) in liks.iter_mut().enumerate() {
                     gt_alns.define_read_windows(tweak, &mut self.rng);
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = *prior + assgns.likelihood();
-                    if stage.write {
+                    if data.debug {
                         let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                         assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
-                        if debug {
-                            selected.update(&assgns);
-                        }
+                        selected.update(&assgns);
                     }
                 }
-                if debug {
+                if data.debug {
                     write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt),
-                        &gt_alns, all_alns, selected.fractions()).map_err(add_path!(!))?;
+                        &gt_alns, &data.all_alns, selected.fractions()).map_err(add_path!(!))?;
                 }
                 if let Err(_) = self.sender.send((ix, mean(&liks))) {
                     log::error!("Read recruitment: main thread stopped before the child thread.");
@@ -620,24 +523,18 @@ impl<'a, W: Write> Helper<'a, W> {
     }
 
     /// Does several things: logs the start of the stage and truncates the list of indices.
-    fn start_stage(&mut self, stage_ix: usize, rem_ixs: &mut Vec<usize>) {
+    fn start_stage(&mut self, stage_ix: usize, curr_genotypes: usize) {
         self.stage_start = self.timer.elapsed();
         self.stage_ix = stage_ix;
-        let stage = &self.scheme.0[stage_ix];
-        let total_genotypes = self.likelihoods.len();
-        // Consider at least one tuple irrespective of the fraction.
-        self.curr_genotypes = ((total_genotypes as f64 * stage.fraction).ceil() as usize)
-            .clamp(1, self.curr_genotypes);
-        if self.curr_genotypes < rem_ixs.len() {
-            rem_ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].total_cmp(&self.likelihoods[i]));
-            rem_ixs.truncate(self.curr_genotypes);
+        assert!(curr_genotypes <= self.curr_genotypes);
+        if curr_genotypes < self.curr_genotypes {
+            self.curr_genotypes = curr_genotypes;
             self.num_width = math::num_digits(self.curr_genotypes as f64) as usize;
         }
-
         self.solved_genotypes = 0;
         self.last_msg = self.stage_start;
-        log::info!("    Stage {:>3}.  {}.  {} genotypes, {} attempts, averaging power: {:.0}",
-            LATIN_NUMS[stage_ix], stage.solver, self.curr_genotypes, stage.attempts, stage.aver_power);
+        log::info!("    Stage {:>3}.  {} on {} genotypes",
+            LATIN_NUMS[stage_ix], self.scheme.stages[stage_ix], self.curr_genotypes);
     }
 
     fn update(&mut self, ix: usize, gt_name: &str, lik: f64) -> Result<(), Error> {

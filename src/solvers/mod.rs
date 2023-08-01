@@ -20,7 +20,17 @@ use crate::Error;
 
 pub trait SetParams {
     /// Sets solver parameters.
-    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error>;
+    /// Each element: string `key=value`.
+    fn set_params(&mut self, params: &[String]) -> Result<(), Error> {
+        for param in params {
+            let (key, value) = param.split_once('=').ok_or_else(|| Error::InvalidInput(
+                    format!("Cannot parse parameter {:?} (must contain =)", param)))?;
+            self.set_param(key.trim(), value.trim())?;
+        }
+        Ok(())
+    }
+
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error>;
 }
 
 /// General trait for all solvers.

@@ -87,21 +87,6 @@ impl F64Ext {
         (a.iter().copied().map(f64::ln).sum::<f64>() / a.len() as f64).exp()
     }
 
-    /// Generalized (Hölder) mean (-Inf -> min, -1 -> harmonic, 0 -> geometric, 1 -> mean, 2 -> sq.mean, Inf -> max).
-    /// Input and output values are in ln-space.
-    pub fn generalized_ln_mean(p: f64) -> Box<dyn Fn(&[f64]) -> f64> {
-        if p < -100.0 {
-            Box::new(Self::min)
-        } else if p.abs() < 1e-8 {
-            // ln-geometric mean.
-            Box::new(Self::mean)
-        } else if p > 100.0 {
-            Box::new(Self::max)
-        } else {
-            Box::new(move |a| (Ln::map_sum(a, |x| x * p) - (a.len() as f64).ln()) / p)
-        }
-    }
-
     /// Returns variance for already calculated mean.
     pub fn fast_variance(a: &[f64], mean: f64) -> f64 {
         let n = a.len();
@@ -185,6 +170,66 @@ impl F64Ext {
     }
 }
 
+
+/// Averaging mode: -inf -> min, inf -> max, otherwise: see Hölder mean.
+#[derive(Clone, Copy, Debug)]
+pub struct Averaging(pub f64);
+
+impl std::str::FromStr for Averaging {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "min" | "-inf" => Ok(Self(f64::NEG_INFINITY)),
+            "max" | "inf" => Ok(Self(f64::INFINITY)),
+            "a.mean" => Ok(Self(1.0)),
+            "g.mean" => Ok(Self(0.0)),
+            _ => {
+                let val = f64::from_str(s).map_err(|_| format!("Unknown averaging mode {:?}", s))?;
+                if val.is_subnormal() && !val.is_infinite() {
+                    Err(format!("Averaging mode {} is not allowed", val))
+                } else {
+                    Ok(Self(val))
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for Averaging {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // Cannot use match on f64.
+        if self.0 == f64::NEG_INFINITY {
+            f.write_str("min")
+        } else if self.0 == f64::INFINITY {
+            f.write_str("max")
+        } else if self.0 == 0.0 {
+            f.write_str("g.mean")
+        } else if self.0 == 1.0 {
+            f.write_str("a.mean")
+        } else {
+            write!(f, "Hölder({})", self.0)
+        }
+    }
+}
+
+impl Averaging {
+    /// Generalized (Hölder) mean (-Inf -> min, -1 -> harmonic, 0 -> geometric, 1 -> mean, 2 -> sq.mean, Inf -> max).
+    /// Input and output values are in ln-space.
+    pub fn generate_ln_mean(self) -> Box<dyn Fn(&[f64]) -> f64> {
+        if self.0 < -100.0 {
+            Box::new(F64Ext::min)
+        } else if self.0.abs() < 1e-8 {
+            // ln-geometric mean.
+            Box::new(F64Ext::mean)
+        } else if self.0 > 100.0 {
+            Box::new(F64Ext::max)
+        } else {
+            Box::new(move |a| (Ln::map_sum(a, |x| x * self.0) - (a.len() as f64).ln()) / self.0)
+        }
+    }
+}
+
 /// Static methods related to iterators.
 pub struct IterExt;
 
@@ -253,6 +298,37 @@ where T: fmt::Debug
 
     fn try_len(&self) -> Option<usize> {
         Some(self.len())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UsizeOrInf(pub usize);
+
+impl UsizeOrInf {
+    const INF: Self = Self(usize::MAX);
+}
+
+impl std::str::FromStr for UsizeOrInf {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "inf" || s == "Inf" || s == "INF" {
+            Ok(Self::INF)
+        } else {
+            usize::from_str(s)
+                .map_err(|_| format!("Cannot parse {:?}, possible values: integer or 'inf'", s))
+                .map(Self)
+        }
+    }
+}
+
+impl fmt::Display for UsizeOrInf {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0 == usize::MAX {
+            f.write_str("inf")
+        } else {
+            write!(f, "{}", self.0)
+        }
     }
 }
 

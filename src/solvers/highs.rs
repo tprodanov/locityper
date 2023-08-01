@@ -1,14 +1,15 @@
 use std::fmt;
 use highs::{RowProblem, Col, Sense, HighsModelStatus as Status};
 use crate::{
-    Error,
+    err::{Error, validate_param},
     model::{
         windows::REG_WINDOW_SHIFT,
         assgn::{GenotypeAlignments, ReadAssignment},
     },
-    ext::vec::F64Ext,
-    bg::ser::json_get,
-    ext::rand::XoshiroRng,
+    ext::{
+        vec::F64Ext,
+        rand::XoshiroRng,
+    },
 };
 
 const HIGHS_NAME: &'static str = "HiGHS";
@@ -29,11 +30,11 @@ impl Default for HighsSolver {
 }
 
 impl HighsSolver {
-    pub fn set_type(&mut self, mode: &str) -> &mut Self {
-        assert!(mode == "choose" || mode == "simplex" || mode == "ipm",
-            "Unknown {} solver type `{}`", HIGHS_NAME, mode);
+    pub fn set_mode(&mut self, mode: &str) -> Result<(), Error> {
+        validate_param!(mode == "choose" || mode == "simplex" || mode == "ipm",
+            "{} solver: unknown mode {:?}", HIGHS_NAME, mode);
         self.mode = mode.to_owned();
-        self
+        Ok(())
     }
 
     fn define_model(&self, gt_alns: &GenotypeAlignments) -> RowProblem {
@@ -137,10 +138,11 @@ impl super::Solver for HighsSolver {
 }
 
 impl super::SetParams for HighsSolver {
-    fn set_params(&mut self, obj: &json::JsonValue) -> Result<(), Error> {
-        json_get!(obj -> mode? (as_str));
-        if let Some(mode) = mode {
-            self.set_type(mode);
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
+        if key == "mode" || key == "type" {
+            self.set_mode(val)?;
+        } else {
+            log::error!("{} solver: unknown parameter {:?}", HIGHS_NAME, key);
         }
         Ok(())
     }

@@ -133,7 +133,8 @@ impl super::Solver for GurobiSolver {
 }
 
 impl super::SetParams for GurobiSolver {
-    fn set_params(&mut self, _: &json::JsonValue) -> Result<(), Error> {
+    fn set_param(&mut self, key: &str, _val: &str) -> Result<(), Error> {
+        log::error!("Gurobi solver: unknown parameter {:?}", key);
         Ok(())
     }
 }

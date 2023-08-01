@@ -1,5 +1,5 @@
 use std::{
-    fs, fmt,
+    fs,
     io::{self, Write, BufRead},
     process::{Command, Stdio},
     cmp::{min, max},
@@ -11,7 +11,6 @@ use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use fnv::{FnvHashSet, FnvHashMap};
 use htslib::bam;
-use lexopt::ValueExt;
 use crate::{
     err::{Error, validate_param, add_path},
     math::Ln,
@@ -28,136 +27,9 @@ use crate::{
         windows::ContigWindows,
         dp_cache::CachedDepthDistrs,
     },
-    solvers::scheme::{self, Scheme},
+    solvers::scheme::{self, Scheme, SchemeParams},
 };
 use super::paths;
-
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UsizeOrInf(pub usize);
-
-impl UsizeOrInf {
-    const INF: Self = Self(usize::MAX);
-}
-
-impl std::str::FromStr for UsizeOrInf {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "inf" || s == "Inf" || s == "INF" {
-            Ok(Self::INF)
-        } else {
-            usize::from_str(s)
-                .map_err(|_| format!("Cannot parse {:?}, possible values: integer or 'inf'", s))
-                .map(Self)
-        }
-    }
-}
-
-impl fmt::Display for UsizeOrInf {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.0 == usize::MAX {
-            f.write_str("inf")
-        } else {
-            write!(f, "{}", self.0)
-        }
-    }
-}
-
-pub struct FilterSubparams {
-    /// Boundaries on the smallest and largest number of haplotypes/genotypes.
-    pub min_size: UsizeOrInf,
-    pub max_size: UsizeOrInf,
-    /// Relative score threshold (between the minimum and maximum score).
-    pub score_thresh: f64,
-}
-
-impl FilterSubparams {
-    pub fn validate(&self, prefix: &'static str) -> Result<(), Error> {
-        validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
-            "{}: score threshold ({}) must be within [0, 1]", prefix, self.score_thresh);
-        validate_param!(self.min_size.0 > 1,
-            "{}: minimal size ({}) must be at least 2", prefix, self.min_size);
-        validate_param!(self.min_size <= self.max_size,
-            "{}: min size ({}) must be <= the max size ({})",
-            prefix, self.min_size, self.max_size);
-        Ok(())
-    }
-
-    pub fn set_sizes(&mut self, mut values: lexopt::ValuesIter) -> Result<(), lexopt::Error> {
-        self.min_size = values.next().expect("First value must be present").parse()?;
-        self.max_size = values.next()
-            .map(|v| v.parse())
-            .transpose()?
-            .unwrap_or(UsizeOrInf::INF);
-        Ok(())
-    }
-
-    pub fn disable(&mut self) {
-        self.min_size = UsizeOrInf::INF;
-        self.max_size = UsizeOrInf::INF;
-    }
-
-    /// Finds partition point and score threshold based on the decreasing list of scores.
-    pub fn get_partition<T>(&self, scores: &[(T, f64)]) -> (usize, f64) {
-        let n = scores.len();
-        let best = scores[0].1;
-        let worst = scores[n - 1].1;
-        let range = best - worst;
-
-        let mut thresh = worst + range * self.score_thresh;
-        let mut m = scores.partition_point(|(_, score)| *score >= thresh);
-        if self.min_size.0 >= n {
-            thresh = worst;
-            m = n;
-        } else if m < self.min_size.0 {
-            thresh = scores[self.min_size.0 - 1].1;
-            m = scores.partition_point(|(_, score)| *score >= thresh);
-        } else if m > self.max_size.0 {
-            thresh = scores[self.max_size.0 - 1].1;
-            m = scores.partition_point(|(_, score)| *score >= thresh);
-        }
-        // m can still be over max_size, but we do not want to discard entries with equal scores.
-        (m, thresh)
-    }
-}
-
-/// Filter haplotypes and genotypes before assigning reads.
-pub struct FilterParams {
-    /// Rank haplotypes based on the top X read alignments, where X = haplotype_aln_coef / ploidy`.
-    pub nreads_mult: f64,
-    pub haplotype: FilterSubparams,
-    pub genotype: FilterSubparams,
-}
-
-impl Default for FilterParams {
-    fn default() -> Self {
-        Self {
-            nreads_mult: 0.8,
-            haplotype: FilterSubparams {
-                min_size: UsizeOrInf(5),
-                max_size: UsizeOrInf(100),
-                score_thresh: 0.9,
-            },
-            genotype: FilterSubparams {
-                min_size: UsizeOrInf(10),
-                max_size: UsizeOrInf(1000),
-                score_thresh: 0.9,
-            },
-        }
-    }
-}
-
-impl FilterParams {
-    pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(0.0 < self.nreads_mult && self.nreads_mult < 2.0,
-            "Number of reads multiplier ({}) must be reasonably close to 1",
-            self.nreads_mult);
-        self.haplotype.validate("Haplotype filtering")?;
-        self.genotype.validate("Genotype filtering")?;
-        Ok(())
-    }
-}
 
 struct Args {
     input: Vec<PathBuf>,
@@ -165,7 +37,6 @@ struct Args {
     output: Option<PathBuf>,
     subset_loci: FnvHashSet<String>,
     ploidy: u8,
-    solvers: Option<PathBuf>,
     priors: Option<PathBuf>,
 
     interleaved: bool,
@@ -178,8 +49,8 @@ struct Args {
     debug: bool,
 
     recr_params: recruit::Params,
-    filt_params: FilterParams,
     assgn_params: AssgnParams,
+    scheme_params: SchemeParams,
 }
 
 impl Default for Args {
@@ -190,7 +61,6 @@ impl Default for Args {
             output: None,
             subset_loci: FnvHashSet::default(),
             ploidy: 2,
-            solvers: None,
             priors: None,
 
             interleaved: false,
@@ -203,8 +73,8 @@ impl Default for Args {
             debug: false,
 
             recr_params: Default::default(),
-            filt_params: Default::default(),
             assgn_params: Default::default(),
+            scheme_params: Default::default(),
         }
     }
 }
@@ -227,7 +97,6 @@ impl Args {
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
-        self.filt_params.validate()?;
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -310,33 +179,31 @@ fn print_help() {
         "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
         super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
 
-    let filt_defaults = &defaults.filt_params;
-    println!("\n{}", "Pre-filtering:".bold());
-    println!("    {:KEY$} {:VAL$}  Skip pre-filtering (same as {} or {}).\n\
-        {EMPTY}  Note: haplotype filtering is always skipped if priors are set.",
-        "    --no-filtering".green(), super::flag(), "--n-haps inf".underline(), "--n-gts inf".underline());
-    println!("    {:KEY$} {:VAL$}  Rank haplotypes based on the top {}/ploidy read alignments [{}].",
-        "    --nreads-mult".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-        super::fmt_def_f64(filt_defaults.nreads_mult));
-    println!("    {:KEY$} {:VAL$}\n\
-        {EMPTY}  Score threshold for haplotype [{}] and genotype [{}] filtering.\n\
-        {EMPTY}  Values range from 0 (use all) to 1 (only entries with the best score).",
-        "    --score-thresh".green(), "FLOAT [FLOAT]".yellow(),
-        super::fmt_def_f64(filt_defaults.haplotype.score_thresh),
-        super::fmt_def_f64(filt_defaults.genotype.score_thresh));
-    println!("    {}    {}  Minimum and maximum number of haplotypes after filtering [{} {}].",
-        "    -n-haps".green(), "INT [INT]".yellow(),
-        super::fmt_def(filt_defaults.haplotype.min_size), super::fmt_def(filt_defaults.haplotype.max_size));
-    println!("    {}     {}  Minimum and maximum number of genotypes after filtering [{} {}].",
-        "    -n-gts".green(), "INT [INT]".yellow(),
-        super::fmt_def(filt_defaults.genotype.min_size), super::fmt_def(filt_defaults.genotype.max_size));
-
     println!("\n{}", "Locus genotyping:".bold());
-    println!("    {:KEY$} {:VAL$}  Optional: describe sequence of solvers in a JSON file.\n\
-        {EMPTY}  Please see README for information on the file content.",
-        "-S, --solvers".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
+        {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
+        "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
+        "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
+    println!("    {:KEY$} {:VAL$}  Score threshold for genotype filtering [{}].\n\
+        {EMPTY}  Filtering is applied after each stage.\n\
+        {EMPTY}  Values range from 0 (use all) to 1 (only entries with the best score).",
+        "-t, --score-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.score_thresh));
+    println!("    {:KEY$} {:VAL$}  Minimum number of genotypes after each step [{}].",
+        "    -min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
+    println!("    {:KEY$} {:VAL$}  Number of attempts per stage [{}].",
+        "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
+    println!("    {:KEY$} {:VAL$}  Averaging mode [{}].\n\
+        {EMPTY}  Modes: {}, {}, {}, {} or any {} (see Hölder mean).",
+        "    --averaging".green(), "STR".yellow(), super::fmt_def(defaults.assgn_params.averaging),
+        "min".yellow(), "max".yellow(), "g.mean".yellow(), "a.mean".yellow(), "FLOAT".yellow());
     println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
         "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
+    println!("        {} {}, {} {}, {} {}, {} {}\n\
+        {EMPTY}  Solver parameters (see README).",
+        "--greedy".green(), "STR".yellow(),
+        "--anneal".green(), "STR".yellow(),
+        "--highs".green(), "STR".yellow(),
+        "--gurobi".green(), "STR".yellow());
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -386,7 +253,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.recr_params.matches_frac = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
-            Short('S') | Long("solvers") => args.solvers = Some(parser.value()?.parse()?),
             Short('C') | Long("dp-contrib") | Long("depth-contrib") | Long("dp-contribution") =>
                 args.assgn_params.depth_contrib = parser.value()?.parse()?,
             Short('A') | Long("alt-cn") =>
@@ -403,6 +269,19 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     .transpose()?
                     .unwrap_or(2.0);
             }
+            Long("edit-pval") | Long("edit-pvalue") =>
+                args.assgn_params.edit_pvals = (
+                    parser.value()?.parse()?,
+                    parser.value()?.parse()?,
+                ),
+
+            Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
+            Short('t') | Long("score-thresh") | Long("score-threshold") =>
+                args.assgn_params.score_thresh = parser.value()?.parse()?,
+            Long("min-gts") | Long("min-genotypes") =>
+                args.assgn_params.min_gts = parser.value()?.parse()?,
+            Short('a') | Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
+            Long("averaging") => args.assgn_params.averaging = parser.value()?.parse()?,
             Long("tweak") => {
                 let val = parser.value()?;
                 args.assgn_params.tweak = if val == "auto" {
@@ -411,31 +290,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     Some(val.parse()?)
                 };
             }
-            Long("edit-pval") | Long("edit-pvalue") =>
-                args.assgn_params.edit_pvals = (
-                    parser.value()?.parse()?,
-                    parser.value()?.parse()?,
-                ),
-
-            Long("no-filt") | Long("no-filter") | Long("no-filtering") => {
-                args.filt_params.haplotype.disable();
-                args.filt_params.genotype.disable();
-            }
-            Long("nreads-mult") | Long("nreads-multiplier") =>
-                args.filt_params.nreads_mult = parser.value()?.parse()?,
-            Long("score-thresh") | Long("score-threshold") => {
-                let mut values = parser.values()?;
-                args.filt_params.haplotype.score_thresh = values.next()
-                    .expect("At least one value must be present").parse()?;
-                args.filt_params.genotype.score_thresh = values.next()
-                    .map(|v| v.parse())
-                    .transpose()?
-                    .unwrap_or(args.filt_params.haplotype.score_thresh);
-            }
-            Long("n-haps") | Long("n-haplotypes") =>
-                args.filt_params.haplotype.set_sizes(parser.values()?)?,
-            Long("n-gts") | Long("n-genotypes") =>
-                args.filt_params.genotype.set_sizes(parser.values()?)?,
+            Long("greedy") => args.scheme_params.greedy_params.push(parser.value()?.parse()?),
+            Long("anneal") => args.scheme_params.anneal_params.push(parser.value()?.parse()?),
+            Long("highs") => args.scheme_params.highs_params.push(parser.value()?.parse()?),
+            Long("gurobi") => args.scheme_params.gurobi_params.push(parser.value()?.parse()?),
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -754,9 +612,6 @@ fn generate_genotypes(
     }
 }
 
-// ln(10^-50).
-const MIN_SCORE_RANGE: f64 = -115.12925464970229;
-
 // fn select_haplotypes(
 //     contigs: &ContigNames,
 //     all_alns: &AllAlignments,
@@ -810,60 +665,60 @@ const MIN_SCORE_RANGE: f64 = -115.12925464970229;
 //     Ok(scores[..m].iter().map(|&(id, _)| id).collect())
 // }
 
-/// Filter genotypes based on read alignments alone (without accounting for read depth).
-fn filter_genotypes(
-    contig_ids: &[ContigId],
-    gt_priors: Vec<(Genotype, f64)>,
-    all_alns: &AllAlignments,
-    mut lik_writer: impl Write,
-    params: &FilterParams,
-    debug: bool,
-) -> io::Result<Vec<(Genotype, f64)>>
-{
-    let n = gt_priors.len();
-    // Need to run anyway in case of `debug`, so that we output all values.
-    if params.genotype.min_size.0 >= n && !debug {
-        return Ok(gt_priors);
-    }
-    log::info!("    Filtering genotypes based on read alignment likelihood");
+// /// Filter genotypes based on read alignments alone (without accounting for read depth).
+// fn filter_genotypes(
+//     contig_ids: &[ContigId],
+//     gt_priors: Vec<(Genotype, f64)>,
+//     all_alns: &AllAlignments,
+//     mut lik_writer: impl Write,
+//     params: &FilterParams,
+//     debug: bool,
+// ) -> io::Result<Vec<(Genotype, f64)>>
+// {
+//     let n = gt_priors.len();
+//     // Need to run anyway in case of `debug`, so that we output all values.
+//     if params.genotype.min_size.0 >= n && !debug {
+//         return Ok(gt_priors);
+//     }
+//     log::info!("    Filtering genotypes based on read alignment likelihood");
 
-    let best_aln_matrix = all_alns.best_aln_matrix(contig_ids);
-    // Vector (genotype index, score).
-    let mut scores = Vec::with_capacity(n);
-    let mut gt_best_probs = vec![0.0_f64; all_alns.n_reads()];
-    for (i, (gt, prior)) in gt_priors.iter().enumerate() {
-        let gt_ids = gt.ids();
-        gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
-        for id in gt_ids[1..].iter() {
-            gt_best_probs.iter_mut().zip(&best_aln_matrix[id.ix()])
-                .for_each(|(best_prob, &curr_prob)| *best_prob = best_prob.max(curr_prob));
-        }
-        let score = *prior + gt_best_probs.iter().sum::<f64>();
-        writeln!(lik_writer, "0\t{}\t{:.3}", gt, Ln::to_log10(score))?;
-        scores.push((i, score));
-    }
+//     let best_aln_matrix = all_alns.best_aln_matrix(contig_ids);
+//     // Vector (genotype index, score).
+//     let mut scores = Vec::with_capacity(n);
+//     let mut gt_best_probs = vec![0.0_f64; all_alns.n_reads()];
+//     for (i, (gt, prior)) in gt_priors.iter().enumerate() {
+//         let gt_ids = gt.ids();
+//         gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
+//         for id in gt_ids[1..].iter() {
+//             gt_best_probs.iter_mut().zip(&best_aln_matrix[id.ix()])
+//                 .for_each(|(best_prob, &curr_prob)| *best_prob = best_prob.max(curr_prob));
+//         }
+//         let score = *prior + gt_best_probs.iter().sum::<f64>();
+//         writeln!(lik_writer, "0\t{}\t{:.3}", gt, Ln::to_log10(score))?;
+//         scores.push((i, score));
+//     }
 
-    // Decreasing sort by score.
-    scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    let best = scores[0];
-    let worst = scores[n - 1];
-    let range = best.1 - worst.1;
-    if range < MIN_SCORE_RANGE {
-        log::warn!("        Difference between genotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
-        return Ok(gt_priors);
-    }
-    let (m, thresh) = params.genotype.get_partition(&scores);
-    log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
-        (thresh - worst.1) / range);
-    log::debug!("        Worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
-        gt_priors[worst.0].0, Ln::to_log10(worst.1), gt_priors[best.0].0, Ln::to_log10(best.1), Ln::to_log10(thresh));
-    Ok(scores[..m].iter().map(|&(i, _)| gt_priors[i].clone()).collect())
-}
+//     // Decreasing sort by score.
+//     scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+//     let best = scores[0];
+//     let worst = scores[n - 1];
+//     let range = best.1 - worst.1;
+//     if range < MIN_SCORE_RANGE {
+//         log::warn!("        Difference between genotypes is too small ({:.1}), keeping all", Ln::to_log10(range));
+//         return Ok(gt_priors);
+//     }
+//     let (m, thresh) = params.genotype.get_partition(&scores);
+//     log::debug!("        Selected {} genotypes out of {}, relative score thresh {:.3}", m, n,
+//         (thresh - worst.1) / range);
+//     log::debug!("        Worst {} ({:.1}), best {} ({:.1}), threshold: {:.1}",
+//         gt_priors[worst.0].0, Ln::to_log10(worst.1), gt_priors[best.0].0, Ln::to_log10(best.1), Ln::to_log10(thresh));
+//     Ok(scores[..m].iter().map(|&(i, _)| gt_priors[i].clone()).collect())
+// }
 
 fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
-    scheme: &Scheme,
+    scheme: &Arc<Scheme>,
     cached_distrs: &CachedDepthDistrs,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
@@ -878,7 +733,7 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let contig_windows = if args.debug || scheme.has_dbg_output() {
+    let contig_windows = if args.debug {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
         ContigWindows::new_all(&locus.set, cached_distrs, &args.assgn_params, windows_writer)
@@ -904,17 +759,17 @@ fn analyze_locus(
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
 
-    let gt_priors = filter_genotypes(&contig_ids, gt_priors, &all_alns, &mut lik_writer,
-        &args.filt_params, args.debug).map_err(add_path!(locus.lik_filename))?;
+    // let gt_priors = filter_genotypes(&contig_ids, gt_priors, &all_alns, &mut lik_writer,
+    //     &args.filt_params, args.debug).map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
-        scheme: scheme.clone(),
-        contigs: Arc::clone(&contigs),
-        contig_windows: Arc::new(contig_windows),
-        params: args.assgn_params.clone(),
+        scheme: Arc::clone(scheme),
+        contigs: Arc::clone(contigs),
+        assgn_params: args.assgn_params.clone(),
         debug: args.debug,
-        all_alns, gt_priors,
+        threads: usize::from(args.threads),
+        all_alns, gt_priors, contig_windows,
     };
-    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng, args.threads)?;
+    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));
     Ok(())
@@ -946,12 +801,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.rerun)?;
     recruit_reads(&loci, &args)?;
 
-    let scheme = match args.solvers.as_ref() {
-        Some(filename) => Scheme::from_json(&ext::sys::load_json(filename)?)?,
-        None => Scheme::default(),
-    };
+    let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
     let cached_distrs = CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn);
-
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {
         // Remove to get ownership of the locus priors.

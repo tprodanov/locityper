@@ -7,6 +7,7 @@ use crate::{
     math::Ln,
     err::{Error, validate_param},
     bg::err_prof,
+    ext::vec::{UsizeOrInf, Averaging},
 };
 
 /// Read depth model parameters.
@@ -34,6 +35,15 @@ pub struct Params {
 
     /// Alternative hypotheses copy number values (main hypothesis is 1).
     pub alt_cn: (f64, f64),
+
+    /// Minimal number of genotypes after each step of solving.
+    pub min_gts: UsizeOrInf,
+    /// Discard low likelihood genotypes based on this threshold (`min + score_thresh * (max - min)`).
+    pub score_thresh: f64,
+    /// Number of attempts with different tweak sizes.
+    pub attempts: usize,
+    /// Averaging function.
+    pub averaging: Averaging,
 }
 
 impl Default for Params {
@@ -50,6 +60,11 @@ impl Default for Params {
 
             tweak: None,
             alt_cn: (0.5, 1.5),
+
+            min_gts: UsizeOrInf(10),
+            score_thresh: 0.9,
+            attempts: 5,
+            averaging: Averaging(0.0),
         }
     }
 }
@@ -83,14 +98,20 @@ impl Params {
             "Alternative copy number #1 ({}) must be in (0, 1).", self.alt_cn.0);
         validate_param!(self.alt_cn.1 > 1.0,
             "Alternative copy number #2 ({}) must be over 1.", self.alt_cn.1);
+
+        validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
+            "Score threshold ({}) must be within [0, 1]", self.score_thresh);
+        validate_param!(self.attempts > 0, "Number of attempts must be positive");
+        validate_param!(self.min_gts.0 > 1,
+            "Minimal number of genotypes ({}) must be at least 2", self.min_gts);
         Ok(())
     }
 
     pub fn set_tweak_size(&mut self, window_size: u32) -> Result<(), Error> {
         const MAX_THEORETICAL_TWEAK: u32 = u16::MAX as u32 / 2 - 1;
-        const MAX_TWEAK: u32 = 200;
+        const MAX_TWEAK: u32 = 100;
         if self.tweak.is_none() {
-            self.tweak = Some((window_size / 2).min(MAX_TWEAK).min(self.boundary_size.saturating_sub(1)));
+            self.tweak = Some((window_size / 3).min(MAX_TWEAK).min(self.boundary_size.saturating_sub(1)));
         }
 
         let tweak = self.tweak.unwrap();
