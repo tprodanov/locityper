@@ -1,6 +1,7 @@
 pub mod err_prof;
 pub mod insertsz;
 pub mod depth;
+pub mod windows;
 pub mod ser;
 
 use std::{
@@ -17,6 +18,7 @@ pub use {
     insertsz::InsertDistr,
     err_prof::ErrorProfile,
     ser::JsonSer,
+    windows::Windows,
 };
 
 /// Parameters for background distributions estimation.

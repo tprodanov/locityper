@@ -1,14 +1,13 @@
 use std::{
     io::{self, Write},
-    cmp::min,
     path::Path,
 };
+use super::{
+    Windows,
+    ser::{JsonSer, parse_f64_arr, json_get},
+};
 use crate::{
-    seq::{
-        self, Interval,
-        kmers::KmerCounts,
-        aln::LightAlignment,
-    },
+    seq::aln::LightAlignment,
     algo::{bisect, loess::Loess},
     ext::{
         self,
@@ -23,9 +22,6 @@ use crate::{
     err::{Error, validate_param, add_path},
     model::windows::WindowGetter,
 };
-use super::{
-    ser::{JsonSer, parse_f64_arr, json_get},
-};
 
 pub trait DepthDistr {
     fn window_size(&self) -> u32;
@@ -33,114 +29,19 @@ pub trait DepthDistr {
     fn ln_prob(&self, gc_content: u8, depth: u32) -> f64;
 }
 
-/// Number of various read types per window.
-#[derive(Clone, Debug)]
-struct WindowCounts {
-    start: u32,
-    end: u32,
-    depth: [u32; 2],
-}
-
-impl WindowCounts {
-    fn new(start: u32, end: u32) -> Self {
-        WindowCounts {
-            start, end,
-            depth: [0, 0],
-        }
-    }
-}
-
-/// Count reads in various windows of length `window_size`
-/// between approx. `interval.start() + boundary_size` and `interval.end() - boundary_size`.
+/// Count reads in various windows of length `window_size`.
 fn count_reads<'a>(
     alignments: impl Iterator<Item = &'a LightAlignment>,
-    interval: &Interval,
-    window_size: u32,
-    boundary_size: u32,
-) -> Vec<WindowCounts> {
-    assert!(interval.len() >= window_size + 2 * boundary_size, "Input interval is too short!");
-    let n_windows = (interval.len() - 2 * boundary_size) / window_size;
-    let sum_len = n_windows * window_size;
-    let interval_start = interval.start();
-    let start = interval_start + (interval.len() - sum_len) / 2;
-    let mut windows: Vec<_> = (0..n_windows)
-        .map(|i| WindowCounts::new(start + i * window_size, start + (i + 1) * window_size))
-        .collect();
-    let window_getter = WindowGetter::new(start, start + sum_len, window_size);
-
+    n_windows: usize,
+    window_getter: &WindowGetter,
+) -> Vec<[u32; 2]> {
+    let mut depth = vec![[0, 0]; n_windows];
     for aln in alignments {
         if let Some(window) = window_getter.middle_window(aln.interval().middle()) {
-            windows[window as usize].depth[aln.read_end().ix()] += 1;
+            depth[window as usize][aln.read_end().ix()] += 1;
         }
     }
-    windows
-}
-
-/// Discard windows, where the region <left_padding><window><right padding> (sum length = neighb_size) contains
-/// - unknown nucleotides (Ns),
-/// - frequent k-mers (specific k-mer percentile > 1).
-///
-/// All windows must have the same length! (is not checked)
-///
-/// Consumes windows, and returns a new vector of selected windows + a vector of GC-content values for each window.
-fn filter_windows(
-    windows: Vec<WindowCounts>,
-    seq_shift: u32,
-    ref_seq: &[u8],
-    kmer_counts_collection: &KmerCounts,
-    window_size: u32,
-    neighb_size: u32,
-    kmer_perc: f64,
-    mut dbg_writer: impl Write,
-) -> io::Result<(Vec<WindowCounts>, Vec<f64>)>
-{
-    writeln!(dbg_writer, "start\tgc\tkmer_cdf1\tkeep\tdepth1\tdepth2")?;
-    log::debug!("    Total windows:   {:7}", windows.len());
-    let seq_len = ref_seq.len();
-    let k = kmer_counts_collection.k();
-    assert!(neighb_size > k);
-    let kmer_counts = kmer_counts_collection.get_first();
-    let left_padding = (neighb_size - window_size) / 2;
-    let right_padding = neighb_size - window_size - left_padding;
-
-    let mut have_ns = 0;
-    let mut have_common_kmers = 0;
-    let mut sel_windows = Vec::with_capacity(windows.len());
-    let mut gc_contents = Vec::with_capacity(windows.len());
-    for window in windows.into_iter() {
-        let start_ix = window.start.saturating_sub(left_padding + seq_shift) as usize;
-        let end_ix = min((window.end + right_padding - seq_shift) as usize, seq_len);
-        let window_seq = &ref_seq[start_ix..end_ix];
-        let mut keep = true;
-        let mut inv_quant1 = f64::NAN;
-        let mut gc_content = f64::NAN;
-        if seq::has_n(window_seq) {
-            have_ns += 1;
-            keep = false
-        } else {
-            let end_ix2 = (end_ix + 1).checked_sub(k as usize).unwrap();
-            assert!(end_ix2 > start_ix);
-            // Inverse quantile (1) - what percentage of k-mer counts is <= 1.
-            // This calculation is actually faster than quantile, as it does not require sorting.
-            inv_quant1 = kmer_counts[start_ix..end_ix2].iter().filter(|&&x| x <= 1).count() as f64
-                / (end_ix2 - start_ix) as f64;
-            gc_content = seq::gc_content(window_seq);
-            if inv_quant1 < kmer_perc {
-                have_common_kmers += 1;
-                keep = false;
-            }
-        }
-
-        writeln!(dbg_writer, "{}\t{:.1}\t{}\t{}\t{}\t{}", window.start, gc_content, inv_quant1,
-            if keep { 'T' } else { 'F' }, window.depth[0], window.depth[1])?;
-        if keep {
-            sel_windows.push(window);
-            gc_contents.push(gc_content);
-        }
-    }
-    log::debug!("    Remove {} windows with Ns, {} windows with common k-mers", have_ns, have_common_kmers);
-    log::debug!("    After filtering: {:7}", sel_windows.len());
-    Ok((sel_windows, gc_contents))
+    depth
 }
 
 /// In total, GC-content falls into 101 bins (0..=100).
@@ -229,10 +130,6 @@ fn blur_boundary_values(means: &[f64], vars: &[f64], gc_bins: &[(usize, usize)],
     }
     (blurred_means, blurred_vars)
 }
-
-/// Calculate GC-content and k-mer frequencies based on the window neighbourhood of at least this size.
-/// Neighbourhood size = max(MIN_NEIGHBOURHOOD, window_size).
-const MIN_NEIGHBOURHOOD: u32 = 300;
 
 /// Read depth parameters.
 #[derive(Clone, Debug)]
@@ -378,16 +275,34 @@ fn estimate_nbinoms<'a>(means: &'a [f64], vars: &'a [f64], rate: f64, ploidy: f6
     })
 }
 
+/// Returns two vectors (first with read1 depth values, and second with GC-content values).
+/// Both vectors are sorted by GC-content.
+fn get_depth_and_gc(
+    depth: &[[u32; 2]],
+    windows: &Windows,
+    mut dbg_writer: impl Write,
+) -> io::Result<(Vec<f64>, Vec<f64>)>
+{
+    let mut depth1 = Vec::with_capacity(depth.len());
+    let mut gc_contents = Vec::with_capacity(depth.len());
+    for (i, (&[d1, d2], window)) in depth.iter().zip(windows.iter()).enumerate() {
+        writeln!(dbg_writer, "{}\t{}\t{}", i, d1, d2)?;
+        if window.keep() {
+            depth1.push(f64::from(d1));
+            gc_contents.push(window.gc());
+        }
+    }
+    let ixs = VecExt::argsort(&gc_contents);
+    Ok((VecExt::reorder(&depth1, &ixs), VecExt::reorder(&gc_contents, &ixs)))
+}
+
 impl ReadDepth {
-    /// Estimates read depth from primary alignments, mapped to the `interval` with sequence `ref_seq`.
-    /// Ignore reads with alignment probability < `params.a` and with insert size > `max_insert_size`.
+    /// Estimates read depth from primary alignments.
     ///
     /// Write debug information if `out_dir` is Some.
     pub fn estimate<'a>(
         alignments: &[&'a LightAlignment],
-        interval: &Interval,
-        ref_seq: &[u8],
-        kmer_counts: &KmerCounts,
+        windows: &Windows,
         params: &ReadDepthParams,
         subsampling_rate: f64,
         is_paired_end: bool,
@@ -395,51 +310,36 @@ impl ReadDepth {
         out_dir: Option<&Path>,
     ) -> Result<Self, Error>
     {
-        log::info!("Estimating read depth from {} reads", alignments.len());
-        log::debug!("    Ploidy {}, subsampling rate {}", params.ploidy, subsampling_rate);
-        assert_eq!(interval.len() as usize, ref_seq.len(),
-            "ReadDepth: interval and reference sequence have different lengths!");
-        let window_size = params.window_size.unwrap_or_else(|| (seq_info.mean_read_len() as u32 + 1) / 2);
-        let neighb_size = window_size.max(MIN_NEIGHBOURHOOD);
-        log::debug!("    Using {} bp windows, (window neighbourhood size {}, boundary {})",
-            window_size, neighb_size, params.boundary_size);
-
-        let windows = count_reads(alignments.iter().copied(), interval, window_size, params.boundary_size);
-        let (windows, gc_contents) = if let Some(dir) = out_dir {
-            let counts_filename = dir.join("counts.csv.gz");
-            let dbg_writer = ext::sys::create_gzip(&counts_filename)?;
-            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, window_size, neighb_size,
-                0.01 * params.kmer_perc, dbg_writer).map_err(add_path!(counts_filename))?
+        let depth = count_reads(alignments.iter().copied(), windows.len(), windows.window_getter());
+        let (depth, gc_contents) = if let Some(dir) = out_dir {
+            let dbg_filename1 = dir.join("window_depth.csv.gz");
+            let mut dbg_writer1 = ext::sys::create_gzip(&dbg_filename1)?;
+            writeln!(dbg_writer1, "window_ix\tdepth1\tdepth2").map_err(add_path!(dbg_filename1))?;
+            get_depth_and_gc(&depth, windows, dbg_writer1).map_err(add_path!(dbg_filename1))?
         } else {
-            filter_windows(windows, interval.start(), &ref_seq, &kmer_counts, window_size, neighb_size,
-                0.01 * params.kmer_perc, io::sink()).map_err(add_path!(!))?
+            get_depth_and_gc(&depth, windows, io::sink()).map_err(add_path!(!))?
         };
-        assert!(windows.len() > 0, "ReadDepth: no applicable windows!");
 
-        let ixs = VecExt::argsort(&gc_contents);
-        let gc_contents = VecExt::reorder(&gc_contents, &ixs);
         let gc_bins = find_gc_bins(&gc_contents);
-        let depth: Vec<f64> = ixs.iter().map(|&i| f64::from(windows[i].depth[0])).collect();
-
         let ploidy = f64::from(params.ploidy);
-        let dbg_filename = out_dir.map(|dirname| dirname.join("depth.csv.gz"));
-        let dbg_writer = dbg_filename.as_ref().map(|filename| ext::sys::create_gzip(filename)).transpose()?;
+        let dbg_filename2 = out_dir.map(|dirname| dirname.join("depth.csv.gz"));
+        let dbg_writer2 = dbg_filename2.as_ref().map(|filename| ext::sys::create_gzip(filename)).transpose()?;
         let distributions: Vec<NBinom>;
         if seq_info.technology().has_gc_bias() {
             let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
             let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
             distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy).collect();
-            if let Some(writer) = dbg_writer {
+            if let Some(writer) = dbg_writer2 {
                 write_summary(&gc_bins, &depth, &loess_means, &loess_vars, &blurred_means, &blurred_vars,
-                    &distributions, writer).map_err(add_path!(dbg_filename.as_ref().unwrap()))?;
+                    &distributions, writer).map_err(add_path!(dbg_filename2.as_ref().unwrap()))?;
             }
         } else {
             let mean = F64Ext::mean(&depth);
             let var = F64Ext::fast_variance(&depth, mean);
             let distr = estimate_nbinoms(&[mean], &[var], subsampling_rate, ploidy).next().unwrap();
-            if let Some(writer) = dbg_writer {
+            if let Some(writer) = dbg_writer2 {
                 write_summary_without_gc(depth.len(), mean, var, &distr, writer)
-                    .map_err(add_path!(dbg_filename.unwrap()))?;
+                    .map_err(add_path!(dbg_filename2.unwrap()))?;
             }
             distributions = vec![distr; GC_BINS];
         }
@@ -451,7 +351,9 @@ impl ReadDepth {
 
         Ok(Self {
             ploidy: params.ploidy,
-            window_size, neighb_size, distributions,
+            window_size: windows.window_size(),
+            neighb_size: windows.neighb_size(),
+            distributions,
         })
     }
 

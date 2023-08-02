@@ -647,6 +647,10 @@ fn estimate_bg_from_paired(
     log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
         min_insert, max_insert, crate::math::fmt_signif(100.0 * conf_lvl, 5));
 
+    let interval = &data.interval;
+    let windows = bg::Windows::create(interval, &data.sequence, &data.kmer_counts, &seq_info,
+        &args.bg_params.depth, opt_out_dir)?;
+
     // Estimate error profile from read pairs with appropriate insert size.
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
     for &(i, j) in pair_ixs.iter() {
@@ -658,9 +662,8 @@ fn estimate_bg_from_paired(
             errprof_alns.push(second);
         }
     }
-    let interval = &data.interval;
-    let err_prof = ErrorProfile::estimate(&errprof_alns, interval, seq_info.mean_read_len(), &args.bg_params,
-        opt_out_dir)?;
+    let err_prof = ErrorProfile::estimate(&errprof_alns, interval, &windows, seq_info.mean_read_len(),
+        &args.bg_params, opt_out_dir)?;
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
     let mut depth_alns: Vec<&LightAlignment> = Vec::with_capacity(errprof_alns.len());
@@ -674,7 +677,7 @@ fn estimate_bg_from_paired(
             depth_alns.push(aln2.deref());
         }
     }
-    let depth_distr = ReadDepth::estimate(&depth_alns, interval, &data.sequence, &data.kmer_counts,
+    let depth_distr = ReadDepth::estimate(&depth_alns, &windows,
         &args.bg_params.depth, args.params.subsampling_rate, true, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
@@ -689,7 +692,10 @@ fn estimate_bg_from_unpaired(
 {
     let insert_distr = InsertDistr::undefined();
     let interval = &data.interval;
-    let err_prof = ErrorProfile::estimate(&alns, interval, seq_info.mean_read_len(), &args.bg_params, opt_out_dir)?;
+    let windows = bg::Windows::create(interval, &data.sequence, &data.kmer_counts, &seq_info,
+        &args.bg_params.depth, opt_out_dir)?;
+    let err_prof = ErrorProfile::estimate(&alns, interval, &windows, seq_info.mean_read_len(),
+        &args.bg_params, opt_out_dir)?;
     let filt_alns: Vec<&LightAlignment> = alns.iter()
         .filter(|aln| {
             let (edit, len) = aln.count_region_operations(interval).edit_and_read_len();
@@ -697,8 +703,8 @@ fn estimate_bg_from_unpaired(
         })
         .map(Deref::deref)
         .collect();
-    let depth_distr = ReadDepth::estimate(&filt_alns, interval, &data.sequence, &data.kmer_counts,
-        &args.bg_params.depth, args.params.subsampling_rate, false, &seq_info, opt_out_dir)?;
+    let depth_distr = ReadDepth::estimate(&filt_alns, &windows,
+        &args.bg_params.depth, args.params.subsampling_rate, true, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 

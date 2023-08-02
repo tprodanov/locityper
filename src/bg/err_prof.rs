@@ -97,7 +97,7 @@ where U: TryInto<T> + Copy,
     }
 }
 
-pub const DEF_EDIT_PVAL: (f64, f64) = (0.01, 0.0001);
+pub const DEF_EDIT_PVAL: (f64, f64) = (0.01, 0.001);
 
 /// Read error profile.
 /// Basically, each operation is penalized according to its probability in the background data.
@@ -126,6 +126,7 @@ impl ErrorProfile {
     pub fn estimate<'a>(
         alns: &[impl Borrow<Alignment>],
         region: &Interval,
+        windows: &super::Windows,
         mean_read_len: f64,
         params: &super::Params,
         out_dir: Option<&Path>,
@@ -136,7 +137,11 @@ impl ErrorProfile {
         // HashMap, values: (edit_dist, read_len), keys: number of appearances.
         let mut edit_distances = HashMap::<(u32, u32), u64>::new();
         for aln in alns.iter() {
-            let counts = aln.borrow().count_region_operations(region);
+            let aln = aln.borrow();
+            if !windows.keep_window(aln.interval().middle()) {
+                continue;
+            }
+            let counts = aln.count_region_operations(region);
             total_counts += &counts;
             let (edit_dist, read_len) = counts.edit_and_read_len();
             edit_distances.entry((edit_dist, read_len))
