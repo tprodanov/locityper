@@ -629,13 +629,13 @@ impl<'a, W: Write> Helper<'a, W> {
     }
 
     /// Returns index of the best tuple, as well as its quality.
-    fn finish_overall(mut self) -> (usize, f64) {
-        let best_lik = self.likelihoods[self.best_ix];
+    fn finish_overall(self) -> (usize, f64) {
         let norm_fct = Ln::sum(&self.likelihoods);
-        self.likelihoods.iter_mut().for_each(|v| *v -= norm_fct);
-        let quality = Phred::from_likelihoods(&mut self.likelihoods, self.best_ix);
+        let mut norm_liks: Vec<_> = self.likelihoods.iter().map(|&v| v - norm_fct).collect();
+        let quality = Phred::from_likelihoods(&mut norm_liks, self.best_ix);
         log::info!("    Best genotype for {}: {}  (Lik = {:.1}, Qual = {:.1}, Conf. = {:.4}%)",
-            self.tag, self.best_str, best_lik, quality, best_lik.exp() * 100.0);
+            self.tag, self.best_str, Ln::to_log10(self.likelihoods[self.best_ix]),
+            quality, norm_liks[self.best_ix].exp() * 100.0);
         (self.best_ix, quality)
     }
 }
