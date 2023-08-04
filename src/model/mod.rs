@@ -104,6 +104,10 @@ impl Params {
         validate_param!(self.alt_cn.1 > 1.0,
             "Alternative copy number #2 ({}) must be over 1.", self.alt_cn.1);
 
+        validate_param!(self.max_alns > 0, "Number of alignments must be positive");
+        if self.max_alns < 1000 {
+            log::warn!("Number of alignments ({}) is too small", self.max_alns);
+        }
         validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
             "Score threshold ({}) must be within [0, 1]", self.score_thresh);
         validate_param!(self.attempts > 0, "Number of attempts must be positive");

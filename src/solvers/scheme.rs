@@ -116,7 +116,7 @@ fn filter_genotypes(
     let best_aln_matrix = all_alns.best_aln_matrix(&contig_ids);
     // Vector (genotype index, score).
     let mut scores = Vec::with_capacity(n);
-    let mut gt_best_probs = vec![0.0_f64; all_alns.n_reads()];
+    let mut gt_best_probs = vec![0.0_f64; all_alns.len()];
     for (gt, prior) in gt_priors.iter() {
         let gt_ids = gt.ids();
         gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);

@@ -56,17 +56,34 @@ pub struct CachedDepthDistrs<'a> {
     /// Cached read depth distributions in windows with few common k-mers (one for each GC-content).
     cached: [OnceCell<Arc<LinearCache<RegularDistr>>>; GC_BINS],
     alt_cn: (f64, f64),
+    subsampling_rate: Option<f64>,
 }
+
+const NBINOM_CELL: OnceCell<Arc<LinearCache<RegularDistr>>> = OnceCell::new();
 
 impl<'a> CachedDepthDistrs<'a> {
     /// Create a set of cached depth distributions.
     pub fn new(bg_distr: &'a bg::BgDistr, alt_cn: (f64, f64)) -> Self {
-        const NBINOM_CELL: OnceCell<Arc<LinearCache<RegularDistr>>> = OnceCell::new();
         Self {
             bg_depth: bg_distr.depth(),
             mul_coef: if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 },
             cached: [NBINOM_CELL; GC_BINS],
             alt_cn,
+            subsampling_rate: None,
+        }
+    }
+
+    pub fn subsample(&self, rate: f64) -> Self {
+        assert!(rate > 0.0 && rate < 1.0, "Subsampling rate ({}) must be in (0, 1)", rate);
+        if rate < 0.1 {
+            log::warn!("Subsampling rate ({:.6}) is too low", rate);
+        }
+        Self {
+            cached: [NBINOM_CELL; GC_BINS],
+            subsampling_rate: Some(rate),
+            bg_depth: self.bg_depth,
+            mul_coef: self.mul_coef,
+            alt_cn: self.alt_cn,
         }
     }
 
@@ -74,7 +91,11 @@ impl<'a> CachedDepthDistrs<'a> {
     fn regular_distr(&self, gc_content: u8) -> &Arc<LinearCache<RegularDistr>> {
         self.cached[usize::from(gc_content)].get_or_init(|| {
             // Probability at CN = 1.
-            let cn1 = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef);
+            let mut cn1 = self.bg_depth.depth_distribution(gc_content).mul(self.mul_coef);
+            if let Some(rate) = self.subsampling_rate {
+                cn1 = cn1.binomial_subsample(rate);
+            }
+
             // Probabilities at alternative CN values.
             let alt = [cn1.mul(self.alt_cn.0), cn1.mul(self.alt_cn.1)];
             let bayes = BayesCalc::new(cn1, alt);

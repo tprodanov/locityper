@@ -70,6 +70,13 @@ impl NBinom {
     pub fn p(&self) -> f64 {
         self.p
     }
+
+    /// Assuming a situation, where each random value is then used in a separate Binomial trial with `p = rate`,
+    /// new random variable also follows Negative Binomial.
+    /// This distribution is returned by this function.
+    pub fn binomial_subsample(&self, rate: f64) -> Self {
+        Self::new(self.n, self.p / (self.p + rate - self.p * rate))
+    }
 }
 
 impl Debug for NBinom {

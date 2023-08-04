@@ -649,15 +649,21 @@ fn analyze_locus(
         ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink()).map_err(add_path!(!))?
     };
 
-    let all_alns = if args.debug {
+    let mut all_alns = if args.debug {
         let reads_filename = locus.out_dir.join("reads.csv.gz");
         let reads_writer = ext::sys::create_gzip(&reads_filename)?;
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, reads_writer)?
     } else {
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, io::sink())?
     };
+    if all_alns.len() > args.assgn_params.max_alns {
+        let rate = args.assgn_params.max_alns as f64 / all_alns.len() as f64;
+        all_alns.subsample(args.assgn_params.max_alns, &mut rng);
+        ContigWindows::define_all_distributions(&mut contig_windows, &cached_distrs.subsample(rate));
+    } else {
+        ContigWindows::define_all_distributions(&mut contig_windows, cached_distrs);
+    }
 
-    ContigWindows::define_all_distributions(&mut contig_windows, cached_distrs);
     let contig_ids: Vec<ContigId> = contigs.ids().collect();
     let gt_priors = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
     if gt_priors.is_empty() {

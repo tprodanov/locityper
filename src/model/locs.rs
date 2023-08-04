@@ -4,6 +4,7 @@ use std::{
     cmp::Ordering,
     collections::hash_map::Entry,
 };
+use rand::{Rng, prelude::SliceRandom};
 use htslib::bam;
 use nohash::{IntSet, IntMap};
 use crate::{
@@ -548,7 +549,7 @@ impl AllAlignments {
     }
 
     /// Returns the total number of saved reads/read pairs.
-    pub fn n_reads(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.0.len()
     }
 
@@ -558,7 +559,7 @@ impl AllAlignments {
 
     /// Returns matrix `contig_id -> read pair -> best aln prob`.
     pub fn best_aln_matrix(&self, contig_ids: &[ContigId]) -> Vec<Vec<f64>> {
-        let mut best_aln_probs = vec![Vec::<f64>::with_capacity(self.n_reads()); contig_ids.len()];
+        let mut best_aln_probs = vec![Vec::<f64>::with_capacity(self.len()); contig_ids.len()];
         for read_alns in self.0.iter() {
             for (contig_probs, best_prob) in best_aln_probs.iter_mut()
                     .zip(read_alns.best_for_each_contig(contig_ids)) {
@@ -566,5 +567,29 @@ impl AllAlignments {
             }
         }
         best_aln_probs
+    }
+
+    /// Randomly subsample alignments.
+    pub fn subsample(&mut self, max_alns: usize, rng: &mut impl Rng) {
+        let before_reads = self.len();
+        let mut ixs: Vec<usize> = (0..before_reads).collect();
+        ixs.shuffle(rng);
+        ixs.truncate(max_alns);
+        ixs.sort_unstable();
+        let mut i = 0;
+
+        let old_alns = std::mem::replace(&mut self.0, Vec::new());
+        self.0.extend(old_alns
+            .into_iter()
+            .enumerate()
+            .filter_map(|(j, alns)| if i < max_alns && ixs[i] == j {
+                i += 1;
+                Some(alns)
+            } else {
+                None
+            })
+        );
+        log::warn!("    Subsampled alignments {} -> {} ({:.2}%)", before_reads, max_alns,
+            100.0 * max_alns as f64 / before_reads as f64);
     }
 }
