@@ -32,9 +32,12 @@ pub struct Params {
     /// Randomly move read middle by `tweak` bp into one of the directions.
     /// None: half window size.
     pub tweak: Option<u32>,
-
     /// Alternative hypotheses copy number values (main hypothesis is 1).
     pub alt_cn: (f64, f64),
+    /// Use paired-end reads that do not have a mapped mate within any contig.
+    pub use_unpaired: bool,
+    /// Use at most this number of alignments (subsample if necessary).
+    pub max_alns: usize,
 
     /// Minimal number of genotypes after each step of solving.
     pub min_gts: UsizeOrInf,
@@ -60,6 +63,8 @@ impl Default for Params {
 
             tweak: None,
             alt_cn: (0.5, 1.5),
+            use_unpaired: false,
+            max_alns: 500_000,
 
             min_gts: UsizeOrInf(10),
             score_thresh: 0.9,

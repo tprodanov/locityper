@@ -178,8 +178,12 @@ fn print_help() {
         {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
         "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
         super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
+    println!("    {:KEY$} {:VAL$}  Use unpaired reads.",
+        "    --use-unpaired".green(), super::flag());
 
     println!("\n{}", "Locus genotyping:".bold());
+    println!("    {:KEY$} {:VAL$}  Use at most {} alignments [{}].",
+        "    --max-alns".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.assgn_params.max_alns));
     println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
         {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
         "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
@@ -278,7 +282,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     parser.value()?.parse()?,
                     parser.value()?.parse()?,
                 ),
+            Long("use-unpaired") => args.assgn_params.use_unpaired = true,
 
+            Long("max-alns") | Long("max-alignments") => args.assgn_params.max_alns = parser.value()?.parse()?,
             Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
             Short('t') | Long("score-thresh") | Long("score-threshold") =>
                 args.assgn_params.score_thresh = parser.value()?.parse()?,

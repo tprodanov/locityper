@@ -35,7 +35,7 @@ impl MateSummary {
     fn unmapped(name_hash: u64) -> Self {
         Self {
             name_hash,
-            weight: f64::NAN,
+            weight: 0.0,
             min_prob: 0.0,
             any_central: false,
             mapped: false,
@@ -367,9 +367,9 @@ impl GrouppedAlignments {
     }
 }
 
-/// For a paired-end read, combine and pair all single-mate alignments across all contigs.
-///
+/// For a paired-end read, combine and pair all mate alignments across all contigs.
 /// Input alignments are sorted first by contig, and then by read end.
+/// Returns None if the read pair is ignored.
 fn identify_paired_end_alignments(
     read_name: String,
     alns: &[LightAlignment],
@@ -379,16 +379,16 @@ fn identify_paired_end_alignments(
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
-) -> GrouppedAlignments
+) -> Option<GrouppedAlignments>
 {
-    // Penalize unpaired reads by reducing their weight in half.
-    const UNPAIRED_WEIGHT_MULT: f64 = 0.5;
-    let weight = match (summary1.mapped, summary2.mapped) {
-        (false, false) => unreachable!("One of the mates must be aligned"),
-        (true,  false) => UNPAIRED_WEIGHT_MULT * summary1.weight,
-        (false, true ) => UNPAIRED_WEIGHT_MULT * summary2.weight,
-        (true,  true ) => 0.5 * (summary1.weight + summary2.weight), // Use mean weight.
-    };
+    if !params.use_unpaired && (!summary1.mapped || !summary2.mapped) {
+        return None;
+    }
+    // If both mates available: mean weight, otherwise: half weight of the available alignment.
+    let weight = 0.5 * (summary1.weight + summary2.weight);
+    if weight == 0.0 {
+        return None;
+    }
 
     let mut groupped_alns = Vec::new();
     let n = alns.len();
@@ -417,12 +417,12 @@ fn identify_paired_end_alignments(
     for aln in groupped_alns.iter_mut() {
         aln.ln_prob -= norm_fct;
     }
-    GrouppedAlignments {
+    Some(GrouppedAlignments {
         read_name,
         name_hash: summary1.name_hash,
         unmapped_prob: both_unmapped - norm_fct,
         alns: groupped_alns,
-    }
+    })
 }
 
 /// For a single-end read, sort alignment across contigs, discard improbable alignments, and normalize probabilities.
@@ -537,9 +537,11 @@ impl AllAlignments {
                     &summary1, summary2.as_ref().unwrap(), &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
                 tmp_alns.sort_unstable_by_key(LightAlignment::contig_id);
-                identify_single_end_alignments(read_name, &tmp_alns, &summary1, ln_ncontigs, params)
+                Some(identify_single_end_alignments(read_name, &tmp_alns, &summary1, ln_ncontigs, params))
             };
-            all_alns.push(groupped_alns);
+            if let Some(alns) = groupped_alns {
+                all_alns.push(alns);
+            }
         }
         log::info!("    Loaded {} read{}", all_alns.len(), if is_paired_end { " pairs"} else { "s" });
         Ok(Self(all_alns))
