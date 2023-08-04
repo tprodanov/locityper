@@ -620,7 +620,7 @@ fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
     scheme: &Arc<Scheme>,
-    cached_distrs: &CachedDepthDistrs,
+    cached_distrs: &CachedDepthDistrs<'_>,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
@@ -634,13 +634,13 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let contig_windows = if args.debug {
+    let mut contig_windows = if args.debug {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        ContigWindows::new_all(&locus.set, cached_distrs, &args.assgn_params, windows_writer)
+        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, windows_writer)
             .map_err(add_path!(windows_filename))?
     } else {
-        ContigWindows::new_all(&locus.set, cached_distrs, &args.assgn_params, io::sink()).map_err(add_path!(!))?
+        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink()).map_err(add_path!(!))?
     };
 
     let all_alns = if args.debug {
@@ -651,17 +651,13 @@ fn analyze_locus(
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, io::sink())?
     };
 
-    let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
-    writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
-
+    ContigWindows::define_all_distributions(&mut contig_windows, cached_distrs);
     let contig_ids: Vec<ContigId> = contigs.ids().collect();
     let gt_priors = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
     if gt_priors.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
 
-    // let gt_priors = filter_genotypes(&contig_ids, gt_priors, &all_alns, &mut lik_writer,
-    //     &args.filt_params, args.debug).map_err(add_path!(locus.lik_filename))?;
     let data = scheme::Data {
         scheme: Arc::clone(scheme),
         contigs: Arc::clone(contigs),
@@ -670,6 +666,8 @@ fn analyze_locus(
         threads: usize::from(args.threads),
         all_alns, gt_priors, contig_windows,
     };
+    let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
+    writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
     scheme::solve(data, lik_writer, &locus.out_dir, &mut rng)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));

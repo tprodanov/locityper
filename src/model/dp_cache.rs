@@ -47,9 +47,9 @@ type RegularDistr = BayesCalc<NBinom, NBinom, 2>;
 
 /// Store cached depth distbrutions.
 #[derive(Clone)]
-pub struct CachedDepthDistrs {
+pub struct CachedDepthDistrs<'a> {
     /// Background read depth distribution.
-    bg_depth: bg::depth::ReadDepth,
+    bg_depth: &'a bg::depth::ReadDepth,
     /// Multiplication coefficient: assume that read depth is `mul_coef` * bg read depth.
     mul_coef: f64,
 
@@ -58,12 +58,12 @@ pub struct CachedDepthDistrs {
     alt_cn: (f64, f64),
 }
 
-impl CachedDepthDistrs {
+impl<'a> CachedDepthDistrs<'a> {
     /// Create a set of cached depth distributions.
-    pub fn new(bg_distr: &bg::BgDistr, alt_cn: (f64, f64)) -> Self {
+    pub fn new(bg_distr: &'a bg::BgDistr, alt_cn: (f64, f64)) -> Self {
         const NBINOM_CELL: OnceCell<Arc<LinearCache<RegularDistr>>> = OnceCell::new();
         Self {
-            bg_depth: bg_distr.depth().clone(),
+            bg_depth: bg_distr.depth(),
             mul_coef: if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 },
             cached: [NBINOM_CELL; GC_BINS],
             alt_cn,

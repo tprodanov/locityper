@@ -10,6 +10,7 @@ use crate::{
         kmers::KmerCounts,
     },
     math::distr::DistrBox,
+    bg::ReadDepth,
 };
 use super::{
     locs::{GrouppedAlignments, PairAlignment},
@@ -195,7 +196,7 @@ pub struct ContigWindows {
     /// k-mer-based window weights.
     window_weights: Vec<f64>,
     /// Read depth distributions for each window.
-    depth_distrs: Vec<DistrBox>,
+    depth_distrs: Option<Vec<DistrBox>>,
 }
 
 impl ContigWindows {
@@ -204,7 +205,7 @@ impl ContigWindows {
         contigs: &ContigNames,
         seq: &[u8],
         kmer_counts: &KmerCounts,
-        cached_distrs: &CachedDepthDistrs,
+        depth: &ReadDepth,
         weight_calc: &WeightCalculator,
         boundary: u32,
         dbg_writer: &mut impl Write,
@@ -212,8 +213,8 @@ impl ContigWindows {
     {
         let contig_len = seq.len() as u32;
         let contig_name = contigs.get_name(contig_id);
-        let window = cached_distrs.bg_depth().window_size();
-        let neighb_size = cached_distrs.bg_depth().neighb_size();
+        let window = depth.window_size();
+        let neighb_size = depth.neighb_size();
         assert!(contig_len > window + 2 * boundary,
             "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
@@ -248,9 +249,7 @@ impl ContigWindows {
         }
         Ok(Self {
             window_getter: WindowGetter::new(reg_start, reg_start + sum_len, window),
-            depth_distrs: window_gcs.iter().zip(&window_weights)
-                .map(|(&gc, &w)| cached_distrs.get_distribution(gc, w))
-                .collect(),
+            depth_distrs: None,
             window_gcs, window_weights,
         })
     }
@@ -258,7 +257,7 @@ impl ContigWindows {
     /// Creates a set of contig windows for each contig.
     pub fn new_all(
         set: &ContigSet,
-        cached_distrs: &CachedDepthDistrs,
+        depth: &ReadDepth,
         params: &super::Params,
         mut dbg_writer: impl Write,
     ) -> io::Result<Vec<Self>> {
@@ -267,9 +266,23 @@ impl ContigWindows {
         let weight_calc = WeightCalculator::new(params.weight_breakpoint, params.weight_power);
         writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tweight")?;
         contigs.ids().zip(seqs)
-            .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), cached_distrs,
+            .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), depth,
                 &weight_calc, params.boundary_size, &mut dbg_writer))
             .collect()
+    }
+
+    /// Defines read depth distributions for all contig windows.
+    pub fn define_all_distributions(
+        contig_windows: &mut [Self],
+        cached_distrs: &CachedDepthDistrs<'_>,
+    ) {
+        for curr_windows in contig_windows {
+            curr_windows.depth_distrs = Some(
+                curr_windows.window_gcs.iter().zip(&curr_windows.window_weights)
+                    .map(|(&gc, &w)| cached_distrs.get_distribution(gc, w))
+                    .collect()
+            );
+        }
     }
 
     pub fn n_windows(&self) -> u32 {
@@ -281,7 +294,7 @@ impl ContigWindows {
     }
 
     pub fn depth_distrs(&self) -> &[DistrBox] {
-        &self.depth_distrs
+        &self.depth_distrs.as_ref().expect("Read depth distributions have not been initialized")
     }
 
     /// Returns window weight based on the read middle.

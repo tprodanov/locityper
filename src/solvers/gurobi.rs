@@ -125,7 +125,7 @@ impl super::Solver for GurobiSolver {
         let assgns = get_assignments(gt_alns, &model, &vars)?;
         let ilp_lik = model.get_attr(attr::ObjVal)?;
         let assgn_lik = assgns.likelihood();
-        if (assgn_lik - ilp_lik).abs() > 1e-5 {
+        if ((assgn_lik - ilp_lik) / ilp_lik).abs() > 1e-8 {
             log::error!("Gurobi likehood differs from the model likelihood: {} and {}", ilp_lik, assgn_lik);
         }
         Ok(assgns)
