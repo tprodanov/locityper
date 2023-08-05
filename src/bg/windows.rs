@@ -123,7 +123,8 @@ impl Windows {
     {
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
-        let window_size = params.window_size.unwrap_or_else(|| (seq_info.mean_read_len() as u32 + 1) / 2);
+        let window_size = params.window_size
+            .unwrap_or_else(|| (2 * seq_info.mean_read_len() as u32 + 2) / 3);
         let neighb_size = window_size.max(MIN_NEIGHBOURHOOD);
         log::debug!("    Using {} bp windows, (window neighbourhood size {}, boundary {})",
             window_size, neighb_size, params.boundary_size);
