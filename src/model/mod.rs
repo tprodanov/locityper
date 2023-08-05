@@ -28,6 +28,8 @@ pub struct Params {
     /// See `windows::WeightCalculator` for more details.
     pub weight_breakpoint: f64,
     pub weight_power: f64,
+    /// Ignore reads and windows with weight under this value.
+    pub min_weight: f64,
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
     /// None: half window size.
@@ -58,6 +60,7 @@ impl Default for Params {
 
             weight_breakpoint: 0.2,
             weight_power: 2.0,
+            min_weight: 0.001,
 
             tweak: None,
             alt_cn: (0.5, 1.5),
@@ -95,6 +98,8 @@ impl Params {
             "Weight breakpoint ({}) must be within (0, 1)", self.weight_breakpoint);
         validate_param!(0.5 <= self.weight_power && self.weight_power <= 50.0,
             "Weight power ({}) must be within [0.5, 50]", self.weight_power);
+        validate_param!(0.0 <= self.min_weight && self.min_weight <= 0.5,
+            "Minimal weight ({}) must be within [0, 0.5].", self.min_weight);
 
         validate_param!(self.alt_cn.0 > 0.0 && self.alt_cn.0 < 1.0,
             "Alternative copy number #1 ({}) must be in (0, 1).", self.alt_cn.0);

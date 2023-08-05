@@ -6,10 +6,7 @@ use grb::{
 use rand::Rng;
 use crate::{
     Error,
-    model::{
-        windows::REG_WINDOW_SHIFT,
-        assgn::{GenotypeAlignments, ReadAssignment},
-    },
+    model::assgn::{GenotypeAlignments, ReadAssignment},
     ext::rand::XoshiroRng,
 };
 
@@ -43,12 +40,8 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
             let ws = loc.windows();
             let inc: u32 = if ws[0] == ws[1] { 2 } else { 1 };
             for w in ws.into_iter() {
-                if w < REG_WINDOW_SHIFT {
-                    window_depth[w as usize].0 += inc;
-                } else {
-                    window_depth[w as usize].1 += inc;
-                    window_depth_constrs[w as usize].add_term(f64::from(inc), var);
-                }
+                window_depth[w as usize].1 += inc;
+                window_depth_constrs[w as usize].add_term(f64::from(inc), var);
                 if inc == 2 {
                     break;
                 }
@@ -60,6 +53,9 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
     let depth_contrib = gt_alns.depth_contrib();
     let mut depth_vars = Vec::new();
     for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
+        if !gt_alns.use_window(w) {
+            continue;
+        }
         let depth_distr = gt_alns.depth_distr(w);
         let (trivial_reads, non_trivial_reads) = window_depth[w];
         if non_trivial_reads == 0 {

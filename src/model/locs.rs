@@ -387,7 +387,7 @@ fn identify_paired_end_alignments(
     }
     // If both mates available: mean weight, otherwise: half weight of the available alignment.
     let weight = 0.5 * (summary1.weight + summary2.weight);
-    if weight == 0.0 {
+    if weight < params.min_weight {
         return None;
     }
 
@@ -434,9 +434,12 @@ fn identify_single_end_alignments(
     summary: &MateSummary,
     ln_ncontigs: f64,
     params: &super::Params,
-) -> GrouppedAlignments
+) -> Option<GrouppedAlignments>
 {
     let weight = summary.weight;
+    if weight < params.min_weight {
+        return None;
+    }
     let mut groupped_alns = Vec::new();
     let n = alns.len();
     let mut i = 0;
@@ -465,12 +468,12 @@ fn identify_single_end_alignments(
     for aln in groupped_alns.iter_mut() {
         aln.ln_prob -= norm_fct;
     }
-    GrouppedAlignments {
+    Some(GrouppedAlignments {
         read_name,
         name_hash: summary.name_hash,
         unmapped_prob: unmapped_prob - norm_fct,
         alns: groupped_alns,
-    }
+    })
 }
 
 pub struct AllAlignments(Vec<GrouppedAlignments>);
@@ -504,6 +507,7 @@ impl AllAlignments {
         let is_paired_end = insert_distr.is_paired_end();
         let ln_ncontigs = (contigs.len() as f64).ln();
         let mut all_alns = Vec::new();
+        let mut ignored = 0;
         let mut hashes = IntSet::default();
         let mut tmp_alns = Vec::new();
         let mut buffer = Vec::with_capacity(16);
@@ -538,13 +542,16 @@ impl AllAlignments {
                     &summary1, summary2.as_ref().unwrap(), &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
                 tmp_alns.sort_unstable_by_key(LightAlignment::contig_id);
-                Some(identify_single_end_alignments(read_name, &tmp_alns, &summary1, ln_ncontigs, params))
+                identify_single_end_alignments(read_name, &tmp_alns, &summary1, ln_ncontigs, params)
             };
             if let Some(alns) = groupped_alns {
                 all_alns.push(alns);
+            } else {
+                ignored += 1;
             }
         }
-        log::info!("    Loaded {} read{}", all_alns.len(), if is_paired_end { " pairs"} else { "s" });
+        log::info!("    Loaded {} read{}, ignored {}",
+            all_alns.len(), if is_paired_end { " pairs"} else { "s" }, ignored);
         Ok(Self(all_alns))
     }
 

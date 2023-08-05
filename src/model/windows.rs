@@ -297,6 +297,11 @@ impl ContigWindows {
         &self.depth_distrs.as_ref().expect("Read depth distributions have not been initialized")
     }
 
+    /// Returns all window weights.
+    pub fn weights(&self) -> &[f64] {
+        &self.window_weights
+    }
+
     /// Returns window weight based on the read middle.
     /// If read is out of bounds, returns 1.0.
     pub fn get_window_weight(&self, middle: u32) -> f64 {

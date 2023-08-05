@@ -171,6 +171,8 @@ fn print_help() {
         "    --weight".green(), "FLOAT [FLOAT]".yellow(),
         super::fmt_def_f64(defaults.assgn_params.weight_breakpoint),
         super::fmt_def_f64(defaults.assgn_params.weight_power), "FLOAT_1".yellow(), "FLOAT_2".yellow());
+    println!("    {:KEY$} {:VAL$}  Ignore reads and windows with weight under this value [{}].",
+        "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
     println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
         {EMPTY}  read alignment likelihoods [{}].",
         "-C, --dp-contrib".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_contrib));
@@ -273,6 +275,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     .transpose()?
                     .unwrap_or(2.0);
             }
+            Long("min-weight") => args.assgn_params.min_weight = parser.value()?.parse()?,
             Long("edit-pval") | Long("edit-pvalue") =>
                 args.assgn_params.edit_pvals = (
                     parser.value()?.parse()?,
@@ -708,7 +711,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     recruit_reads(&loci, &args)?;
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
-    let cached_distrs = CachedDepthDistrs::new(&bg_distr, args.assgn_params.alt_cn);
+    let cached_distrs = CachedDepthDistrs::new(&bg_distr, &args.assgn_params);
     let mut rng = ext::rand::init_rng(args.seed);
     for locus in loci.iter() {
         // Remove to get ownership of the locus priors.

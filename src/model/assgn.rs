@@ -62,6 +62,8 @@ pub struct GenotypeAlignments {
     depth_contrib: f64,
     /// Read depth distribution at each window (length: `gt_windows.total_windows()`).
     depth_distrs: Vec<DistrBox>,
+    /// Is this window weight over the threshold?
+    use_window: Vec<bool>,
 
     /// A vector of possible read alignments.
     alns: Vec<ReadGtAlns>,
@@ -105,15 +107,21 @@ impl GenotypeAlignments {
 
         const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
             "Constants have changed!");
-        let mut depth_distrs = Vec::with_capacity(gt_windows.total_windows() as usize);
+        let total_windows = gt_windows.total_windows() as usize;
+        let mut depth_distrs = Vec::with_capacity(total_windows);
+        let mut use_window = Vec::with_capacity(total_windows);
         depth_distrs.push(unmapped_distr());
+        use_window.push(false);
         depth_distrs.push(boundary_distr());
+        use_window.push(false);
         for contig_windows in gt_windows.contig_windows() {
             depth_distrs.extend_from_slice(contig_windows.depth_distrs());
+            use_window.extend(contig_windows.weights().iter().map(|&w| w >= params.min_weight));
         }
+
         Self {
             depth_contrib: params.depth_contrib,
-            gt_windows, depth_distrs, alns, read_ixs, non_trivial_reads,
+            gt_windows, depth_distrs, use_window, alns, read_ixs, non_trivial_reads,
         }
     }
 
@@ -175,6 +183,10 @@ impl GenotypeAlignments {
     /// WARN: Need to account for `self.depth_contrib()`.
     pub fn depth_distr(&self, window: usize) -> &DistrBox {
         &self.depth_distrs[window]
+    }
+
+    pub fn use_window(&self, window: usize) -> bool {
+        self.use_window[window]
     }
 
     /// Returns maximum achievable alignment likelihood (without read depth component).
@@ -258,10 +270,10 @@ impl<'a> ReadAssignment<'a> {
     /// Does not actually update the read depth.
     /// Does not account for read depth contribution.
     fn atomic_depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
-        if depth_change == 0 {
+        let w = window as usize;
+        if depth_change == 0 || !self.gt_alns.use_window[w] {
             0.0
         } else {
-            let w = window as usize;
             let distr = &self.gt_alns.depth_distrs[w];
             let old_depth = self.depth[w];
             let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative");

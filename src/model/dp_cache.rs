@@ -56,6 +56,7 @@ pub struct CachedDepthDistrs<'a> {
     /// Cached read depth distributions in windows with few common k-mers (one for each GC-content).
     cached: [OnceCell<Arc<LinearCache<RegularDistr>>>; GC_BINS],
     alt_cn: (f64, f64),
+    min_weight: f64,
     subsampling_rate: Option<f64>,
 }
 
@@ -63,12 +64,13 @@ const NBINOM_CELL: OnceCell<Arc<LinearCache<RegularDistr>>> = OnceCell::new();
 
 impl<'a> CachedDepthDistrs<'a> {
     /// Create a set of cached depth distributions.
-    pub fn new(bg_distr: &'a bg::BgDistr, alt_cn: (f64, f64)) -> Self {
+    pub fn new(bg_distr: &'a bg::BgDistr, params: &super::Params) -> Self {
         Self {
             bg_depth: bg_distr.depth(),
             mul_coef: if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 },
             cached: [NBINOM_CELL; GC_BINS],
-            alt_cn,
+            alt_cn: params.alt_cn,
+            min_weight: params.min_weight.max(1e-7),
             subsampling_rate: None,
         }
     }
@@ -84,6 +86,7 @@ impl<'a> CachedDepthDistrs<'a> {
             bg_depth: self.bg_depth,
             mul_coef: self.mul_coef,
             alt_cn: self.alt_cn,
+            min_weight: self.min_weight,
         }
     }
 
@@ -105,7 +108,7 @@ impl<'a> CachedDepthDistrs<'a> {
 
     /// Returns a box to either `NBinom`, `WeightedDistr`, depending on GC-content and the weight of the window.
     pub fn get_distribution(&self, gc_content: u8, weight: f64) -> DistrBox {
-        if weight < 0.00001 {
+        if weight < self.min_weight {
             Box::new(AlwaysOneDistr)
         } else {
             let regular = Arc::clone(self.regular_distr(gc_content));

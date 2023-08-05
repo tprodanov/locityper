@@ -2,10 +2,7 @@ use std::fmt;
 use highs::{RowProblem, Col, Sense, HighsModelStatus as Status};
 use crate::{
     err::{Error, validate_param},
-    model::{
-        windows::REG_WINDOW_SHIFT,
-        assgn::{GenotypeAlignments, ReadAssignment},
-    },
+    model::assgn::{GenotypeAlignments, ReadAssignment},
     ext::{
         vec::F64Ext,
         rand::XoshiroRng,
@@ -62,12 +59,8 @@ impl HighsSolver {
                 let ws = loc.windows();
                 let inc: u32 = if ws[0] == ws[1] { 2 } else { 1 };
                 for w in ws.into_iter() {
-                    if w < REG_WINDOW_SHIFT {
-                        window_depth[w as usize].0 += inc;
-                    } else {
-                        window_depth[w as usize].1 += inc;
-                        window_depth_constrs[w as usize].push((var, f64::from(inc)));
-                    }
+                    window_depth[w as usize].1 += inc;
+                    window_depth_constrs[w as usize].push((var, f64::from(inc)));
                     if inc == 2 {
                         break;
                     }
@@ -80,6 +73,9 @@ impl HighsSolver {
         let depth_contrib = gt_alns.depth_contrib();
         let mut depth_constr1 = Vec::new();
         for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
+            if !gt_alns.use_window(w) {
+                continue;
+            }
             let depth_distr = gt_alns.depth_distr(w);
             let (trivial_reads, non_trivial_reads) = window_depth[w];
             if non_trivial_reads == 0 {
