@@ -196,10 +196,6 @@ fn print_help() {
         "    -min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
     println!("    {:KEY$} {:VAL$}  Number of attempts per stage [{}].",
         "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
-    println!("    {:KEY$} {:VAL$}  Averaging mode [{}].\n\
-        {EMPTY}  Modes: {}, {}, {}, {} or any {} (see Hölder mean).",
-        "    --averaging".green(), "STR".yellow(), super::fmt_def(defaults.assgn_params.averaging),
-        "min".yellow(), "max".yellow(), "g.mean".yellow(), "a.mean".yellow(), "FLOAT".yellow());
     println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
         "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
     println!("        {} {}, {} {}, {} {}, {} {}\n\
@@ -291,7 +287,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("min-gts") | Long("min-genotypes") =>
                 args.assgn_params.min_gts = parser.value()?.parse()?,
             Short('a') | Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
-            Long("averaging") => args.assgn_params.averaging = parser.value()?.parse()?,
             Long("tweak") => {
                 let val = parser.value()?;
                 args.assgn_params.tweak = if val == "auto" {

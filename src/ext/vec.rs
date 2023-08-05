@@ -2,7 +2,6 @@ use std::{
     fmt::{self, Write},
     ops::{Add, Sub},
 };
-use crate::math::Ln;
 
 /// Static methods extending slices.
 pub struct VecExt;
@@ -192,66 +191,6 @@ impl F64Ext {
     #[inline]
     pub fn to_str5(a: &[f64]) -> String {
         F64Ext::to_str(a, 10, 5)
-    }
-}
-
-
-/// Averaging mode: -inf -> min, inf -> max, otherwise: see Hölder mean.
-#[derive(Clone, Copy, Debug)]
-pub struct Averaging(pub f64);
-
-impl std::str::FromStr for Averaging {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match &s.to_lowercase() as &str {
-            "min" | "-inf" => Ok(Self(f64::NEG_INFINITY)),
-            "max" | "inf" => Ok(Self(f64::INFINITY)),
-            "a.mean" | "arithm.mean" => Ok(Self(1.0)),
-            "g.mean" | "geom.mean" => Ok(Self(0.0)),
-            _ => {
-                let val = f64::from_str(s).map_err(|_| format!("Unknown averaging mode {:?}", s))?;
-                if val.is_subnormal() && !val.is_infinite() {
-                    Err(format!("Averaging mode {} is not allowed", val))
-                } else {
-                    Ok(Self(val))
-                }
-            }
-        }
-    }
-}
-
-impl fmt::Display for Averaging {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Cannot use match on f64.
-        if self.0 == f64::NEG_INFINITY {
-            f.write_str("min")
-        } else if self.0 == f64::INFINITY {
-            f.write_str("max")
-        } else if self.0 == 0.0 {
-            f.write_str("geom.mean")
-        } else if self.0 == 1.0 {
-            f.write_str("arithm.mean")
-        } else {
-            write!(f, "Hölder({})", self.0)
-        }
-    }
-}
-
-impl Averaging {
-    /// Generalized (Hölder) mean (-Inf -> min, -1 -> harmonic, 0 -> geometric, 1 -> mean, 2 -> sq.mean, Inf -> max).
-    /// Input and output values are in ln-space.
-    pub fn generate_ln_mean(self) -> Box<dyn Fn(&[f64]) -> f64> {
-        if self.0 < -100.0 {
-            Box::new(F64Ext::min)
-        } else if self.0.abs() < 1e-8 {
-            // ln-geometric mean.
-            Box::new(F64Ext::mean)
-        } else if self.0 > 100.0 {
-            Box::new(F64Ext::max)
-        } else {
-            Box::new(move |a| (Ln::map_sum(a, |x| x * self.0) - (a.len() as f64).ln()) / self.0)
-        }
     }
 }
 

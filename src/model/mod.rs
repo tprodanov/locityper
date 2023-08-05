@@ -7,7 +7,7 @@ use crate::{
     math::Ln,
     err::{Error, validate_param},
     bg::err_prof,
-    ext::vec::{UsizeOrInf, Averaging},
+    ext::vec::UsizeOrInf,
 };
 
 /// Read depth model parameters.
@@ -45,8 +45,6 @@ pub struct Params {
     pub score_thresh: f64,
     /// Number of attempts with different tweak sizes.
     pub attempts: usize,
-    /// Averaging function.
-    pub averaging: Averaging,
 }
 
 impl Default for Params {
@@ -69,7 +67,6 @@ impl Default for Params {
             min_gts: UsizeOrInf(10),
             score_thresh: 0.9,
             attempts: 5,
-            averaging: Averaging(0.0),
         }
     }
 }
