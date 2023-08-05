@@ -1,5 +1,7 @@
 pub mod distr;
 
+use statrs::distribution::{StudentsT, ContinuousCDF};
+
 /// Constant log(10).
 pub const LOG10: f64 = 2.302585092994045684_f64;
 /// Constant 1 / log(10).
@@ -35,7 +37,7 @@ impl Ln {
             a
         } else {
             let c = a - b;
-            assert!(c >= 0.0, "Ln::sub({}, {}) impossible!", a, b);
+            assert!(c >= 0.0, "Ln::sub({}, {}) is impossible!", a, b);
             b + (c.exp() - 1.0).ln()
         }
     }
@@ -108,7 +110,6 @@ impl Phred {
         -0.1 * Ln::from_log10(phred)
     }
 
-
     /// Returns Phred score ln-likelihood with index `ix` across all `likelihoods`.
     pub fn from_likelihoods(likelihoods: &mut [f64], ix: usize) -> f64 {
         let stored = likelihoods[ix];
@@ -154,4 +155,15 @@ pub fn fmt_signif(x: impl Into<f64>, digits: u8) -> String {
             (((x / fct).round() * fct).round() as i64).to_string()
         }
     }
+}
+
+/// Computes unpaired t-test p-value.
+/// Null hipothesis: first mean is equal or larger than the second mean.
+/// Sample sizes should be the same.
+pub fn unpaired_onesided_t_test(mean1: f64, var1: f64, mean2: f64, var2: f64, n: f64) -> f64 {
+    let diff_sd = ((var1 + var2) / n).sqrt();
+    let t_stat = (mean2 - mean1) / diff_sd;
+    let freedom = 2.0 * n - 2.0;
+    let t_distr = StudentsT::new(0.0, 1.0, freedom).expect("Could not create Student's t distribution");
+    t_distr.cdf(t_stat)
 }

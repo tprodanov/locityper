@@ -111,6 +111,9 @@ impl Params {
         validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
             "Score threshold ({}) must be within [0, 1]", self.score_thresh);
         validate_param!(self.attempts > 0, "Number of attempts must be positive");
+        if self.attempts < 3 {
+            log::warn!("At least 3 attempts are advised, otherwise qualities are inaccurate!");
+        }
         validate_param!(self.min_gts.0 > 1,
             "Minimal number of genotypes ({}) must be at least 2", self.min_gts);
         Ok(())

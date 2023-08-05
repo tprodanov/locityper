@@ -679,7 +679,7 @@ fn analyze_locus(
         all_alns, gt_priors, contig_windows,
     };
     let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
-    writeln!(lik_writer, "stage\tgenotype\tlik").map_err(add_path!(locus.lik_filename))?;
+    writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(locus.lik_filename))?;
     scheme::solve(data, lik_writer, &locus.out_dir, &mut rng)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));

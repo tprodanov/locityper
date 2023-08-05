@@ -133,10 +133,7 @@ impl InsertDistr {
         // Find index after the limiting value.
         let m = bisect::right(&insert_sizes, &est_limit);
         let lim_insert_sizes = &insert_sizes[..m];
-
-        let mean = F64Ext::mean(lim_insert_sizes);
-        // Increase variance, if less-equal than mean.
-        let var = F64Ext::fast_variance(lim_insert_sizes, mean);
+        let (mean, var) = F64Ext::mean_variance(lim_insert_sizes);
         let distr = RegularizedEstimator::default().estimate(mean, var);
         log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", distr.mean(), distr.variance().sqrt());
 

@@ -222,8 +222,7 @@ fn write_summary(
         \tblurred_mean\tblurred_var\tnbinom_n\tnbinom_p")?;
     for (gc, &(i, j)) in gc_bins.iter().enumerate() {
         let n = j - i;
-        let mean = if n > 0 { F64Ext::mean(&depth[i..j]) } else { f64::NAN };
-        let var = if n > 1 { F64Ext::fast_variance(&depth[i..j], mean) } else { f64::NAN };
+        let (mean, var) = F64Ext::mean_variance_or_nan(&depth[i..j]);
         write!(dbg_writer, "{gc}\t{n}\t{mean:.5}\t{var:.5}\t")?;
         write!(dbg_writer, "{:.5}\t{:.5}\t", loess_means[gc], loess_vars[gc])?;
         write!(dbg_writer, "{:.5}\t{:.5}\t", blurred_means[gc], blurred_vars[gc])?;
@@ -334,8 +333,7 @@ impl ReadDepth {
                     &distributions, writer).map_err(add_path!(dbg_filename2.as_ref().unwrap()))?;
             }
         } else {
-            let mean = F64Ext::mean(&depth);
-            let var = F64Ext::fast_variance(&depth, mean);
+            let (mean, var) = F64Ext::mean_variance(&depth);
             let distr = estimate_nbinoms(&[mean], &[var], subsampling_rate, ploidy).next().unwrap();
             if let Some(writer) = dbg_writer2 {
                 write_summary_without_gc(depth.len(), mean, var, &distr, writer)

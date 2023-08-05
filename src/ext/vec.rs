@@ -11,7 +11,16 @@ impl VecExt {
     /// Return indices, sorted according to the vector values.
     pub fn argsort<T: PartialOrd>(a: &[T]) -> Vec<usize> {
         let mut ixs: Vec<usize> = (0..a.len()).collect();
-        ixs.sort_unstable_by(|&i, &j| a[i].partial_cmp(&a[j]).expect("Error in `argsort`: elements are not comparable"));
+        ixs.sort_unstable_by(|&i, &j| a[i].partial_cmp(&a[j])
+            .expect("Error in `argsort`: elements are not comparable"));
+        ixs
+    }
+
+    /// Decreasing argsort.
+    pub fn argsort_decr<T: PartialOrd>(a: &[T]) -> Vec<usize> {
+        let mut ixs: Vec<usize> = (0..a.len()).collect();
+        ixs.sort_unstable_by(|&i, &j| a[j].partial_cmp(&a[i])
+            .expect("Error in `argsort`: elements are not comparable"));
         ixs
     }
 
@@ -100,6 +109,22 @@ impl F64Ext {
     /// Calculate sample variance.
     pub fn variance(a: &[f64]) -> f64 {
         Self::fast_variance(a, Self::mean(a))
+    }
+
+    /// Returns mean and variance together.
+    pub fn mean_variance(a: &[f64]) -> (f64, f64) {
+        let mean = Self::mean(a);
+        (mean, Self::fast_variance(a, mean))
+    }
+
+    /// Returns mean and variance, but, if the number of elements is too low, returns NaN.
+    pub fn mean_variance_or_nan(a: &[f64]) -> (f64, f64) {
+        let n = a.len();
+        match n {
+            0 => (f64::NAN, f64::NAN),
+            1 => (Self::mean(a), f64::NAN),
+            _ => Self::mean_variance(a),
+        }
     }
 
     /// Returns minimal vector value.
