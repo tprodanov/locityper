@@ -160,10 +160,14 @@ pub fn fmt_signif(x: impl Into<f64>, digits: u8) -> String {
 /// Computes unpaired t-test p-value.
 /// Null hipothesis: first mean is equal or larger than the second mean.
 /// Sample sizes should be the same.
-pub fn unpaired_onesided_t_test(mean1: f64, var1: f64, mean2: f64, var2: f64, n: f64) -> f64 {
-    let diff_sd = ((var1 + var2) / n).sqrt();
-    let t_stat = (mean2 - mean1) / diff_sd;
-    let freedom = 2.0 * n - 2.0;
+pub fn unpaired_onesided_t_test<const EQ_VAR: bool>(mean1: f64, var1: f64, mean2: f64, var2: f64, n: f64) -> f64 {
+    let var_sum = var1 + var2;
+    let t_stat = (mean2 - mean1) / (var_sum / n).sqrt();
+    let freedom = if EQ_VAR {
+        2.0 * n - 2.0
+    } else {
+        (n - 1.0) * var_sum * var_sum / (var1 * var1 + var2 * var2)
+    };
     let t_distr = StudentsT::new(0.0, 1.0, freedom).expect("Could not create Student's t distribution");
     t_distr.cdf(t_stat)
 }

@@ -45,6 +45,8 @@ pub struct Params {
     pub min_gts: UsizeOrInf,
     /// Discard low likelihood genotypes based on this threshold (`min + score_thresh * (max - min)`).
     pub score_thresh: f64,
+    /// Discard genotypes with low probability to be best (after each step).
+    pub prob_thresh: f64,
     /// Number of attempts with different tweak sizes.
     pub attempts: usize,
 }
@@ -69,6 +71,7 @@ impl Default for Params {
 
             min_gts: UsizeOrInf(10),
             score_thresh: 0.9,
+            prob_thresh: Ln::from_log10(-4.0),
             attempts: 5,
         }
     }
@@ -112,6 +115,8 @@ impl Params {
         }
         validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
             "Score threshold ({}) must be within [0, 1]", self.score_thresh);
+        validate_param!(self.prob_thresh.is_normal() && self.prob_thresh < 0.0,
+            "Probability threshold ({}) must be negative (log10-space)", Ln::to_log10(self.prob_thresh));
         validate_param!(self.attempts > 0, "Number of attempts must be positive");
         if self.attempts < 3 {
             log::warn!("At least 3 attempts are advised, otherwise qualities are inaccurate!");

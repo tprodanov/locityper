@@ -56,7 +56,7 @@ impl Default for SchemeParams {
 fn truncate_ixs(
     ixs: &mut Vec<usize>,
     scores: &[f64],
-    gt_priors: &[(Genotype, f64)],
+    gts: &[Genotype],
     score_thresh: f64,
     min_size: usize,
     threads: usize,
@@ -70,7 +70,7 @@ fn truncate_ixs(
     let best = scores[ixs[0]];
     let worst = scores[ixs[n - 1]];
     log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
-        gt_priors[ixs[n - 1]].0, Ln::to_log10(worst), gt_priors[ixs[0]].0, Ln::to_log10(best));
+        gts[ixs[n - 1]], Ln::to_log10(worst), gts[ixs[0]], Ln::to_log10(best));
     if min_size >= n || worst >= best - MIN_DIST {
         ixs.shuffle(rng);
         log::debug!("        Keep {}/{} genotypes (100.0%)", n, n);
@@ -96,7 +96,8 @@ fn truncate_ixs(
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
 fn filter_genotypes(
     contigs: &ContigNames,
-    gt_priors: &[(Genotype, f64)],
+    gts: &[Genotype],
+    priors: &[f64],
     all_alns: &AllAlignments,
     lik_writer: &mut impl Write,
     params: &AssgnParams,
@@ -105,7 +106,7 @@ fn filter_genotypes(
     rng: &mut impl Rng,
 ) -> io::Result<Vec<usize>>
 {
-    let n = gt_priors.len();
+    let n = gts.len();
     let mut ixs = (0..n).collect();
     // Need to run anyway in case of `debug`, so that we output all values.
     if params.min_gts.0 >= n && !debug {
@@ -118,19 +119,19 @@ fn filter_genotypes(
     // Vector (genotype index, score).
     let mut scores = Vec::with_capacity(n);
     let mut gt_best_probs = vec![0.0_f64; all_alns.len()];
-    for (gt, prior) in gt_priors.iter() {
+    for (gt, &prior) in gts.iter().zip(priors) {
         let gt_ids = gt.ids();
         gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
         for id in gt_ids[1..].iter() {
             gt_best_probs.iter_mut().zip(&best_aln_matrix[id.ix()])
                 .for_each(|(best_prob, &curr_prob)| *best_prob = best_prob.max(curr_prob));
         }
-        let score = *prior + gt_best_probs.iter().sum::<f64>();
+        let score = prior + gt_best_probs.iter().sum::<f64>();
         writeln!(lik_writer, "0\t{}\t{:.3}", gt, Ln::to_log10(score))?;
         scores.push(score);
     }
 
-    truncate_ixs(&mut ixs, &scores, gt_priors, params.score_thresh, params.min_gts.0, threads, rng);
+    truncate_ixs(&mut ixs, &scores, gts, params.score_thresh, params.min_gts.0, threads, rng);
     Ok(ixs)
 }
 
@@ -211,7 +212,8 @@ pub struct Data {
     pub contig_windows: Vec<ContigWindows>,
 
     /// Genotypes and their priors.
-    pub gt_priors: Vec<(Genotype, f64)>,
+    pub gts: Vec<Genotype>,
+    pub priors: Vec<f64>,
 
     pub assgn_params: AssgnParams,
     pub debug: bool,
@@ -261,7 +263,7 @@ fn solve_single_thread(
 ) -> Result<(), Error>
 {
     let tweak = data.assgn_params.tweak.unwrap();
-    let total_genotypes = data.gt_priors.len();
+    let total_genotypes = data.gts.len();
     let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes,
         data.assgn_params.attempts)?;
 
@@ -276,7 +278,8 @@ fn solve_single_thread(
 
         let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
         for &ix in rem_ixs.iter() {
-            let (gt, prior) = &data.gt_priors[ix];
+            let gt = &data.gts[ix];
+            let prior = data.priors[ix];
             let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
                 &data.assgn_params);
             if data.debug {
@@ -286,7 +289,7 @@ fn solve_single_thread(
             for (attempt, lik) in liks.iter_mut().enumerate() {
                 gt_alns.define_read_windows(tweak, rng);
                 let assgns = solver.solve(&gt_alns, rng)?;
-                *lik = *prior + assgns.likelihood();
+                *lik = prior + assgns.likelihood();
                 if data.debug {
                     let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                     assgns.write_depth(&mut depth_writer, &prefix).map_err(add_path!(!))?;
@@ -304,7 +307,7 @@ fn solve_single_thread(
             helper.update(ix, gt.name(), lik_mean, lik_var)?;
         }
         if stage_ix + 1 < n_stages {
-            truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
+            truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gts, data.assgn_params.score_thresh,
                 data.assgn_params.min_gts.0, data.threads, rng);
         }
         helper.finish_stage();
@@ -357,7 +360,7 @@ pub fn solve(
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let n_gts = data.gt_priors.len();
+    let n_gts = data.gts.len();
     assert!(n_gts > 0);
     data.threads = min(data.threads, n_gts);
     log::info!("    Genotyping complex locus  across {} possible genotypes", n_gts);
@@ -372,7 +375,7 @@ pub fn solve(
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
     let rem_ixs = if data.scheme.filter {
-        filter_genotypes(&data.contigs, &data.gt_priors, &data.all_alns, &mut lik_writer, &data.assgn_params,
+        filter_genotypes(&data.contigs, &data.gts, &data.priors, &data.all_alns, &mut lik_writer, &data.assgn_params,
             data.debug, data.threads, rng).map_err(add_path!(!))?
     } else {
         (0..n_gts).collect()
@@ -437,7 +440,7 @@ impl MainWorker {
         let n_workers = self.handles.len();
         let data = self.data.deref();
         let scheme = data.scheme.deref();
-        let total_genotypes = data.gt_priors.len();
+        let total_genotypes = data.gts.len();
         let mut helper = Helper::new(&scheme, data.contigs.tag(), lik_writer, total_genotypes,
             data.assgn_params.attempts)?;
         let mut rem_jobs = Vec::with_capacity(n_workers);
@@ -471,13 +474,13 @@ impl MainWorker {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, lik_mean, lik_var) = receiver.recv().expect("Genotyping worker has failed!");
-                        helper.update(ix, data.gt_priors[ix].0.name(), lik_mean, lik_var)?;
+                        helper.update(ix, data.gts[ix].name(), lik_mean, lik_var)?;
                         *jobs -= 1;
                     }
                 }
             }
             if stage_ix + 1 < n_stages {
-                truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gt_priors, data.assgn_params.score_thresh,
+                truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gts, data.assgn_params.score_thresh,
                     data.assgn_params.min_gts.0, data.threads, rng);
             }
             helper.finish_stage();
@@ -515,7 +518,8 @@ impl<W: Write, U: Write> Worker<W, U> {
             let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
             let mut selected = SelectedCounter::default();
             for ix in task.into_iter() {
-                let (gt, prior) = &data.gt_priors[ix];
+                let gt = &data.gts[ix];
+                let prior = data.priors[ix];
                 let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
                     &data.assgn_params);
                 if data.debug {
@@ -524,7 +528,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                 for (attempt, lik) in liks.iter_mut().enumerate() {
                     gt_alns.define_read_windows(tweak, &mut self.rng);
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
-                    *lik = *prior + assgns.likelihood();
+                    *lik = prior + assgns.likelihood();
                     if data.debug {
                         let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                         assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
@@ -663,7 +667,7 @@ impl<'a, W: Write> Helper<'a, W> {
                 if curr_lik == f64::NEG_INFINITY {
                     break;
                 }
-                let pval = math::unpaired_onesided_t_test(best_lik, best_var,
+                let pval = math::unpaired_onesided_t_test::<false>(best_lik, best_var,
                     curr_lik, self.variances[i], self.attempts);
                 if pval == 0.0 {
                     count_zero += 1;

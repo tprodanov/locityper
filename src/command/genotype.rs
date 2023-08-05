@@ -190,13 +190,16 @@ fn print_help() {
         {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
         "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
         "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
-    println!("    {:KEY$} {:VAL$}  Score threshold for genotype filtering [{}].\n\
-        {EMPTY}  Filtering is applied after each stage.\n\
-        {EMPTY}  Values range from 0 (use all) to 1 (only entries with the best score).",
-        "-t, --score-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.score_thresh));
+    println!("    {:KEY$} {:VAL$}  Score threshold for genotype pre-filtering [{}].\n\
+        {EMPTY}  Values range from 0 (use all) to 1 (use best-score genotypes).",
+        "    --score-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.score_thresh));
+    println!("    {:KEY$} {:VAL$}  After each step, discard genotypes that have\n\
+        {EMPTY}  smaller probability than 10^{} to be best [{}].",
+        "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+        super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
     println!("    {:KEY$} {:VAL$}  Minimum number of genotypes after each step [{}].",
         "    -min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
-    println!("    {:KEY$} {:VAL$}  Number of attempts per stage [{}].",
+    println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
         "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
     println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
         "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
@@ -285,8 +288,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Long("max-alns") | Long("max-alignments") => args.assgn_params.max_alns = parser.value()?.parse()?,
             Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
-            Short('t') | Long("score-thresh") | Long("score-threshold") =>
+            Long("score-thresh") | Long("score-threshold") =>
                 args.assgn_params.score_thresh = parser.value()?.parse()?,
+            Long("prob-thresh") | Long("prob-threshold") =>
+                args.assgn_params.prob_thresh = parser.value()?.parse()?,
             Long("min-gts") | Long("min-genotypes") =>
                 args.assgn_params.min_gts = parser.value()?.parse()?,
             Short('a') | Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
@@ -594,12 +599,13 @@ fn generate_genotypes(
     contigs: &ContigNames,
     opt_priors: Option<&FnvHashMap<String, f64>>,
     ploidy: usize,
-) -> Result<Vec<(Genotype, f64)>, Error>
+) -> Result<(Vec<Genotype>, Vec<f64>), Error>
 {
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
             "All contig IDs must be present when priors are provided");
-        let mut gt_priors = Vec::with_capacity(priors_map.len());
+        let mut gts = Vec::with_capacity(priors_map.len());
+        let mut priors = Vec::with_capacity(priors_map.len());
         for (s, &prior) in priors_map.iter() {
             let gt = Genotype::parse(s, contigs)?;
             if prior > 0.0 || prior.is_nan() {
@@ -608,15 +614,16 @@ fn generate_genotypes(
                 return Err(Error::InvalidInput(format!(
                     "Cannot load prior for genotype {} (expected ploidy {})", s, ploidy)));
             } else if prior.is_finite() {
-                gt_priors.push((gt, prior));
+                gts.push(gt);
+                priors.push(prior);
             }
         }
-        Ok(gt_priors)
+        Ok((gts, priors))
     } else {
-        let mut gt_priors = Vec::with_capacity(ext::vec::count_combinations_with_repl(contig_ids.len(), ploidy));
-        ext::vec::gen_combinations_with_repl(&contig_ids, ploidy,
-            |ids| gt_priors.push((Genotype::new(ids, contigs), 0.0)));
-        Ok(gt_priors)
+        let count = ext::vec::count_combinations_with_repl(contig_ids.len(), ploidy);
+        let mut gts = Vec::with_capacity(count);
+        ext::vec::gen_combinations_with_repl(&contig_ids, ploidy, |ids| gts.push(Genotype::new(ids, contigs)));
+        Ok((gts, vec![0.0; count]))
     }
 }
 
@@ -663,8 +670,8 @@ fn analyze_locus(
     }
 
     let contig_ids: Vec<ContigId> = contigs.ids().collect();
-    let gt_priors = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
-    if gt_priors.is_empty() {
+    let (gts, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
+    if gts.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
 
@@ -674,7 +681,7 @@ fn analyze_locus(
         assgn_params: args.assgn_params.clone(),
         debug: args.debug,
         threads: usize::from(args.threads),
-        all_alns, gt_priors, contig_windows,
+        all_alns, gts, priors, contig_windows,
     };
     let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
     writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(locus.lik_filename))?;
