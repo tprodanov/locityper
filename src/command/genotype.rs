@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Write, BufRead},
+    io::{self, BufRead},
     process::{Command, Stdio},
     cmp::{min, max},
     path::{Path, PathBuf},
@@ -401,8 +401,6 @@ struct LocusData {
     tmp_aln_filename: PathBuf,
     /// Final file with read alignments to the haplotypes.
     aln_filename: PathBuf,
-    /// File with haplotype-pair likelihoods.
-    lik_filename: PathBuf,
 }
 
 impl LocusData {
@@ -414,7 +412,6 @@ impl LocusData {
             reads_filename: out_dir.join("reads.fq"),
             tmp_aln_filename: out_dir.join("aln.tmp.bam"),
             aln_filename: out_dir.join("aln.bam"),
-            lik_filename: out_dir.join("lik.csv.gz"),
             set, out_dir,
         }
     }
@@ -604,7 +601,7 @@ fn generate_genotypes(
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
             "All contig IDs must be present when priors are provided");
-        let mut gts = Vec::with_capacity(priors_map.len());
+        let mut genotypes = Vec::with_capacity(priors_map.len());
         let mut priors = Vec::with_capacity(priors_map.len());
         for (s, &prior) in priors_map.iter() {
             let gt = Genotype::parse(s, contigs)?;
@@ -614,16 +611,16 @@ fn generate_genotypes(
                 return Err(Error::InvalidInput(format!(
                     "Cannot load prior for genotype {} (expected ploidy {})", s, ploidy)));
             } else if prior.is_finite() {
-                gts.push(gt);
+                genotypes.push(gt);
                 priors.push(prior);
             }
         }
-        Ok((gts, priors))
+        Ok((genotypes, priors))
     } else {
         let count = ext::vec::count_combinations_with_repl(contig_ids.len(), ploidy);
-        let mut gts = Vec::with_capacity(count);
-        ext::vec::gen_combinations_with_repl(&contig_ids, ploidy, |ids| gts.push(Genotype::new(ids, contigs)));
-        Ok((gts, vec![0.0; count]))
+        let mut genotypes = Vec::with_capacity(count);
+        ext::vec::gen_combinations_with_repl(&contig_ids, ploidy, |ids| genotypes.push(Genotype::new(ids, contigs)));
+        Ok((genotypes, vec![0.0; count]))
     }
 }
 
@@ -670,8 +667,8 @@ fn analyze_locus(
     }
 
     let contig_ids: Vec<ContigId> = contigs.ids().collect();
-    let (gts, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
-    if gts.is_empty() {
+    let (genotypes, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
+    if genotypes.is_empty() {
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
 
@@ -681,11 +678,9 @@ fn analyze_locus(
         assgn_params: args.assgn_params.clone(),
         debug: args.debug,
         threads: usize::from(args.threads),
-        all_alns, gts, priors, contig_windows,
+        all_alns, genotypes, priors, contig_windows,
     };
-    let mut lik_writer = ext::sys::create_gzip(&locus.lik_filename)?;
-    writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(locus.lik_filename))?;
-    scheme::solve(data, lik_writer, &locus.out_dir, &mut rng)?;
+    scheme::solve(data, &locus.out_dir, &mut rng)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));
     Ok(())

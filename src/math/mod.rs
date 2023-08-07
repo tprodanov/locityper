@@ -158,11 +158,12 @@ pub fn fmt_signif(x: impl Into<f64>, digits: u8) -> String {
 }
 
 /// Computes unpaired t-test p-value.
+/// Returns probability of observing t-statistic under the null hypothesis: `mean1 >= mean2`.
 /// Null hipothesis: first mean is equal or larger than the second mean.
 /// Sample sizes should be the same.
 pub fn unpaired_onesided_t_test<const EQ_VAR: bool>(mean1: f64, var1: f64, mean2: f64, var2: f64, n: f64) -> f64 {
     let var_sum = var1 + var2;
-    let t_stat = (mean2 - mean1) / (var_sum / n).sqrt();
+    let t_stat = (mean1 - mean2) / (var_sum / n).sqrt();
     let freedom = if EQ_VAR {
         2.0 * n - 2.0
     } else {

@@ -17,7 +17,7 @@ use rand::{Rng, prelude::SliceRandom};
 use crate::{
     ext::{
         self,
-        vec::{VecExt, F64Ext},
+        vec::F64Ext,
         rand::XoshiroRng,
     },
     math::{self, Ln, Phred},
@@ -56,11 +56,10 @@ impl Default for SchemeParams {
 fn truncate_ixs(
     ixs: &mut Vec<usize>,
     scores: &[f64],
-    gts: &[Genotype],
+    genotypes: &[Genotype],
     score_thresh: f64,
     min_size: usize,
     threads: usize,
-    rng: &mut impl Rng,
 ) {
     ixs.sort_unstable_by(|&i, &j| scores[j].total_cmp(&scores[i]));
     let n = ixs.len();
@@ -70,9 +69,8 @@ fn truncate_ixs(
     let best = scores[ixs[0]];
     let worst = scores[ixs[n - 1]];
     log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
-        gts[ixs[n - 1]], Ln::to_log10(worst), gts[ixs[0]], Ln::to_log10(best));
+        genotypes[ixs[n - 1]], Ln::to_log10(worst), genotypes[ixs[0]], Ln::to_log10(best));
     if min_size >= n || worst >= best - MIN_DIST {
-        ixs.shuffle(rng);
         log::debug!("        Keep {}/{} genotypes (100.0%)", n, n);
         return;
     }
@@ -88,25 +86,23 @@ fn truncate_ixs(
     // Increase up to `threads`.
     m = m.max(threads).min(n);
     ixs.truncate(m);
-    ixs.shuffle(rng);
     log::debug!("        Keep {}/{} genotypes ({:.1}%), threshold: {:.0} ({:.1}%)",
         m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / range);
 }
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
-fn filter_genotypes(
+fn prefilter_genotypes(
     contigs: &ContigNames,
-    gts: &[Genotype],
+    genotypes: &[Genotype],
     priors: &[f64],
     all_alns: &AllAlignments,
     lik_writer: &mut impl Write,
     params: &AssgnParams,
     debug: bool,
     threads: usize,
-    rng: &mut impl Rng,
 ) -> io::Result<Vec<usize>>
 {
-    let n = gts.len();
+    let n = genotypes.len();
     let mut ixs = (0..n).collect();
     // Need to run anyway in case of `debug`, so that we output all values.
     if params.min_gts.0 >= n && !debug {
@@ -119,7 +115,7 @@ fn filter_genotypes(
     // Vector (genotype index, score).
     let mut scores = Vec::with_capacity(n);
     let mut gt_best_probs = vec![0.0_f64; all_alns.len()];
-    for (gt, &prior) in gts.iter().zip(priors) {
+    for (gt, &prior) in genotypes.iter().zip(priors) {
         let gt_ids = gt.ids();
         gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
         for id in gt_ids[1..].iter() {
@@ -131,7 +127,7 @@ fn filter_genotypes(
         scores.push(score);
     }
 
-    truncate_ixs(&mut ixs, &scores, gts, params.score_thresh, params.min_gts.0, threads, rng);
+    truncate_ixs(&mut ixs, &scores, genotypes, params.score_thresh, params.min_gts.0, threads);
     Ok(ixs)
 }
 
@@ -212,7 +208,7 @@ pub struct Data {
     pub contig_windows: Vec<ContigWindows>,
 
     /// Genotypes and their priors.
-    pub gts: Vec<Genotype>,
+    pub genotypes: Vec<Genotype>,
     pub priors: Vec<f64>,
 
     pub assgn_params: AssgnParams,
@@ -253,32 +249,184 @@ fn write_alns(
     Ok(())
 }
 
+struct Likelihoods {
+    /// Mean and variance of various genotypes.
+    likelihoods: Vec<(f64, f64)>,
+    /// Genotype indices after the latest iteration.
+    ixs: Vec<usize>,
+}
+
+impl Likelihoods {
+    fn new(n_gts: usize, ixs: Vec<usize>) -> Self {
+        Self {
+            likelihoods: vec![(f64::NEG_INFINITY, 0.0); n_gts],
+            ixs,
+        }
+    }
+
+    /// Number of genotypes, still in contest.
+    fn curr_len(&self) -> usize {
+        self.ixs.len()
+    }
+
+    fn discard_improbable_genotypes(
+        &mut self,
+        genotypes: &[Genotype],
+        params: &AssgnParams,
+        threads: usize,
+    ) {
+        let n = self.ixs.len();
+        let min_gts = params.min_gts.0.max(threads);
+        if params.prob_thresh == f64::NEG_INFINITY || min_gts >= n {
+            return;
+        }
+
+        let attempts = params.attempts as f64;
+        // Decreasing sort by average likelihood.
+        self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
+        let best_ix = self.ixs[0];
+        let worst_ix = self.ixs[n - 1];
+        let (mean1, var1) = self.likelihoods[best_ix];
+        let (worst, _) = self.likelihoods[worst_ix];
+        log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
+            genotypes[worst_ix], Ln::to_log10(worst),
+            genotypes[best_ix], Ln::to_log10(mean1));
+
+        // Stop when encountered 5 unlikely genotypes.
+        const STOP_COUNT: u32 = 5;
+        let mut dropped = 0;
+        let mut new_ixs = self.ixs[..min_gts].to_vec();
+        for &i in self.ixs[min_gts..].iter() {
+            let (mean_i, var_i) = self.likelihoods[i];
+            let pval = math::unpaired_onesided_t_test::<false>(mean_i, var_i, mean1, var1, attempts);
+            if pval.ln() >= params.prob_thresh {
+                new_ixs.push(i);
+            } else {
+                dropped += 1;
+                if dropped >= STOP_COUNT {
+                    break;
+                }
+            }
+        }
+        let m = new_ixs.len();
+        let (thresh, _) = self.likelihoods[new_ixs[m - 1]];
+        log::debug!("        Keep {}/{} genotypes ({:.1}%), smallest lik: {:.0} ({:.1}%)",
+            m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh),
+            100.0 * (thresh - worst) / (mean1 - worst).max(1.0));
+        self.ixs = new_ixs;
+    }
+
+    fn produce_result(
+        &mut self,
+        tag: String,
+        genotypes: &[Genotype],
+        params: &AssgnParams,
+    ) -> Genotyping {
+        // ln(1e-5).
+        const THRESH: f64 = -11.512925464970229;
+        const MIN_OUTPUT: usize = 4;
+        let thresh_prob = THRESH.min(params.prob_thresh);
+        let attempts = params.attempts as f64;
+        self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
+        let mut n = self.ixs.len();
+        assert!(n > 1);
+
+        let mut ln_probs = vec![0.0; n];
+        let mut out_genotypes = Vec::with_capacity(n);
+        let mut mean_sds = Vec::with_capacity(n);
+        for i in 0..n {
+            let (mean_i, var_i) = self.likelihoods[self.ixs[i]];
+            out_genotypes.push(genotypes[self.ixs[i]].clone());
+            mean_sds.push((mean_i, (var_i / attempts).sqrt()));
+            for j in i + 1..n {
+                let (mean_j, var_j) = self.likelihoods[self.ixs[j]];
+                let pval = math::unpaired_onesided_t_test::<false>(mean_i, var_i, mean_j, var_j, attempts);
+                if i == 0 && j >= MIN_OUTPUT && pval.ln() < thresh_prob {
+                    n = j;
+                    break;
+                }
+                ln_probs[i] += pval.ln();
+                ln_probs[j] += (-pval).ln_1p();
+            }
+        }
+        ln_probs.truncate(n);
+        let norm_fct = Ln::sum(&ln_probs);
+        ln_probs.iter_mut().for_each(|v| *v -= norm_fct);
+        let quality = Phred::from_ln_prob(Ln::sum(&ln_probs[1..]));
+        Genotyping {
+            genotypes: out_genotypes,
+            tag, mean_sds, ln_probs, quality,
+        }
+    }
+}
+
+/// Genotyping result.
+pub struct Genotyping {
+    tag: String,
+    /// Filtered list with the best genotypes.
+    /// Genotypes are sorted from best to worst.
+    genotypes: Vec<Genotype>,
+    /// Mean and standard deviation, divided by sqrt(attempts).
+    mean_sds: Vec<(f64, f64)>,
+    /// Normalized ln-probabilities for each genotype.
+    ln_probs: Vec<f64>,
+    /// Quality of the top genotype.
+    quality: f64,
+}
+
+impl Genotyping {
+    pub fn print_log(&self) {
+        let (mean, sd) = self.mean_sds[0];
+        log::info!("    Best genotype for {}: {}.  Lik = {:.1} ± {:.1}, Qual = {:.1}, Conf. = {:.4}%",
+            self.tag, self.genotypes[0], Ln::to_log10(mean), Ln::to_log10(sd),
+            self.quality, 100.0 * self.ln_probs[0].exp());
+    }
+
+    pub fn to_json(&self) -> json::JsonValue {
+        let options: Vec<_> = self.genotypes.iter().enumerate().map(|(i, gt)| {
+            json::object! {
+                genotype: gt.name(),
+                lik_mean: Ln::to_log10(self.mean_sds[i].0),
+                lik_sd: Ln::to_log10(self.mean_sds[i].1),
+                prob: self.ln_probs[i].exp(),
+                log10_prob: Ln::to_log10(self.ln_probs[i]),
+            }
+        }).collect();
+        json::object! {
+            locus: &self.tag as &str,
+            genotype: self.genotypes[0].name(),
+            quality: self.quality,
+            options: options,
+        }
+    }
+}
+
+/// Returns: vector of likelihood means and variances (same order ).
 fn solve_single_thread(
-    mut rem_ixs: Vec<usize>,
-    data: Data,
-    lik_writer: impl Write,
+    data: &Data,
+    likelihoods: &mut Likelihoods,
+    mut lik_writer: impl Write,
     mut depth_writer: impl Write,
     mut aln_writer: impl Write,
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
     let tweak = data.assgn_params.tweak.unwrap();
-    let total_genotypes = data.gts.len();
-    let mut helper = Helper::new(&data.scheme, data.contigs.tag(), lik_writer, total_genotypes,
-        data.assgn_params.attempts)?;
+    let total_genotypes = data.genotypes.len();
+    let mut logger = Logger::new(&data.scheme, total_genotypes);
 
     let n_stages = data.scheme.stages.len();
     let mut selected = SelectedCounter::default();
     for (stage_ix, solver) in data.scheme.iter().enumerate() {
-        helper.start_stage(stage_ix, rem_ixs.len());
-        if stage_ix + 1 < n_stages && rem_ixs.len() <= data.assgn_params.min_gts.0.max(data.threads) {
+        logger.start_stage(stage_ix, likelihoods.curr_len());
+        if stage_ix + 1 < n_stages && likelihoods.curr_len() <= data.assgn_params.min_gts.0 {
             log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
             continue;
         }
 
-        let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
-        for &ix in rem_ixs.iter() {
-            let gt = &data.gts[ix];
+        let mut liks = vec![f64::NAN; data.assgn_params.attempts];
+        for &ix in likelihoods.ixs.iter() {
+            let gt = &data.genotypes[ix];
             let prior = data.priors[ix];
             let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
                 &data.assgn_params);
@@ -291,28 +439,30 @@ fn solve_single_thread(
                 let assgns = solver.solve(&gt_alns, rng)?;
                 *lik = prior + assgns.likelihood();
                 if data.debug {
-                    let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
-                    assgns.write_depth(&mut depth_writer, &prefix).map_err(add_path!(!))?;
+                    let ext_prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
+                    assgns.write_depth(&mut depth_writer, &ext_prefix).map_err(add_path!(!))?;
                     if data.debug {
                         selected.update(&assgns);
                     }
                 }
             }
+            let prefix = format!("{}\t{}", stage_ix + 1, gt);
             if data.debug {
-                let prefix = format!("{}\t{}", stage_ix + 1, gt);
                 write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, selected.fractions())
                     .map_err(add_path!(!))?;
             }
             let (lik_mean, lik_var) = F64Ext::mean_variance_or_nan(&liks);
-            helper.update(ix, gt.name(), lik_mean, lik_var)?;
+            logger.update(gt.name(), lik_mean);
+            writeln!(lik_writer, "{}\t{:.3}\t{:.3}", prefix, Ln::to_log10(lik_mean),
+                    Ln::to_log10((lik_var / data.assgn_params.attempts as f64).sqrt()))
+                .map_err(add_path!(!))?;
+            likelihoods.likelihoods[ix] = (lik_mean, lik_var);
         }
         if stage_ix + 1 < n_stages {
-            truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gts, data.assgn_params.score_thresh,
-                data.assgn_params.min_gts.0, data.threads, rng);
+            likelihoods.discard_improbable_genotypes(&data.genotypes, &data.assgn_params, 1);
         }
-        helper.finish_stage();
+        logger.finish_stage();
     }
-    helper.finish_overall();
     Ok(())
 }
 
@@ -355,12 +505,11 @@ fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
 
 pub fn solve(
     mut data: Data,
-    mut lik_writer: impl Write,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let n_gts = data.gts.len();
+    let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
     data.threads = min(data.threads, n_gts);
     log::info!("    Genotyping complex locus  across {} possible genotypes", n_gts);
@@ -374,21 +523,34 @@ pub fn solve(
         &locus_dir.join("alns."), data.threads, data.debug)?;
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
+    let lik_filename = locus_dir.join("liks.csv.gz");
+    let mut lik_writer = ext::sys::create_gzip(&lik_filename)?;
+    writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(lik_filename))?;
     let rem_ixs = if data.scheme.filter {
-        filter_genotypes(&data.contigs, &data.gts, &data.priors, &data.all_alns, &mut lik_writer, &data.assgn_params,
-            data.debug, data.threads, rng).map_err(add_path!(!))?
+        prefilter_genotypes(&data.contigs, &data.genotypes, &data.priors, &data.all_alns, &mut lik_writer,
+            &data.assgn_params, data.debug, data.threads).map_err(add_path!(!))?
     } else {
         (0..n_gts).collect()
     };
 
+    let mut likelihoods = Likelihoods::new(n_gts, rem_ixs);
+    let data = Arc::new(data);
     if data.threads == 1 {
-        solve_single_thread(rem_ixs, data, lik_writer, depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
+        solve_single_thread(&data, &mut likelihoods, lik_writer,
+            depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
     } else {
-        let main_worker = MainWorker::new(Arc::new(data), rng, depth_writers, aln_writers);
-        main_worker.run(rng, rem_ixs, lik_writer)?;
+        let main_worker = MainWorker::new(Arc::clone(&data), rng, depth_writers, aln_writers);
+        main_worker.run(rng, &mut likelihoods, lik_writer)?;
     }
     merge_dbg_files(&depth_filenames)?;
     merge_dbg_files(&aln_filenames)?;
+
+    let data = &data;
+    let genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes, &data.assgn_params);
+    genotyping.print_log();
+    let json_filename = locus_dir.join("res.json.gz");
+    let mut json_writer = ext::sys::create_gzip(&json_filename)?;
+    genotyping.to_json().write_pretty(&mut json_writer, 4).map_err(add_path!(json_filename))?;
     Ok(())
 }
 
@@ -436,19 +598,23 @@ impl MainWorker {
         MainWorker { data, senders, receivers, handles }
     }
 
-    fn run(self, rng: &mut impl Rng, mut rem_ixs: Vec<usize>, lik_writer: impl Write) -> Result<(), Error> {
+    fn run(self,
+        rng: &mut impl Rng,
+        likelihoods: &mut Likelihoods,
+        mut lik_writer: impl Write,
+    ) -> Result<(), Error>
+    {
         let n_workers = self.handles.len();
         let data = self.data.deref();
         let scheme = data.scheme.deref();
-        let total_genotypes = data.gts.len();
-        let mut helper = Helper::new(&scheme, data.contigs.tag(), lik_writer, total_genotypes,
-            data.assgn_params.attempts)?;
+        let total_genotypes = data.genotypes.len();
+        let mut logger = Logger::new(&scheme, total_genotypes);
         let mut rem_jobs = Vec::with_capacity(n_workers);
 
         let n_stages = scheme.stages.len();
         for stage_ix in 0..n_stages {
-            helper.start_stage(stage_ix, rem_ixs.len());
-            let m = rem_ixs.len();
+            logger.start_stage(stage_ix, likelihoods.curr_len());
+            let m = likelihoods.curr_len();
             if stage_ix + 1 < n_stages && m <= data.assgn_params.min_gts.0.max(data.threads) {
                 log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
                 continue;
@@ -456,6 +622,8 @@ impl MainWorker {
 
             rem_jobs.clear();
             let mut start = 0;
+            // Shuffle indices to better distribute them to threads.
+            likelihoods.ixs.shuffle(rng);
             for (i, sender) in self.senders.iter().enumerate() {
                 if start == m {
                     break;
@@ -463,33 +631,36 @@ impl MainWorker {
                 let rem_workers = n_workers - i;
                 // Ceiling division.
                 let curr_jobs = ((m - start) + rem_workers - 1) / rem_workers;
-                let task = rem_ixs[start..start + curr_jobs].to_vec();
+                let task = likelihoods.ixs[start..start + curr_jobs].to_vec();
                 sender.send((stage_ix, task)).expect("Genotyping worker has failed!");
                 start += curr_jobs;
                 rem_jobs.push(curr_jobs);
             }
             assert_eq!(start, m);
 
-            while helper.solved_genotypes < m {
+            while logger.solved_genotypes < m {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, lik_mean, lik_var) = receiver.recv().expect("Genotyping worker has failed!");
-                        helper.update(ix, data.gts[ix].name(), lik_mean, lik_var)?;
+                        logger.update(data.genotypes[ix].name(), lik_mean);
+                        writeln!(lik_writer, "{}\t{}\t{:.3}\t{:.3}", stage_ix + 1, data.genotypes[ix],
+                                Ln::to_log10(lik_mean),
+                                Ln::to_log10((lik_var / data.assgn_params.attempts as f64).sqrt()))
+                            .map_err(add_path!(!))?;
+                        likelihoods.likelihoods[ix] = (lik_mean, lik_var);
                         *jobs -= 1;
                     }
                 }
             }
             if stage_ix + 1 < n_stages {
-                truncate_ixs(&mut rem_ixs, &helper.likelihoods, &data.gts, data.assgn_params.score_thresh,
-                    data.assgn_params.min_gts.0, data.threads, rng);
+                likelihoods.discard_improbable_genotypes(&data.genotypes, &data.assgn_params, data.threads);
             }
-            helper.finish_stage();
+            logger.finish_stage();
         }
         std::mem::drop(self.senders);
         for handle in self.handles.into_iter() {
             handle.join().expect("Process failed for unknown reason")?;
         }
-        helper.finish_overall();
         Ok(())
     }
 }
@@ -515,10 +686,10 @@ impl<W: Write, U: Write> Worker<W, U> {
             let n = task.len();
             assert_ne!(n, 0, "Received empty task");
 
-            let mut liks = vec![f64::NAN; usize::from(data.assgn_params.attempts)];
+            let mut liks = vec![f64::NAN; data.assgn_params.attempts];
             let mut selected = SelectedCounter::default();
             for ix in task.into_iter() {
-                let gt = &data.gts[ix];
+                let gt = &data.genotypes[ix];
                 let prior = data.priors[ix];
                 let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
                     &data.assgn_params);
@@ -550,54 +721,37 @@ impl<W: Write, U: Write> Worker<W, U> {
     }
 }
 
-struct Helper<'a, W> {
+struct Logger<'a> {
     scheme: &'a Scheme,
-    tag: &'a str,
-    lik_writer: W,
-
     stage_ix: usize,
     solved_genotypes: usize,
     curr_genotypes: usize,
     num_width: usize,
 
-    likelihoods: Vec<f64>,
-    variances: Vec<f64>,
-    best_ix: usize,
+    best_lik: f64,
     best_str: String,
-    attempts: f64,
 
     timer: Instant,
     stage_start: Duration,
     last_msg: Duration,
 }
 
-impl<'a, W: Write> Helper<'a, W> {
-    fn new(
-        scheme: &'a Scheme,
-        tag: &'a str,
-        lik_writer: W,
-        total_genotypes: usize,
-        attempts: usize,
-    ) -> Result<Self, Error>
-    {
-        Ok(Self {
-            scheme, tag, lik_writer,
-
+impl<'a> Logger<'a> {
+    fn new(scheme: &'a Scheme, total_genotypes: usize) -> Self {
+        Self {
+            scheme,
             stage_ix: 0,
             solved_genotypes: 0,
             curr_genotypes: total_genotypes,
             num_width: math::num_digits(total_genotypes as f64) as usize,
 
-            likelihoods: vec![f64::NEG_INFINITY; total_genotypes],
-            variances: vec![0.0; total_genotypes],
-            best_ix: 0,
+            best_lik: f64::NEG_INFINITY,
             best_str: String::new(),
-            attempts: attempts as f64,
 
             timer: Instant::now(),
             stage_start: Duration::default(),
             last_msg: Duration::default(),
-        })
+        }
     }
 
     fn start_stage(&mut self, stage_ix: usize, curr_genotypes: usize) {
@@ -614,17 +768,9 @@ impl<'a, W: Write> Helper<'a, W> {
             LATIN_NUMS[stage_ix], self.scheme.stages[stage_ix], self.curr_genotypes);
     }
 
-    fn update(&mut self, ix: usize, gt_name: &str, lik_mean: f64, lik_var: f64) -> Result<(), Error> {
-        writeln!(self.lik_writer, "{}\t{}\t{:.3}\t{:.3}", self.stage_ix + 1, gt_name,
-            Ln::to_log10(lik_mean), Ln::to_log10((lik_var / self.attempts).sqrt()))
-            .map_err(add_path!(!))?;
-
-        const MIN_VAR: f64 = 1e-8;
-        // Always replace old likelihood, even if it decreased (this should not happen very often).
-        self.likelihoods[ix] = lik_mean;
-        self.variances[ix] = lik_var.max(MIN_VAR);
-        if lik_mean > self.likelihoods[self.best_ix] {
-            self.best_ix = ix;
+    fn update(&mut self, gt_name: &str, lik: f64) {
+        if lik > self.best_lik {
+            self.best_lik = lik;
             self.best_str = gt_name.to_owned();
         }
         self.solved_genotypes += 1;
@@ -634,11 +780,9 @@ impl<'a, W: Write> Helper<'a, W> {
         if (now_dur - self.last_msg).as_secs() >= UPDATE_SECS {
             let speed = (now_dur.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
             log::debug!("        [{:width$}/{}, {:7.4} s/gt]  Best: {} -> {:8.0}", self.solved_genotypes,
-                self.curr_genotypes, speed, self.best_str, Ln::to_log10(self.likelihoods[self.best_ix]),
-                width = self.num_width);
+                self.curr_genotypes, speed, self.best_str, Ln::to_log10(self.best_lik), width = self.num_width);
             self.last_msg = now_dur;
         }
-        Ok(())
     }
 
     fn finish_stage(&mut self) {
@@ -646,44 +790,5 @@ impl<'a, W: Write> Helper<'a, W> {
         let speed = (self.last_msg.as_secs_f64() - self.stage_start.as_secs_f64()) / self.solved_genotypes as f64;
         log::info!("      * Finished in {} ({:.4} s/gt)",
             ext::fmt::Duration(self.last_msg - self.stage_start), speed);
-    }
-
-    /// Returns index of the best tuple, as well as its quality.
-    fn finish_overall(self) -> (usize, f64) {
-        // First way of calculating quality: through ordinary likelihood values.
-        let norm_fct = Ln::sum(&self.likelihoods);
-        let mut norm_liks: Vec<_> = self.likelihoods.iter().map(|&v| v - norm_fct).collect();
-        let mut quality = Phred::from_likelihoods(&mut norm_liks, self.best_ix);
-
-        let best_lik = self.likelihoods[self.best_ix];
-        let best_var = self.variances[self.best_ix];
-        // Second way of calculating quality: via t-test.
-        if self.attempts > 1.5 {
-            let mut ln_confidence = 0.0;
-            let mut count_zero = 0;
-            let ixs = VecExt::argsort_decr(&self.likelihoods);
-            for &i in &ixs[1..] {
-                let curr_lik = self.likelihoods[i];
-                if curr_lik == f64::NEG_INFINITY {
-                    break;
-                }
-                let pval = math::unpaired_onesided_t_test::<false>(best_lik, best_var,
-                    curr_lik, self.variances[i], self.attempts);
-                if pval == 0.0 {
-                    count_zero += 1;
-                    if count_zero >= 3 {
-                        break;
-                    }
-                } else {
-                    ln_confidence += (-pval).ln_1p();
-                }
-            }
-            quality = quality.min(Phred::from_ln_prob((-ln_confidence.exp()).ln_1p()));
-        }
-        let confidence = 100.0 * (1.0 - Phred::to_prob(quality));
-        log::info!("    Best genotype for {}: {}  (Lik = {:.1} ± {:.1}, Qual = {:.1}, Conf. = {:.4}%)",
-            self.tag, self.best_str, Ln::to_log10(best_lik), Ln::to_log10((best_var / self.attempts).sqrt()),
-            quality, confidence);
-        (self.best_ix, quality)
     }
 }

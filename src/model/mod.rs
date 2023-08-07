@@ -69,7 +69,7 @@ impl Default for Params {
             use_unpaired: false,
             max_alns: 500_000,
 
-            min_gts: UsizeOrInf(10),
+            min_gts: UsizeOrInf(8),
             score_thresh: 0.9,
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 5,
@@ -115,12 +115,9 @@ impl Params {
         }
         validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
             "Score threshold ({}) must be within [0, 1]", self.score_thresh);
-        validate_param!(self.prob_thresh.is_normal() && self.prob_thresh < 0.0,
+        validate_param!(self.prob_thresh < 0.0,
             "Probability threshold ({}) must be negative (log10-space)", Ln::to_log10(self.prob_thresh));
-        validate_param!(self.attempts > 0, "Number of attempts must be positive");
-        if self.attempts < 3 {
-            log::warn!("At least 3 attempts are advised, otherwise qualities are inaccurate!");
-        }
+        validate_param!(self.attempts >= 1, "Number of attempts ({}) must be at least 1", self.attempts);
         validate_param!(self.min_gts.0 > 1,
             "Minimal number of genotypes ({}) must be at least 2", self.min_gts);
         Ok(())
