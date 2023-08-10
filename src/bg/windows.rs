@@ -1,6 +1,6 @@
 use std::{
     io::{self, Write},
-    cmp::min,
+    cmp::{min, max},
     path::Path,
 };
 use super::depth::ReadDepthParams;
@@ -102,6 +102,10 @@ fn filter_windows(
 /// Calculate GC-content and k-mer frequencies based on the window neighbourhood of at least this size.
 /// Neighbourhood size = max(MIN_NEIGHBOURHOOD, window_size).
 const MIN_NEIGHBOURHOOD: u32 = 300;
+/// Automatic window size = 2/3 read length.
+const AUTO_WINDOW_MULT: f64 = 2.0 / 3.0;
+/// Window size must be at least 20 bp.
+const AUTO_WINDOW_MIN: u32 = 20;
 
 /// Collection of windows.
 pub struct Windows {
@@ -124,7 +128,7 @@ impl Windows {
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
         let window_size = params.window_size
-            .unwrap_or_else(|| (2 * seq_info.mean_read_len() as u32 + 2) / 3);
+            .unwrap_or_else(|| max(AUTO_WINDOW_MIN, (seq_info.mean_read_len() * AUTO_WINDOW_MULT).round() as u32));
         let neighb_size = window_size.max(MIN_NEIGHBOURHOOD);
         log::debug!("    Using {} bp windows, (window neighbourhood size {}, boundary {})",
             window_size, neighb_size, params.boundary_size);

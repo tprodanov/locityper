@@ -97,7 +97,7 @@ def main():
             scores.append(target_distances[i][1])
         score = mean(scores)
         query.sort()
-        query = ','.join(sorted(query))
+        query = ','.join(query)
         results[query] = min(results[query], score)
 
     with open_stream(args.output, 'w') as out:

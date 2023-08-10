@@ -77,6 +77,13 @@ impl Default for Params {
     }
 }
 
+/// If tweak size is bigger than this, there may appear problems with overflowing.
+const MAX_ALLOWED_TWEAK: u32 = u16::MAX as u32 / 2 - 1;
+/// Automatically select tweak size as 1/3 of the window size.
+const AUTO_TWEAK_MULT: f64 = 1.0 / 3.0;
+/// Automatically crop tweak size to 100 bp.
+const AUTO_TWEAK_MAX: u32 = 100;
+
 impl Params {
     pub fn validate(&mut self) -> Result<(), Error> {
         validate_param!(self.boundary_size > 0, "Boundary size ({}) cannot be zero.", self.boundary_size);
@@ -124,18 +131,20 @@ impl Params {
     }
 
     pub fn set_tweak_size(&mut self, window_size: u32) -> Result<(), Error> {
-        const MAX_THEORETICAL_TWEAK: u32 = u16::MAX as u32 / 2 - 1;
-        const MAX_TWEAK: u32 = 100;
         if self.tweak.is_none() {
-            self.tweak = Some((window_size / 3).min(MAX_TWEAK).min(self.boundary_size.saturating_sub(1)));
+            self.tweak = Some((
+                (window_size as f64 * AUTO_TWEAK_MULT).round() as u32)
+                    .min(AUTO_TWEAK_MAX)
+                    .min(self.boundary_size.saturating_sub(1))
+            );
         }
 
         let tweak = self.tweak.unwrap();
         validate_param!(tweak < self.boundary_size, "Boundary size ({}) must be greater than tweak size ({}).",
             self.boundary_size, tweak);
-        validate_param!(tweak < MAX_THEORETICAL_TWEAK, "Tweaking size ({}) is too large (max = {})",
-            tweak, MAX_THEORETICAL_TWEAK);
-        if tweak > MAX_TWEAK {
+        validate_param!(tweak <= MAX_ALLOWED_TWEAK, "Tweaking size ({}) is too large (max = {})",
+            tweak, MAX_ALLOWED_TWEAK);
+        if tweak > AUTO_TWEAK_MAX {
             log::warn!("Tweaking size ({}) may be too large", tweak);
         }
         Ok(())

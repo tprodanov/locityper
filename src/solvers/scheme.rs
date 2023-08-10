@@ -523,7 +523,7 @@ pub fn solve(
         &locus_dir.join("alns."), data.threads, data.debug)?;
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
-    let lik_filename = locus_dir.join("liks.csv.gz");
+    let lik_filename = locus_dir.join("lik.csv.gz");
     let mut lik_writer = ext::sys::create_gzip(&lik_filename)?;
     writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(lik_filename))?;
     let rem_ixs = if data.scheme.filter {
