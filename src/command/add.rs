@@ -1,5 +1,5 @@
 use std::{
-    cmp::max,
+    cmp::{min, max},
     io::{self, BufRead, Read, Seek, Write},
     fs::File,
     sync::Arc,
@@ -19,10 +19,10 @@ use crate::{
     algo::bisect,
     ext::{
         self,
-        vec::{VecExt, F64Ext, IterExt},
+        vec::{VecExt, IterExt},
     },
     seq::{
-        self, NamedInterval, ContigNames, NamedSeq,
+        self, NamedInterval, Interval, ContigNames, NamedSeq,
         kmers::JfKmerGetter,
         wfa::Penalties,
         dist, panvcf,
@@ -62,7 +62,7 @@ impl Default for Args {
 
             ref_name: "REF".to_owned(),
             leave_out: Default::default(),
-            max_expansion: 5000,
+            max_expansion: 50000,
             moving_window: 500,
 
             penalties: Default::default(),
@@ -250,49 +250,19 @@ fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf])
     Ok(intervals)
 }
 
-/// Best position (across equals) is Minimal/Maximal.
-#[derive(Debug, Clone, Copy)]
-enum PosLoc { Min, Max }
-
-/// Across the islands `(start, end)`, finds the position with the smallest `aver_kmer_freq` value.
-/// If there are several optimal position, returns
-fn find_optimal_pos<I>(pos_loc: PosLoc, start: u32, aver_kmer_freqs: &[f64], islands: I) -> u32
-where I: Iterator<Item = (u32, u32)>,
-{
-    let mut best_pos = 0;
-    let mut best_freq = f64::INFINITY;
-    for (isl_start, isl_end) in islands {
-        let subvec = &aver_kmer_freqs[(isl_start - start) as usize..(isl_end - start) as usize];
-        let (i, opt_freq) = match pos_loc {
-            PosLoc::Min => F64Ext::argmin(subvec),
-            // Finds last argmin.
-            PosLoc::Max => IterExt::arg_optimal(subvec.iter().copied(), |opt, e| opt <= e),
-        };
-        if opt_freq <= 1.0 {
-            // Best frequency is already achieved.
-            return isl_start + i as u32;
-        } else if opt_freq < best_freq {
-            best_freq = opt_freq;
-            best_pos = isl_start + i as u32;
-        }
-    }
-    best_pos
-}
-
 /// Find possible islands, where
 /// - the variation graph contains no bubbles,
-/// - reference sequence contains no Ns,
 /// - average k-mer frequency is the smallest,
 /// - position is closest to the boundary.
 ///
 /// Returns best position, if found.
-fn find_best_boundary(
-    pos_loc: PosLoc,
+fn find_best_boundary<const LEFT: bool>(
     mov_window: u32,
     seq_shift: u32,
     seq: &[u8],
     vars: &[VcfRecord],
     kmer_getter: &JfKmerGetter,
+    expand_size: u32,
 ) -> Result<Option<u32>, Error>
 {
     let halfw = mov_window / 2;
@@ -300,46 +270,58 @@ fn find_best_boundary(
     let start = seq_shift + halfw;
     let end = seq_shift + seq.len() as u32 - halfw;
 
-    /// Skip 10 bp around variants.
-    const VAR_MARGIN: u32 = 10;
+    let unique_kmers: Vec<u32> = kmer_getter.fetch_one(seq.to_vec())?
+        .take_first().into_iter()
+        .map(|count| u32::from(count <= 1))
+        .collect();
     let k = kmer_getter.k();
-    let nrun_margin = max(VAR_MARGIN, k);
-    let nruns = seq::n_runs(seq);
+    let divisor = f64::from(mov_window + 1 - k);
+    // Initially, set weights to the fraction of unique kmers.
+    let mut weights: Vec<f64> = VecExt::moving_window_sums(&unique_kmers, (mov_window + 1 - k) as usize)
+        .into_iter().map(|count| f64::from(count) / divisor).collect();
+    assert_eq!(weights.len() as u32, end - start);
 
-    let mut levels = Vec::with_capacity(1 + vars.len() + nruns.len());
-    levels.push((start, end, 1));
-    levels.extend(vars.iter().map(|var|
-        ((var.pos() as u32).saturating_sub(VAR_MARGIN), var.end() as u32 + VAR_MARGIN, -1)));
-    levels.extend(nruns.iter().map(|&(run_start, run_end)|
-        ((seq_shift + run_start).saturating_sub(nrun_margin), seq_shift + run_end + nrun_margin, -1)));
-    // Find regions with depth == 1: +1 when inside the region, -1 when there is a bubble, -1 when there is an N run.
-    let islands = seq::interv::split_disjoint(&levels, |depth| depth == 1);
-    if islands.is_empty() {
-        return Ok(None);
+    // Try to select boundary at least 10 bp from any variant.
+    const EFFECT_MARGIN: u32 = 9;
+    let effect_divisor = f64::from(EFFECT_MARGIN + 1);
+    for var in vars.iter() {
+        let var_start = var.pos() as u32;
+        let var_end = var.end() as u32;
+        // Ignore positions with variants.
+        for i in var_start.saturating_sub(start)..min(var_end, end).saturating_sub(start) {
+            weights[i as usize] = 0.0;
+        }
+        // Downgrade positions close to variants.
+        // i in 0..EFFECT_MARGIN  &&  start <= var_start - i - 1 < end.
+        for i in var_start.saturating_sub(end)..var_start.saturating_sub(start).min(EFFECT_MARGIN) {
+            weights[(var_start - start - i) as usize] *= f64::from(EFFECT_MARGIN - i) / effect_divisor;
+        }
+        // i in 0..EFFECT_MARGIN  &&  start <= var_end + i < end.
+        for i in start.saturating_sub(var_end)..end.saturating_sub(var_end).min(EFFECT_MARGIN) {
+            weights[(var_end + i - start) as usize] *= f64::from(i + 1) / effect_divisor;
+        }
     }
 
-    // Replace Ns with As for k-mer calculation.
-    let seq_wo_ns = if nruns.is_empty() {
-        seq.to_vec()
+    // `inner_start - expand_size` and `inner_end + expand_size` are penalized by 20%.
+    const WEIGHT_DROP: f64 = 0.2;
+    let per_bp_drop = WEIGHT_DROP / f64::from(expand_size);
+    if LEFT {
+        weights.iter_mut().rev().enumerate().for_each(|(i, w)| *w -= *w * per_bp_drop * i as f64);
     } else {
-        seq.iter().map(|&nt| if nt == b'N' { b'A' } else { nt }).collect()
-    };
-    let kmer_counts: Vec<f64> = kmer_getter.fetch_one(seq_wo_ns)?
-        .take_first().into_iter()
-        .map(f64::from).collect();
-    let divisor = f64::from(mov_window + 1 - k);
-    // Average k-mer counts for each window of size `mov_window` over k-mers of size `k`.
-    // Only defined for indices between `start` and `end`.
-    let aver_kmer_freqs: Vec<f64> = VecExt::moving_window_sums(&kmer_counts, (mov_window + 1 - k) as usize)
-        .into_iter().map(|count| count / divisor).collect();
-    debug_assert_eq!(aver_kmer_freqs.len() as u32, end - start);
+        weights.iter_mut().enumerate().for_each(|(i, w)| *w -= *w * per_bp_drop * i as f64);
+    }
 
-    // Find position with the smallest average frequency and closest to the boundary.
-    let islands_iter = islands.iter().map(|(isl_start, isl_end, _)| (*isl_start, *isl_end));
-    Ok(Some(match pos_loc {
-        PosLoc::Min => find_optimal_pos(pos_loc, start, &aver_kmer_freqs, islands_iter),
-        PosLoc::Max => find_optimal_pos(pos_loc, start, &aver_kmer_freqs, islands_iter.rev()),
-    }))
+    let (i, maxval) = if LEFT {
+        // Finds last argmax
+        IterExt::arg_optimal(weights.iter().copied(), |opt, e| opt >= e)
+    } else {
+        IterExt::arg_optimal(weights.iter().copied(), |opt, e| opt > e)
+    };
+    if maxval == 0.0 {
+        Ok(None)
+    } else {
+        Ok(Some(start + i as u32))
+    }
 }
 
 /// Check divergencies and warns if they are too high.
@@ -363,7 +345,7 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Ite
         }
     }
     if count > 0 {
-        log::warn!("    [{}] {} haplotype pairs with high divergence, highest {:.5} ({}, {})", tag, count,
+        log::warn!("    [{}] {} haplotype pairs with high divergence, highest {:.5} ({} and {})", tag, count,
             highest, entries[highest_i].name(), entries[highest_j].name());
     }
 }
@@ -480,6 +462,52 @@ fn process_haplotypes(
     Ok(())
 }
 
+/// Checks unknown sequences, and returns max interval that contains `inner_interv` and does not contain Ns.
+/// If `inner_interv` contains Ns as well, returns None.
+fn process_unknown_seq(
+    locus: &str,
+    full_seq: &[u8],
+    full_interv: &Interval,
+    inner_interv: &Interval,
+) -> Option<Interval>
+{
+    let n_runs = seq::n_runs(full_seq);
+    if n_runs.is_empty() {
+        return Some(full_interv.clone());
+    }
+
+    let (full_start, full_end) = full_interv.range();
+    let (inner_start, inner_end) = inner_interv.range();
+    let mut new_start = full_start;
+    let mut new_end = full_end;
+    for (mut start, mut end) in n_runs {
+        start += full_start;
+        end += full_start;
+        if start <= inner_start {
+            if end <= inner_start {
+                new_start = end;
+            } else {
+                return None;
+            }
+        } else if end >= inner_end {
+            if start >= inner_end {
+                new_end = start;
+            } else {
+                return None;
+            }
+        }
+    }
+    if new_start > full_start {
+        log::debug!("    [{}] Unknown sequence {} bp to the left ({}:{})", locus, inner_start - new_start,
+            inner_interv.contig_name(), new_start + 1);
+    }
+    if new_end < full_end {
+        log::debug!("    [{}] Unknown sequence {} bp to the right ({}:{})", locus, new_end - inner_end + 1,
+            inner_interv.contig_name(), new_end + 1);
+    }
+    Some(Interval::new(Arc::clone(full_interv.contigs()), full_interv.contig_id(), new_start, new_end))
+}
+
 /// Add `locus` to the database.
 fn add_locus<R>(
     loci_dir: &Path,
@@ -496,12 +524,22 @@ where R: Read + Seek,
     if !super::Rerun::from_force(args.force).need_analysis(&dir)? {
         return Ok(true);
     }
-    log::info!("Analyzing locus {}", locus);
+    log::info!("{} {}", "Analyzing locus".bold(), locus);
     let inner_interv = locus.interval();
     // Add extra half-window to each sides.
     let halfw = args.moving_window / 2;
-    let outer_interv = inner_interv.expand(args.max_expansion + halfw, args.max_expansion + halfw);
-    let outer_seq = outer_interv.fetch_seq(fasta_file).map_err(add_path!(args.reference.as_ref().unwrap()))?;
+    let full_interv = inner_interv.expand(args.max_expansion + halfw, args.max_expansion + halfw);
+    let full_seq = full_interv.fetch_seq(fasta_file).map_err(add_path!(args.reference.as_ref().unwrap()))?;
+
+    let outer_interv = match process_unknown_seq(locus.name(), &full_seq, &full_interv, &inner_interv) {
+        Some(interv) => interv,
+        None => {
+            log::error!("Cannot add locus {}. Interval {} contains unknown sequence", locus, inner_interv);
+            return Ok(false);
+        }
+    };
+    let outer_seq = &full_seq[
+        (outer_interv.start() - full_interv.start()) as usize..(outer_interv.end() - full_interv.start()) as usize];
 
     let vcf_rid = vcf_file.header().name2rid(outer_interv.contig_name().as_bytes())?;
     vcf_file.fetch(vcf_rid, u64::from(outer_interv.start()), Some(u64::from(outer_interv.end())))?;
@@ -515,24 +553,26 @@ where R: Read + Seek,
 
     // Extend region to the left.
     let outer_start = outer_interv.start();
-    let new_start = match find_best_boundary(PosLoc::Max, args.moving_window, outer_start,
-            &outer_seq[..(halfw + inner_start + 1 - outer_start) as usize], &vcf_recs[..left_var_ix], kmer_getter)? {
+    let new_start = match find_best_boundary::<true>(args.moving_window, outer_start,
+            &outer_seq[..(halfw + inner_start + 1 - outer_start) as usize], &vcf_recs[..left_var_ix],
+            kmer_getter, args.max_expansion)? {
         Some(pos) => pos,
         None => {
-            log::error!("Cannot extend locus {} to the left.\n    \
-                Try increasing -e/--extend parameter or manually modifying region boundaries.", locus);
+            log::error!("Cannot expand_size locus {} to the left.\n    \
+                Try increasing -e/--expand_size parameter or manually modifying region boundaries.", locus);
             return Ok(false);
         }
     };
 
     // Extend region to the right.
     let right_shift = inner_end - halfw - 1;
-    let new_end = match find_best_boundary(PosLoc::Min, args.moving_window, right_shift,
-            &outer_seq[(right_shift - outer_start) as usize..], &vcf_recs[right_var_ix..], kmer_getter)? {
+    let new_end = match find_best_boundary::<false>(args.moving_window, right_shift,
+            &outer_seq[(right_shift - outer_start) as usize..], &vcf_recs[right_var_ix..],
+            kmer_getter, args.max_expansion)? {
         Some(pos) => pos + 1,
         None => {
-            log::error!("Cannot extend locus {} to the right.\n    \
-                Try increasing -e/--extend parameter or manually modify region boundaries.", locus);
+            log::error!("Cannot expand_size locus {} to the right.\n    \
+                Try increasing -e/--expand_size parameter or manually modify region boundaries.", locus);
             return Ok(false);
         }
     };
@@ -546,13 +586,8 @@ where R: Read + Seek,
         new_locus = locus.clone();
     }
 
-    let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
-    if seq::has_n(ref_seq) {
-        log::error!("Cannot extract locus {}: reference sequence contains Ns", new_locus);
-        return Ok(false);
-    }
-
     log::info!("    Reconstructing haplotypes");
+    let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
     let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
         vcf_file.header(), args.unavail_rate);
     match reconstruction {
