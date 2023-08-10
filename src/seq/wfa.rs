@@ -16,9 +16,11 @@ mod cwfa {
 
 #[derive(Clone)]
 pub struct Penalties {
+    // NOTE: Adding match may lead to problems in other places (such as `panvcf` divergence calculation).
     pub mismatch: u32,
     pub gap_opening: u32,
     pub gap_extension: u32,
+    // Similarly, adding separate parameters for insert/deletion penalties may lead to problems elsewhere.
 }
 
 impl Default for Penalties {

@@ -90,6 +90,18 @@ impl Operation {
             Operation::Diff => 8,
         }
     }
+
+    /// Inverses reference and query.
+    pub const fn inverse(self) -> Self {
+        match self {
+            Operation::Ins | Operation::Soft => Operation::Del,
+            Operation::Del => Operation::Ins,
+
+            Operation::Match => Operation::Match,
+            Operation::Equal => Operation::Equal,
+            Operation::Diff => Operation::Diff,
+        }
+    }
 }
 
 impl fmt::Display for Operation {
@@ -99,7 +111,7 @@ impl fmt::Display for Operation {
 }
 
 /// Tuple operation + length.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CigarItem {
     op: Operation,
     len: u32,
@@ -161,17 +173,45 @@ pub struct Cigar {
 
 impl Cigar {
     /// Create an empty CIGAR.
-    #[inline]
     pub fn new() -> Cigar {
         Cigar::default()
     }
 
-    pub fn from_raw(record: &Record) -> Cigar {
+    /// Creates cigar of `len` matches (=).
+    pub fn new_full_match(len: u32) -> Self {
+        assert!(len > 0);
+        Self {
+            tuples: vec![CigarItem::new(Operation::Equal, len)],
+            rlen: len,
+            qlen: len,
+        }
+    }
+
+    /// Creates cigar of `len` mismatches (X).
+    pub fn new_full_mismatch(len: u32) -> Self {
+        assert!(len > 0);
+        Self {
+            tuples: vec![CigarItem::new(Operation::Diff, len)],
+            rlen: len,
+            qlen: len,
+        }
+    }
+
+    pub fn from_raw(record: &Record) -> Self {
         let mut res = Cigar::new();
         for &val in record.raw_cigar().iter() {
             res.push(CigarItem::from_u32(val));
         }
         res
+    }
+
+    /// Inverses reference and query (for example, `10M3I5M -> 10M3D15M`).
+    pub fn inverse(&self) -> Self {
+        Self {
+            tuples: self.tuples.iter().map(|item| CigarItem::new(item.op.inverse(), item.len)).collect(),
+            rlen: self.qlen,
+            qlen: self.rlen,
+        }
     }
 
     /// Length of the reference sequence.
@@ -209,6 +249,22 @@ impl Cigar {
             }
             self.tuples[n - 1].len += len;
         }
+    }
+
+    pub fn extend(&mut self, other: &Cigar) {
+        if other.tuples.is_empty() {
+            return;
+        }
+        let n = self.tuples.len();
+        let oth_first = other.tuples[0];
+        if n > 0 && self.tuples[n - 1].op == oth_first.op {
+            self.tuples[n - 1].len += oth_first.len;
+            self.tuples.extend_from_slice(&other.tuples[1..]);
+        } else {
+            self.tuples.extend_from_slice(&other.tuples);
+        };
+        self.rlen += other.rlen;
+        self.qlen += other.qlen;
     }
 
     /// Returns iterator over CIGAR items.

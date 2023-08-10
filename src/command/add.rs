@@ -23,9 +23,10 @@ use crate::{
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
+        dist, panvcf,
+        cigar::Cigar,
         kmers::JfKmerGetter,
         wfa::Penalties,
-        dist, panvcf,
     },
 };
 use super::paths;
@@ -48,6 +49,7 @@ struct Args {
 
     threads: u16,
     force: bool,
+    true_aln: bool,
     jellyfish: PathBuf,
 }
 
@@ -71,6 +73,7 @@ impl Default for Args {
 
             threads: 8,
             force: false,
+            true_aln: false,
             jellyfish: PathBuf::from("jellyfish"),
         }
     }
@@ -144,6 +147,9 @@ fn print_help() {
         "-u, --unavail".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unavail_rate));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
+    println!("    {:KEY$} {:VAL$}  Calculate true alignments between haplotypes using WFA.\n\
+        {EMPTY}  Otherwise: assume pangenome VCF file to have the best alignment.",
+        "    --true-aln".green(), super::flag());
 
     println!("\n{}", "Haplotype clustering parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
@@ -193,6 +199,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     args.leave_out.insert(val.parse()?);
                 }
             }
+            Long("true-aln") | Long("true-alignment") | Long("true-alignments") => args.true_aln = true,
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
 
@@ -408,6 +415,7 @@ fn process_haplotypes(
     locus_dir: &Path,
     locus: &NamedInterval,
     entries: Vec<NamedSeq>,
+    alns: &[(Cigar, i32)],
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<(), Error>
@@ -421,9 +429,12 @@ fn process_haplotypes(
 
     log::info!("    Calculating haplotype divergence");
     let paf_filename = locus_dir.join(paths::LOCUS_PAF);
-    let paf_writer = ext::sys::create_lz4_slow(&paf_filename)?;
-    let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)
-        .map_err(add_path!(paf_filename))?;
+    let paf_writer = ext::sys::create_gzip(&paf_filename)?;
+    let divergences = if args.true_aln {
+        dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)
+    } else {
+        dist::pairwise_divergences_from_alns(&entries, alns, paf_writer)
+    }.map_err(add_path!(paf_filename))?;
     check_divergencies(tag, &entries, divergences.iter().copied());
 
     log::info!("    Clustering haploypes");
@@ -589,9 +600,9 @@ where R: Read + Seek,
     log::info!("    Reconstructing haplotypes");
     let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
     let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
-        vcf_file.header(), args.unavail_rate);
+        vcf_file.header(), args.unavail_rate, &args.penalties);
     match reconstruction {
-        Ok(seqs) => process_haplotypes(&dir, &new_locus, seqs, kmer_getter, &args)?,
+        Ok((seqs, pairwise_alns)) => process_haplotypes(&dir, &new_locus, seqs, &pairwise_alns, kmer_getter, &args)?,
         Err(Error::InvalidData(e)) => {
             log::error!("Cannot extract locus {} sequences: {}", new_locus, e);
             return Ok(false);

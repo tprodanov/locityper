@@ -9,6 +9,26 @@ use super::{
     cigar::{Cigar, Operation},
 };
 
+/// With already known alignments between sequences, calculates divergences from alignments and writes PAF file.
+pub fn pairwise_divergences_from_alns(
+    entries: &[NamedSeq],
+    alns: &[(Cigar, i32)],
+    mut paf_writer: impl Write,
+) -> io::Result<Vec<f64>> {
+    let n = entries.len();
+    assert_eq!(alns.len(), n * (n - 1) / 2);
+    let mut divergences = Vec::with_capacity(alns.len());
+    let mut alns_iter = alns.iter();
+    for (i, entry1) in entries.iter().enumerate() {
+        for entry2 in entries[i + 1..].iter() {
+            let (cigar, score) = alns_iter.next().unwrap();
+            let divergence = write_paf(&mut paf_writer, entry2, entry1, &cigar, *score)?;
+            divergences.push(divergence);
+        }
+    }
+    Ok(divergences)
+}
+
 /// Calculates all pairwise divergences between all sequences, writes alignments to PAF file,
 /// and returns condensed distance matrix (see `kodama` crate).
 pub fn pairwise_divergences(
@@ -24,7 +44,7 @@ pub fn pairwise_divergences(
         for (i, entry1) in entries.iter().enumerate() {
             for entry2 in entries[i + 1..].iter() {
                 let (cigar, score) = aligner.align(entry1.seq(), entry2.seq());
-                let divergence = write_paf(&mut paf_writer, entry2, entry1, score, &cigar)?;
+                let divergence = write_paf(&mut paf_writer, entry2, entry1, &cigar, score)?;
                 divergences.push(divergence);
             }
         }
@@ -78,7 +98,7 @@ fn divergences_multithread(
     for handle in handles.into_iter() {
         for (cigar, score) in handle.join().expect("Worker process failed") {
             let &(i, j) = pairs_iter.next().expect("Number of solutions does not match the number of tasks");
-            divergences.push(write_paf(&mut paf_writer, &entries[j as usize], &entries[i as usize], score, &cigar)?);
+            divergences.push(write_paf(&mut paf_writer, &entries[j as usize], &entries[i as usize], &cigar, score)?);
         }
     }
     assert!(pairs_iter.next().is_none(), "Number of solutions does not match the number of tasks");
@@ -91,8 +111,8 @@ fn write_paf(
     writer: &mut impl Write,
     query: &NamedSeq,
     refer: &NamedSeq,
-    score: i32,
     cigar: &Cigar,
+    score: i32,
 ) -> io::Result<f64>
 {
     let qlen = cigar.query_len();

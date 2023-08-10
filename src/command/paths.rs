@@ -19,7 +19,7 @@ pub(super) const LOCUS_FASTA_ALL: &'static str = "all_haplotypes.fa.gz";
 /// Filtered haplotypes for the locus are stored in `database/loci/<locus_name>/LOCUS_FASTA`.
 pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
 /// Pairwise haplotype alignments are stored in `database/loci/<locus_name>/LOCUS_PAF`.
-pub(super) const LOCUS_PAF: &'static str = "all_haplotypes.paf.lz4";
+pub(super) const LOCUS_PAF: &'static str = "all_haplotypes.paf.gz";
 /// Dendrogram is stored in `database/loci/<locus_name>/LOCUS_DENDROGRAM`.
 pub(super) const LOCUS_DENDROGRAM: &'static str = "all_haplotypes.nwk";
 
