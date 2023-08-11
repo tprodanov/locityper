@@ -191,9 +191,9 @@ impl fmt::Debug for Rerun {
 
 /// Debug information at the start of the log.
 fn greet() {
-    log::debug!("{} v{} @ {}", PROGRAM, VERSION, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
     let command = std::env::args().map(|arg| ext::fmt::path(Path::new(&arg))).collect::<Vec<_>>().join(" ");
-    log::debug!("    {}", command);
+    log::debug!("{}", command);
+    log::debug!("{} v{} @ {}", PROGRAM, VERSION, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
 }
 
 // /// Writes command line arguments, current version and time.

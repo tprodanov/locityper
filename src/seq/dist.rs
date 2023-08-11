@@ -38,6 +38,7 @@ pub fn pairwise_divergences(
     threads: u16,
 ) -> io::Result<Vec<f64>> {
     if threads == 1 {
+        log::debug!("        Aligning sequences in 1 thread");
         let n = entries.len();
         let mut divergences = Vec::with_capacity(n * (n - 1) / 2);
         let aligner = Aligner::new(penalties);
@@ -61,6 +62,7 @@ fn divergences_multithread(
     threads: u16,
 ) -> io::Result<Vec<f64>> {
     let threads = usize::from(threads);
+    log::debug!("        Aligning sequences in {} threads", threads);
     let seqs = Arc::new(entries.iter().map(|entry| entry.seq.clone()).collect::<Vec<Vec<u8>>>());
     let n = seqs.len() as u32;
     let pairs: Arc<Vec<(u32, u32)>> = Arc::new(
