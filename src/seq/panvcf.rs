@@ -68,12 +68,6 @@ pub struct AllHaplotypes {
 }
 
 impl AllHaplotypes {
-    pub fn samples(&self) -> &[Sample] {
-        &self.samples
-    }
-}
-
-impl AllHaplotypes {
     /// Examines VCF header and the first record to extract sample ploidy.
     /// Samples and haplotypes in `leave_out` are discarded.
     pub fn new(
@@ -144,6 +138,15 @@ impl AllHaplotypes {
         }
         Ok(Self { ref_name, samples, total })
     }
+
+    pub fn samples(&self) -> &[Sample] {
+        &self.samples
+    }
+
+    /// Total number of haplotypes (including the reference).
+    pub fn total(&self) -> usize {
+        self.total
+    }
 }
 
 /// Discard variants where there is no known variation.
@@ -195,18 +198,18 @@ fn format_var(var: &Record, header: &HeaderView) -> String {
 }
 
 /// Reconstructs sample sequences by adding variants to the reference sequence.
-/// Returns
-/// - vector of named sequences,
-/// - all pairwise alignments in a vector form.
+/// Returns a vector of named sequences.
+/// If `pairwise_alns` is Some, calculates all pairwise alignments between all haplotypes.
 pub fn reconstruct_sequences(
     ref_start: u32,
     ref_seq: &[u8],
     recs: &[Record],
     haplotypes: &AllHaplotypes,
+    mut pairwise_alns: Option<&mut Vec<(Cigar, i32)>>,
     header: &HeaderView,
     unavail_rate: f64,
     aln_penalties: &Penalties,
-) -> Result<(Vec<NamedSeq>, Vec<(Cigar, i32)>), Error>
+) -> Result<Vec<NamedSeq>, Error>
 {
     let ref_end = ref_start + ref_seq.len() as u32;
     let capacity = ref_seq.len() * 3 / 2;
@@ -223,7 +226,6 @@ pub fn reconstruct_sequences(
     }
     let aligner = Aligner::new(aln_penalties);
     let mism_penalty = -(aln_penalties.mismatch as i32);
-    let mut pairwise_alns = vec![(Cigar::new(), 0); haplotypes.total * (haplotypes.total - 1) / 2];
     // Number of unavailable nucleotides for each sequence.
     let mut unavail_size = vec![0_u32; haplotypes.total];
 
@@ -273,8 +275,9 @@ pub fn reconstruct_sequences(
                 *last_allele_iter.next().unwrap() = allele_ix;
             }
         }
-        add_variant_to_alns(var_start - ref_pos, &alleles, &aligner, mism_penalty,
-            &last_allele, &mut pairwise_alns);
+        if let Some(ref mut alns) = pairwise_alns {
+            add_variant_to_alns(var_start - ref_pos, &alleles, &aligner, mism_penalty, &last_allele, *alns);
+        }
         ref_pos = var_end;
     }
     let suffix_size = ref_end - ref_pos;
@@ -284,7 +287,9 @@ pub fn reconstruct_sequences(
             entry.seq_mut().extend_from_slice(suffix_seq);
         }
         let cigar_suffix = Cigar::new_full_match(suffix_size);
-        pairwise_alns.iter_mut().for_each(|(cigar, _)| cigar.extend(&cigar_suffix));
+        if let Some(ref mut alns) = pairwise_alns {
+            alns.iter_mut().for_each(|(cigar, _)| cigar.extend(&cigar_suffix));
+        }
     }
 
     let aver_unavail = F64Ext::mean(&unavail_size);
@@ -302,7 +307,7 @@ pub fn reconstruct_sequences(
     if n_remain < 2 {
         return Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()));
     }
-    Ok((avail_seqs, pairwise_alns))
+    Ok(avail_seqs)
 }
 
 /// Finds alignments between all alleles.

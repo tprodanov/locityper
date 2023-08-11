@@ -58,7 +58,7 @@ impl Aligner {
         // Use Adaptive heuristic.
         attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_wfadaptive;
         attributes.heuristic.min_wavefront_length = 50;
-        attributes.heuristic.max_distance_threshold = 200;
+        attributes.heuristic.max_distance_threshold = 1000;
         attributes.heuristic.steps_between_cutoffs = 1;
         // Use less memory at the expense of running time.
         attributes.memory_mode = cwfa::wavefront_memory_t_wavefront_memory_low;

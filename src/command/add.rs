@@ -301,7 +301,7 @@ fn find_best_boundary<const LEFT: bool>(
         // Downgrade positions close to variants.
         // i in 0..EFFECT_MARGIN  &&  start <= var_start - i - 1 < end.
         for i in var_start.saturating_sub(end)..var_start.saturating_sub(start).min(EFFECT_MARGIN) {
-            weights[(var_start - start - i) as usize] *= f64::from(EFFECT_MARGIN - i) / effect_divisor;
+            weights[(var_start - start - i - 1) as usize] *= f64::from(EFFECT_MARGIN - i) / effect_divisor;
         }
         // i in 0..EFFECT_MARGIN  &&  start <= var_end + i < end.
         for i in start.saturating_sub(var_end)..end.saturating_sub(var_end).min(EFFECT_MARGIN) {
@@ -415,7 +415,7 @@ fn process_haplotypes(
     locus_dir: &Path,
     locus: &NamedInterval,
     entries: Vec<NamedSeq>,
-    alns: &[(Cigar, i32)],
+    pairwise_alns: Option<&Vec<(Cigar, i32)>>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<(), Error>
@@ -430,10 +430,9 @@ fn process_haplotypes(
     log::info!("    Calculating haplotype divergence");
     let paf_filename = locus_dir.join(paths::LOCUS_PAF);
     let paf_writer = ext::sys::create_gzip(&paf_filename)?;
-    let divergences = if args.true_aln {
-        dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)
-    } else {
-        dist::pairwise_divergences_from_alns(&entries, alns, paf_writer)
+    let divergences = match pairwise_alns {
+        Some(alns) => dist::pairwise_divergences_from_alns(&entries, alns, paf_writer),
+        None => dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads),
     }.map_err(add_path!(paf_filename))?;
     check_divergencies(tag, &entries, divergences.iter().copied());
 
@@ -590,7 +589,7 @@ where R: Read + Seek,
     let new_locus;
     if new_start != inner_start || new_end != inner_end {
         new_locus = locus.with_new_range(new_start, new_end);
-        log::info!("    Extending locus by {} bp left and {} bp right. New locus: {}",
+        log::info!("    Extending locus by {} bp left and {} bp right -> {}",
             inner_start - new_start, new_end - inner_end, new_locus.interval());
         assert!(new_locus.is_name_explicit());
     } else {
@@ -599,10 +598,15 @@ where R: Read + Seek,
 
     log::info!("    Reconstructing haplotypes");
     let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
+    let mut pairwise_alns = if args.true_aln {
+        None
+    } else {
+        Some(vec![(Cigar::new(), 0); haplotypes.total() * (haplotypes.total() - 1) / 2])
+    };
     let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
-        vcf_file.header(), args.unavail_rate, &args.penalties);
+        pairwise_alns.as_mut(), vcf_file.header(), args.unavail_rate, &args.penalties);
     match reconstruction {
-        Ok((seqs, pairwise_alns)) => process_haplotypes(&dir, &new_locus, seqs, &pairwise_alns, kmer_getter, &args)?,
+        Ok(seqs) => process_haplotypes(&dir, &new_locus, seqs, pairwise_alns.as_ref(), kmer_getter, &args)?,
         Err(Error::InvalidData(e)) => {
             log::error!("Cannot extract locus {} sequences: {}", new_locus, e);
             return Ok(false);
