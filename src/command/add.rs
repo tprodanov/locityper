@@ -108,12 +108,12 @@ fn print_help() {
     println!("{}", "Adds complex locus/loci to the database.".yellow());
 
     println!("\n{}", "Usage:".bold());
-    println!("    {} add -d db -r ref.fa -v vars.vcf.gz -l/-L loci [arguments]", super::PKG_NAME);
-    // println!("    {} add -d db -s seqs.fa=name [arguments]", super::PKG_NAME);
+    println!("    {} add -d db -r ref.fa -v vars.vcf.gz -l/-L loci [arguments]", super::PROGRAM);
+    // println!("    {} add -d db -s seqs.fa=name [arguments]", super::PROGRAM);
 
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory (initialized with {}).",
-        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " create").underline());
+        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.\n\
@@ -614,6 +614,7 @@ where R: Read + Seek,
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut args = parse_args(argv)?.validate()?;
+    super::greet();
     // unwrap as argsuments were previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
     let ref_filename = args.reference.as_ref().unwrap();

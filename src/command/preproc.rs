@@ -224,7 +224,7 @@ fn print_help(extended: bool) {
     println!("{}", "Preprocess WGS dataset.".yellow());
 
     println!("\n{} {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam) -d db -r reference.fa -o out [arguments]",
-        "Usage:".bold(), super::PKG_NAME);
+        "Usage:".bold(), super::PROGRAM);
     if !extended {
         println!("\nThis is a short help message. Please use {} to see the full help.",
             "-H/--full-help".green());
@@ -238,7 +238,7 @@ fn print_help(extended: bool) {
         {EMPTY}  Mutually exclusive with {}.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green());
     println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
-        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " create").underline(), "add".underline());
+        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
@@ -790,8 +790,9 @@ impl RefData {
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let timer = Instant::now();
     let args = parse_args(argv)?.validate()?;
+    super::greet();
+    let timer = Instant::now();
     // `args.output`/bg
     let out_bg_dir = create_out_dir(&args)?;
 

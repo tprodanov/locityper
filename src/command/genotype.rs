@@ -115,16 +115,16 @@ fn print_help() {
     println!("{}", "Genotype complex loci.".yellow());
 
     println!("\n{} {} genotype -i reads1.fq [reads2.fq] -d db -o out [arguments]",
-        "Usage:".bold(), super::PKG_NAME);
+        "Usage:".bold(), super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
-        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " create").underline(), "add".underline());
+        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
     println!("    {:KEY$} {:VAL$}  Output directory   (initialized with {}).",
-        "-o, --output".green(), "DIR".yellow(), concatcp!(super::PKG_NAME, " preproc").underline());
+        "-o, --output".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
         "-^, --interleaved".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
@@ -687,8 +687,9 @@ fn analyze_locus(
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let timer = Instant::now();
     let mut args = parse_args(argv)?.validate()?;
+    super::greet();
+    let timer = Instant::now();
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;

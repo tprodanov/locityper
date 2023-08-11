@@ -15,7 +15,8 @@ use crate::{
     err::{Error, add_path},
 };
 
-const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
+const PROGRAM: &'static str = env!("CARGO_PKG_NAME");
+const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 pub fn run(argv: &[String]) -> Result<(), Error> {
     if argv.len() <= 1 {
@@ -37,7 +38,7 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
 }
 
 fn print_version() {
-    println!("{} {}", PKG_NAME.underline(), format!("v{}", env!("CARGO_PKG_VERSION")).green());
+    println!("{} {}", PROGRAM.underline(), format!("v{}", VERSION).green());
     let authors: Vec<_> = env!("CARGO_PKG_AUTHORS").split(':').collect();
     let n = authors.len();
     if n == 0 {
@@ -67,7 +68,7 @@ fn print_help() {
     const WIDTH: usize = 12;
     print_version();
     println!("\n{} {} command [arguments]",
-        "Usage:".bold(), PKG_NAME);
+        "Usage:".bold(), PROGRAM);
 
     println!("\n{}", "[ Creating database ]".bold());
     println!("    {:WIDTH$} Create an empty database",
@@ -188,6 +189,13 @@ impl fmt::Debug for Rerun {
     }
 }
 
+/// Debug information at the start of the log.
+fn greet() {
+    log::debug!("{} v{} @ {}", PROGRAM, VERSION, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    let command = std::env::args().map(|arg| ext::fmt::path(Path::new(&arg))).collect::<Vec<_>>().join(" ");
+    log::debug!("    {}", command);
+}
+
 // /// Writes command line arguments, current version and time.
 // fn write_command(filename: impl AsRef<Path>) -> Result<(), Error> {
 //     let mut s = String::new();
@@ -197,11 +205,11 @@ impl fmt::Debug for Rerun {
 //         }
 //         s.push_str(&ext::fmt::path(Path::new(&arg)));
 //     }
-//     write!(s, "\n{} v{}\n", PKG_NAME, env!("CARGO_PKG_VERSION")).unwrap();
+//     write!(s, "\n{} v{}\n", PROGRAM, VERSION).unwrap();
 //     writeln!(s, "{:?}", chrono::offset::Local::now()).unwrap();
 //     fs::write(&filename, s).map_err(add_path!(filename))
 // }
 
 fn write_success_file(filename: impl AsRef<Path>) -> Result<(), Error> {
-    fs::write(&filename, const_format::formatcp!("v{}\n", env!("CARGO_PKG_VERSION"))).map_err(add_path!(filename))
+    fs::write(&filename, const_format::formatcp!("v{}\n", VERSION)).map_err(add_path!(filename))
 }

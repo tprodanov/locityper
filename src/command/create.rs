@@ -63,7 +63,7 @@ fn print_help() {
     println!("{}", format!("Create an {} database of complex loci.", "empty".bold()).yellow());
 
     println!("\n{} {} create -d db -r reference.fa [arguments]",
-        "Usage:".bold(), super::PKG_NAME);
+        "Usage:".bold(), super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Output database directory.",
@@ -217,6 +217,7 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
+    super::greet();
     // unwrap as args.database was previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
     // Directory is not empty.
