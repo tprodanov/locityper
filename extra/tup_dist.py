@@ -96,7 +96,7 @@ def main():
             query.append(target_distances[i][0])
             scores.append(target_distances[i][1])
         score = mean(scores)
-        query.sort()
+        # query.sort()
         query = ','.join(query)
         results[query] = min(results[query], score)
 

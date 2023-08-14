@@ -70,7 +70,7 @@ impl Default for Params {
             max_alns: 500_000,
 
             min_gts: UsizeOrInf(8),
-            score_thresh: 0.9,
+            score_thresh: 0.95,
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 5,
         }

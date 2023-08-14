@@ -1,7 +1,7 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.3.5-2"
+version = "0.3.5-3"
 edition = "2021"
 
 [dependencies]
@@ -19,6 +19,8 @@ rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_xoshiro = { version = "0.6.0", default-features = false }
 getrandom = { version = "0.2", default-features = false }
 grb = { version = "1.3.0", default-features = false, optional = true }
+# Force same version of highs-sys as highs.
+highs-sys = { version = "=1.5.0", default-features = false, optional = true }
 highs = { version = "1.5.0", default-features = false, optional = true }
 lexopt = { version = "0.3", default-features = false }
 colored = { version = "2.0", default-features = false }
@@ -43,5 +45,5 @@ bindgen = { version = "0.66", default-features = false, features = ["runtime"] }
 [features]
 default = ["gurobi", "highs"]
 gurobi = ["dep:grb"]
-highs = ["dep:highs"]
+highs = ["dep:highs", "dep:highs-sys"]
 devel = []

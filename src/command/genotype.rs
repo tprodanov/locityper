@@ -198,7 +198,7 @@ fn print_help() {
         "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
         super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
     println!("    {:KEY$} {:VAL$}  Minimum number of genotypes after each step [{}].",
-        "    -min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
+        "    --min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
     println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
         "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
     println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
