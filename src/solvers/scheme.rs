@@ -43,7 +43,7 @@ pub struct SchemeParams {
 impl Default for SchemeParams {
     fn default() -> Self {
         Self {
-            stages: "filter,anneal,ilp".to_owned(),
+            stages: "filter,anneal".to_owned(),
             greedy_params: Vec::new(),
             anneal_params: Vec::new(),
             highs_params: Vec::new(),
@@ -249,6 +249,20 @@ fn write_alns(
     Ok(())
 }
 
+/// Returns probability that the first mean is larger than the second.
+/// If variances are well defined, returns ln(p-value) of the t-test.
+/// Otherwise, returns probability based on the difference between the two means.
+fn compare_two_likelihoods(mean1: f64, var1: f64, mean2: f64, var2: f64, attempts: f64) -> f64 {
+    // Simple normalization.
+    let simple_norm = mean1 - Ln::add(mean1, mean2);
+    if var1.is_normal() && var2.is_normal() {
+        simple_norm.max(
+            math::unpaired_onesided_t_test::<false>(mean1, var2, mean2, var2, attempts).ln())
+    } else {
+        simple_norm
+    }
+}
+
 struct Likelihoods {
     /// Mean and variance of various genotypes.
     likelihoods: Vec<(f64, f64)>,
@@ -298,8 +312,8 @@ impl Likelihoods {
         let mut new_ixs = self.ixs[..min_gts].to_vec();
         for &i in self.ixs[min_gts..].iter() {
             let (mean_i, var_i) = self.likelihoods[i];
-            let pval = math::unpaired_onesided_t_test::<false>(mean_i, var_i, mean1, var1, attempts);
-            if pval.ln() >= params.prob_thresh {
+            let ln_pval = compare_two_likelihoods(mean_i, var_i, mean1, var1, attempts);
+            if ln_pval >= params.prob_thresh {
                 new_ixs.push(i);
             } else {
                 dropped += 1;
@@ -334,20 +348,23 @@ impl Likelihoods {
         let mut ln_probs = vec![0.0; n];
         let mut out_genotypes = Vec::with_capacity(n);
         let mut mean_sds = Vec::with_capacity(n);
-        for i in 0..n {
+        let mut i = 0;
+        // Use while instead of for, as upper bound can change.
+        while i < n {
             let (mean_i, var_i) = self.likelihoods[self.ixs[i]];
             out_genotypes.push(genotypes[self.ixs[i]].clone());
             mean_sds.push((mean_i, (var_i / attempts).sqrt()));
             for j in i + 1..n {
                 let (mean_j, var_j) = self.likelihoods[self.ixs[j]];
-                let pval = math::unpaired_onesided_t_test::<false>(mean_i, var_i, mean_j, var_j, attempts);
-                if i == 0 && j >= MIN_OUTPUT && pval.ln() < thresh_prob {
+                let prob_j = compare_two_likelihoods(mean_j, var_j, mean_i, var_i, attempts);
+                if i == 0 && j >= MIN_OUTPUT && prob_j < thresh_prob {
                     n = j;
                     break;
                 }
-                ln_probs[i] += pval.ln();
-                ln_probs[j] += (-pval).ln_1p();
+                ln_probs[i] += (-prob_j.exp()).ln_1p();
+                ln_probs[j] += prob_j;
             }
+            i += 1;
         }
         ln_probs.truncate(n);
         let norm_fct = Ln::sum(&ln_probs);
@@ -377,7 +394,7 @@ pub struct Genotyping {
 impl Genotyping {
     pub fn print_log(&self) {
         let (mean, sd) = self.mean_sds[0];
-        log::info!("    Best genotype for {}: {}.  Lik = {:.1} ± {:.1}, Qual = {:.1}, Conf. = {:.4}%",
+        log::info!("    Best genotype for {}: {}.  Lik = {:.2} ± {:.2}, Qual = {:.1}, Conf. = {:.4}%",
             self.tag, self.genotypes[0], Ln::to_log10(mean), Ln::to_log10(sd),
             self.quality, 100.0 * self.ln_probs[0].exp());
     }
