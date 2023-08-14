@@ -16,6 +16,7 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
     let mut model = Model::with_env("", &env.start()?)?;
     model.set_param(parameter::IntParam::Threads, 1)?;
 
+    let (depth_contrib, aln_contrib) = gt_alns.contributions();
     let total_windows = gt_alns.total_windows();
     let mut window_depth = vec![(0_u32, 0_u32); total_windows];
     let mut window_depth_constrs = vec![LinExpr::new(); total_windows];
@@ -28,7 +29,7 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
             for w in loc.windows().into_iter() {
                 window_depth[w as usize].0 += 1;
             }
-            objective.add_constant(loc.ln_prob());
+            objective.add_constant(aln_contrib * loc.ln_prob());
             continue;
         }
 
@@ -36,7 +37,7 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
         for (j, loc) in read_alns.iter().enumerate() {
             let var = add_binvar!(model, name: &format!("R{:x}_{}", rp, j))?;
             assignment_vars.push(var);
-            objective.add_term(loc.ln_prob(), var);
+            objective.add_term(aln_contrib * loc.ln_prob(), var);
             let ws = loc.windows();
             let inc: u32 = if ws[0] == ws[1] { 2 } else { 1 };
             for w in ws.into_iter() {
@@ -50,7 +51,6 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
         model.add_constr(&format!("R{:x}", rp), c!( (&assignment_vars[prev_len..]).grb_sum() == 1 ))?;
     }
 
-    let depth_contrib = gt_alns.depth_contrib();
     let mut depth_vars = Vec::new();
     for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
         if !gt_alns.use_window(w) {

@@ -33,7 +33,7 @@ impl SelectedCounter {
     /// Increments selected counts.
     pub fn update(&mut self, assgn: &ReadAssignment) {
         self.total_count += 1;
-        for (&read_ix, &read_assgn) in assgn.gt_alns.read_ixs.iter().zip(&assgn.read_assgn) {
+        for (&read_ix, &read_assgn) in assgn.parent.read_ixs.iter().zip(&assgn.read_assgn) {
             self.buffer[read_ix + usize::from(read_assgn)] += 1;
         }
     }
@@ -58,12 +58,14 @@ pub struct GenotypeAlignments {
     /// Contigs subset, to which reads the reads are assigned,
     /// plus the number of windows (and shifts) at each window.
     gt_windows: GenotypeWindows,
-    /// Read depth contribution, relative to read alignment likelihoods.
-    depth_contrib: f64,
     /// Read depth distribution at each window (length: `gt_windows.total_windows()`).
     depth_distrs: Vec<DistrBox>,
     /// Is this window weight over the threshold?
     use_window: Vec<bool>,
+
+    /// Read depth and read alignments contributions (sum to 2).
+    depth_contrib: f64,
+    aln_contrib: f64,
 
     /// A vector of possible read alignments.
     alns: Vec<ReadGtAlns>,
@@ -120,7 +122,8 @@ impl GenotypeAlignments {
         }
 
         Self {
-            depth_contrib: params.depth_contrib,
+            depth_contrib: params.lik_skew + 1.0,
+            aln_contrib: 1.0 - params.lik_skew,
             gt_windows, depth_distrs, use_window, alns, read_ixs, non_trivial_reads,
         }
     }
@@ -160,9 +163,9 @@ impl GenotypeAlignments {
         self.depth_distrs.len()
     }
 
-    /// Read depth contribution, relative to read alignment contribution.
-    pub fn depth_contrib(&self) -> f64 {
-        self.depth_contrib
+    /// Read depth and read alignment contributions to the total likelihood.
+    pub fn contributions(&self) -> (f64, f64) {
+        (self.depth_contrib, self.aln_contrib)
     }
 
     // /// Returns the genotype.
@@ -199,7 +202,7 @@ impl GenotypeAlignments {
 /// Read assignment to a vector of contigs and the corresponding likelihoods.
 pub struct ReadAssignment<'a> {
     /// Genotype and read alignments to it.
-    gt_alns: &'a GenotypeAlignments,
+    parent: &'a GenotypeAlignments,
     /// Store current read assignment (length: n_reads).
     read_assgn: Vec<u16>,
     /// Current read depth at each window (concatenated across different contigs).
@@ -217,27 +220,27 @@ impl<'a> ReadAssignment<'a> {
     ///
     /// Read assignments are initialized with `select_init` function, which provides initial location index
     /// for all non-trivial reads/read pairs.
-    pub fn new<F>(gt_alns: &'a GenotypeAlignments, mut select_init: F) -> Self
+    pub fn new<F>(parent: &'a GenotypeAlignments, mut select_init: F) -> Self
     where F: FnMut(&[ReadGtAlns]) -> usize,
     {
-        Self::try_new::<_, ()>(gt_alns, |locs| Ok(select_init(locs))).unwrap()
+        Self::try_new::<_, ()>(parent, |locs| Ok(select_init(locs))).unwrap()
     }
 
     /// Same as `new`, but initialization function may produce errors.
-    pub fn try_new<F, E>(gt_alns: &'a GenotypeAlignments, mut select_init: F) -> Result<Self, E>
+    pub fn try_new<F, E>(parent: &'a GenotypeAlignments, mut select_init: F) -> Result<Self, E>
     where F: FnMut(&[ReadGtAlns]) -> Result<usize, E>,
     {
-        let mut depth = vec![0; gt_alns.total_windows()];
+        let mut depth = vec![0; parent.total_windows()];
         // TODO: Replace with `array_windows`, once stable.
         let mut i = 0;
-        let read_assgn = gt_alns.read_ixs[1..].iter().map(|&j| {
+        let read_assgn = parent.read_ixs[1..].iter().map(|&j| {
             let m = j - i;
             let mut assgn = 0;
             if m > 1 {
-                assgn = select_init(&gt_alns.alns[i..j])?;
+                assgn = select_init(&parent.alns[i..j])?;
                 assert!(assgn < m, "Impossible read assignment: {} ({} locations)", assgn, m);
             }
-            for w in gt_alns.alns[i + assgn].windows().into_iter() {
+            for w in parent.alns[i + assgn].windows().into_iter() {
                 depth[w as usize] += 1;
             }
             i = j;
@@ -245,7 +248,7 @@ impl<'a> ReadAssignment<'a> {
         }).collect::<Result<Vec<_>, E>>()?;
 
         let mut assgn = Self {
-            gt_alns, read_assgn, depth,
+            parent, read_assgn, depth,
             aln_lik: f64::NEG_INFINITY,
             depth_lik: f64::NEG_INFINITY,
         };
@@ -255,13 +258,13 @@ impl<'a> ReadAssignment<'a> {
 
     // /// Returns the genotype.
     // pub fn genotype(&self) -> &Genotype {
-    //     self.gt_alns.genotype()
+    //     self.parent.genotype()
     // }
 
     /// Returns the total likelihood of the read assignment.
-    /// Equal to `depth_contrib * depth_lik + aln_lik`
+    /// Includes contribution factors.
     pub fn likelihood(&self) -> f64 {
-        self.gt_alns.depth_contrib * self.depth_lik + self.aln_lik
+        self.parent.depth_contrib * self.depth_lik + self.parent.aln_contrib * self.aln_lik
     }
 
     /// Assuming that read depth in `window` will change by `depth_change`,
@@ -271,10 +274,10 @@ impl<'a> ReadAssignment<'a> {
     /// Does not account for read depth contribution.
     fn atomic_depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
         let w = window as usize;
-        if depth_change == 0 || !self.gt_alns.use_window[w] {
+        if depth_change == 0 || !self.parent.use_window[w] {
             0.0
         } else {
-            let distr = &self.gt_alns.depth_distrs[w];
+            let distr = &self.parent.depth_distrs[w];
             let old_depth = self.depth[w];
             let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative");
             distr.ln_pmf(new_depth) - distr.ln_pmf(old_depth)
@@ -313,50 +316,52 @@ impl<'a> ReadAssignment<'a> {
 
     /// Finds the best improvement, which can be achieved by moving one read pair.
     pub fn best_read_improvement(&self, read_pair: usize) -> (ReassignmentTarget, f64) {
-        let start_ix = self.gt_alns.read_ixs[read_pair];
-        let end_ix = self.gt_alns.read_ixs[read_pair + 1];
+        let start_ix = self.parent.read_ixs[read_pair];
+        let end_ix = self.parent.read_ixs[read_pair + 1];
         assert!(start_ix + 1 < end_ix, "Read has only one possible assignment");
 
         let old_assgn = self.read_assgn[read_pair];
         let old_ix = start_ix + usize::from(old_assgn);
-        let old_aln = &self.gt_alns.alns[old_ix];
+        let old_aln = &self.parent.alns[old_ix];
         let [w1, w2] = old_aln.windows();
 
         let mut best_i = 0;
         let mut best_improv = f64::NEG_INFINITY;
-        for (i, aln) in self.gt_alns.alns[start_ix..end_ix].iter().enumerate() {
+        let rel_contrib = self.parent.depth_contrib / self.parent.aln_contrib;
+        for (i, aln) in self.parent.alns[start_ix..end_ix].iter().enumerate() {
             if i != usize::from(old_assgn) {
                 let [w3, w4] = aln.windows();
-                let improv = aln.ln_prob() + self.gt_alns.depth_contrib * self.depth_lik_diff(w1, w2, w3, w4);
+                let improv = aln.ln_prob() + rel_contrib * self.depth_lik_diff(w1, w2, w3, w4);
                 if improv > best_improv {
                     best_improv = improv;
                     best_i = i;
                 }
             }
         }
+        let improv = self.parent.aln_contrib * (best_improv - old_aln.ln_prob());
         (ReassignmentTarget {
             read_pair,
             new_assgn: best_i as u16,
             old_ix,
             new_ix: start_ix + best_i,
-        }, best_improv - old_aln.ln_prob())
+        }, improv)
     }
 
     /// Calculates improvement, achieved by reassigning read pair `rp` to a new location.
     /// Does not actually performs reassignment.
     pub fn calculate_improvement(&self, target: &ReassignmentTarget) -> f64 {
-        let old_aln = &self.gt_alns.alns[target.old_ix];
-        let new_aln = &self.gt_alns.alns[target.new_ix];
+        let old_aln = &self.parent.alns[target.old_ix];
+        let new_aln = &self.parent.alns[target.new_ix];
         let [w1, w2] = old_aln.windows();
         let [w3, w4] = new_aln.windows();
-        self.gt_alns.depth_contrib * self.depth_lik_diff(w1, w2, w3, w4)
-            + new_aln.ln_prob() - old_aln.ln_prob()
+        self.parent.depth_contrib * self.depth_lik_diff(w1, w2, w3, w4)
+            + self.parent.aln_contrib * (new_aln.ln_prob() - old_aln.ln_prob())
     }
 
     /// Reassigns read pair to a new location.
     pub fn reassign(&mut self, target: &ReassignmentTarget) {
-        let old_aln = &self.gt_alns.alns[target.old_ix];
-        let new_aln = &self.gt_alns.alns[target.new_ix];
+        let old_aln = &self.parent.alns[target.old_ix];
+        let new_aln = &self.parent.alns[target.new_ix];
         let [w1, w2] = old_aln.windows();
         let [w3, w4] = new_aln.windows();
         self.depth_lik += self.depth_lik_diff(w1, w2, w3, w4);
@@ -370,12 +375,12 @@ impl<'a> ReadAssignment<'a> {
 
     /// Recalculates total model likelihood.
     pub fn recalc_likelihood(&mut self) {
-        self.depth_lik = self.gt_alns.depth_distrs.iter()
+        self.depth_lik = self.parent.depth_distrs.iter()
             .zip(&self.depth)
             .map(|(distr, &depth)| distr.ln_pmf(depth))
             .sum::<f64>();
-        self.aln_lik = self.gt_alns.read_ixs.iter().zip(&self.read_assgn)
-            .map(|(&start_ix, &assgn)| self.gt_alns.alns[start_ix + assgn as usize].ln_prob())
+        self.aln_lik = self.parent.read_ixs.iter().zip(&self.read_assgn)
+            .map(|(&start_ix, &assgn)| self.parent.alns[start_ix + assgn as usize].ln_prob())
             .sum();
     }
 
@@ -385,20 +390,22 @@ impl<'a> ReadAssignment<'a> {
     /// General lines:  `prefix  contig(1|2)  window  depth     depth_lik`.
     /// Last line:      `prefix  summary      key=value key=value ...`. (key-value pairs separated by space).
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
-        let gt_windows = &self.gt_alns.gt_windows;
+        let gt_windows = &self.parent.gt_windows;
         for i in 0..gt_windows.genotype().ploidy() {
             let wshift = gt_windows.get_wshift(i) as usize;
             let wshift_end = gt_windows.get_wshift(i + 1) as usize;
             for w in wshift..wshift_end {
                 let depth = self.depth[w];
-            let log10_prob = Ln::to_log10(self.gt_alns.depth_distrs[w].ln_pmf(depth));
+            let log10_prob = Ln::to_log10(self.parent.depth_distrs[w].ln_pmf(depth));
                 writeln!(f, "{}\t{}\t{}\t{}\t{:.3}", prefix, i + 1, w - wshift + 1, depth, log10_prob)?;
             }
         }
 
-        writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} depth_lik={:.5} lik={:.5}", prefix,
+        writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} scaled_aln_lik={:.5} \
+            depth_lik={:.5} scaled_depth_lik={:.5} lik={:.5}", prefix,
             self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
-            Ln::to_log10(self.aln_lik), Ln::to_log10(self.depth_lik * self.gt_alns.depth_contrib),
+            Ln::to_log10(self.aln_lik), Ln::to_log10(self.parent.aln_contrib * self.aln_lik),
+            Ln::to_log10(self.depth_lik), Ln::to_log10(self.parent.depth_contrib * self.depth_lik),
             Ln::to_log10(self.likelihood()))
     }
 }
@@ -417,8 +424,8 @@ impl ReassignmentTarget {
         let old_assgn = assgn.read_assgn[read_pair];
         assert_ne!(old_assgn, new_assgn, "Read pair #{}: cannot change to the same assignment", read_pair);
 
-        let start_ix = assgn.gt_alns.read_ixs[read_pair];
-        let end_ix = assgn.gt_alns.read_ixs[read_pair + 1];
+        let start_ix = assgn.parent.read_ixs[read_pair];
+        let end_ix = assgn.parent.read_ixs[read_pair + 1];
         let old_ix = start_ix + usize::from(old_assgn);
         let new_ix = start_ix + usize::from(new_assgn);
         assert!(new_ix < end_ix, "Invalid read assignment for read pair #{}", read_pair);
@@ -427,9 +434,9 @@ impl ReassignmentTarget {
 
     /// Creates a random reassignment target: selects one random read pair, and its possible random new location.
     pub fn random(assgn: &ReadAssignment, rng: &mut impl Rng) -> Self {
-        let read_pair = assgn.gt_alns.non_trivial_reads[rng.gen_range(0..assgn.gt_alns.non_trivial_reads.len())];
-        let start_ix = assgn.gt_alns.read_ixs[read_pair];
-        let end_ix = assgn.gt_alns.read_ixs[read_pair + 1];
+        let read_pair = assgn.parent.non_trivial_reads[rng.gen_range(0..assgn.parent.non_trivial_reads.len())];
+        let start_ix = assgn.parent.read_ixs[read_pair];
+        let end_ix = assgn.parent.read_ixs[read_pair + 1];
         let total_assgns = end_ix - start_ix;
         assert!(total_assgns > 1, "Read pair #{} has less than 2 possible assignments", read_pair);
 

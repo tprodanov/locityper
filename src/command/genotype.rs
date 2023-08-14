@@ -173,9 +173,9 @@ fn print_help() {
         super::fmt_def_f64(defaults.assgn_params.weight_power), "FLOAT_1".yellow(), "FLOAT_2".yellow());
     println!("    {:KEY$} {:VAL$}  Ignore reads and windows with weight under this value [{}].",
         "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
-    println!("    {:KEY$} {:VAL$}  Read depth likelihood contribution relative to\n\
-        {EMPTY}  read alignment likelihoods [{}].",
-        "-C, --dp-contrib".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_contrib));
+    println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
+        {EMPTY}  matter more; Positive: read depth matters more.",
+        "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
     println!("    {} {}  Compare window probability to have copy number 1 against two\n\
         {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
         "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
@@ -262,8 +262,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.recr_params.matches_frac = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
-            Short('C') | Long("dp-contrib") | Long("depth-contrib") | Long("dp-contribution") =>
-                args.assgn_params.depth_contrib = parser.value()?.parse()?,
+            Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
             Short('A') | Long("alt-cn") =>
                 args.assgn_params.alt_cn = (parser.value()?.parse()?, parser.value()?.parse()?),
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),

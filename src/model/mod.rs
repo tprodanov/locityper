@@ -15,8 +15,8 @@ use crate::{
 pub struct Params {
     /// Boundary size: ignore left- and right-most `boundary_size` bp.
     pub boundary_size: u32,
-    /// Read depth likelihood contribution, relative to read alignment likelihood.
-    pub depth_contrib: f64,
+    /// Read depth likelihood contribution, relative to read alignment likelihood, must be in [0, 2].
+    pub lik_skew: f64,
     /// For each read pair, all alignments to a specific genotype,
     /// less probable than `best_prob - prob_diff` are discarded.
     pub prob_diff: f64,
@@ -55,7 +55,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             boundary_size: 200,
-            depth_contrib: 50.0,
+            lik_skew: 0.8,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
             edit_pvals: err_prof::DEF_EDIT_PVAL,
@@ -89,8 +89,8 @@ impl Params {
         validate_param!(self.boundary_size > 0, "Boundary size ({}) cannot be zero.", self.boundary_size);
         validate_param!(!self.prob_diff.is_nan() && self.prob_diff.is_finite(),
             "Unexpected probability difference ({:.4}) value", self.prob_diff);
-        validate_param!(self.depth_contrib > 0.0,
-            "Depth contribution ({}) must be positive", self.depth_contrib);
+        validate_param!(self.lik_skew >= -1.0 + 1e-10 && self.lik_skew <= 1.0 - 1e-10,
+            "Likelihood skew ({}) must be within (-1, 1)", self.lik_skew);
         self.prob_diff = self.prob_diff.abs();
         if self.prob_diff < 1.0 {
             log::warn!("Note that probability difference ({}) is in log-10 space", Ln::to_log10(self.prob_diff));

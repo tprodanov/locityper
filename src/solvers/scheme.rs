@@ -512,9 +512,7 @@ pub fn solve(
     let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
     data.threads = min(data.threads, n_gts);
-    log::info!("    Genotyping complex locus  across {} possible genotypes", n_gts);
-    log::debug!("        {} stages, {} threads, score thresh: {:.2}",
-        data.scheme.stages.len(), data.threads, data.assgn_params.score_thresh);
+    log::info!("    Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);
     let (mut depth_writers, depth_filenames) = create_debug_files(
         &locus_dir.join("depth."), data.threads, data.debug)?;
     writeln!(depth_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER).map_err(add_path!(!))?;
