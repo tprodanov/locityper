@@ -20,6 +20,4 @@ Improve `locityper add`:
 Provide scheme through arguments?
 
 * `loctyper add`: allow sequences as input,
-* Two contribution factors that sum up to 2.
-* Quality calculation when variance is 0.
 * Allow BAM files as input.
