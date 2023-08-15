@@ -355,7 +355,7 @@ impl Likelihoods {
         while i < n {
             let (mean_i, var_i) = self.likelihoods[self.ixs[i]];
             out_genotypes.push(genotypes[self.ixs[i]].clone());
-            mean_sds.push((mean_i, (var_i / attempts).sqrt()));
+            mean_sds.push((mean_i, var_i.sqrt()));
             for j in i + 1..n {
                 let (mean_j, var_j) = self.likelihoods[self.ixs[j]];
                 let prob_j = compare_two_likelihoods(mean_j, var_j, mean_i, var_i, attempts);
@@ -472,8 +472,7 @@ fn solve_single_thread(
             }
             let (lik_mean, lik_var) = F64Ext::mean_variance_or_nan(&liks);
             logger.update(gt.name(), lik_mean);
-            writeln!(lik_writer, "{}\t{:.3}\t{:.3}", prefix, Ln::to_log10(lik_mean),
-                    Ln::to_log10((lik_var / data.assgn_params.attempts as f64).sqrt()))
+            writeln!(lik_writer, "{}\t{:.3}\t{:.3}", prefix, Ln::to_log10(lik_mean), Ln::to_log10(lik_var.sqrt()))
                 .map_err(add_path!(!))?;
             likelihoods.likelihoods[ix] = (lik_mean, lik_var);
         }
@@ -661,9 +660,7 @@ impl MainWorker {
                         let (ix, lik_mean, lik_var) = receiver.recv().expect("Genotyping worker has failed!");
                         logger.update(data.genotypes[ix].name(), lik_mean);
                         writeln!(lik_writer, "{}\t{}\t{:.3}\t{:.3}", stage_ix + 1, data.genotypes[ix],
-                                Ln::to_log10(lik_mean),
-                                Ln::to_log10((lik_var / data.assgn_params.attempts as f64).sqrt()))
-                            .map_err(add_path!(!))?;
+                            Ln::to_log10(lik_mean), Ln::to_log10(lik_var.sqrt())).map_err(add_path!(!))?;
                         likelihoods.likelihoods[ix] = (lik_mean, lik_var);
                         *jobs -= 1;
                     }

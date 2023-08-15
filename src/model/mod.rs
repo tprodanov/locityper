@@ -67,22 +67,22 @@ impl Default for Params {
             tweak: None,
             alt_cn: (0.5, 1.5),
             use_unpaired: false,
-            max_alns: 500_000,
+            max_alns: 1_000_000,
 
             min_gts: UsizeOrInf(8),
             score_thresh: 0.95,
             prob_thresh: Ln::from_log10(-4.0),
-            attempts: 5,
+            attempts: 20,
         }
     }
 }
 
 /// If tweak size is bigger than this, there may appear problems with overflowing.
 const MAX_ALLOWED_TWEAK: u32 = u16::MAX as u32 / 2 - 1;
-/// Automatically select tweak size as 1/3 of the window size.
-const AUTO_TWEAK_MULT: f64 = 1.0 / 3.0;
-/// Automatically crop tweak size to 100 bp.
-const AUTO_TWEAK_MAX: u32 = 100;
+/// Automatically select tweak size as 1/2 of the window size.
+const AUTO_TWEAK_MULT: f64 = 0.5;
+/// Automatically crop tweak size to 200 bp.
+const AUTO_TWEAK_MAX: u32 = 200;
 
 impl Params {
     pub fn validate(&mut self) -> Result<(), Error> {
