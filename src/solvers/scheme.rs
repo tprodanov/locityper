@@ -396,7 +396,7 @@ pub struct Genotyping {
 impl Genotyping {
     pub fn print_log(&self) {
         let (mean, sd) = self.mean_sds[0];
-        log::info!("    Best genotype for {}: {}.  Lik = {:.2} ± {:.2}, Qual = {:.1}, Conf. = {:.4}%",
+        log::info!("    Best genotype for {}: {},  likelihood = {:.2} ± {:.2}, quality = {:.1}, confidence = {:.4}%",
             self.tag, self.genotypes[0], Ln::to_log10(mean), Ln::to_log10(sd),
             self.quality, 100.0 * self.ln_probs[0].exp());
     }

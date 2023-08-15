@@ -7,7 +7,7 @@ import numpy as np
 import tqdm
 import sys
 
-from tup_dist import open_stream
+from common import open_stream
 
 
 def get_divergencies(filename):

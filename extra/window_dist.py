@@ -5,7 +5,7 @@ import re
 import numpy as np
 from tqdm import tqdm
 
-from tup_dist import open_stream
+from common import open_stream
 
 
 PATTERN = re.compile(r'[0-9]+=')
