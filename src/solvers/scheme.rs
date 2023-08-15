@@ -155,7 +155,7 @@ impl Scheme {
                 }
                 "greedy" => (Box::new(super::GreedySolver::default()), &params.greedy_params),
                 "anneal" | "simanneal" | "annealing" | "simannealing"
-                    => (Box::new(super::SimAnneal::default()), &params.greedy_params),
+                    => (Box::new(super::SimAnneal::default()), &params.anneal_params),
                 "highs" => {
                     #[cfg(feature = "highs")]
                     { (Box::new(super::HighsSolver::default()), &params.highs_params) }
@@ -343,7 +343,9 @@ impl Likelihoods {
         let attempts = params.attempts as f64;
         self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
         let mut n = self.ixs.len();
-        assert!(n > 1);
+        if n < 2 {
+            log::warn!("For some reason, only {} genotypes remaining, quality will be undefined", n);
+        }
 
         let mut ln_probs = vec![0.0; n];
         let mut out_genotypes = Vec::with_capacity(n);

@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    cmp::min,
+    cmp::{min, max},
 };
 use rand::{
     Rng,
@@ -12,6 +12,19 @@ use crate::{
     model::assgn::{GenotypeAlignments, ReadAssignment, ReassignmentTarget},
 };
 use super::Solver;
+
+/// Returns maximum absolute likelihood difference, observed over `count` random reassignments.
+fn max_abs_random(assignments: &ReadAssignment, rng: &mut XoshiroRng, count: usize) -> f64 {
+    (0..count).map(|_| assignments.calculate_improvement(&ReassignmentTarget::random(&assignments, rng)))
+        .fold(0.0, |acc, x| acc.max(x.abs()))
+}
+
+const INIT_ITER: usize = 100;
+
+/// Consider likelihood differences between these values random noise caused by float arithmetics.
+fn minimum_allowed_diff(max_abs_diff: f64) -> f64 {
+    (1e-10 * max_abs_diff).max(1e-14)
+}
 
 /// Assigns reads in a greedy way.
 ///
@@ -54,15 +67,17 @@ impl Solver for GreedySolver {
         rng: &mut XoshiroRng,
     ) -> Result<ReadAssignment<'a>, Error>
     {
-        // 0 - index of the best alignment.
         let non_trivial_ixs = gt_alns.non_trivial_reads();
         let sample_size = min(self.sample_size, non_trivial_ixs.len());
+        // 0 - index of the best alignment.
         let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
-        let mut curr_plato = 0;
+        let min_diff = minimum_allowed_diff(max_abs_random(&assignments, rng, INIT_ITER));
 
-        while curr_plato <= self.plato_size {
+        let mut curr_plato = 0;
+        let max_iter = max(100_000, self.plato_size * 100);
+        for _ in 0..max_iter {
             let mut best_target = None;
-            let mut best_improv = 0.0;
+            let mut best_improv = min_diff;
             for &rp in non_trivial_ixs.choose_multiple(rng, sample_size) {
                 let (target, improv) = assignments.best_read_improvement(rp);
                 if improv > best_improv {
@@ -75,6 +90,9 @@ impl Solver for GreedySolver {
                 assignments.reassign(&target);
             } else {
                 curr_plato += 1;
+                if curr_plato > self.plato_size {
+                    break;
+                }
             }
         }
         Ok(assignments)
@@ -106,68 +124,41 @@ impl fmt::Display for GreedySolver {
 /// Randomly selects direction based on the current temperature, and stops once there are no improvement `plato_size`.
 #[derive(Clone)]
 pub struct SimAnneal {
-    /// Temperature starts at 1, and decreases by `cooling_temp` every step.
-    cooling_temp: f64,
     /// Initialize temperature constant in such way, that initially
-    /// an average negative improvement would have `init_prob` chance to pass.
+    /// an -abs(max diff) would have `init_prob` chance to pass.
     init_prob: f64,
-    /// Solver stops if there were no improvements during the last `plato_size` iterations.
+    /// How many annealing steps should there be?
+    anneal_steps: usize,
+    /// After annealing, continue improving likelihood until encounter `plato_size` iterations without improvement.
     plato_size: usize,
 }
 
 impl Default for SimAnneal {
     fn default() -> Self {
         Self {
-            cooling_temp: 5e-5,
-            init_prob: 0.1,
+            init_prob: 0.5,
+            anneal_steps: 20000,
             plato_size: 10000,
         }
     }
 }
 
 impl SimAnneal {
-    pub fn set_cooling_temp(&mut self, cooling_temp: f64) -> Result<(), Error> {
-        validate_param!(cooling_temp > 0.0 && cooling_temp < 1.0,
-            "Cooling temperature ({}) must be within (0, 1)", cooling_temp);
-        self.cooling_temp = cooling_temp;
+    pub fn set_init_prob(&mut self, init_prob: f64) -> Result<(), Error> {
+        validate_param!(init_prob > 0.0 && init_prob <= 1.0,
+            "Initial probability ({}) must be within (0, 1]", init_prob);
+        self.init_prob = init_prob;
         Ok(())
     }
 
-    pub fn set_init_prob(&mut self, init_prob: f64) -> Result<(), Error> {
-        validate_param!(init_prob > 0.0 && init_prob < 1.0,
-            "Initial probability ({}) must be within (0, 1)", init_prob);
-        self.init_prob = init_prob;
+    pub fn set_anneal_steps(&mut self, anneal_steps: usize) -> Result<(), Error> {
+        validate_param!(anneal_steps > 0, "Number of annealing steps ({}) must be positive", anneal_steps);
+        self.anneal_steps = anneal_steps;
         Ok(())
     }
 
     pub fn set_plato_size(&mut self, plato_size: usize) {
         self.plato_size = plato_size;
-    }
-
-    /// Finds temperature coefficient by checking 100 random reassignments and their probabilities.
-    fn find_temperature_coeff(&self,
-        assignments: &ReadAssignment,
-        rng: &mut XoshiroRng
-    ) -> f64 {
-        let mut neg_sum = 0.0;
-        let mut neg_count: u32 = 0;
-        const INIT_ITERS: u32 = 100;
-        for _ in 0..INIT_ITERS {
-            let diff = assignments.calculate_improvement(&ReassignmentTarget::random(&assignments, rng));
-            if diff < 0.0 {
-                neg_sum += diff;
-                neg_count += 1;
-            }
-        }
-        if neg_count == 0 {
-            1.0
-        } else {
-            self.init_prob.ln() * f64::from(neg_count) / neg_sum
-        }
-    }
-
-    fn accept_change(diff: f64, curr_temp: f64, rng: &mut impl Rng) -> bool {
-        diff > 0.0 || (diff > 0.0 && rng.gen::<f64>() <= (diff / curr_temp).exp())
     }
 }
 
@@ -181,20 +172,34 @@ impl Solver for SimAnneal {
     {
         // 0 - index of the best alignment.
         let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
-        let coeff = self.find_temperature_coeff(&assignments, rng);
+        let max_abs = max_abs_random(&assignments, rng, INIT_ITER);
+        let min_diff = minimum_allowed_diff(max_abs);
+        // Solution to equation   `init_prob = exp(-max_abs / start_temp)`.
+        let start_temp = (-max_abs / self.init_prob.ln()).max(1e-5);
+        let temp_step = start_temp / self.anneal_steps as f64;
 
-        let mut curr_temp = 1.0 / coeff;
-        let cooling_temp = self.cooling_temp / coeff;
-        let mut curr_plato = 0;
-        while curr_plato <= self.plato_size {
+        for i in (1..=self.anneal_steps).rev() {
             let target = ReassignmentTarget::random(&assignments, rng);
-            if Self::accept_change(assignments.calculate_improvement(&target), curr_temp, rng) {
+            let diff = assignments.calculate_improvement(&target) - min_diff;
+            if diff >= 0.0 || rng.gen::<f64>() <= (diff / (temp_step * i as f64)).exp() {
+                assignments.reassign(&target);
+            }
+        }
+
+        let max_iter = max(100_000, self.plato_size * 100);
+        let mut curr_plato = 0;
+        for _ in 0..max_iter {
+            let target = ReassignmentTarget::random(&assignments, rng);
+            let diff = assignments.calculate_improvement(&target);
+            if diff > min_diff {
                 assignments.reassign(&target);
                 curr_plato = 0;
             } else {
                 curr_plato += 1;
+                if curr_plato >= self.plato_size {
+                    break;
+                }
             }
-            curr_temp -= cooling_temp;
         }
         Ok(assignments)
     }
@@ -204,9 +209,9 @@ impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
     fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
         match &key.to_lowercase() as &str {
-            "cooling" | "coolingtemp" | "cooling_temp" => self.set_cooling_temp(val.parse()
+            "steps" | "annealsteps" | "anneal_steps" => self.set_anneal_steps(val.parse()
                 .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
-            "init_prob" | "initprob" => self.set_init_prob(val.parse()
+            "init" | "init_prob" | "initprob" => self.set_init_prob(val.parse()
                 .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
             "plato" => self.set_plato_size(val.parse()
                 .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?),
@@ -218,7 +223,6 @@ impl super::SetParams for SimAnneal {
 
 impl fmt::Display for SimAnneal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SimAnneal(cool.temp {}, init.prob {}, plato {})",
-            self.cooling_temp, self.init_prob, self.plato_size)
+        write!(f, "SimAnneal(init.prob {}, steps {}, plato {})", self.init_prob, self.anneal_steps, self.plato_size)
     }
 }
