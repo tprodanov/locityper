@@ -32,6 +32,8 @@ fn minimum_allowed_diff(max_abs_diff: f64) -> f64 {
 /// If no improvement was made for `plato_size` iterations, the solver stops.
 #[derive(Clone)]
 pub struct GreedySolver {
+    /// If true, start with best read alignments, otherwise, assign initial alignments randomly.
+    best_start: bool,
     /// Number of read-pairs, examined per iteration.
     sample_size: usize,
     /// Number of iteration without improvement, after which the solver stops.
@@ -41,13 +43,18 @@ pub struct GreedySolver {
 impl Default for GreedySolver {
     fn default() -> Self {
         Self {
-            sample_size: 100,
-            plato_size: 5,
+            best_start: true,
+            sample_size: 10,
+            plato_size: 100,
         }
     }
 }
 
 impl GreedySolver {
+    pub fn set_best_start(&mut self, best_start: bool) {
+        self.best_start = best_start;
+    }
+
     pub fn set_sample_size(&mut self, sample_size: usize) -> Result<(), Error> {
         validate_param!(sample_size != 0, "Greedy solver: sample size must be positive");
         self.sample_size = sample_size;
@@ -69,8 +76,12 @@ impl Solver for GreedySolver {
     {
         let non_trivial_ixs = gt_alns.non_trivial_reads();
         let sample_size = min(self.sample_size, non_trivial_ixs.len());
-        // 0 - index of the best alignment.
-        let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
+        let mut assignments = if self.best_start {
+            // 0 - index of the best alignment.
+            ReadAssignment::new(gt_alns, |_| 0)
+        } else {
+            ReadAssignment::new(gt_alns, |alns| rng.gen_range(0..alns.len()))
+        };
         let min_diff = minimum_allowed_diff(max_abs_random(&assignments, rng, INIT_ITER));
 
         let mut curr_plato = 0;
@@ -103,6 +114,8 @@ impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
     fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
         match &key.to_lowercase() as &str {
+            "best" | "beststart" | "best_start" => self.set_best_start(val.parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?),
             "sample" => self.set_sample_size(val.parse()
                 .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
             "plato" => self.set_plato_size(val.parse()
@@ -115,7 +128,8 @@ impl super::SetParams for GreedySolver {
 
 impl fmt::Display for GreedySolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Greedy({} reads/iter, plato {})", self.sample_size, self.plato_size)
+        write!(f, "Greedy({} start, {} reads/iter, plato {})",
+            if self.best_start { "best" } else { "random" }, self.sample_size, self.plato_size)
     }
 }
 
@@ -171,7 +185,8 @@ impl Solver for SimAnneal {
     ) -> Result<ReadAssignment<'a>, Error>
     {
         // 0 - index of the best alignment.
-        let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
+        // let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
+        let mut assignments = ReadAssignment::new(gt_alns, |alns| rng.gen_range(0..alns.len()));
         let max_abs = max_abs_random(&assignments, rng, INIT_ITER);
         let min_diff = minimum_allowed_diff(max_abs);
         // Solution to equation   `init_prob = exp(-max_abs / start_temp)`.
