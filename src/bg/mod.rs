@@ -5,7 +5,7 @@ pub mod windows;
 pub mod ser;
 
 use std::{
-    fmt,
+    fmt::{self, Write},
     str::FromStr,
 };
 use crate::{
@@ -172,6 +172,25 @@ impl Technology {
         }
     }
 
+    /// Describe values for each technology in format
+    /// "illumina: X, hifi: Y, ..."
+    pub fn describe_values<D, F>(f: F) -> String
+    where D: fmt::Display,
+          F: Fn(Self) -> D,
+    {
+        // NOTE: In nightly version, can use `std::mem::variant_count`.
+        const TECHS: [Technology; 4] = [Technology::Illumina, Technology::HiFi,
+            Technology::PacBio, Technology::Nanopore];
+        let mut s = String::new();
+        for (i, &tech) in TECHS.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            write!(s, "{}: {}", tech, f(tech)).unwrap();
+        }
+        s
+    }
+
     /// Returns true if the technology exhibits different depth values at different GC-contents.
     pub fn has_gc_bias(self) -> bool {
         self == Self::Illumina
@@ -189,6 +208,15 @@ impl Technology {
 
     pub fn paired_end_allowed(self) -> bool {
         self == Self::Illumina
+    }
+
+    /// Returns minimizer matching fraction for different technologies.
+    pub fn default_matches_frac(self) -> f64 {
+        match self {
+            Self::Illumina => 0.7,
+            Self::HiFi => 0.2,
+            Self::PacBio | Self::Nanopore => 0.1,
+        }
     }
 }
 

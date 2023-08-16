@@ -54,6 +54,13 @@ impl Params {
         validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
         Ok(())
     }
+
+    pub fn set_matches_frac(&mut self, matches_frac: f32) -> Result<(), Error> {
+        validate_param!(matches_frac > 0.0 && matches_frac <= 1.0,
+            "Matches ratio ({:.5}) cannot be zero, and cannot be over 1", matches_frac);
+        self.matches_frac = matches_frac;
+        Ok(())
+    }
 }
 
 /// Recruitment statistics: how long did it take, how many reads processed and how many recruited.

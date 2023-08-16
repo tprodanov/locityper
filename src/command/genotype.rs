@@ -49,6 +49,7 @@ struct Args {
     debug: bool,
 
     recr_params: recruit::Params,
+    matches_frac: Option<f64>,
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
 }
@@ -73,6 +74,7 @@ impl Default for Args {
             debug: false,
 
             recr_params: Default::default(),
+            matches_frac: None,
             assgn_params: Default::default(),
             scheme_params: Default::default(),
         }
@@ -141,9 +143,10 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
         "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.recr_params.minimizer_w));
     println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
-        {EMPTY}  of minimizers matching one of the targets [{}].",
+        {EMPTY}  of minimizers matching one of the targets.\n\
+        {EMPTY}  Default: {}.",
         "-m, --matches-frac".green(), "FLOAT".yellow(),
-        super::fmt_def_f64(f64::from(defaults.recr_params.matches_frac)));
+        Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
     println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
         {EMPTY}  May impact runtime in multi-threaded read recruitment.",
         "-c, --chunk-size".green(), "INT".yellow(), super::fmt_def(defaults.recr_params.chunk_size));
@@ -259,7 +262,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('k') | Long("recr-kmer") => args.recr_params.minimizer_k = parser.value()?.parse()?,
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
             Short('m') | Long("matches-frac") | Long("matches-fraction") =>
-                args.recr_params.matches_frac = parser.value()?.parse()?,
+                args.matches_frac = Some(parser.value()?.parse()?),
             Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
 
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
@@ -691,7 +694,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let timer = Instant::now();
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
-    let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
 
     let bg_path = out_dir.join(paths::BG_DIR).join(paths::BG_DISTR);
     let mut bg_stream = ext::sys::open(&bg_path)?;
@@ -699,6 +701,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     bg_stream.read_to_string(&mut bg_str).map_err(add_path!(bg_path))?;
     let mut bg_distr = BgDistr::load(&json::parse(&bg_str)?)?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
+    args.recr_params.set_matches_frac(
+        args.matches_frac.unwrap_or_else(|| bg_distr.seq_info().technology().default_matches_frac()) as f32)?;
     bg_distr.set_edit_pvals(args.assgn_params.edit_pvals);
 
     validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
@@ -709,6 +713,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         args.minimap = ext::sys::find_exe(args.minimap)?;
     }
 
+    let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.rerun)?;
     recruit_reads(&loci, &args)?;
 
