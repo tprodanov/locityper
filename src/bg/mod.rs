@@ -154,12 +154,18 @@ impl Technology {
         }
     }
 
+    pub fn long_name(self) -> &'static str {
+        match self {
+            Self::Illumina => "Illumina",
+            Self::HiFi => "PacBio HiFi",
+            Self::PacBio => "Pacbio CLR",
+            Self::Nanopore => "Oxford Nanopore",
+        }
+    }
+
     pub fn minimap_preset(self) -> &'static str {
         match self {
-            Self::Illumina => {
-                log::warn!("Using Minimap2 for short reads!");
-                "sr"
-            },
+            Self::Illumina => unreachable!("Minimap2 is not used for short reads"),
             Self::HiFi => "map-hifi",
             Self::PacBio => "map-pb",
             Self::Nanopore => "map-ont",
@@ -168,6 +174,20 @@ impl Technology {
 
     /// Returns true if the technology exhibits different depth values at different GC-contents.
     pub fn has_gc_bias(self) -> bool {
+        self == Self::Illumina
+    }
+
+    /// Returns ranges of expected sequencing lengths for various sequencing technologies.
+    pub fn expect_mean_length(self) -> (f64, f64) {
+        match self {
+            Self::Illumina => (100.0, 400.0),
+            Self::HiFi => (5_000.0, 30_000.0),
+            Self::PacBio => (5_000.0, 150_000.0),
+            Self::Nanopore => (5_000.0, 500_000.0),
+        }
+    }
+
+    pub fn paired_end_allowed(self) -> bool {
         self == Self::Illumina
     }
 }
@@ -192,18 +212,7 @@ impl fmt::Display for Technology {
     }
 }
 
-impl fmt::Debug for Technology {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(match self {
-            Self::Illumina => "'Illumina'",
-            Self::HiFi => "'PacBio HiFi'",
-            Self::PacBio => "'Pacbio CLR'",
-            Self::Nanopore => "'Oxford Nanopore'",
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SequencingInfo {
     /// Mean read length.
     read_len: f64,
@@ -212,12 +221,20 @@ pub struct SequencingInfo {
 }
 
 impl SequencingInfo {
-    pub fn new(read_len: f64, technology: Technology) -> Self {
-        if read_len > 400.0 && technology == Technology::Illumina {
-            log::error!("Unusual mean read length ({:.0}) for the {:?} sequencing technology",
-                read_len, technology);
+    /// Creates sequencing info. Does not return Error if `warn`, even if the read length is suspicious.
+    pub fn new(read_len: f64, technology: Technology, warn: bool) -> Result<Self, Error> {
+        let (min_mean_len, max_mean_len) = technology.expect_mean_length();
+        if read_len < min_mean_len || read_len > max_mean_len {
+            if warn {
+                log::warn!("Unusual mean read length ({:.0}) for the {} sequencing technology",
+                    read_len, technology.long_name());
+            } else {
+                return Err(Error::InvalidInput(format!(
+                    "Unusual mean read length ({:.0}) for the {} sequencing technology",
+                    read_len, technology.long_name())));
+            }
         }
-        Self { read_len, technology }
+        Ok(Self { read_len, technology })
     }
 
     pub fn mean_read_len(&self) -> f64 {

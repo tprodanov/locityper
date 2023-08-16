@@ -130,10 +130,12 @@ struct Args {
     minimap: PathBuf,
     samtools: PathBuf,
     debug: bool,
+    /// Was technology explicitely provided?
+    explicit_technology: bool,
 
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
-    pub max_clipping: f64,
+    max_clipping: f64,
 
     params: Params,
     bg_params: bg::Params,
@@ -155,6 +157,7 @@ impl Default for Args {
             strobealign: PathBuf::from("strobealign"),
             minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
+            explicit_technology: false,
 
             max_clipping: 0.02,
             params: Params::default(),
@@ -174,13 +177,13 @@ impl Args {
             "Read files (-i) and an alignment file (-a) cannot be provided together");
         validate_param!(n_input != 2 || !self.interleaved,
             "Two read files (-i/--input) are provided, however, --interleaved is specified");
-        if self.params.technology == Technology::Illumina {
-            if self.is_single_end() {
+        if n_input > 0 {
+            let paired_end_allowed = self.params.technology.paired_end_allowed();
+            validate_param!(self.is_single_end() || paired_end_allowed,
+                "Paired end reads are not supported by {}", self.params.technology.long_name());
+            if self.is_single_end() && paired_end_allowed {
                 log::warn!("Running in single-end mode.");
             }
-        } else {
-            validate_param!(self.is_single_end(),
-                "Paired end reads are not supported for technology {:?}", self.params.technology);
         }
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
@@ -345,7 +348,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
-            Short('t') | Long("technology") => args.params.technology = parser.value()?.parse()?,
+            Short('t') | Long("technology") => {
+                args.explicit_technology = true;
+                args.params.technology = parser.value()?.parse()?;
+            }
 
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
@@ -731,13 +737,14 @@ fn estimate_bg_distrs(
         (alns, is_paired_end) = load_alns(&mut bam_reader,
             |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
             &data.ref_contigs, args)?;
-        if is_paired_end && args.params.technology != Technology::Illumina {
-            return Err(Error::InvalidInput(format!("Paired end reads are not supported for technology {:?}",
-                args.params.technology)));
+        if is_paired_end && !args.params.technology.paired_end_allowed() {
+            return Err(Error::InvalidInput(format!("Paired end reads are not supported by {}",
+                args.params.technology.long_name())));
         }
-        seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.params.technology);
+        seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.params.technology, args.explicit_technology)?;
     } else {
-        seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.params.technology);
+        seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.params.technology,
+            args.explicit_technology)?;
         log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
 
         let bam_filename = out_dir.join("aln.bam");
