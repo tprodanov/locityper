@@ -1,6 +1,6 @@
 use std::{
     io::{self, Write},
-    cmp::{min, max},
+    cmp::min,
     path::Path,
 };
 use super::depth::ReadDepthParams;
@@ -130,7 +130,7 @@ impl Windows {
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
         let window_size = params.window_size
-            .unwrap_or_else(|| (seq_info.mean_read_len() * AUTO_WINDOW_MULT).round() as u32
+            .unwrap_or_else(|| ((seq_info.mean_read_len() * AUTO_WINDOW_MULT).round() as u32)
                 .clamp(AUTO_WINDOW_MIN, AUTO_WINDOW_MAX));
         if window_size < AUTO_WINDOW_MIN || window_size > AUTO_WINDOW_MAX {
             log::warn!("    Window size {} may be too small or too big", window_size);
