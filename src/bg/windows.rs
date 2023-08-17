@@ -106,6 +106,8 @@ const MIN_NEIGHBOURHOOD: u32 = 300;
 const AUTO_WINDOW_MULT: f64 = 2.0 / 3.0;
 /// Window size must be at least 20 bp.
 const AUTO_WINDOW_MIN: u32 = 20;
+/// Maximum window size.
+const AUTO_WINDOW_MAX: u32 = 5000;
 
 /// Collection of windows.
 pub struct Windows {
@@ -128,7 +130,11 @@ impl Windows {
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
         let window_size = params.window_size
-            .unwrap_or_else(|| max(AUTO_WINDOW_MIN, (seq_info.mean_read_len() * AUTO_WINDOW_MULT).round() as u32));
+            .unwrap_or_else(|| (seq_info.mean_read_len() * AUTO_WINDOW_MULT).round() as u32
+                .clamp(AUTO_WINDOW_MIN, AUTO_WINDOW_MAX));
+        if window_size < AUTO_WINDOW_MIN || window_size > AUTO_WINDOW_MAX {
+            log::warn!("    Window size {} may be too small or too big", window_size);
+        }
         let neighb_size = window_size.max(MIN_NEIGHBOURHOOD);
         log::debug!("    Using {} bp windows, (window neighbourhood size {}, boundary {})",
             window_size, neighb_size, params.boundary_size);
