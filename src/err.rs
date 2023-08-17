@@ -66,6 +66,11 @@ impl Error {
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {
         Self::Solver(solver_name, s.into())
     }
+
+    /// Format error message. TODO: Better formatting.
+    pub fn display(&self) -> String {
+        format!("{:?}", self)
+    }
 }
 
 macro_rules! validate_param {

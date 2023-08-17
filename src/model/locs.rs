@@ -516,8 +516,7 @@ impl AllAlignments {
             let read_name = reader.curr_name()?.to_owned();
             let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut dbg_writer)?;
             if !hashes.insert(summary1.name_hash) {
-                log::warn!("Read {} produced hash collision ({:X}). \
-                    If many such messages, reads appear in an unordered fashion, will lead to errors",
+                log::warn!("Read {} produced hash collision ({:X}). Is an error if there are many such messages",
                     read_name, summary1.name_hash);
             }
             let mut central = summary1.any_central;

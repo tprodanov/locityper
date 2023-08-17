@@ -89,9 +89,6 @@ impl Args {
         validate_param!(n_input > 0, "Read files are not provided (see -i/--input)");
         validate_param!(n_input != 2 || !self.interleaved,
             "Two read files (-i/--input) are provided, however, --interleaved is specified");
-        if !self.interleaved && n_input == 1 {
-            log::warn!("Running in single-end mode.");
-        }
         validate_param!(self.ploidy > 0 && self.ploidy <= 11, "Ploidy ({}) must be within [1, 10]", self.ploidy);
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
@@ -221,7 +218,7 @@ fn print_help() {
         "    --rerun".green(), "STR".yellow(), defaults.rerun.to_str().cyan(),
         "all".yellow(), "part".yellow(), "none".yellow());
     println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
-        {EMPTY}  input and product version.",
+        {EMPTY}  input and program version.",
         "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
@@ -722,6 +719,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
     let cached_distrs = CachedDepthDistrs::new(&bg_distr, &args.assgn_params);
     let mut rng = ext::rand::init_rng(args.seed);
+    let mut successes = 0;
     for locus in loci.iter() {
         // Remove to get ownership of the locus priors.
         let locus_priors = priors.as_ref().and_then(|priors| priors.get(locus.set.tag()));
@@ -732,8 +730,20 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         let rng_clone = rng.clone();
         // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
         rng.long_jump();
-        analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, locus_priors, rng_clone, &args)?;
+        if let Err(e) = analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, locus_priors, rng_clone, &args) {
+            log::error!("Error in locus {}: {}", locus.set.tag(), e.display());
+        } else {
+            successes += 1;
+        }
     }
-    log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
+    let nloci = loci.len();
+    if successes == 0 {
+        log::error!("Failed at all {} loci", nloci);
+    } else if successes < nloci {
+        log::warn!("Successfully analysed {} loci, failed at {} loci", successes, nloci - successes);
+    } else {
+        log::info!("Successfully analysed {} loci", successes);
+    }
+    log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }

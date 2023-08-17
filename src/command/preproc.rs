@@ -15,7 +15,10 @@ use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use htslib::bam;
 use crate::{
-    ext,
+    ext::{
+        self,
+        rand::{init_rng, XoshiroRng},
+    },
     err::{Error, validate_param, add_path},
     seq::{
         ContigNames, Interval,
@@ -40,7 +43,7 @@ struct Params {
     technology: Technology,
     min_mapq: u8,
     subsampling_rate: f64,
-    subsampling_seed: Option<u64>,
+    seed: Option<u64>,
 }
 
 impl Default for Params {
@@ -49,7 +52,7 @@ impl Default for Params {
             technology: Technology::Illumina,
             min_mapq: 20,
             subsampling_rate: 0.1,
-            subsampling_seed: None,
+            seed: None,
         }
     }
 }
@@ -90,9 +93,9 @@ impl Params {
             true
         } else {
             // Not critical.
-            if from_reads && self.subsampling_seed != old_params.subsampling_seed {
+            if from_reads && self.seed != old_params.seed {
                 log::warn!("Subsampling seed has changed ({:?} -> {:?})",
-                    old_params.subsampling_seed, self.subsampling_seed);
+                    old_params.seed, self.seed);
             }
             false
         }
@@ -105,14 +108,17 @@ impl JsonSer for Params {
             technology: self.technology.to_str(),
             min_mapq: self.min_mapq,
             subsampling_rate: self.subsampling_rate,
-            subsampling_seed: self.subsampling_seed,
+            subsampling_seed: self.seed,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
         json_get!(obj -> technology (as_str), min_mapq (as_u8), subsampling_rate (as_f64), subsampling_seed? (as_u64));
         let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
-        Ok(Self { technology, min_mapq, subsampling_rate, subsampling_seed })
+        Ok(Self {
+            technology, min_mapq, subsampling_rate,
+            seed: subsampling_seed,
+        })
     }
 }
 
@@ -201,7 +207,7 @@ impl Args {
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
         if self.alns.is_some() {
             self.params.subsampling_rate = 1.0;
-            self.params.subsampling_seed = None;
+            self.params.seed = None;
         }
 
         self.params.validate()?;
@@ -275,13 +281,8 @@ fn print_help(extended: bool) {
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
             "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.bg_params.depth.ploidy));
-        println!("    {:KEY$} {:VAL$}\n\
-            {EMPTY}  Subsample input reads by a factor of {} [{}]\n\
-            {EMPTY}  Use all reads for {} or if alignment file ({}) is provided.\n\
-            {EMPTY}  Second value sets the subsampling seed (optional).",
-            "-s, --subsample".green(), "FLOAT [INT]".yellow(), "FLOAT".yellow(),
-            super::fmt_def_f64(defaults.params.subsampling_rate),
-            "-s 1".green(), "-a".green());
+        println!("    {:KEY$} {:VAL$}  Subsample input reads by this factor [{}].",
+            "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.params.subsampling_rate));
         println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [auto].\n\
             {EMPTY}  Default: half of the mean read length.",
             "-w, --window".green(), "INT".yellow());
@@ -313,6 +314,9 @@ fn print_help(extended: bool) {
         {EMPTY}  read mapping ({}); do not rerun ({}).",
         "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
         "all".yellow(), "part".yellow(), "none".yellow());
+    println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
+        {EMPTY}  input and program version.",
+        "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
     if extended {
@@ -363,11 +367,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.bg_params.err_rate_mult = parser.value()?.parse()?,
 
             Short('p') | Long("ploidy") => args.bg_params.depth.ploidy = parser.value()?.parse()?,
-            Short('s') | Long("subsample") => {
-                let mut values = parser.values()?;
-                args.params.subsampling_rate = values.next().expect("At least one value must be present").parse()?;
-                args.params.subsampling_seed = values.next().map(|v| v.parse()).transpose()?;
-            }
+            Long("subsample") => args.params.subsampling_rate = parser.value()?.parse()?,
             Short('w') | Long("window") => {
                 let val = parser.value()?;
                 args.bg_params.depth.window_size = if val == "auto" {
@@ -393,6 +393,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
+            Short('s') | Long("seed") => args.params.seed = Some(parser.value()?.parse()?),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -434,28 +435,25 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
 fn set_mapping_stdin(
     args: &Args,
     child_stdin: ChildStdin,
+    rng: &mut XoshiroRng,
 ) -> Result<thread::JoinHandle<Result<(), io::Error>>, Error>
 {
-    fn create_job(args: &Args, mut writer: impl io::Write + 'static, mut reader: impl FastxRead + 'static,
-    ) -> impl FnOnce() -> Result<(), io::Error> + 'static {
-        let subsampling_rate = args.params.subsampling_rate;
-        let subsampling_seed = args.params.subsampling_seed.clone();
-        move || reader.subsample(&mut writer, subsampling_rate, &mut ext::rand::init_rng(subsampling_seed))
-    }
-
-    let writer = io::BufWriter::new(child_stdin);
+    let subsampling_rate = args.params.subsampling_rate;
+    let mut local_rng = rng.clone();
+    rng.long_jump();
+    let mut writer = io::BufWriter::new(child_stdin);
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
-        let reader = fastx::Reader::from_path(&args.input[0])?;
-        Ok(thread::spawn(create_job(args, writer, reader)))
+        let mut reader = fastx::Reader::from_path(&args.input[0])?;
+        Ok(thread::spawn(move || reader.subsample(&mut writer, subsampling_rate, &mut local_rng)))
     } else if args.interleaved {
-        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
-        Ok(thread::spawn(create_job(args, writer, reader)))
+        let mut reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
+        Ok(thread::spawn(move || reader.subsample(&mut writer, subsampling_rate, &mut local_rng)))
     } else {
-        let reader = fastx::PairedEndReaders::new(
+        let mut reader = fastx::PairedEndReaders::new(
             fastx::Reader::from_path(&args.input[0])?,
             fastx::Reader::from_path(&args.input[1])?);
-        Ok(thread::spawn(create_job(args, writer, reader)))
+        Ok(thread::spawn(move || reader.subsample(&mut writer, subsampling_rate, &mut local_rng)))
     }
 }
 
@@ -508,7 +506,7 @@ fn first_step_str(args: &Args) -> String {
     }
 
     write!(s, "_subsample_ --rate {}", args.params.subsampling_rate).unwrap();
-    if let Some(seed) = args.params.subsampling_seed {
+    if let Some(seed) = args.params.seed {
         write!(s, " --seed {}", seed).unwrap();
     }
     write!(s, " -i {}", ext::fmt::path(&args.input[0])).unwrap();
@@ -526,7 +524,8 @@ fn run_mapping(
     seq_info: &SequencingInfo,
     ref_filename: &Path,
     bed_target: &Path,
-    out_bam: &Path
+    out_bam: &Path,
+    rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
     let tmp_bam = out_bam.with_extension("tmp.bam");
@@ -541,7 +540,7 @@ fn run_mapping(
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut guard = ext::sys::ChildGuard::new(mapping_child);
-    let handle = mapping_stdin.map(|stdin| set_mapping_stdin(args, stdin)).transpose()?;
+    let handle = mapping_stdin.map(|stdin| set_mapping_stdin(args, stdin, rng)).transpose()?;
 
     let mut samtools = Command::new(&args.samtools);
     // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
@@ -719,6 +718,7 @@ fn estimate_bg_distrs(
     args: &Args,
     out_dir: &Path,
     data: &RefData,
+    rng: &mut XoshiroRng,
 ) -> Result<BgDistr, Error>
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
@@ -749,7 +749,7 @@ fn estimate_bg_distrs(
 
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
-        run_mapping(args, &seq_info, &data.ref_filename, &data.bed_filename, &bam_filename)?;
+        run_mapping(args, &seq_info, &data.ref_filename, &data.bed_filename, &bam_filename, rng)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
@@ -807,7 +807,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
     let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
 
-    let bg_distr = estimate_bg_distrs(&args, &out_bg_dir, &ref_data)?;
+    let mut rng = init_rng(args.params.seed);
+    let bg_distr = estimate_bg_distrs(&args, &out_bg_dir, &ref_data, &mut rng)?;
     let distr_filename = out_bg_dir.join(paths::BG_DISTR);
     let mut distr_file = ext::sys::create_gzip(&distr_filename)?;
     bg_distr.save().write_pretty(&mut distr_file, 4).map_err(add_path!(distr_filename))?;
