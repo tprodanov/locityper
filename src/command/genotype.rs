@@ -638,7 +638,7 @@ fn analyze_locus(
     args: &Args,
 ) -> Result<(), Error>
 {
-    log::info!("Analyzing {}", locus.set.tag());
+    log::info!("{} {}", "Analyzing".bold(), locus.set.tag().bold());
     let timer = Instant::now();
     map_reads(locus, bg_distr.seq_info(), &args)?;
 

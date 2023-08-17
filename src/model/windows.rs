@@ -197,8 +197,6 @@ pub struct ContigWindows {
     window_weights: Vec<f64>,
     /// Is the window used (based on the weight?).
     use_window: Vec<bool>,
-    /// sum(use_window).
-    usable_windows: u32,
     /// Read depth distributions for each window.
     depth_distrs: Option<Vec<DistrBox>>,
 }
@@ -251,12 +249,11 @@ impl ContigWindows {
             window_weights.push(weight);
             writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}", contig_name, start, end, gc, inv_cdf1, weight)?;
         }
-        let use_window: Vec<_> = window_weights.iter().map(|&weight| weight >= params.min_weight).collect();
-        let usable_windows = use_window.iter().fold(0, |acc, &b| acc + u32::from(b));
         Ok(Self {
             window_getter: WindowGetter::new(reg_start, reg_start + sum_len, window),
             depth_distrs: None,
-            window_gcs, window_weights, use_window, usable_windows,
+            use_window: window_weights.iter().map(|&weight| weight >= params.min_weight).collect(),
+            window_gcs, window_weights,
         })
     }
 
@@ -311,11 +308,6 @@ impl ContigWindows {
     /// Is the window used?
     pub fn use_window(&self) -> &[bool] {
         &self.use_window
-    }
-
-    /// Returns the number of usable windows.
-    pub fn usable_windows(&self) -> u32 {
-        self.usable_windows
     }
 
     /// Returns window weight based on the read middle.
