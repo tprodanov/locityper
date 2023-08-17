@@ -13,7 +13,12 @@ use std::{
     },
     ops::Deref,
 };
-use rand::{Rng, prelude::SliceRandom};
+use statrs::distribution::Poisson;
+use rand::{
+    Rng,
+    prelude::SliceRandom,
+    distributions::Distribution,
+};
 use crate::{
     ext::{
         self,
@@ -127,8 +132,56 @@ fn prefilter_genotypes(
         scores.push(score);
     }
 
+    let (mean, var) = F64Ext::mean_variance(&scores);
+    log::debug!("    Aln   mean {:10.3},  sd {:10.3}", Ln::to_log10(mean), Ln::to_log10(var.sqrt()));
+    let mut scores_sort = scores.clone();
+    scores_sort.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap());
+    for &i in &[50, 100, 500, 1000] {
+        let (mean, var) = F64Ext::mean_variance(&scores_sort[..min(i, n)]);
+        log::debug!("    Top {:4} mean {:10.3},  sd {:10.3}", min(i, n), Ln::to_log10(mean), Ln::to_log10(var.sqrt()));
+    }
+    for &i in &[2, 3, 5, 10, 50, 100] {
+        log::debug!("    Top {:2} diff {:10.3}", i, Ln::to_log10(scores_sort[0] - scores_sort[i - 1]));
+    }
     truncate_ixs(&mut ixs, &scores, genotypes, params.score_thresh, params.min_gts.0, threads);
     Ok(ixs)
+}
+
+fn calc_depth_variance(
+    contig_windows: &[ContigWindows],
+    mut rng: &mut impl Rng,
+    genotypes: &[Genotype],
+    n_reads: usize,
+    n_tries: usize,
+) {
+    assert!(n_reads > 0);
+    assert!(n_tries > 2);
+    let mut probs = Vec::with_capacity(n_tries);
+    for _ in 0..n_tries {
+        let gt = &genotypes[rng.gen_range(0..genotypes.len())];
+        let usable_windows: u32 = gt.ids().iter().map(|id| contig_windows[id.ix()].usable_windows()).sum();
+        let poisson = Poisson::new(n_reads as f64 / f64::from(usable_windows)).expect("Incorrect Poisson distribution");
+        let mut poisson_gen = poisson.sample_iter(&mut rng);
+
+        let mut total_prob = 0.0;
+        for id in gt.ids() {
+            let windows = &contig_windows[id.ix()];
+            for (&usew, distr) in windows.use_window().iter().zip(windows.depth_distrs()) {
+                if usew {
+                    total_prob += distr.ln_pmf(poisson_gen.next().unwrap().round() as u32);
+                }
+            }
+        }
+        log::debug!("    {} -> {:10.3}", gt, Ln::to_log10(total_prob));
+        probs.push(total_prob);
+    }
+    let (mean, var) = F64Ext::mean_variance(&probs);
+    log::debug!("    Depth mean {:10.3},  sd {:10.3}", Ln::to_log10(mean), Ln::to_log10(var.sqrt()));
+
+    probs.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap());
+    for &i in &[2, 3, 5, 10, 50, 100] {
+        log::debug!("    Top {:2} diff {:10.3}", i, Ln::to_log10(probs[0] - probs[i - 1]));
+    }
 }
 
 const MAX_STAGES: usize = 10;
@@ -548,6 +601,8 @@ pub fn solve(
     } else {
         (0..n_gts).collect()
     };
+
+    calc_depth_variance(&data.contig_windows, rng, &data.genotypes, data.all_alns.len(), 1000);
 
     let mut likelihoods = Likelihoods::new(n_gts, rem_ixs);
     let data = Arc::new(data);

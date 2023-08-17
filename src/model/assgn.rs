@@ -118,7 +118,7 @@ impl GenotypeAlignments {
         use_window.push(false);
         for contig_windows in gt_windows.contig_windows() {
             depth_distrs.extend_from_slice(contig_windows.depth_distrs());
-            use_window.extend(contig_windows.weights().iter().map(|&w| w >= params.min_weight));
+            use_window.extend_from_slice(contig_windows.use_window());
         }
 
         Self {

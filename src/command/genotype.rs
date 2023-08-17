@@ -455,7 +455,9 @@ fn load_loci(
         }
     }
     let n = loci.len();
-    if n < total_entries {
+    if n == 0 {
+        return Err(Error::InvalidInput(format!("Zero loci loaded")));
+    } else if n < total_entries {
         log::info!("Loaded {} loci, skipped {} directories", n, total_entries - n);
     } else {
         log::info!("Loaded {} loci", n);

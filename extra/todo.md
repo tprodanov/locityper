@@ -21,3 +21,4 @@ Provide scheme through arguments?
 
 * `loctyper add`: allow sequences as input,
 * Allow BAM files as input.
+* Lower weight of low/high GC content windows.

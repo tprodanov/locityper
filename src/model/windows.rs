@@ -195,6 +195,10 @@ pub struct ContigWindows {
     window_gcs: Vec<u8>,
     /// k-mer-based window weights.
     window_weights: Vec<f64>,
+    /// Is the window used (based on the weight?).
+    use_window: Vec<bool>,
+    /// sum(use_window).
+    usable_windows: u32,
     /// Read depth distributions for each window.
     depth_distrs: Option<Vec<DistrBox>>,
 }
@@ -207,7 +211,7 @@ impl ContigWindows {
         kmer_counts: &KmerCounts,
         depth: &ReadDepth,
         weight_calc: &WeightCalculator,
-        boundary: u32,
+        params: &super::Params,
         dbg_writer: &mut impl Write,
     ) -> io::Result<Self>
     {
@@ -215,10 +219,10 @@ impl ContigWindows {
         let contig_name = contigs.get_name(contig_id);
         let window = depth.window_size();
         let neighb_size = depth.neighb_size();
-        assert!(contig_len > window + 2 * boundary,
+        assert!(contig_len > window + 2 * params.boundary_size,
             "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
-        let n_windows = (contig_len - 2 * boundary) / window;
+        let n_windows = (contig_len - 2 * params.boundary_size) / window;
         let sum_len = n_windows * window;
         let reg_start = (contig_len - sum_len) / 2;
 
@@ -247,10 +251,12 @@ impl ContigWindows {
             window_weights.push(weight);
             writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}", contig_name, start, end, gc, inv_cdf1, weight)?;
         }
+        let use_window: Vec<_> = window_weights.iter().map(|&weight| weight >= params.min_weight).collect();
+        let usable_windows = use_window.iter().fold(0, |acc, &b| acc + u32::from(b));
         Ok(Self {
             window_getter: WindowGetter::new(reg_start, reg_start + sum_len, window),
             depth_distrs: None,
-            window_gcs, window_weights,
+            window_gcs, window_weights, use_window, usable_windows,
         })
     }
 
@@ -267,7 +273,7 @@ impl ContigWindows {
         writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tweight")?;
         contigs.ids().zip(seqs)
             .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), depth,
-                &weight_calc, params.boundary_size, &mut dbg_writer))
+                &weight_calc, params, &mut dbg_writer))
             .collect()
     }
 
@@ -300,6 +306,16 @@ impl ContigWindows {
     /// Returns all window weights.
     pub fn weights(&self) -> &[f64] {
         &self.window_weights
+    }
+
+    /// Is the window used?
+    pub fn use_window(&self) -> &[bool] {
+        &self.use_window
+    }
+
+    /// Returns the number of usable windows.
+    pub fn usable_windows(&self) -> u32 {
+        self.usable_windows
     }
 
     /// Returns window weight based on the read middle.
