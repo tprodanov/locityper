@@ -800,6 +800,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
+    let mut rng = init_rng(args.params.seed);
     // `args.output`/bg
     let out_bg_dir = create_out_dir(&args)?;
 
@@ -807,7 +808,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
     let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
 
-    let mut rng = init_rng(args.params.seed);
     let bg_distr = estimate_bg_distrs(&args, &out_bg_dir, &ref_data, &mut rng)?;
     let distr_filename = out_bg_dir.join(paths::BG_DISTR);
     let mut distr_file = ext::sys::create_gzip(&distr_filename)?;

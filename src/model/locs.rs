@@ -129,7 +129,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
                 edit_dist, read_len, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
-            if self.found_alns.is_empty() {
+            if weight.is_nan() {
                 weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
                 write!(dbg_writer, "\t{:.5}\t{}", weight, self.curr_name()?).map_err(add_path!(!))?;
             }
@@ -158,7 +158,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 break;
             }
             // Next primary record or unmapped read. Either way, it will be a new read or new read end.
-            if !self.record.is_secondary() {
+            if !self.record.is_secondary() && !self.record.is_supplementary() {
                 break;
             }
             assert_eq!(fnv1a(self.record.qname()), name_hash,
@@ -173,11 +173,14 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         })
     }
 
+    fn has_more(&self) -> bool {
+        self.has_more
+    }
+
     /// Returns the name of the next record.
     fn curr_name(&self) -> Result<&str, Error> {
         std::str::from_utf8(self.record.qname()).map_err(|_|
-            Error::InvalidInput(format!("Read name is not UTF-8: {:?}",
-                String::from_utf8_lossy(self.record.qname()))))
+            Error::InvalidInput(format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))
     }
 }
 
@@ -507,17 +510,19 @@ impl AllAlignments {
         let is_paired_end = insert_distr.is_paired_end();
         let ln_ncontigs = (contigs.len() as f64).ln();
         let mut all_alns = Vec::new();
-        let mut ignored = 0;
         let mut hashes = IntSet::default();
         let mut tmp_alns = Vec::new();
         let mut buffer = Vec::with_capacity(16);
-        while reader.has_more {
+        let mut collisions = 0;
+        let mut total_reads = 0;
+        while reader.has_more() {
+            total_reads += 1;
             tmp_alns.clear();
             let read_name = reader.curr_name()?.to_owned();
             let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut dbg_writer)?;
             if !hashes.insert(summary1.name_hash) {
-                log::warn!("Read {} produced hash collision ({:X}). Is an error if there are many such messages",
-                    read_name, summary1.name_hash);
+                log::warn!("Read {} produced hash collision ({:X})", read_name, summary1.name_hash);
+                collisions += 1;
             }
             let mut central = summary1.any_central;
             let summary2 = if is_paired_end {
@@ -545,12 +550,14 @@ impl AllAlignments {
             };
             if let Some(alns) = groupped_alns {
                 all_alns.push(alns);
-            } else {
-                ignored += 1;
             }
         }
+        let loaded_reads = all_alns.len();
         log::info!("    Loaded {} read{}, ignored {}",
-            all_alns.len(), if is_paired_end { " pairs"} else { "s" }, ignored);
+            loaded_reads, if is_paired_end { " pairs"} else { "s" }, total_reads - loaded_reads);
+        if collisions > 2 && collisions * 100 > total_reads {
+            return Err(Error::RuntimeError(format!("Too many hash collisions ({})", collisions)));
+        }
         Ok(Self(all_alns))
     }
 

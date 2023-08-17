@@ -646,10 +646,9 @@ fn analyze_locus(
     let mut contig_windows = if args.debug {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, windows_writer)
-            .map_err(add_path!(windows_filename))?
+        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, windows_writer)?
     } else {
-        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink()).map_err(add_path!(!))?
+        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink())?
     };
 
     let mut all_alns = if args.debug {
@@ -691,6 +690,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
+    let mut rng = ext::rand::init_rng(args.seed);
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
 
@@ -718,7 +718,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
     let cached_distrs = CachedDepthDistrs::new(&bg_distr, &args.assgn_params);
-    let mut rng = ext::rand::init_rng(args.seed);
     let mut successes = 0;
     for locus in loci.iter() {
         // Remove to get ownership of the locus priors.
@@ -738,7 +737,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     }
     let nloci = loci.len();
     if successes == 0 {
-        log::error!("Failed at all {} loci", nloci);
+        log::error!("Failed at {} loci", nloci);
     } else if successes < nloci {
         log::warn!("Successfully analysed {} loci, failed at {} loci", successes, nloci - successes);
     } else {

@@ -1,6 +1,6 @@
 use std::{
     cmp::min,
-    io::{self, Write},
+    io::Write,
 };
 use rand::Rng;
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
     },
     math::distr::DistrBox,
     bg::ReadDepth,
+    err::{Error, add_path},
 };
 use super::{
     locs::{GrouppedAlignments, PairAlignment},
@@ -211,14 +212,16 @@ impl ContigWindows {
         weight_calc: &WeightCalculator,
         params: &super::Params,
         dbg_writer: &mut impl Write,
-    ) -> io::Result<Self>
+    ) -> Result<Self, Error>
     {
         let contig_len = seq.len() as u32;
         let contig_name = contigs.get_name(contig_id);
         let window = depth.window_size();
         let neighb_size = depth.neighb_size();
-        assert!(contig_len > window + 2 * params.boundary_size,
-            "Contig {} is too short (len = {})", contigs.get_name(contig_id), contig_len);
+        if contig_len < window + 2 * params.boundary_size {
+            return Err(Error::RuntimeError(format!("Contig {} is too short (len = {})",
+                contigs.get_name(contig_id), contig_len)));
+        }
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
         let n_windows = (contig_len - 2 * params.boundary_size) / window;
         let sum_len = n_windows * window;
@@ -247,7 +250,8 @@ impl ContigWindows {
                 / (kmer_end - kmer_start) as f64;
             let weight = weight_calc.get(inv_cdf1);
             window_weights.push(weight);
-            writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}", contig_name, start, end, gc, inv_cdf1, weight)?;
+            writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}", contig_name, start, end, gc, inv_cdf1, weight)
+                .map_err(add_path!(!))?;
         }
         Ok(Self {
             window_getter: WindowGetter::new(reg_start, reg_start + sum_len, window),
@@ -263,11 +267,11 @@ impl ContigWindows {
         depth: &ReadDepth,
         params: &super::Params,
         mut dbg_writer: impl Write,
-    ) -> io::Result<Vec<Self>> {
+    ) -> Result<Vec<Self>, Error> {
         let contigs = set.contigs();
         let seqs = set.seqs();
         let weight_calc = WeightCalculator::new(params.weight_breakpoint, params.weight_power);
-        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tweight")?;
+        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tweight").map_err(add_path!(!))?;
         contigs.ids().zip(seqs)
             .map(|(id, seq)| Self::new(id, contigs, seq, set.kmer_counts(), depth,
                 &weight_calc, params, &mut dbg_writer))

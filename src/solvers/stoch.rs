@@ -192,21 +192,12 @@ impl Solver for SimAnneal {
         // Solution to equation   `init_prob = exp(-max_abs / start_temp)`.
         let start_temp = (-max_abs / self.init_prob.ln()).max(1e-5);
         let temp_step = start_temp / self.anneal_steps as f64;
+        let mut curr_plato = 0;
 
         for i in (1..=self.anneal_steps).rev() {
             let target = ReassignmentTarget::random(&assignments, rng);
             let diff = assignments.calculate_improvement(&target) - min_diff;
             if diff >= 0.0 || rng.gen::<f64>() <= (diff / (temp_step * i as f64)).exp() {
-                assignments.reassign(&target);
-            }
-        }
-
-        let max_iter = max(100_000, self.plato_size * 100);
-        let mut curr_plato = 0;
-        for _ in 0..max_iter {
-            let target = ReassignmentTarget::random(&assignments, rng);
-            let diff = assignments.calculate_improvement(&target);
-            if diff > min_diff {
                 assignments.reassign(&target);
                 curr_plato = 0;
             } else {
@@ -214,6 +205,21 @@ impl Solver for SimAnneal {
                 if curr_plato >= self.plato_size {
                     break;
                 }
+            }
+        }
+
+        let max_iter = max(100_000, self.plato_size * 100);
+        for _ in 0..max_iter {
+            if curr_plato >= self.plato_size {
+                break;
+            }
+            let target = ReassignmentTarget::random(&assignments, rng);
+            let diff = assignments.calculate_improvement(&target);
+            if diff > min_diff {
+                assignments.reassign(&target);
+                curr_plato = 0;
+            } else {
+                curr_plato += 1;
             }
         }
         Ok(assignments)
