@@ -105,7 +105,10 @@ impl GenotypeAlignments {
                 non_trivial_reads.push(rp);
             }
         }
-        assert!(read_ixs.len() > 1, "Cannot construct read assignment with 0 alignments.");
+        // 1 because `read_ixs` includes is one more than the number of reads.
+        if read_ixs.len() <= 1 {
+            log::warn!("Zero reads can be used for {}", gt_windows.genotype());
+        }
 
         const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
             "Constants have changed!");
