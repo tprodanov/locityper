@@ -10,7 +10,7 @@ use const_format::formatcp;
 use bio::io::fasta;
 use crate::{
     Error,
-    algo::parse_int,
+    ext::fmt::PrettyU32,
 };
 use super::{ContigId, ContigNames};
 
@@ -73,11 +73,11 @@ impl Interval {
 
     fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
         let contig_id = contigs.try_get_id(&captures[1])?;
-        let start: u32 = parse_int(&captures[2])
+        let start: PrettyU32 = captures[2].parse()
             .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let end: u32 = parse_int(&captures[3])
+        let end: PrettyU32 = captures[3].parse()
             .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        Ok(Self::new(Arc::clone(contigs), contig_id, start - 1, end))
+        Ok(Self::new(Arc::clone(contigs), contig_id, start.get() - 1, end.get()))
     }
 
     /// Parses interval from string "name:start-end", where start is 1-based, inclusive.

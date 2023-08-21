@@ -108,7 +108,7 @@ fn prefilter_genotypes(
     let n = genotypes.len();
     let mut ixs = (0..n).collect();
     // Need to run anyway in case of `debug`, so that we output all values.
-    if params.min_gts.0 >= n && !debug {
+    if params.min_gts >= n && !debug {
         return Ok(ixs);
     }
     log::info!("*** Filtering genotypes based on read alignment likelihood");
@@ -129,7 +129,7 @@ fn prefilter_genotypes(
         writeln!(lik_writer, "0\t{}\t{:.3}", gt, Ln::to_log10(score))?;
         scores.push(score);
     }
-    truncate_ixs(&mut ixs, &scores, genotypes, params.score_thresh, params.min_gts.0, threads);
+    truncate_ixs(&mut ixs, &scores, genotypes, params.score_thresh, params.min_gts, threads);
     Ok(ixs)
 }
 
@@ -292,7 +292,7 @@ impl Likelihoods {
         threads: usize,
     ) {
         let n = self.ixs.len();
-        let min_gts = params.min_gts.0.max(threads);
+        let min_gts = params.min_gts.max(threads);
         if params.prob_thresh == f64::NEG_INFINITY || min_gts >= n {
             return;
         }
@@ -440,7 +440,7 @@ fn solve_single_thread(
     let mut selected = SelectedCounter::default();
     for (stage_ix, solver) in data.scheme.iter().enumerate() {
         logger.start_stage(stage_ix, likelihoods.curr_len());
-        if stage_ix + 1 < n_stages && likelihoods.curr_len() <= data.assgn_params.min_gts.0 {
+        if stage_ix + 1 < n_stages && likelihoods.curr_len() <= data.assgn_params.min_gts {
             log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
             continue;
         }
@@ -633,7 +633,7 @@ impl MainWorker {
         for stage_ix in 0..n_stages {
             logger.start_stage(stage_ix, likelihoods.curr_len());
             let m = likelihoods.curr_len();
-            if stage_ix + 1 < n_stages && m <= data.assgn_params.min_gts.0.max(data.threads) {
+            if stage_ix + 1 < n_stages && m <= data.assgn_params.min_gts.max(data.threads) {
                 log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
                 continue;
             }

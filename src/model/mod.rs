@@ -7,7 +7,6 @@ use crate::{
     math::Ln,
     err::{Error, validate_param},
     bg::err_prof,
-    ext::vec::UsizeOrInf,
 };
 
 /// Read depth model parameters.
@@ -42,7 +41,7 @@ pub struct Params {
     pub max_alns: usize,
 
     /// Minimal number of genotypes after each step of solving.
-    pub min_gts: UsizeOrInf,
+    pub min_gts: usize,
     /// Discard low likelihood genotypes based on this threshold (`min + score_thresh * (max - min)`).
     pub score_thresh: f64,
     /// Discard genotypes with low probability to be best (after each step).
@@ -69,7 +68,7 @@ impl Default for Params {
             use_unpaired: false,
             max_alns: 1_000_000,
 
-            min_gts: UsizeOrInf(8),
+            min_gts: 8,
             score_thresh: 0.95,
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 20,
@@ -128,7 +127,7 @@ impl Params {
         if self.attempts < 3 {
             log::warn!("At least 3 attempts are recommended");
         }
-        validate_param!(self.min_gts.0 > 1,
+        validate_param!(self.min_gts > 1,
             "Minimal number of genotypes ({}) must be at least 2", self.min_gts);
         Ok(())
     }

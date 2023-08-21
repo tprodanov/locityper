@@ -20,6 +20,7 @@ use crate::{
     ext::{
         self,
         vec::{VecExt, IterExt},
+        fmt::PrettyU32,
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
@@ -137,10 +138,10 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Reference genome name [{}].",
         "-g, --genome".green(), "STR".yellow(), super::fmt_def(defaults.ref_name));
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
-        "-e, --expand".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.max_expansion));
+        "-e, --expand".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.max_expansion)));
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
         {EMPTY}  moving windows of size {} bp [{}].",
-        "-w, --window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.moving_window));
+        "-w, --window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.moving_window)));
     println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
         {EMPTY}  (relative to the haplotype length). Variants that have no known variation\n\
         {EMPTY}  in the input VCF pangenome are ignored.",
@@ -200,8 +201,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
             Long("true-aln") | Long("true-alignment") | Long("true-alignments") => args.true_aln = true,
-            Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse()?,
-            Short('w') | Long("window") => args.moving_window = parser.value()?.parse()?,
+            Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse::<PrettyU32>()?.get(),
+            Short('w') | Long("window") => args.moving_window = parser.value()?.parse::<PrettyU32>()?.get(),
 
             Short('M') | Long("mismatch") => args.penalties.mismatch = parser.value()?.parse()?,
             Short('O') | Long("gap-open") | Long("gap-opening") =>

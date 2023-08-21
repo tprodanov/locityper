@@ -265,37 +265,6 @@ where T: fmt::Debug
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UsizeOrInf(pub usize);
-
-impl UsizeOrInf {
-    const INF: Self = Self(usize::MAX);
-}
-
-impl std::str::FromStr for UsizeOrInf {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "inf" || s == "Inf" || s == "INF" {
-            Ok(Self::INF)
-        } else {
-            usize::from_str(s)
-                .map_err(|_| format!("Cannot parse {:?}, possible values: integer or 'inf'", s))
-                .map(Self)
-        }
-    }
-}
-
-impl fmt::Display for UsizeOrInf {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.0 == usize::MAX {
-            f.write_str("inf")
-        } else {
-            write!(f, "{}", self.0)
-        }
-    }
-}
-
 /// Count the number of combinations.
 /// Taken from https://stackoverflow.com/questions/65561566/number-of-combinations-permutations.
 pub fn count_combinations(n: usize, r: usize) -> usize {

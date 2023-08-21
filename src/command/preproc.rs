@@ -18,6 +18,7 @@ use crate::{
     ext::{
         self,
         rand::{init_rng, XoshiroRng},
+        fmt::PrettyU32,
     },
     err::{Error, validate_param, add_path},
     seq::{
@@ -283,12 +284,12 @@ fn print_help(extended: bool) {
             "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.bg_params.depth.ploidy));
         println!("    {:KEY$} {:VAL$}  Subsample input reads by this factor [{}].",
             "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.params.subsampling_rate));
-        println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [auto].\n\
+        println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [{}].\n\
             {EMPTY}  Default: half of the mean read length.",
-            "-w, --window".green(), "INT".yellow());
+            "-w, --window".green(), "INT".yellow(), "auto".cyan());
         println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(),
-            super::fmt_def(defaults.bg_params.depth.boundary_size));
+            super::fmt_def(PrettyU32(defaults.bg_params.depth.boundary_size)));
         println!("    {:KEY$} {:VAL$}  Ignore windows, where less than {}% k-mers are unique [{}].",
             "    --kmer-perc".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(defaults.bg_params.depth.kmer_perc));
@@ -376,7 +377,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     Some(val.parse()?)
                 };
             }
-            Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse()?,
+            Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse::<PrettyU32>()?.get(),
             Long("kmer-perc") | Long("kmer-percentage") | Long("kmer-percentile") =>
                 args.bg_params.depth.kmer_perc = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>

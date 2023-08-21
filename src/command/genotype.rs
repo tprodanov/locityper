@@ -20,7 +20,7 @@ use crate::{
         kmers::Kmer,
     },
     bg::{BgDistr, JsonSer, Technology, SequencingInfo},
-    ext,
+    ext::{self, fmt::PrettyUsize},
     model::{
         Params as AssgnParams,
         locs::AllAlignments,
@@ -139,7 +139,8 @@ fn print_help(extended: bool) {
             "-k, --recr-kmer".green(), "INT".yellow(), recruit::Minimizer::MAX_KMER_SIZE,
             super::fmt_def(defaults.recr_params.minimizer_k));
         println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
-            "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.recr_params.minimizer_w));
+            "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(),
+            super::fmt_def(defaults.recr_params.minimizer_w));
         println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
             {EMPTY}  of minimizers matching one of the targets.\n\
             {EMPTY}  Default: {}.",
@@ -147,7 +148,8 @@ fn print_help(extended: bool) {
             Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
-            "-c, --chunk-size".green(), "INT".yellow(), super::fmt_def(defaults.recr_params.chunk_size));
+            "-c, --chunk-size".green(), "INT".yellow(),
+            super::fmt_def(PrettyUsize(defaults.recr_params.chunk_size)));
 
         println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
@@ -186,7 +188,8 @@ fn print_help(extended: bool) {
 
         println!("\n{}", "Locus genotyping:".bold());
         println!("    {:KEY$} {:VAL$}  Use at most {} alignments [{}].",
-            "    --max-alns".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.assgn_params.max_alns));
+            "    --max-alns".green(), "INT".yellow(), "INT".yellow(),
+            super::fmt_def(PrettyUsize(defaults.assgn_params.max_alns)));
         println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
             {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
             "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
@@ -199,7 +202,8 @@ fn print_help(extended: bool) {
             "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
         println!("    {:KEY$} {:VAL$}  Minimum number of genotypes after each step [{}].",
-            "    --min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
+            "    --min-gts".green(), "INT".yellow(),
+            super::fmt_def(PrettyUsize(defaults.assgn_params.min_gts)));
         println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
             "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
@@ -265,7 +269,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
             Short('m') | Long("matches-frac") | Long("matches-fraction") =>
                 args.matches_frac = Some(parser.value()?.parse()?),
-            Short('c') | Long("chunk") | Long("chunk-size") => args.recr_params.chunk_size = parser.value()?.parse()?,
+            Short('c') | Long("chunk") | Long("chunk-size") =>
+                args.recr_params.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
 
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
             Short('A') | Long("alt-cn") =>
@@ -290,14 +295,15 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 ),
             Long("use-unpaired") => args.assgn_params.use_unpaired = true,
 
-            Long("max-alns") | Long("max-alignments") => args.assgn_params.max_alns = parser.value()?.parse()?,
+            Long("max-alns") | Long("max-alignments") =>
+                args.assgn_params.max_alns = parser.value()?.parse::<PrettyUsize>()?.get(),
             Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
             Long("score-thresh") | Long("score-threshold") =>
                 args.assgn_params.score_thresh = parser.value()?.parse()?,
             Long("prob-thresh") | Long("prob-threshold") =>
                 args.assgn_params.prob_thresh = parser.value()?.parse()?,
             Long("min-gts") | Long("min-genotypes") =>
-                args.assgn_params.min_gts = parser.value()?.parse()?,
+                args.assgn_params.min_gts = parser.value()?.parse::<PrettyUsize>()?.get(),
             Short('a') | Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
             Long("tweak") => {
                 let val = parser.value()?;
