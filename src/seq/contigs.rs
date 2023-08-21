@@ -106,7 +106,7 @@ impl ContigNames {
         tag: impl Into<String>,
         stream: impl BufRead,
         mut descriptions: impl VecOrNone<Option<String>>,
-    ) -> io::Result<(Arc<Self>, Vec<Vec<u8>>)>
+    ) -> io::Result<(Self, Vec<Vec<u8>>)>
     {
         let mut reader = fasta::Reader::from_bufread(stream);
         let mut names_lengths = Vec::new();
@@ -116,7 +116,7 @@ impl ContigNames {
             reader.read(&mut record)?;
             if record.is_empty() {
                 let contigs = Self::new(tag, names_lengths.into_iter());
-                return Ok((Arc::new(contigs), seqs));
+                return Ok((contigs, seqs));
             }
 
             let mut ref_seq = record.seq().to_vec();
@@ -185,6 +185,10 @@ impl ContigNames {
         &self.names
     }
 
+    pub fn take_names(self) -> Vec<String> {
+        self.names
+    }
+
     /// Returns iterator over all contig lengths.
     pub fn lengths(&self) -> &[u32] {
         &self.lengths
@@ -227,7 +231,10 @@ impl ContigSet {
         let (contigs, seqs) = ContigNames::load_fasta(tag, ext::sys::open(fasta_filename)?, descriptions)
             .map_err(add_path!(fasta_filename))?;
         let kmer_counts = KmerCounts::load(ext::sys::open(kmers_filename)?, contigs.lengths())?;
-        Ok(Self { contigs, seqs, kmer_counts })
+        Ok(Self {
+            contigs: Arc::new(contigs),
+            seqs, kmer_counts,
+        })
     }
 
     /// Returns the number of contigs in the set.

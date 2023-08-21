@@ -4,6 +4,7 @@ use std::{
     fs::File,
     sync::Arc,
     path::{Path, PathBuf},
+    time::Instant,
 };
 use fnv::FnvHashSet;
 use bio::io::fasta;
@@ -24,7 +25,7 @@ use crate::{
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        dist, panvcf,
+        dist, panvcf, interv,
         cigar::Cigar,
         kmers::JfKmerGetter,
         wfa::Penalties,
@@ -38,6 +39,7 @@ struct Args {
     variants: Option<PathBuf>,
     loci: Vec<String>,
     bed_files: Vec<PathBuf>,
+    sequences: Vec<String>,
 
     ref_name: String,
     leave_out: FnvHashSet<String>,
@@ -62,6 +64,7 @@ impl Default for Args {
             variants: None,
             loci: Vec::new(),
             bed_files: Vec::new(),
+            sequences: Vec::new(),
 
             ref_name: "REF".to_owned(),
             leave_out: Default::default(),
@@ -83,10 +86,17 @@ impl Default for Args {
 impl Args {
     fn validate(mut self) -> Result<Self, Error> {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
-        validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
-        validate_param!(self.variants.is_some(), "Variants VCF file is not provided (see -v/--vcf)");
-        validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
-            "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
+        if self.sequences.is_empty() {
+            validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
+            validate_param!(self.variants.is_some(), "Pangenome VCF file is not provided (see -v/--vcf)");
+            validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
+                "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
+        } else {
+            validate_param!(self.reference.is_none(), "Reference (-r) is mutually exclusive with sequences (-s)");
+            validate_param!(self.variants.is_none(), "VCF file (-v) is mutually exclusive with sequences (-s)");
+            validate_param!(self.loci.is_empty() && self.bed_files.is_empty(),
+                "Loci (-l/-L) are mutually exclusive with sequences (-s)");
+        }
 
         validate_param!(0.0 <= self.unavail_rate && self.unavail_rate <= 1.0,
             "Unavailable rate ({}) must be within [0, 1]", self.unavail_rate);
@@ -110,7 +120,7 @@ fn print_help() {
 
     println!("\n{}", "Usage:".bold());
     println!("    {} add -d db -r ref.fa -v vars.vcf.gz -l/-L loci [arguments]", super::PROGRAM);
-    // println!("    {} add -d db -s seqs.fa=name [arguments]", super::PROGRAM);
+    println!("    {} add -d db -s seqs.fa=name [seqs2.fa=name2 ...] [arguments]", super::PROGRAM);
 
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory (initialized with {}).",
@@ -120,10 +130,12 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.\n\
         {EMPTY}  Must be compressed and indexed with {}.",
         "-v, --vcf".green(), "FILE".yellow(), "tabix".underline());
-    // println!("    {:KEY$} {:VAL$}  Fasta file with haplotype sequences\n
-    //     {EMPTY}  Mutually exclusive with {}, {}, {}, {} and {}.",
-    //     "-s, --seqs".green(), "FILE".yellow(),
-    //     "-r".green(), "-v".green(), "-l".green(), "-L".green(), )
+    println!("    {:KEY$} {:VAL$}\n\
+        {EMPTY}  Fasta file(s) with locus alleles. Format: {}={}.\n\
+        {EMPTY}  Mutually exclusive with {}, {} and {}/{}.\n\
+        {EMPTY}  {}: all sequences must be on the same strand!",
+        "-s, --seqs".green(), "FILE=STR".yellow(), "filename".underline(), "locus_name".underline(),
+        "-r".green(), "-v".green(), "-l".green(), "-L".green(), "NOTE".red());
 
     println!("\n{}", "Complex loci coordinates:".bold());
     println!("    {:KEY$} {:VAL$}  Complex locus coordinates. Multiple loci are allowed.\n\
@@ -143,13 +155,13 @@ fn print_help() {
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.moving_window)));
     println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
-        {EMPTY}  (relative to the haplotype length). Variants that have no known variation\n\
-        {EMPTY}  in the input VCF pangenome are ignored.",
+        {EMPTY}  (relative to the haplotype length). Variants that have no known\n\
+        {EMPTY}  variation in the input VCF pangenome are ignored.",
         "-u, --unavail".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unavail_rate));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
-    println!("    {:KEY$} {:VAL$}  Calculate true alignments between haplotypes using WFA.\n\
-        {EMPTY}  Otherwise: assume pangenome VCF file to have the best alignment.",
+    println!("    {:KEY$} {:VAL$}  Calculate sequence alignments between alleles as\n\
+        {EMPTY}  accurate as possible (may be slower).",
         "    --true-aln".green(), super::flag());
 
     println!("\n{}", "Haplotype clustering parameters:".bold());
@@ -159,7 +171,8 @@ fn print_help() {
         "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_opening));
     println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
         "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extension));
-    println!("    {:KEY$} {:VAL$}  Sequence divergence threshold, used for haplotypes clustering [{}].",
+    println!("    {:KEY$} {:VAL$}  Sequence divergence threshold,\n\
+        {EMPTY}  used to discard almost identical locus alleles [{}].",
         "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
 
     println!("\n{}", "Execution parameters:".bold());
@@ -193,6 +206,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('l') | Long("locus") =>
                 args.loci = parser.values()?.map(ValueExt::string).collect::<Result<Vec<_>, _>>()?,
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
+            Short('s') | Long("seqs") | Long("sequences") =>
+                args.sequences = parser.values()?.map(|s| s.parse()).collect::<Result<_, _>>()?,
 
             Short('g') | Long("genome") => args.ref_name = parser.value()?.parse()?,
             Long("leave-out") | Long("leaveout") => {
@@ -414,20 +429,14 @@ fn cluster_haplotypes(
 /// Process haplotypes: write FASTA, PAF, kmers files, cluster sequences.
 fn process_haplotypes(
     locus_dir: &Path,
-    locus: &NamedInterval,
+    tag: &str,
     entries: Vec<NamedSeq>,
     pairwise_alns: Option<&Vec<(Cigar, i32)>>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<(), Error>
 {
-    let tag = locus.name();
     log::info!("    Writing {} haplotypes to {}/", entries.len(), ext::fmt::path(locus_dir));
-    let locus_bed = locus_dir.join(paths::LOCUS_BED);
-    let mut bed_writer = File::create(&locus_bed).map_err(add_path!(locus_bed))?;
-    writeln!(bed_writer, "{}", locus.bed_fmt()).map_err(add_path!(locus_bed))?;
-    std::mem::drop(bed_writer);
-
     log::info!("    Calculating haplotype divergence");
     let paf_filename = locus_dir.join(paths::LOCUS_PAF);
     let paf_writer = ext::sys::create_gzip(&paf_filename)?;
@@ -531,8 +540,8 @@ fn add_locus<R>(
 ) -> Result<bool, Error>
 where R: Read + Seek,
 {
-    let dir = loci_dir.join(locus.name());
-    if !super::Rerun::from_force(args.force).need_analysis(&dir)? {
+    let locus_dir = loci_dir.join(locus.name());
+    if !super::Rerun::from_force(args.force).need_analysis(&locus_dir)? {
         return Ok(true);
     }
     log::info!("{} {}", "Analyzing locus".bold(), locus);
@@ -596,6 +605,10 @@ where R: Read + Seek,
     } else {
         new_locus = locus.clone();
     }
+    let locus_bed = locus_dir.join(paths::LOCUS_BED);
+    let mut bed_writer = File::create(&locus_bed).map_err(add_path!(locus_bed))?;
+    writeln!(bed_writer, "{}", new_locus.bed_fmt()).map_err(add_path!(locus_bed))?;
+    std::mem::drop(bed_writer);
 
     log::info!("    Reconstructing haplotypes");
     let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
@@ -607,7 +620,7 @@ where R: Read + Seek,
     let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
         pairwise_alns.as_mut(), vcf_file.header(), args.unavail_rate, &args.penalties);
     match reconstruction {
-        Ok(seqs) => process_haplotypes(&dir, &new_locus, seqs, pairwise_alns.as_ref(), kmer_getter, &args)?,
+        Ok(seqs) => process_haplotypes(&locus_dir, new_locus.name(), seqs, pairwise_alns.as_ref(), kmer_getter, &args)?,
         Err(Error::InvalidData(e)) => {
             log::error!("Cannot extract locus {} sequences: {}", new_locus, e);
             return Ok(false);
@@ -617,19 +630,106 @@ where R: Read + Seek,
     Ok(true)
 }
 
-pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let mut args = parse_args(argv)?.validate()?;
-    super::greet();
-    // unwrap as argsuments were previously checked to be Some.
-    let db_path = args.database.as_ref().unwrap();
+/// Add loci when pangenome is provided as a VCF file.
+/// Returns number of successful and total loci.
+fn run_with_vcf(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> Result<(u32, u32), Error> {
     let ref_filename = args.reference.as_ref().unwrap();
     let vcf_filename = args.variants.as_ref().unwrap();
 
     let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta("reference", &ref_filename)?;
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
-
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
     let haplotypes = panvcf::AllHaplotypes::new(&mut vcf_file, &args.ref_name, &args.leave_out)?;
+
+    let mut succeed = 0;
+    let mut total = 0;
+    for locus in loci.iter() {
+        if add_locus(loci_dir, locus, &mut fasta_file, &mut vcf_file, &haplotypes, kmer_getter, &args)? {
+            succeed += 1;
+        }
+        total += 1;
+    }
+    Ok((succeed, total))
+}
+
+fn check_sequences(seqs: &[Vec<u8>], locus: &str) -> Result<(), Error> {
+    if seqs.is_empty() {
+        return Err(Error::InvalidData(format!("No sequences available for locus {}", locus)));
+    }
+    let min_size: usize = seqs.iter().map(|s| s.len()).min().unwrap();
+    if min_size < 1000 {
+        return Err(Error::InvalidData(format!("Locus alleles are too short for locus {} (shortest: {} bp)",
+            locus, min_size)));
+    } else if min_size < 10000 {
+        log::warn!("[{}] Locus alleles may be too short (shortest: {} bp)", locus, min_size);
+    }
+    if seqs.iter().any(|s| seq::has_n(s)) {
+        return Err(Error::InvalidData(format!("Locus alleles contain Ns for locus {}", locus)));
+    }
+
+    const AFFIX_SIZE: usize = 2;
+    let seq0 = &seqs[0];
+    let prefix = &seq0[..AFFIX_SIZE];
+    let suffix = &seq0[seq0.len() - AFFIX_SIZE..];
+    if seqs[1..].iter().any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix) {
+        log::warn!("[{}] There are variants on the boundary of the locus", locus);
+    }
+    Ok(())
+}
+
+fn process_locus_from_fasta(
+    path_and_name: &str,
+    loci_dir: &Path,
+    kmer_getter: &JfKmerGetter,
+    args: &Args,
+) -> Result<(), Error>
+{
+    let (path, locus) = path_and_name.split_once('=')
+        .ok_or_else(|| Error::InvalidInput(format!("Sequence argument {:?} must follow format FASTA=LOCUS_NAME",
+            path_and_name)))?;
+    interv::check_locus_name(locus)?;
+    let locus_dir = loci_dir.join(locus);
+    if !super::Rerun::from_force(args.force).need_analysis(&locus_dir)? {
+        return Ok(())
+    }
+
+    let (contigs, seqs) = ContigNames::load_fasta(locus, ext::sys::open(Path::new(path))?, ())
+        .map_err(add_path!(path))?;
+    check_sequences(&seqs, locus)?;
+    let seqs: Vec<_> = contigs.take_names().into_iter().zip(seqs.into_iter())
+        .map(|(name, seq)| NamedSeq::new(name, seq))
+        .collect();
+    process_haplotypes(&locus_dir, locus, seqs, None, kmer_getter, &args)?;
+    Ok(())
+}
+
+/// Add loci based on explicit fasta files.
+/// Returns number of successful and failed loci.
+fn run_with_fasta(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> Result<(u32, u32), Error> {
+    let mut succeed = 0;
+    for path_and_name in args.sequences.iter() {
+        match process_locus_from_fasta(path_and_name, loci_dir, kmer_getter, args) {
+            Ok(()) => succeed += 1,
+            Err(e) => {
+                let s = match path_and_name.split('=') {
+                    Some((_, name)) => format!("locus {}", name),
+                    None => format!("entry {:?}", path_and_name),
+                };
+                log::error!("Error while analyzing {}: {}", s, e.display());
+            }
+        }
+    }
+    Ok((succeed, args.sequences.len() as u32))
+}
+
+pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+    let mut args = parse_args(argv)?.validate()?;
+    super::greet();
+    let timer = Instant::now();
+
+    let db_path = args.database.as_ref().unwrap();
+    let loci_dir = db_path.join(paths::LOCI_DIR);
+    ext::sys::mkdir(&loci_dir)?;
 
     let mut jf_filenames = ext::sys::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
     if jf_filenames.len() != 1 {
@@ -640,18 +740,19 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_filenames.pop().unwrap())?;
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
-    let loci_dir = db_path.join(paths::LOCI_DIR);
-    ext::sys::mkdir(&loci_dir)?;
-    let mut n_successes = 0;
-    for locus in loci.iter() {
-        if add_locus(&loci_dir, locus, &mut fasta_file, &mut vcf_file, &haplotypes, &kmer_getter, &args)? {
-            n_successes += 1;
-        }
-    }
-    if n_successes > 0 {
-        log::info!("Success!");
+    let (succeed, total) = if args.sequences.is_empty() {
+        run_with_vcf(&loci_dir, &kmer_getter, &args)?
     } else {
-        log::error!("Could not add any loci.");
+        run_with_fasta(&loci_dir, &kmer_getter, &args)?
+    };
+
+    if succeed == 0 {
+        log::error!("Failed at {} loci", total);
+    } else if succeed < total {
+        log::warn!("Successfully analysed {} loci, failed at {} loci", succeed, total - succeed);
+    } else {
+        log::info!("Successfully analysed {} loci", succeed);
     }
+    log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }

@@ -259,6 +259,18 @@ impl<'a> fmt::Display for BedFormat<'a> {
     }
 }
 
+/// Tests if the locus name is allowed.
+pub fn check_locus_name(name: &str) -> Result<(), Error> {
+    lazy_static! {
+        static ref NAME_RE: Regex = Regex::new(formatcp!("^{}$", NAME_PATTERN)).unwrap();
+    }
+    if NAME_RE.is_match(&name) {
+        Ok(())
+    } else {
+        Err(Error::ParsingError(format!("Locus name '{}' contains forbidden symbols", name)))
+    }
+}
+
 /// Stores an interval with its name.
 #[derive(Clone)]
 pub struct NamedInterval {
@@ -275,15 +287,8 @@ impl NamedInterval {
     pub fn new(interval: Interval, name: Option<&str>) -> Result<Self, Error> {
         let explicit_name = name.is_some();
         let name = name.map(Into::into).unwrap_or_else(|| interval.to_string());
-
-        lazy_static! {
-            static ref NAME_RE: Regex = Regex::new(formatcp!("^{}$", NAME_PATTERN)).unwrap();
-        }
-        if !NAME_RE.is_match(&name) {
-            Err(Error::ParsingError(format!("Interval name '{}' contains forbidden symbols", name)))
-        } else {
-            Ok(Self { name, interval, explicit_name })
-        }
+        check_locus_name(&name)?;
+        Ok(Self { name, interval, explicit_name })
     }
 
     /// Parse interval name from string "contig:start-end[=name]".
