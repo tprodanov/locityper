@@ -1,7 +1,10 @@
 use std::{
     io,
+    fmt::Write,
     path::PathBuf,
 };
+use colored::Colorize;
+use crate::ext;
 
 /// General enum, representing possible errors.
 #[derive(Debug)]
@@ -16,19 +19,13 @@ pub enum Error {
     /// Executable not found.
     NoExec(PathBuf),
     /// Subcommand failed.
-    SubprocessFail(std::process::Output),
+    Subprocess(std::process::Output),
     InvalidInput(String),
     InvalidData(String),
     ParsingError(String),
     RuntimeError(String),
     JsonLoad(String),
 }
-
-// impl From<io::Error> for Error {
-//     fn from(e: io::Error) -> Self {
-//         Self::Io(e, Vec::new())
-//     }
-// }
 
 #[cfg(feature = "gurobi")]
 impl From<grb::Error> for Error {
@@ -61,6 +58,17 @@ impl From<json::JsonError> for Error {
     }
 }
 
+fn clip_msg(bytes: &[u8]) -> String {
+    const MAX_LEN: usize = 10000;
+    if bytes.len() > MAX_LEN {
+        let mut s = String::from_utf8_lossy(&bytes[..MAX_LEN]).into_owned();
+        write!(s, " ...").unwrap();
+        s
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 impl Error {
     /// Converts an error, produced by a solver.
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {
@@ -69,7 +77,44 @@ impl Error {
 
     /// Format error message. TODO: Better formatting.
     pub fn display(&self) -> String {
-        format!("{:?}", self)
+        let mut s = String::new();
+        match self {
+            Self::Io(e, files) => {
+                write!(s, "{} in relation to ", "Input/Output error".red()).unwrap();
+                if files.is_empty() {
+                    writeln!(s, "unnamed streams").unwrap();
+                } else {
+                    writeln!(s, "{}.", files.iter().map(|f| ext::fmt::path(f).cyan().to_string())
+                        .collect::<Vec<_>>().join(" ")).unwrap();
+                }
+                write!(s, "{} error", e.kind()).unwrap();
+                if let Some(e2) = e.get_ref() {
+                    write!(s, ": {}", e2).unwrap();
+                }
+            }
+            Self::Solver(solver, e) => write!(s, "ILP solver {} produced error {}", solver.red(), e).unwrap(),
+            Self::Lexopt(e) => write!(s, "{} to parse command-line arguments: {}", "Failed".red(), e).unwrap(),
+            Self::Htslib(e) => write!(s, "{}: {}", "Htslib error".red(), e).unwrap(),
+            Self::NoExec(path) => write!(s, "{} at {}", "Could not find executable".red(),
+                ext::fmt::path(path).cyan()).unwrap(),
+            Self::Subprocess(out) => {
+                write!(s, "{}, {}", "Error while running subprocess".red(), out.status).unwrap();
+                let stdout = clip_msg(&out.stdout);
+                if !stdout.is_empty() {
+                    write!(s, "\n{}: {}\n", "Stdout".bold(), stdout).unwrap();
+                }
+                let stderr = clip_msg(&out.stderr);
+                if !stderr.is_empty() {
+                    write!(s, "\n{}: {}\n", "Stdout".bold(), stderr).unwrap();
+                }
+            }
+            Self::InvalidInput(e) => write!(s, "{}: {}", "Invalid input".red(), e).unwrap(),
+            Self::InvalidData(e) => write!(s, "{}: {}", "Invalid data".red(), e).unwrap(),
+            Self::ParsingError(e) => write!(s, "{}: {}", "Parsing error".red(), e).unwrap(),
+            Self::RuntimeError(e) => write!(s, "{}: {}", "Runtime error".red(), e).unwrap(),
+            Self::JsonLoad(e) => write!(s, "{}: {}", "Could not load JSON".red(), e).unwrap(),
+        };
+        s
     }
 }
 

@@ -560,7 +560,7 @@ fn run_mapping(
     log::debug!("");
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     if !output.status.success() {
-        return Err(Error::SubprocessFail(output));
+        return Err(Error::Subprocess(output));
     }
     if let Some(handle) = handle {
         // handle.join() returns Result<Result<(), crate::Error>, Any>.

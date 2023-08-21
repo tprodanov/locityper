@@ -101,7 +101,7 @@ macro_rules! impl_pretty_int {
                 let mut rev_bytes = s.as_bytes().iter().rev();
                 let (mut n, mut mult) = match rev_bytes.next().copied() {
                     None => return Err("Cannot parse an empty string into int".to_owned()),
-                    Some(b'G') | Some(b'g') => (0, 1_000_000_000),
+                    Some(b'G') | Some(b'g') | Some(b'B') | Some(b'b') => (0, 1_000_000_000),
                     Some(b'M') | Some(b'm') => (0, 1_000_000),
                     Some(b'K') | Some(b'k') => (0, 1000),
                     Some(c @ b'0' ..= b'9') => (<$prim>::from(c - b'0'), 10),

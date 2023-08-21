@@ -2,7 +2,7 @@
 
 use std::{
     io::{Read, Write, Seek},
-    cmp::max,
+    cmp::{min, max},
     sync::Arc,
     process::Command,
     path::{Path, PathBuf},
@@ -16,7 +16,7 @@ use crate::{
         Interval, ContigNames,
         kmers::{JfKmerGetter, Kmer},
     },
-    ext,
+    ext::{self, fmt::PrettyU64},
 };
 use super::paths;
 
@@ -27,6 +27,7 @@ struct Args {
     bg_region: Option<String>,
     threads: u16,
     jellyfish: PathBuf,
+    jf_size: Option<u64>,
 }
 
 impl Default for Args {
@@ -38,6 +39,7 @@ impl Default for Args {
             bg_region: None,
             threads: 8,
             jellyfish: PathBuf::from("jellyfish"),
+            jf_size: None,
         }
     }
 }
@@ -84,6 +86,8 @@ fn print_help() {
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
+    println!("    {:KEY$} {:VAL$}  Override Jellyfish cache size.",
+        "    --jf-size".green(), "INT".yellow());
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -108,6 +112,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('b') | Long("bg") | Long("bg-region") => args.bg_region = Some(parser.value()?.parse()?),
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
+            Long("jf-size") => args.jf_size = Some(parser.value()?.parse::<PrettyU64>()?.get()),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -215,23 +220,24 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
         return Ok(jf_path)
     }
 
+    let timer = Instant::now();
     let mut command = Command::new(&args.jellyfish);
+    let jf_size = args.jf_size.unwrap_or(min(genome_size, 10_000_000_000));
     command.args(&["count", "--canonical", "--lower-count=2", "--out-counter-len=1",
             &format!("--mer-len={}", args.kmer_size),
             &format!("--threads={}", args.threads),
-            &format!("--size={}", genome_size)])
+            &format!("--size={}", jf_size)])
         .arg("--output").arg(&jf_path)
         .arg(ref_filename);
     log::info!("Counting {}-mers in {} threads", args.kmer_size, args.threads);
     log::debug!("    {}", ext::fmt::command(&command));
 
-    let start = Instant::now();
     let output = command.output().map_err(add_path!(!))?;
-    log::debug!("    Finished in {:?}", ext::fmt::Duration(start.elapsed()));
+    log::debug!("    Finished in {}", ext::fmt::Duration(timer.elapsed()));
     if output.status.success() {
         Ok(jf_path)
     } else {
-        Err(Error::SubprocessFail(output))
+        Err(Error::Subprocess(output))
     }
 }
 

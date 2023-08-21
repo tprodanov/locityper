@@ -596,9 +596,9 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
     let bwa_output = child.wait_with_output().map_err(add_path!(!))?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     if !bwa_output.status.success() {
-        return Err(Error::SubprocessFail(bwa_output));
+        return Err(Error::Subprocess(bwa_output));
     } else if !samtools_output.status.success() {
-        return Err(Error::SubprocessFail(samtools_output));
+        return Err(Error::Subprocess(samtools_output));
     }
     fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
         .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;

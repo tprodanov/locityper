@@ -39,5 +39,8 @@ fn init_logger() {
 fn main() {
     init_logger();
     let args: Vec<_> = std::env::args().collect();
-    command::run(&args).unwrap();
+    if let Err(e) = command::run(&args) {
+        log::error!("Finished with an error:\n{}", e.display());
+        std::process::exit(1);
+    }
 }
