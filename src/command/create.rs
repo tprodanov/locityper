@@ -207,7 +207,7 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
 
     let start = Instant::now();
     let output = command.output().map_err(add_path!(!))?;
-    log::debug!("    Finished in {:?}", start.elapsed());
+    log::debug!("    Finished in {:?}", ext::fmt::Duration(start.elapsed()));
     if output.status.success() {
         Ok(jf_path)
     } else {

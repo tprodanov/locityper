@@ -249,7 +249,7 @@ pub fn minimizers<K: Kmer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
 }
 
 /// Store k-mer counts as u16.
-pub type KmerCount = u16;
+pub type KmerCount = u8;
 
 /// Stores k-mer counts for each input k-mer across a set of sequences.
 pub struct KmerCounts {

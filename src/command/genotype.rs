@@ -105,7 +105,7 @@ impl Args {
     }
 }
 
-fn print_help() {
+fn print_help(extended: bool) {
     const KEY: usize = 18;
     const VAL: usize = 5;
     const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
@@ -126,89 +126,91 @@ fn print_help() {
         "-o, --output".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
         "-^, --interleaved".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
-        "    --subset-loci".green(), "STR+".yellow());
-    println!("    {:KEY$} {:VAL$}  Optional: genotype priors. Contains three columns:\n\
-        {EMPTY}  <locus>  <genotype (through comma)>  <log10(prior)>.\n\
-        {EMPTY}  Missing genotypes are removed from the analysis.",
-        "    --priors".green(), "FILE".yellow());
+    if extended {
+        println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
+            "    --subset-loci".green(), "STR+".yellow());
+        println!("    {:KEY$} {:VAL$}  Optional: genotype priors. Contains three columns:\n\
+            {EMPTY}  <locus>  <genotype (through comma)>  <log10(prior)>.\n\
+            {EMPTY}  Missing genotypes are removed from the analysis.",
+            "    --priors".green(), "FILE".yellow());
 
-    println!("\n{}", "Read recruitment:".bold());
-    println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than {}) [{}].",
-        "-k, --recr-kmer".green(), "INT".yellow(), recruit::Minimizer::MAX_KMER_SIZE,
-        super::fmt_def(defaults.recr_params.minimizer_k));
-    println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
-        "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.recr_params.minimizer_w));
-    println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
-        {EMPTY}  of minimizers matching one of the targets.\n\
-        {EMPTY}  Default: {}.",
-        "-m, --matches-frac".green(), "FLOAT".yellow(),
-        Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
-    println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
-        {EMPTY}  May impact runtime in multi-threaded read recruitment.",
-        "-c, --chunk-size".green(), "INT".yellow(), super::fmt_def(defaults.recr_params.chunk_size));
+        println!("\n{}", "Read recruitment:".bold());
+        println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than {}) [{}].",
+            "-k, --recr-kmer".green(), "INT".yellow(), recruit::Minimizer::MAX_KMER_SIZE,
+            super::fmt_def(defaults.recr_params.minimizer_k));
+        println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
+            "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.recr_params.minimizer_w));
+        println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
+            {EMPTY}  of minimizers matching one of the targets.\n\
+            {EMPTY}  Default: {}.",
+            "-m, --matches-frac".green(), "FLOAT".yellow(),
+            Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
+        println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
+            {EMPTY}  May impact runtime in multi-threaded read recruitment.",
+            "-c, --chunk-size".green(), "INT".yellow(), super::fmt_def(defaults.recr_params.chunk_size));
 
-    println!("\n{}", "Model parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
-        "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
-    println!("    {:KEY$} {:VAL$}\n\
-        {EMPTY}  Two p-value thresholds on edit distance:\n\
-        {EMPTY}  for good alignments [{}], and for passable alignments [{}].",
-        "    --edit-pval".green(), "FLOAT FLOAT".yellow(),
-        super::fmt_def_f64(defaults.assgn_params.edit_pvals.0),
-        super::fmt_def_f64(defaults.assgn_params.edit_pvals.1));
-    println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
-        {EMPTY}  the best alignment [{}].",
-        "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-        super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_diff)));
-    println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
-        "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-        super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
-    println!("    {:KEY$} {}\n\
-        {EMPTY}  Calculate window weight based on the fraction of unique k-mers [{} {}].\n\
-        {EMPTY}  * {} = breakpoint (0, 1). Weight at breakpoint is 1/2,\n\
-        {EMPTY}  * {} = power [0.5, 50]. Regulates sigmoid slope (bigger - steeper).",
-        "    --weight".green(), "FLOAT [FLOAT]".yellow(),
-        super::fmt_def_f64(defaults.assgn_params.weight_breakpoint),
-        super::fmt_def_f64(defaults.assgn_params.weight_power), "FLOAT_1".yellow(), "FLOAT_2".yellow());
-    println!("    {:KEY$} {:VAL$}  Ignore reads and windows with weight under this value [{}].",
-        "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
-    println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
-        {EMPTY}  matter more; Positive: read depth matters more.",
-        "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
-    println!("    {} {}  Compare window probability to have copy number 1 against two\n\
-        {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
-        "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
-        super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
-    println!("    {:KEY$} {:VAL$}  Use unpaired reads.",
-        "    --use-unpaired".green(), super::flag());
+        println!("\n{}", "Model parameters:".bold());
+        println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
+            "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
+        println!("    {:KEY$} {:VAL$}\n\
+            {EMPTY}  Two p-value thresholds on edit distance:\n\
+            {EMPTY}  for good alignments [{}], and for passable alignments [{}].",
+            "    --edit-pval".green(), "FLOAT FLOAT".yellow(),
+            super::fmt_def_f64(defaults.assgn_params.edit_pvals.0),
+            super::fmt_def_f64(defaults.assgn_params.edit_pvals.1));
+        println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
+            {EMPTY}  the best alignment [{}].",
+            "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_diff)));
+        println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
+            "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
+        println!("    {:KEY$} {}\n\
+            {EMPTY}  Calculate window weight based on the fraction of unique k-mers [{} {}].\n\
+            {EMPTY}  * {} = breakpoint (0, 1). Weight at breakpoint is 1/2,\n\
+            {EMPTY}  * {} = power [0.5, 50]. Regulates sigmoid slope (bigger - steeper).",
+            "    --weight".green(), "FLOAT [FLOAT]".yellow(),
+            super::fmt_def_f64(defaults.assgn_params.weight_breakpoint),
+            super::fmt_def_f64(defaults.assgn_params.weight_power), "FLOAT_1".yellow(), "FLOAT_2".yellow());
+        println!("    {:KEY$} {:VAL$}  Ignore reads and windows with weight under this value [{}].",
+            "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
+        println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
+            {EMPTY}  matter more; Positive: read depth matters more.",
+            "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
+        println!("    {} {}  Compare window probability to have copy number 1 against two\n\
+            {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
+            "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
+            super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
+        println!("    {:KEY$} {:VAL$}  Use unpaired reads.",
+            "    --use-unpaired".green(), super::flag());
 
-    println!("\n{}", "Locus genotyping:".bold());
-    println!("    {:KEY$} {:VAL$}  Use at most {} alignments [{}].",
-        "    --max-alns".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.assgn_params.max_alns));
-    println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
-        {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
-        "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
-        "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
-    println!("    {:KEY$} {:VAL$}  Score threshold for genotype pre-filtering [{}].\n\
-        {EMPTY}  Values range from 0 (use all) to 1 (use best-score genotypes).",
-        "    --score-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.score_thresh));
-    println!("    {:KEY$} {:VAL$}  After each step, discard genotypes that have\n\
-        {EMPTY}  smaller probability than 10^{} to be best [{}].",
-        "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-        super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
-    println!("    {:KEY$} {:VAL$}  Minimum number of genotypes after each step [{}].",
-        "    --min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
-    println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
-        "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
-    println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
-        "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
-    println!("        {} {}, {} {}, {} {}, {} {}\n\
-        {EMPTY}  Solver parameters (see README).",
-        "--greedy".green(), "STR".yellow(),
-        "--anneal".green(), "STR".yellow(),
-        "--highs".green(), "STR".yellow(),
-        "--gurobi".green(), "STR".yellow());
+        println!("\n{}", "Locus genotyping:".bold());
+        println!("    {:KEY$} {:VAL$}  Use at most {} alignments [{}].",
+            "    --max-alns".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.assgn_params.max_alns));
+        println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
+            {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
+            "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
+            "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
+        println!("    {:KEY$} {:VAL$}  Score threshold for genotype pre-filtering [{}].\n\
+            {EMPTY}  Values range from 0 (use all) to 1 (use best-score genotypes).",
+            "    --score-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.score_thresh));
+        println!("    {:KEY$} {:VAL$}  After each step, discard genotypes that have\n\
+            {EMPTY}  smaller probability than 10^{} to be best [{}].",
+            "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
+        println!("    {:KEY$} {:VAL$}  Minimum number of genotypes after each step [{}].",
+            "    --min-gts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_gts));
+        println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
+            "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
+        println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
+            "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
+        println!("        {} {}, {} {}, {} {}, {} {}\n\
+            {EMPTY}  Solver parameters (see README).",
+            "--greedy".green(), "STR".yellow(),
+            "--anneal".green(), "STR".yellow(),
+            "--highs".green(), "STR".yellow(),
+            "--gurobi".green(), "STR".yellow());
+    }
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -222,21 +224,24 @@ fn print_help() {
         "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
         "    --debug".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
-        "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
-    println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
-        "    --minimap".green(), "EXE".yellow(), super::fmt_def(defaults.minimap.display()));
-    println!("    {:KEY$} {:VAL$}  Samtools executable    [{}].",
-        "    --samtools".green(), "EXE".yellow(), super::fmt_def(defaults.samtools.display()));
+    if extended {
+        println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
+            "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
+        println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
+            "    --minimap".green(), "EXE".yellow(), super::fmt_def(defaults.minimap.display()));
+        println!("    {:KEY$} {:VAL$}  Samtools executable    [{}].",
+            "    --samtools".green(), "EXE".yellow(), super::fmt_def(defaults.samtools.display()));
+    }
 
     println!("\n{}", "Other parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
+    println!("    {:KEY$} {:VAL$}  Show {} help message.", "-H, --full-help".green(), "", "extended".red());
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     if argv.is_empty() {
-        print_help();
+        print_help(false);
         std::process::exit(1);
     }
     use lexopt::prelude::*;
@@ -321,7 +326,11 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 std::process::exit(0);
             }
             Short('h') | Long("help") => {
-                print_help();
+                print_help(false);
+                std::process::exit(0);
+            }
+            Short('H') | Long("full-help") | Long("hidden-help") => {
+                print_help(true);
                 std::process::exit(0);
             }
             _ => Err(arg.unexpected())?,
