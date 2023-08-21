@@ -711,7 +711,7 @@ fn run_with_fasta(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> R
         match process_locus_from_fasta(path_and_name, loci_dir, kmer_getter, args) {
             Ok(()) => succeed += 1,
             Err(e) => {
-                let s = match path_and_name.split('=') {
+                let s = match path_and_name.split_once('=') {
                     Some((_, name)) => format!("locus {}", name),
                     None => format!("entry {:?}", path_and_name),
                 };

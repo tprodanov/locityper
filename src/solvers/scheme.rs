@@ -172,16 +172,6 @@ impl Scheme {
                     { return Err(Error::RuntimeError(
                         "Gurobi solver is disabled. Please recompile with `gurobi` feature.".to_owned())) }
                 }
-                "ilp" => {
-                    #[cfg(feature = "highs")]
-                    { (Box::new(super::HighsSolver::default()), &params.highs_params) }
-                    #[cfg(all(not(feature = "highs"), feature = "gurobi"))]
-                    { (Box::new(super::GurobiSolver::default()), &params.gurobi_params) }
-                    #[cfg(all(not(feature = "highs"), not(feature = "gurobi")))]
-                    { return Err(Error::RuntimeError(
-                        "Both ILP solvers are disabled. Please recompile with `gurobi` or `highs` feature."
-                        .to_owned())) }
-                }
                 _ => return Err(Error::InvalidInput(format!("Unknown solver {:?}", stage))),
             };
             solver.set_params(solver_params)?;
