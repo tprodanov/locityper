@@ -1,6 +1,5 @@
 use std::{
-    fmt,
-    io::{self, BufRead},
+    fmt, io,
     fs::File,
     sync::Arc,
     path::Path,
@@ -62,7 +61,7 @@ impl ContigNames {
     /// Create contig names from an iterator over pairs (name, length).
     /// Names must not repeat.
     /// First argument: overall name of the contig set.
-    pub fn new(tag: impl Into<String>, it: impl Iterator<Item = (String, u32)>) -> Self {
+    pub fn new(tag: impl Into<String>, it: impl Iterator<Item = (String, u32)>) -> Result<Self, Error> {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
         let mut name_to_id = FnvHashMap::default();
@@ -77,21 +76,25 @@ impl ContigNames {
         }
 
         const MAX_CONTIGS: usize = (std::u16::MAX as usize - 1) / 2;
-        assert!(names.len() < MAX_CONTIGS,
-            "Cannot support {} contigs, maximum number is {}", names.len(), MAX_CONTIGS);
+        if names.is_empty() {
+            return Err(Error::InvalidData("Contig set is empty".to_owned()));
+        } else if names.len() >= MAX_CONTIGS {
+            return Err(Error::InvalidData(format!("Too many contigs ({}), can support at most {}",
+                names.len(), MAX_CONTIGS)));
+        }
 
         names.shrink_to_fit();
         lengths.shrink_to_fit();
         name_to_id.shrink_to_fit();
-        Self {
+        Ok(Self {
             tag: tag.into(),
             names, lengths, name_to_id,
-        }
+        })
     }
 
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
-    pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> Self {
+    pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> Result<Self, Error> {
         Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
     }
 
@@ -104,18 +107,18 @@ impl ContigNames {
     /// - Vector of contig sequences.
     pub fn load_fasta(
         tag: impl Into<String>,
-        stream: impl BufRead,
+        filename: &Path,
         mut descriptions: impl VecOrNone<Option<String>>,
-    ) -> io::Result<(Self, Vec<Vec<u8>>)>
+    ) -> Result<(Self, Vec<Vec<u8>>), Error>
     {
-        let mut reader = fasta::Reader::from_bufread(stream);
+        let mut reader = fasta::Reader::from_bufread(ext::sys::open(&filename)?);
         let mut names_lengths = Vec::new();
         let mut seqs = Vec::new();
         let mut record = fasta::Record::new();
         loop {
-            reader.read(&mut record)?;
+            reader.read(&mut record).map_err(add_path!(filename))?;
             if record.is_empty() {
-                let contigs = Self::new(tag, names_lengths.into_iter());
+                let contigs = Self::new(tag, names_lengths.into_iter())?;
                 return Ok((contigs, seqs));
             }
 
@@ -130,13 +133,13 @@ impl ContigNames {
     /// Loads indexed fasta and stored contig names and lengths.
     pub fn load_indexed_fasta(
         tag: impl Into<String>,
-        filename: &(impl AsRef<Path> + fmt::Debug),
+        filename: &Path,
     ) -> Result<(Arc<Self>, fasta::IndexedReader<File>), Error>
     {
         let fasta = fasta::IndexedReader::from_file(&filename)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
             .map_err(add_path!(filename))?;
-        let contigs = ContigNames::from_index(tag, &fasta.index);
+        let contigs = ContigNames::from_index(tag, &fasta.index)?;
         Ok((Arc::new(contigs), fasta))
     }
 
@@ -228,8 +231,7 @@ impl ContigSet {
         descriptions: impl VecOrNone<Option<String>>,
     ) -> Result<Self, Error>
     {
-        let (contigs, seqs) = ContigNames::load_fasta(tag, ext::sys::open(fasta_filename)?, descriptions)
-            .map_err(add_path!(fasta_filename))?;
+        let (contigs, seqs) = ContigNames::load_fasta(tag, fasta_filename, descriptions)?;
         let kmer_counts = KmerCounts::load(ext::sys::open(kmers_filename)?, contigs.lengths())?;
         Ok(Self {
             contigs: Arc::new(contigs),

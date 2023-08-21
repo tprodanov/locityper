@@ -693,8 +693,7 @@ fn process_locus_from_fasta(
         return Ok(())
     }
 
-    let (contigs, seqs) = ContigNames::load_fasta(locus, ext::sys::open(Path::new(path))?, ())
-        .map_err(add_path!(path))?;
+    let (contigs, seqs) = ContigNames::load_fasta(locus, Path::new(path), ())?;
     check_sequences(&seqs, locus)?;
     let seqs: Vec<_> = contigs.take_names().into_iter().zip(seqs.into_iter())
         .map(|(name, seq)| NamedSeq::new(name, seq))

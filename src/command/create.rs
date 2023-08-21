@@ -74,10 +74,10 @@ fn print_help() {
     println!("\n{}", "Optional parameters:".bold());
     println!("    {:KEY$} {:VAL$}  k-mer size [{}].",
         "-k, --kmer".green(), "INT".yellow(), super::fmt_def(defaults.kmer_size));
-    println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region. Must not be\n\
-        {EMPTY}  duplicated in the genome. Defaults to: chr17:72062001-76562000 (GRCh38).",
+    println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region,\n\
+        {EMPTY}  preferably >3 Mb and without many duplications.\n\
+        {EMPTY}  Default regions are defined for CHM13, GRCh38 and GRCh37.",
         "-b, --bg-region".green(), "STR".yellow());
-    // TODO: Parse default regions from BG_REGIONS.
 
     println!("\n{}", "Execution parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -123,8 +123,14 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
-/// Calculate background read distributions based on one of these regions.
-const BG_REGIONS: [&'static str; 1] = ["chr17:72062001-76562000"];
+fn default_region(genome: &str) -> &'static str {
+    match genome {
+        "CHM13" => "chr17:72950001-77450000",
+        "GRCh38" => "chr17:72062001-76562000",
+        "GRCh37" => "chr17:70060001-74560000",
+        _ => panic!("Unexpected genome {}", genome),
+    }
+}
 
 /// Returns the first appropriate interval for the contig names.
 /// If `bg_region` is set, try to parse it. Otherwise, iterate over `BG_REGIONS`.
@@ -146,19 +152,33 @@ fn select_bg_interval(
         };
     }
 
-    for s in BG_REGIONS.iter() {
-        if let Ok(region) = Interval::parse(s, contigs) {
+    let chr1_len = contigs.try_get_id("chr1")
+        .or_else(|_| contigs.try_get_id("1"))
+        .map(|id| contigs.get_len(id));
+    let genome = match chr1_len {
+        Ok(248_387_328) => "CHM13",
+        Ok(248_956_422) => "GRCh38",
+        Ok(249_250_621) => "GRCh37",
+        _ => return Err(Error::RuntimeError("Could not recognize reference genome. \
+            Please provide background region (-b) explicitely, preferably >3 Mb long and without many duplications."
+            .to_owned())),
+    };
+    let region = default_region(genome);
+
+    log::info!("Recognized {} reference genome, using background region {}", genome, region);
+    // Try to crop `chr` if region cannot be found.
+    for &crop in &[0, 3] {
+        if let Ok(region) = Interval::parse(&region[crop..], contigs) {
             if contigs.in_bounds(&region) {
                 return Ok(region);
             } else {
-                log::error!("Chromosome {} is in the reference file {}, but is shorter than expected",
-                    region.contig_name(), ext::fmt::path(ref_filename));
+                return Err(Error::InvalidInput(format!("Region {} is too long for the reference genome", region)));
             }
         }
     }
-    Err(Error::InvalidInput(format!(
-        "Reference file {} does not contain any of the default background regions. \
-        Consider setting region via --region or use a different reference file.", ext::fmt::path(ref_filename))))
+    Err(Error::InvalidInput(format!("Reference file {} does not contain any of the default background regions. \
+        Please provide background region (-b) explicitely, preferably >3 Mb long and without many duplications.",
+        ext::fmt::path(ref_filename))))
 }
 
 /// Extracts the sequence of a background region, used to estimate the parameters of the sequencing data.
@@ -220,8 +240,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     super::greet();
     // unwrap as args.database was previously checked to be Some.
     let db_path = args.database.as_ref().unwrap();
-    // Directory is not empty.
-    if db_path.exists() && db_path.read_dir().map_err(add_path!(db_path))?.next().is_some() {
+    let success_path = db_path.join(paths::BG_DIR).join(paths::SUCCESS);
+    if success_path.exists() && db_path.read_dir().map_err(add_path!(db_path))?.next().is_some() {
         log::error!("Output directory {} is not empty.", ext::fmt::path(db_path));
         log::warn!("Please remove it manually or select a different path.");
         std::process::exit(1);
@@ -231,14 +251,13 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     // unwrap as args.reference was previously checked to be Some.
     let ref_filename = args.reference.as_ref().unwrap();
     let (contigs, mut fasta) = ContigNames::load_indexed_fasta("reference", &ref_filename)?;
+    let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
     let jf_path = run_jellyfish(&db_path, &ref_filename, &args, contigs.genome_size())?;
     let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_path)?;
-
-    let region = select_bg_interval(&ref_filename, &contigs, &args.bg_region)?;
     extract_bg_region(&region, &mut fasta, &db_path, &kmer_getter)?;
 
     ext::sys::mkdir(&db_path.join(paths::LOCI_DIR))?;
-    super::write_success_file(db_path.join(paths::BG_DIR).join(paths::SUCCESS))?;
+    super::write_success_file(&success_path)?;
     log::info!("Success!");
     Ok(())
 }
