@@ -571,7 +571,6 @@ fn create_mapping_command(
             "-N", n_locs,   // Output as many secondary alignments as possible.
             "-f", &args.discard_minim.to_string(),
             "--eqx",        // Output X/= instead of M operations.
-            "-Y",           // Use soft clipping.
             "-t", &args.threads.to_string()]);
     }
     cmd.arg(&ref_path).arg(&reads_path)
