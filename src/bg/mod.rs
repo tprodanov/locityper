@@ -246,6 +246,8 @@ pub struct SequencingInfo {
     read_len: f64,
     /// Sequencing technology.
     technology: Technology,
+    /// Total number of reads/read pairs in the input file.
+    total_reads: Option<u64>,
 }
 
 impl SequencingInfo {
@@ -262,7 +264,10 @@ impl SequencingInfo {
                     read_len, technology.long_name())));
             }
         }
-        Ok(Self { read_len, technology })
+        Ok(Self {
+            read_len, technology,
+            total_reads: None,
+        })
     }
 
     pub fn mean_read_len(&self) -> f64 {
@@ -272,6 +277,10 @@ impl SequencingInfo {
     pub fn technology(&self) -> Technology {
         self.technology
     }
+
+    pub fn set_total_reads(&mut self, count: u64) {
+        self.total_reads = Some(count);
+    }
 }
 
 impl JsonSer for SequencingInfo {
@@ -279,12 +288,13 @@ impl JsonSer for SequencingInfo {
         json::object!{
             read_len: self.read_len,
             technology: self.technology.to_str(),
+            total_reads: self.total_reads,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> read_len (as_f64), technology (as_str));
+        json_get!(obj -> read_len (as_f64), technology (as_str), total_reads? (as_u64));
         let technology = Technology::from_str(technology).map_err(|e| Error::JsonLoad(e))?;
-        Ok(Self { read_len, technology })
+        Ok(Self { read_len, technology, total_reads })
     }
 }

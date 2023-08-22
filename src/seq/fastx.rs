@@ -176,6 +176,7 @@ impl RecordExt for PairedRecord {
 pub struct Reader<R: BufRead> {
     stream: R,
     buffer: Vec<u8>,
+    total_reads: u64,
 }
 
 impl Reader<Box<dyn BufRead + Send>> {
@@ -188,7 +189,10 @@ impl<R: BufRead> Reader<R> {
     pub fn new(mut stream: R) -> io::Result<Self> {
         let mut buffer = Vec::new();
         read_line(&mut stream, &mut buffer)?;
-        Ok(Self { stream, buffer })
+        Ok(Self {
+            stream, buffer,
+            total_reads: 0,
+        })
     }
 
     fn fill_fasta_record(&mut self, record: &mut Record) -> io::Result<bool> {
@@ -304,6 +308,18 @@ pub trait FastxRead: Send {
         }
         Ok(())
     }
+
+    /// Writes input stream to output.
+    fn copy(&mut self, writer: &mut impl io::Write) -> io::Result<()> {
+        let mut record = Self::Record::default();
+        while self.read_next(&mut record)? {
+            record.write_to(writer)?;
+        }
+        Ok(())
+    }
+
+    /// Returns the total number of consumed reads/read pairs.
+    fn total_reads(&self) -> u64;
 }
 
 impl<R: BufRead + Send> FastxRead for Reader<R> {
@@ -320,6 +336,7 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
         if self.buffer.is_empty() {
             return Ok(false);
         }
+        self.total_reads += 1;
 
         record.full_name.extend_from_slice(&self.buffer[1..]);
         if self.buffer[0] == b'>' {
@@ -327,6 +344,11 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
         } else {
             self.fill_fastq_record(record)
         }
+    }
+
+    /// Returns the total number of single end reads.
+    fn total_reads(&self) -> u64 {
+        self.total_reads
     }
 }
 
@@ -355,6 +377,11 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
             Ok(true)
         }
     }
+
+    /// Returns the total number of consumed paired reads.
+    fn total_reads(&self) -> u64 {
+        self.reader.total_reads() / 2
+    }
 }
 
 /// Two paired-end FASTA/Q readers, that stores two buffer records to reduce memory allocations.
@@ -382,5 +409,10 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
             _ => Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Different number of records in two input files.")),
         }
+    }
+
+    /// Returns the total number of consumed paired reads.
+    fn total_reads(&self) -> u64 {
+        self.reader1.total_reads()
     }
 }

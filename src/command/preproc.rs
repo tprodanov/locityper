@@ -434,28 +434,43 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     Ok(bg_dir)
 }
 
+// The same code is executed several times. This macro pastes the code where needed.
+macro_rules! create_handle {
+    ($reader:ident, $writer:ident, $rate:ident, $rng:ident) => {
+        Ok(thread::spawn(move || {
+            if $rate < 1.0 {
+                $reader.subsample(&mut $writer, $rate, &mut $rng)?;
+            } else {
+                $reader.copy(&mut $writer)?;
+            }
+            Ok($reader.total_reads())
+        }))
+    }
+}
+
+/// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
 fn set_mapping_stdin(
     args: &Args,
     child_stdin: ChildStdin,
     rng: &mut XoshiroRng,
-) -> Result<thread::JoinHandle<Result<(), io::Error>>, Error>
+) -> Result<thread::JoinHandle<Result<u64, io::Error>>, Error>
 {
-    let subsampling_rate = args.params.subsampling_rate;
+    let rate = args.params.subsampling_rate;
     let mut local_rng = rng.clone();
     rng.long_jump();
     let mut writer = io::BufWriter::new(child_stdin);
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
         let mut reader = fastx::Reader::from_path(&args.input[0])?;
-        Ok(thread::spawn(move || reader.subsample(&mut writer, subsampling_rate, &mut local_rng)))
+        create_handle!(reader, writer, rate, local_rng)
     } else if args.interleaved {
         let mut reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
-        Ok(thread::spawn(move || reader.subsample(&mut writer, subsampling_rate, &mut local_rng)))
+        create_handle!(reader, writer, rate, local_rng)
     } else {
         let mut reader = fastx::PairedEndReaders::new(
             fastx::Reader::from_path(&args.input[0])?,
             fastx::Reader::from_path(&args.input[1])?);
-        Ok(thread::spawn(move || reader.subsample(&mut writer, subsampling_rate, &mut local_rng)))
+        create_handle!(reader, writer, rate, local_rng)
     }
 }
 
@@ -473,7 +488,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "-t", &args.threads.to_string(), // Specify the number of threads,
             "-r", &format!("{:.0}", seq_info.mean_read_len()), // Provide mean read length.
             ]);
-        if (args.params.subsampling_rate == 1.0 && args.interleaved) || args.is_paired_end() {
+        if args.is_paired_end() {
             command.arg("--interleaved");
         }
     } else {
@@ -489,15 +504,10 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "-t", &args.threads.to_string() // Specify the number of threads,
             ]);
     }
-
-    // Providing paths to the reference and reads.
-    command.arg(&ref_filename);
-    if args.params.subsampling_rate == 1.0 {
-        command.args(&args.input);
-    } else {
-        command.arg("-").stdin(Stdio::piped());
-    }
-    command.stdout(Stdio::piped());
+    // Provide paths to the reference and pipe reads.
+    command.arg(&ref_filename).arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
     command
 }
 
@@ -521,9 +531,10 @@ fn first_step_str(args: &Args) -> String {
 
 /// Map reads to the whole reference genome, and then take only reads mapped to the corresponding BED file.
 /// Subsample reads if the corresponding rate is less than 1.
+/// Return the total number of reads/read pairs.
 fn run_mapping(
     args: &Args,
-    seq_info: &SequencingInfo,
+    seq_info: &mut SequencingInfo,
     ref_filename: &Path,
     bed_target: &Path,
     out_bam: &Path,
@@ -542,7 +553,7 @@ fn run_mapping(
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut guard = ext::sys::ChildGuard::new(mapping_child);
-    let handle = mapping_stdin.map(|stdin| set_mapping_stdin(args, stdin, rng)).transpose()?;
+    let handle = set_mapping_stdin(args, mapping_stdin.unwrap(), rng)?;
 
     let mut samtools = Command::new(&args.samtools);
     // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
@@ -563,11 +574,10 @@ fn run_mapping(
     if !output.status.success() {
         return Err(Error::Subprocess(output));
     }
-    if let Some(handle) = handle {
-        // handle.join() returns Result<Result<(), crate::Error>, Any>.
-        // expect unwraps the outer Err, then ? returns the inner Err, if any.
-        handle.join().expect("Process failed for unknown reason").map_err(add_path!(!))?;
-    }
+    let total_reads = handle.join()
+        .map_err(|e| Error::RuntimeError(format!("Read mapping failed: {:?}", e)))?
+        .map_err(add_path!(!))?;
+    seq_info.set_total_reads(total_reads);
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
     guard.disarm();
     Ok(())
@@ -726,7 +736,7 @@ fn estimate_bg_distrs(
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     let is_paired_end: bool;
     let alns: Vec<Alignment>;
-    let seq_info: SequencingInfo;
+    let mut seq_info: SequencingInfo;
 
     if let Some(alns_filename) = args.alns.as_ref() {
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
@@ -751,7 +761,7 @@ fn estimate_bg_distrs(
 
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
-        run_mapping(args, &seq_info, &data.ref_filename, &data.bed_filename, &bam_filename, rng)?;
+        run_mapping(args, &mut seq_info, &data.ref_filename, &data.bed_filename, &bam_filename, rng)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;

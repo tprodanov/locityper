@@ -1,9 +1,11 @@
 Locityper
 =========
 
-Locityper is a tool, designed to genotype complex loci from short- and long-read whole genome sequencing.
+Locityper is designed to **genotype complex loci** from *short-* and *long-read* whole genome sequencing.
 
-Locityper is created by Timofey Prodanov `timofey.prodanov[at]hhu.de` and Tobias Marschall `tobias.marschall[at]hhu.de`.
+Locityper is created by
+[Timofey Prodanov](https://marschall-lab.github.io/people/tprodanov/) `timofey.prodanov[at]hhu.de` and
+[Tobias Marschall](https://marschall-lab.github.io/people/tmarschall/) `tobias.marschall[at]hhu.de`.
 
 Table of contents
 -----------------
