@@ -233,11 +233,11 @@ fn print_help(extended: bool) {
     let defaults = Args::default();
     println!("{}", "Preprocess WGS dataset.".yellow());
 
-    println!("\n{} {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam) -d db -r reference.fa -o out [arguments]",
+    println!("\n{} {} preproc -i reads1.fq [reads2.fq] -d db -r reference.fa -o out [arguments]",
         "Usage:".bold(), super::PROGRAM);
     if !extended {
-        println!("\nThis is a short help message. Please use {} to see the full help.",
-            "-H/--full-help".green());
+        println!("\nThis is a {} help message. Please use {} to see the full help.",
+            "short".red(), "-H/--full-help".green());
     }
 
     println!("\n{}", "Input/output arguments:".bold());
@@ -245,8 +245,9 @@ fn print_help(extended: bool) {
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Reads in indexed BAM/CRAM format, already mapped to the whole genome.\n\
-        {EMPTY}  Mutually exclusive with {}.",
-        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green());
+        {EMPTY}  Mutually exclusive with {}.\n\
+        {EMPTY}  This method is much faster, but {}.",
+        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "less accurate".red());
     println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
         "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",

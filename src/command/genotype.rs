@@ -115,6 +115,10 @@ fn print_help(extended: bool) {
 
     println!("\n{} {} genotype -i reads1.fq [reads2.fq] -d db -o out [arguments]",
         "Usage:".bold(), super::PROGRAM);
+    if !extended {
+        println!("\nThis is a {} help message. Please use {} to see the full help.",
+            "short".red(), "-H/--full-help".green());
+    }
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\

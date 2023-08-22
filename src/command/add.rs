@@ -134,9 +134,9 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}\n\
         {EMPTY}  Fasta file(s) with locus alleles. Format: {}={}.\n\
         {EMPTY}  Mutually exclusive with {}, {} and {}/{}.\n\
-        {EMPTY}  {}: all sequences must be on the same strand!",
+        {EMPTY}  All sequences {} on the same strand!",
         "-s, --seqs".green(), "FILE=STR".yellow(), "filename".underline(), "locus_name".underline(),
-        "-r".green(), "-v".green(), "-l".green(), "-L".green(), "NOTE".red());
+        "-r".green(), "-v".green(), "-l".green(), "-L".green(), "must be".red());
 
     println!("\n{}", "Complex loci coordinates:".bold());
     println!("    {:KEY$} {:VAL$}  Complex locus coordinates. Multiple loci are allowed.\n\
