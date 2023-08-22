@@ -50,6 +50,7 @@ struct Args {
 
     recr_params: recruit::Params,
     matches_frac: Option<f64>,
+    discard_minim: f64,
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
 }
@@ -75,6 +76,7 @@ impl Default for Args {
 
             recr_params: Default::default(),
             matches_frac: None,
+            discard_minim: 0.001,
             assgn_params: Default::default(),
             scheme_params: Default::default(),
         }
@@ -96,6 +98,8 @@ impl Args {
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
+        validate_param!(self.discard_minim >= 0.0 && self.discard_minim < 1.0,
+            "Fraction of discarded minimizers ({}) must be within [0, 1)", self.discard_minim);
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -150,6 +154,8 @@ fn print_help(extended: bool) {
             {EMPTY}  Default: {}.",
             "-m, --matches-frac".green(), "FLOAT".yellow(),
             Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
+        println!("    {:KEY$} {:VAL$}  Discard top fraction of repetitive minimizers [{}].",
+            "-f, --discard-minim".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.discard_minim));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
             "-c, --chunk-size".green(), "INT".yellow(),
@@ -273,6 +279,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
             Short('m') | Long("matches-frac") | Long("matches-fraction") =>
                 args.matches_frac = Some(parser.value()?.parse()?),
+            Short('f') | Long("discard-minim") => args.discard_minim = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") =>
                 args.recr_params.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
 
@@ -496,22 +503,20 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
     }
 
     log::info!("Generating recruitment targets");
-    let mut targets = recruit::Targets::new(&args.recr_params);
+    let mut target_builder = recruit::TargetBuilder::new(args.recr_params.clone());
     let mut writers = Vec::with_capacity(n_filt_loci);
-    let mut total_seqs = 0;
+
     for locus in filt_loci.iter() {
         let fasta_path = locus.db_locus_dir.join(paths::LOCUS_FASTA_ALL);
         let mut fasta_reader = fastx::Reader::from_path(&fasta_path)?;
         let locus_all_seqs = fasta_reader.read_all().map_err(add_path!(fasta_path))?;
-        total_seqs += locus_all_seqs.len();
-        targets.add(locus_all_seqs.iter().map(NamedSeq::seq));
+        target_builder.add(locus_all_seqs.iter().map(NamedSeq::seq));
         // Output files with a large buffer (4 Mb).
         const BUFFER: usize = 4_194_304;
         writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
-    log::info!("Collected {} minimizers across {} loci and {} sequences", targets.total_minimizers(),
-        n_filt_loci, total_seqs);
+    let targets = target_builder.finalize(args.discard_minim);
 
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
@@ -553,7 +558,7 @@ fn create_mapping_command(
             "-M", n_locs,   // Try as many secondary locations as possible.
             "-N", n_locs,   // Output as many secondary alignments as possible.
             "-S", "0.5",     // Try candidate sites with score >= 0.5 * best score.
-            "-f", "0",       // Do not discard repetitive minimizers.
+            "-f", &args.discard_minim.to_string(),
             "-k", "15",      // Use smaller minimizers to get more matches.
             "--eqx",         // Output X/= instead of M operations.
             "-r", &format!("{:.0}", seq_info.mean_read_len()),
@@ -564,9 +569,9 @@ fn create_mapping_command(
             "-a", // Output SAM format,
             "-x", seq_info.technology().minimap_preset(), // Set mapping preset.
             "-N", n_locs,   // Output as many secondary alignments as possible.
-            "-f", "0",       // Do not discard repetitive minimizers.
-            "--eqx",         // Output X/= instead of M operations.
-            "-Y",            // Use soft clipping.
+            "-f", &args.discard_minim.to_string(),
+            "--eqx",        // Output X/= instead of M operations.
+            "-Y",           // Use soft clipping.
             "-t", &args.threads.to_string()]);
     }
     cmd.arg(&ref_path).arg(&reads_path)
@@ -575,7 +580,7 @@ fn create_mapping_command(
     cmd
 }
 
-fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Result<(), Error> {
+fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), Error> {
     if locus.aln_filename.exists() {
         log::info!("    Skipping read mapping");
         return Ok(());
@@ -586,13 +591,15 @@ fn map_reads(locus: &LocusData, seq_info: &SequencingInfo, args: &Args) -> Resul
     // Output at most this number of alignments per read.
     let n_locs = min(30000, locus.set.len() * 30).to_string();
     let start = Instant::now();
-    let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, seq_info, &n_locs, args);
+    let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, bg_distr.seq_info(), &n_locs, args);
     let mut child = mapping_cmd.spawn().map_err(add_path!(!))?;
     let child_stdout = child.stdout.take().unwrap();
 
     let mut samtools_cmd = Command::new(&args.samtools);
     samtools_cmd.args(&["view", "-b"]) // Output BAM.
         .arg("-o").arg(&locus.tmp_aln_filename)
+        // Ignore reads with both mates unmapped.
+        .arg(if bg_distr.insert_distr().is_paired_end() { "-G12" } else { "-F4" })
         .stdin(Stdio::from(child_stdout));
 
     log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
@@ -656,7 +663,7 @@ fn analyze_locus(
 {
     log::info!("{} {}", "Analyzing".bold(), locus.set.tag().bold());
     let timer = Instant::now();
-    map_reads(locus, bg_distr.seq_info(), &args)?;
+    map_reads(locus, bg_distr, &args)?;
 
     log::info!("    Calculating read alignment probabilities");
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
