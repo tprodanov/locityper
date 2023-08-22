@@ -214,6 +214,43 @@ impl fmt::Debug for ContigNames {
     }
 }
 
+/// Version of the reference genome, supported by this program.
+#[derive(Clone, Copy, Debug)]
+pub enum GenomeVersion {
+    Chm13,
+    GRCh38,
+    GRCh37,
+}
+
+impl GenomeVersion {
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Self::Chm13 => "CHM13",
+            Self::GRCh38 => "GRCh38",
+            Self::GRCh37 => "GRCh37",
+        }
+    }
+
+    /// Based on the length of the first chromosome, tries to identify reference version.
+    pub fn guess(contigs: &ContigNames) -> Option<Self> {
+        let chr1_len = contigs.try_get_id("chr1")
+            .or_else(|_| contigs.try_get_id("1"))
+            .map(|id| contigs.get_len(id));
+        match chr1_len {
+            Ok(248_387_328) => Some(Self::Chm13),
+            Ok(248_956_422) => Some(Self::GRCh38),
+            Ok(249_250_621) => Some(Self::GRCh37),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for GenomeVersion {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.to_str())
+    }
+}
+
 /// Contigs, their complete sequences, and k-mer counts.
 pub struct ContigSet {
     contigs: Arc<ContigNames>,

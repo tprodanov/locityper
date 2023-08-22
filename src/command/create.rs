@@ -15,6 +15,7 @@ use crate::{
     seq::{
         Interval, ContigNames,
         kmers::{JfKmerGetter, Kmer},
+        contigs::GenomeVersion,
     },
     ext::{self, fmt::PrettyU64},
 };
@@ -128,12 +129,12 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
-fn default_region(genome: &str) -> &'static str {
-    match genome {
-        "CHM13" => "chr17:72950001-77450000",
-        "GRCh38" => "chr17:72062001-76562000",
-        "GRCh37" => "chr17:70060001-74560000",
-        _ => panic!("Unexpected genome {}", genome),
+/// Returns default background region.
+fn default_region(ver: GenomeVersion) -> &'static str {
+    match ver {
+        GenomeVersion::Chm13 => "chr17:72950001-77450000",
+        GenomeVersion::GRCh38 => "chr17:72062001-76562000",
+        GenomeVersion::GRCh37 => "chr17:70060001-74560000",
     }
 }
 
@@ -157,19 +158,11 @@ fn select_bg_interval(
         };
     }
 
-    let chr1_len = contigs.try_get_id("chr1")
-        .or_else(|_| contigs.try_get_id("1"))
-        .map(|id| contigs.get_len(id));
-    let genome = match chr1_len {
-        Ok(248_387_328) => "CHM13",
-        Ok(248_956_422) => "GRCh38",
-        Ok(249_250_621) => "GRCh37",
-        _ => return Err(Error::RuntimeError("Could not recognize reference genome. \
+    let genome = GenomeVersion::guess(contigs)
+        .ok_or_else(|| Error::RuntimeError("Could not recognize reference genome. \
             Please provide background region (-b) explicitely, preferably >3 Mb long and without many duplications."
-            .to_owned())),
-    };
+            .to_owned()))?;
     let region = default_region(genome);
-
     log::info!("Recognized {} reference genome, using background region {}", genome, region);
     // Try to crop `chr` if region cannot be found.
     for &crop in &[0, 3] {

@@ -26,6 +26,7 @@ use crate::{
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
         dist, panvcf, interv,
+        contigs::GenomeVersion,
         cigar::Cigar,
         kmers::JfKmerGetter,
         wfa::Penalties,
@@ -41,7 +42,7 @@ struct Args {
     bed_files: Vec<PathBuf>,
     sequences: Vec<String>,
 
-    ref_name: String,
+    ref_name: Option<String>,
     leave_out: FnvHashSet<String>,
     max_expansion: u32,
     moving_window: u32,
@@ -66,7 +67,7 @@ impl Default for Args {
             bed_files: Vec::new(),
             sequences: Vec::new(),
 
-            ref_name: "REF".to_owned(),
+            ref_name: None,
             leave_out: Default::default(),
             max_expansion: 50000,
             moving_window: 500,
@@ -147,8 +148,8 @@ fn print_help() {
         "-L, --loci-bed".green(), "FILE".yellow());
 
     println!("\n{}", "Haplotype extraction parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Reference genome name [{}].",
-        "-g, --genome".green(), "STR".yellow(), super::fmt_def(defaults.ref_name));
+    println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
+        "-g, --genome".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
         "-e, --expand".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.max_expansion)));
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
@@ -209,7 +210,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('s') | Long("seqs") | Long("sequences") =>
                 args.sequences = parser.values()?.map(|s| s.parse()).collect::<Result<_, _>>()?,
 
-            Short('g') | Long("genome") => args.ref_name = parser.value()?.parse()?,
+            Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
             Long("leave-out") | Long("leaveout") => {
                 for val in parser.values()? {
                     args.leave_out.insert(val.parse()?);
@@ -637,9 +638,13 @@ fn run_with_vcf(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> Res
     let vcf_filename = args.variants.as_ref().unwrap();
 
     let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta("reference", &ref_filename)?;
+    let ref_name = args.ref_name.as_ref().map(|s| s as &str)
+        .or_else(|| GenomeVersion::guess(&contigs).map(GenomeVersion::to_str))
+        .ok_or_else(|| Error::RuntimeError("Cannot guess reference genome name, please provide using -g".to_owned()))?;
+
     let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
     let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
-    let haplotypes = panvcf::AllHaplotypes::new(&mut vcf_file, &args.ref_name, &args.leave_out)?;
+    let haplotypes = panvcf::AllHaplotypes::new(&mut vcf_file, &ref_name, &args.leave_out)?;
 
     let mut succeed = 0;
     let mut total = 0;
