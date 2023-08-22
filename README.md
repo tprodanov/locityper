@@ -24,9 +24,9 @@ Installation
 ------------
 
 For manual installation, you need the following software:
-* [Rust](https://www.rust-lang.org/)
-* [Samtools](https://www.htslib.org/)
-* [Jellyfish](https://github.com/gmarcais/Jellyfish/)
+* [Rust](https://www.rust-lang.org/),
+* [Samtools](https://www.htslib.org/),
+* [Jellyfish](https://github.com/gmarcais/Jellyfish/),
 * [Minimap2](https://github.com/lh3/minimap2) if you plan to analyze long-read sequencing,
 * [Strobealign](https://github.com/ksahlin/strobealign) if you plan to analyze short-read sequencing.
 

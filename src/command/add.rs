@@ -25,7 +25,7 @@ use crate::{
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        dist, panvcf, interv,
+        dist, panvcf, interv, fastx,
         contigs::GenomeVersion,
         cigar::Cigar,
         kmers::JfKmerGetter,
@@ -657,52 +657,47 @@ fn run_with_vcf(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> Res
     Ok((succeed, total))
 }
 
-fn check_sequences(seqs: &[Vec<u8>], locus: &str) -> Result<(), Error> {
+fn check_sequences(seqs: &[NamedSeq], locus: &str) -> Result<(), Error> {
     if seqs.is_empty() {
         return Err(Error::InvalidData(format!("No sequences available for locus {}", locus)));
     }
-    let min_size: usize = seqs.iter().map(|s| s.len()).min().unwrap();
+    let min_size = seqs.iter().map(|s| s.len()).min().unwrap();
     if min_size < 1000 {
         return Err(Error::InvalidData(format!("Locus alleles are too short for locus {} (shortest: {} bp)",
             locus, min_size)));
     } else if min_size < 10000 {
         log::warn!("[{}] Locus alleles may be too short (shortest: {} bp)", locus, min_size);
     }
-    if seqs.iter().any(|s| seq::has_n(s)) {
+    if seqs.iter().any(|entry| seq::has_n(entry.seq())) {
         return Err(Error::InvalidData(format!("Locus alleles contain Ns for locus {}", locus)));
     }
 
     const AFFIX_SIZE: usize = 2;
-    let seq0 = &seqs[0];
+    let seq0 = seqs[0].seq();
     let prefix = &seq0[..AFFIX_SIZE];
     let suffix = &seq0[seq0.len() - AFFIX_SIZE..];
-    if seqs[1..].iter().any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix) {
+    if seqs[1..].iter().map(NamedSeq::seq)
+            .any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix) {
         log::warn!("[{}] There are variants on the boundary of the locus", locus);
     }
     Ok(())
 }
 
 fn process_locus_from_fasta(
-    path_and_name: &str,
+    locus: &str,
+    fasta_path: &Path,
     loci_dir: &Path,
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<(), Error>
 {
-    let (path, locus) = path_and_name.split_once('=')
-        .ok_or_else(|| Error::InvalidInput(format!("Sequence argument {:?} must follow format FASTA=LOCUS_NAME",
-            path_and_name)))?;
-    interv::check_locus_name(locus)?;
     let locus_dir = loci_dir.join(locus);
     if !super::Rerun::from_force(args.force).need_analysis(&locus_dir)? {
         return Ok(())
     }
-
-    let (contigs, seqs) = ContigNames::load_fasta(locus, Path::new(path), ())?;
+    let mut fasta_reader = fastx::Reader::from_path(fasta_path)?;
+    let seqs = fasta_reader.read_all().map_err(add_path!(fasta_path))?;
     check_sequences(&seqs, locus)?;
-    let seqs: Vec<_> = contigs.take_names().into_iter().zip(seqs.into_iter())
-        .map(|(name, seq)| NamedSeq::new(name, seq))
-        .collect();
     process_haplotypes(&locus_dir, locus, seqs, None, kmer_getter, &args)?;
     Ok(())
 }
@@ -710,20 +705,25 @@ fn process_locus_from_fasta(
 /// Add loci based on explicit fasta files.
 /// Returns number of successful and failed loci.
 fn run_with_fasta(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> Result<(u32, u32), Error> {
-    let mut succeed = 0;
+    let total = args.sequences.len();
+    // First, parse `args.sequences`, so that we do not fail later.
+    let mut loci = Vec::with_capacity(total);
     for path_and_name in args.sequences.iter() {
-        match process_locus_from_fasta(path_and_name, loci_dir, kmer_getter, args) {
+        let (fasta_path, locus) = path_and_name.split_once('=')
+            .ok_or_else(|| Error::InvalidInput(format!("Sequence argument {:?} must follow format FASTA=LOCUS_NAME",
+                path_and_name)))?;
+        interv::check_locus_name(locus)?;
+        loci.push((locus, fasta_path));
+    }
+
+    let mut succeed = 0;
+    for (locus, fasta_path) in loci.into_iter() {
+        match process_locus_from_fasta(locus, &Path::new(fasta_path), loci_dir, kmer_getter, args) {
             Ok(()) => succeed += 1,
-            Err(e) => {
-                let s = match path_and_name.split_once('=') {
-                    Some((_, name)) => format!("locus {}", name),
-                    None => format!("entry {:?}", path_and_name),
-                };
-                log::error!("Error while analyzing {}: {}", s, e.display());
-            }
+            Err(e) => log::error!("Error while analyzing locus {}: {}", locus, e.display()),
         }
     }
-    Ok((succeed, args.sequences.len() as u32))
+    Ok((succeed, total as u32))
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
