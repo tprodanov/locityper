@@ -374,6 +374,13 @@ impl ReadDepth {
     pub fn distributions(&self) -> std::slice::Iter<'_, NBinom> {
         self.distributions.iter()
     }
+
+    /// Assume that read depth changes by a factor of rate.
+    pub fn mul_depth(&mut self, rate: f64) {
+        for distr in self.distributions.iter_mut() {
+            *distr = distr.mul(rate);
+        }
+    }
 }
 
 impl JsonSer for ReadDepth {

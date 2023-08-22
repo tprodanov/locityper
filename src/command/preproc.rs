@@ -129,6 +129,7 @@ struct Args {
     database: Option<PathBuf>,
     reference: Option<PathBuf>,
     output: Option<PathBuf>,
+    similar_dataset: Option<PathBuf>,
 
     interleaved: bool,
     threads: u16,
@@ -156,6 +157,7 @@ impl Default for Args {
             database: None,
             reference: None,
             output: None,
+            similar_dataset: None,
 
             interleaved: false,
             threads: 8,
@@ -192,10 +194,15 @@ impl Args {
                 log::warn!("Running in single-end mode.");
             }
         }
+        validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
+        if self.similar_dataset.is_some() {
+            validate_param!(n_input > 0, "Read files (-i) required if similar dataset is provided (-~)");
+            // No more checks are needed.
+            return Ok(self);
+        }
 
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
-        validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
         if self.params.technology == Technology::Illumina {
             self.strobealign = ext::sys::find_exe(self.strobealign)?;
@@ -256,6 +263,9 @@ fn print_help(extended: bool) {
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
         "-^, --interleaved".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  This dataset is similar to already preprocessed dataset.\n\
+        {EMPTY}  {}. Only utilizes difference in the number of reads.",
+        "-~, --like".green(), "DIR".yellow(), "Use with care".red());
     println!("    {:KEY$} {:VAL$}  Sequencing technology [{}]:\n\
         {EMPTY}  sr  | illumina : short-read sequencing,\n\
         {EMPTY}    hifi         : PacBio HiFi,\n\
@@ -276,9 +286,6 @@ fn print_help(extended: bool) {
             "    --pval-thresh".green(), "FLOAT FLOAT".yellow(),
             super::fmt_def_f64(defaults.bg_params.insert_pval),
             super::fmt_def_f64(defaults.bg_params.edit_pval));
-        println!("    {:KEY$} {:VAL$}  Multiply error rates by this factor, in order to correct for\n\
-            {EMPTY}  read mappings missed due to higher error rate [{}].",
-            "-m, --err-mult".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.bg_params.err_rate_mult));
 
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
@@ -358,6 +365,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.explicit_technology = true;
                 args.params.technology = parser.value()?.parse()?;
             }
+            Short('~') | Long("like") => args.similar_dataset = Some(parser.value()?.parse()?),
 
             Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
@@ -365,8 +373,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.bg_params.insert_pval = parser.value()?.parse()?;
                 args.bg_params.edit_pval = parser.value()?.parse()?;
             }
-            Short('m') | Long("err-mult") | Long("err-multiplier") =>
-                args.bg_params.err_rate_mult = parser.value()?.parse()?,
 
             Short('p') | Long("ploidy") => args.bg_params.depth.ploidy = parser.value()?.parse()?,
             Long("subsample") => args.params.subsampling_rate = parser.value()?.parse()?,
@@ -730,7 +736,6 @@ fn estimate_bg_distrs(
     args: &Args,
     out_dir: &Path,
     data: &RefData,
-    rng: &mut XoshiroRng,
 ) -> Result<BgDistr, Error>
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
@@ -761,7 +766,8 @@ fn estimate_bg_distrs(
 
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
-        run_mapping(args, &mut seq_info, &data.ref_filename, &data.bed_filename, &bam_filename, rng)?;
+        let mut rng = init_rng(args.params.seed);
+        run_mapping(args, &mut seq_info, &data.ref_filename, &data.bed_filename, &bam_filename, &mut rng)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
@@ -775,6 +781,52 @@ fn estimate_bg_distrs(
     } else {
         estimate_bg_from_unpaired(alns, seq_info, args, opt_out_dir, data)
     }
+}
+
+/// Assume that this WGS dataset is similar to another dataset, and use its parameters.
+fn estimate_like(args: &Args, similar_dataset: &Path) -> Result<BgDistr, Error> {
+    let similar_path = similar_dataset.join(paths::BG_DIR).join(paths::BG_DISTR);
+    log::info!("Loading distribution parameters from {}", ext::fmt::path(&similar_path));
+    let similar_distr = BgDistr::load_from(&similar_path)?;
+    let similar_seq_info = similar_distr.seq_info();
+    let similar_n_reads = match similar_seq_info.total_reads() {
+        Some(count) => count,
+        None => return Err(Error::InvalidInput(format!(
+            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(similar_dataset)))),
+    };
+
+    let seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.params.technology,
+        args.explicit_technology)?;
+    if similar_seq_info.technology() != seq_info.technology() {
+        return Err(Error::InvalidInput(format!(
+            "Cannot use similar dataset {}: different sequencing technology ({} and {})",
+            ext::fmt::path(similar_dataset), similar_seq_info.technology(), seq_info.technology())));
+    } else if similar_distr.insert_distr().is_paired_end() != args.is_paired_end() {
+        return Err(Error::InvalidInput(format!(
+            "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(similar_dataset))));
+    } else if !seq_info.technology().is_read_len_similar(seq_info.mean_read_len(), similar_seq_info.mean_read_len()) {
+        return Err(Error::InvalidInput(format!(
+            "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",
+            ext::fmt::path(similar_dataset), seq_info.mean_read_len(), similar_seq_info.mean_read_len())));
+    }
+    log::info!("Counting reads in {}", ext::fmt::path(&args.input[0]));
+    let total_reads = fastx::count_reads(&args.input[0])?;
+    log::debug!("    In total, {} reads", total_reads);
+
+    let mut new_distr = similar_distr.clone();
+    new_distr.set_seq_info(seq_info);
+    // NOTE: total reads are deliberately not provided to `seq_info`, so as not to propagate errors.
+    let rate = total_reads as f64 / similar_n_reads as f64;
+    if rate < 0.1 {
+        return Err(Error::InvalidInput(format!(
+            "Read depth changed too much (by a factor of {:.4}), please estimate parameters anew", rate)))
+    } else if (rate - 1.0).abs() < 0.01 {
+        log::debug!("    Almost identical read depth");
+    } else {
+        log::debug!("    Adapt read depth to new dataset: average changed by {:.4}", rate);
+        new_distr.depth_mut().mul_depth(rate);
+    }
+    Ok(new_distr)
 }
 
 struct RefData {
@@ -812,15 +864,18 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
-    let mut rng = init_rng(args.params.seed);
     // `args.output`/bg
     let out_bg_dir = create_out_dir(&args)?;
 
-    log::info!("Loading background non-duplicated region into memory");
-    let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
-    let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
+    let bg_distr = if let Some(similar_dataset) = args.similar_dataset.as_ref() {
+        estimate_like(&args, similar_dataset)?
+    } else {
+        log::info!("Loading background non-duplicated region into memory");
+        let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
+        let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
+        estimate_bg_distrs(&args, &out_bg_dir, &ref_data)?
+    };
 
-    let bg_distr = estimate_bg_distrs(&args, &out_bg_dir, &ref_data, &mut rng)?;
     let distr_filename = out_bg_dir.join(paths::BG_DISTR);
     let mut distr_file = ext::sys::create_gzip(&distr_filename)?;
     bg_distr.save().write_pretty(&mut distr_file, 4).map_err(add_path!(distr_filename))?;

@@ -207,7 +207,7 @@ impl<R: BufRead> Reader<R> {
                         format!("Fasta record {} has an empty sequence.", record.name_only())));
                 }
                 return Ok(true);
-            } else if record.seq[seq_len] == b'@' || record.seq[seq_len] == b'>' {
+            } else if record.seq[seq_len] == b'>' || record.seq[seq_len] == b'@' {
                 self.buffer.extend_from_slice(&record.seq[seq_len..]);
                 record.seq.truncate(seq_len);
                 return Ok(true);
@@ -414,5 +414,47 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
     /// Returns the total number of consumed paired reads.
     fn total_reads(&self) -> u64 {
         self.reader1.total_reads()
+    }
+}
+
+fn count_reads_fasta(mut stream: impl BufRead) -> io::Result<u64> {
+    let mut count = 0;
+    let mut line = Vec::with_capacity(4096);
+    while stream.read_until(b'>', &mut line)? > 0 {
+        count += 1;
+        line.clear();
+    }
+    Ok(count)
+}
+
+fn count_reads_fastq(mut stream: impl BufRead) -> io::Result<u64> {
+    let mut count = 0;
+    let mut line = Vec::with_capacity(4096);
+    while stream.read_until(b'\n', &mut line)? > 0 {
+        count += 1;
+        line.clear();
+    }
+    if count % 4 != 0 {
+        log::warn!("Number of lines in FASTQ file does not divide 4 (mod = {})", count % 4);
+    }
+    Ok(count / 4)
+}
+
+/// Count the number of FASTA/FASTQ reads in the stream.
+/// NOTE: Fasta and Fastq reads should not be present in the same file.
+pub fn count_reads(path: &Path) -> Result<u64, Error> {
+    let mut stream = ext::sys::open(path)?;
+    let mut first_byte = [0_u8; 1];
+    if stream.read(&mut first_byte).map_err(add_path!(path))? == 1 {
+        match first_byte[0] {
+            b'>' => count_reads_fasta(stream),
+            b'@' => count_reads_fastq(stream),
+            _ => {
+                log::warn!("Unexpected first symbol '{}', assuming FASTQ file", first_byte[0] as char);
+                count_reads_fastq(stream)
+            }
+        }.map_err(add_path!(path))
+    } else {
+        Ok(0)
     }
 }

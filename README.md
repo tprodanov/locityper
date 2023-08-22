@@ -42,6 +42,8 @@ cargo install
 General usage
 -------------
 
+Note that many of all commands below allow to specify the number of threads (`-@ N`, 8 by default).
+
 ### Creating a database
 
 First, we create a database, that would later contain information about complex loci.
@@ -86,3 +88,20 @@ For that, please use
 locityper preproc -i reads1.fastq [reads2.fastq] -d db -r reference.fasta -o analysis
 ```
 Use can also use `fasta` input files, as well as gzipped input files.
+
+Additionally, you can estimate WGS characteristics using an already preprocessed file.
+> [!WARNING]
+> Please use this feature with care if you are certain that the two datasets are similar
+> (produced with the same sequencing technology and similar library preparation).
+> Preprocessing using existing dataset is significantly faster, but may produce incorrect results
+> if datasets have noticeably different characteristics.
+```bash
+locityper preproc -i reads1.fastq [reads2.fastq] -o analysis -~ other_analysis
+```
+
+### Genotyping WGS dataset
+
+In order to genotype a dataset, please run
+```bash
+locityper genotype -i reads1.fastq [reads2.fastq] -d db -o analysis
+```

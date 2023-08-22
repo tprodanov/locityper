@@ -39,38 +39,35 @@ impl<T: Add<Output = T> + Copy> OperCounts<T> {
 
 impl OperCounts<u64> {
     /// Calculates ln-probabilities of various error types.
-    /// Error probabilities (mismatches, insertions & deletions) are increased by `err_rate_mult`
+    /// Error probabilities (mismatches, insertions & deletions)
     /// to account for possible mutations in the data.
     ///
     /// Returned clipping probability is set to the maximum of mismatch and insert probabilities.
-    pub fn to_ln_probs(&self, err_rate_mult: f64) -> OperCounts<f64> {
+    pub fn to_ln_probs(&self) -> OperCounts<f64> {
         // Clipping is ignored.
         let sum_len = (self.matches + self.mismatches + self.insertions + self.deletions) as f64;
         let mism_prob = self.mismatches as f64 / sum_len;
-        let corr_mism_prob = mism_prob * err_rate_mult;
         let ins_prob = self.insertions as f64 / sum_len;
-        let corr_ins_prob = ins_prob * err_rate_mult;
         let del_prob = self.deletions as f64 / sum_len;
-        let corr_del_prob = del_prob * err_rate_mult;
-        let corr_match_prob = 1.0 - corr_mism_prob - corr_ins_prob - corr_del_prob;
+        let match_prob = 1.0 - mism_prob - ins_prob - del_prob;
 
-        log::info!("    {:12} matches    ({:.6} -> {:.6})",
-            self.matches, self.matches as f64 / sum_len, corr_match_prob);
-        log::info!("    {:12} mismatches ({:.6} -> {:.6})",
-            self.mismatches, mism_prob, corr_mism_prob);
-        log::info!("    {:12} insertions ({:.6} -> {:.6})",
-            self.insertions, ins_prob, corr_ins_prob);
-        log::info!("    {:12} deletions  ({:.6} -> {:.6})",
-            self.deletions, del_prob, corr_del_prob);
-        assert!(corr_match_prob > 0.5, "Match probability ({:.5}) must be over 50%", corr_match_prob);
-        assert!((corr_match_prob + corr_mism_prob + corr_ins_prob + corr_del_prob - 1.0).abs() < 1e-8,
+        log::info!("    {:12} matches    ({:.6})",
+            self.matches, match_prob);
+        log::info!("    {:12} mismatches ({:.6})",
+            self.mismatches, mism_prob);
+        log::info!("    {:12} insertions ({:.6})",
+            self.insertions, ins_prob);
+        log::info!("    {:12} deletions  ({:.6})",
+            self.deletions, del_prob);
+        assert!(match_prob > 0.5, "Match probability ({:.5}) must be over 50%", match_prob);
+        assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
             "Error probabilities do not sum to one");
         OperCounts {
-            matches: corr_match_prob.ln(),
-            mismatches: corr_mism_prob.ln(),
-            insertions: corr_ins_prob.ln(),
-            deletions: corr_del_prob.ln(),
-            clipping: corr_ins_prob.max(corr_mism_prob).ln(),
+            matches: match_prob.ln(),
+            mismatches: mism_prob.ln(),
+            insertions: ins_prob.ln(),
+            deletions: del_prob.ln(),
+            clipping: ins_prob.max(mism_prob).ln(),
         }
     }
 }
@@ -149,7 +146,7 @@ impl ErrorProfile {
                 .or_insert(1);
         }
 
-        let oper_probs = total_counts.to_ln_probs(params.err_rate_mult);
+        let oper_probs = total_counts.to_ln_probs();
         let edit_distances: Vec<_> = edit_distances.into_iter()
             .map(|((k, n), count)| (k, n, count as f64))
             .collect();

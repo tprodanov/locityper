@@ -131,20 +131,21 @@ pub fn mkdir(path: impl AsRef<Path>) -> Result<(), Error> {
     }
 }
 
-/// Counts lines in the stream.
-/// Inspired by `linecount` crate.
-pub fn count_lines<R: BufRead>(mut stream: R) -> io::Result<u64> {
-    const LF: u8 = b'\n';
-    let mut count = 0;
-    let mut line: Vec<u8> = Vec::new();
-    while stream.read_until(LF, &mut line)? > 0 {
-        count += 1;
-    }
-    if line.last() == Some(&LF) {
-        count += 1;
-    }
-    Ok(count)
-}
+// /// Counts lines in the stream.
+// /// Inspired by `linecount` crate.
+// pub fn count_lines<R: BufRead>(mut stream: R) -> io::Result<u64> {
+//     const LF: u8 = b'\n';
+//     let mut count = 0;
+//     let mut line: Vec<u8> = Vec::new();
+//     while stream.read_until(LF, &mut line)? > 0 {
+//         count += 1;
+//         // NEED TO CLEAR line, but then next if does not work.
+//     }
+//     if line.last() == Some(&LF) {
+//         count += 1;
+//     }
+//     Ok(count)
+// }
 
 /// Directly concantenates files, without trying to decompress them.
 /// Therefore, if input files are already gzipped, output writer should be plain, without compression.

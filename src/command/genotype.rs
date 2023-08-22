@@ -19,7 +19,7 @@ use crate::{
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
     },
-    bg::{BgDistr, JsonSer, Technology, SequencingInfo},
+    bg::{BgDistr, Technology, SequencingInfo},
     ext::{self, fmt::PrettyUsize},
     model::{
         Params as AssgnParams,
@@ -713,11 +713,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
 
-    let bg_path = out_dir.join(paths::BG_DIR).join(paths::BG_DISTR);
-    let mut bg_stream = ext::sys::open(&bg_path)?;
-    let mut bg_str = String::new();
-    bg_stream.read_to_string(&mut bg_str).map_err(add_path!(bg_path))?;
-    let mut bg_distr = BgDistr::load(&json::parse(&bg_str)?)?;
+    let mut bg_distr = BgDistr::load_from(&out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     args.recr_params.set_matches_frac(
         args.matches_frac.unwrap_or_else(|| bg_distr.seq_info().technology().default_matches_frac()) as f32)?;

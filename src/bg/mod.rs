@@ -4,15 +4,6 @@ pub mod depth;
 pub mod windows;
 pub mod ser;
 
-use std::{
-    fmt::{self, Write},
-    str::FromStr,
-};
-use crate::{
-    math,
-    err::{Error, validate_param},
-};
-use self::ser::json_get;
 pub use {
     depth::{ReadDepth, ReadDepthParams},
     insertsz::InsertDistr,
@@ -20,6 +11,17 @@ pub use {
     ser::JsonSer,
     windows::Windows,
 };
+
+use std::{
+    fmt::{self, Write},
+    str::FromStr,
+    path::Path,
+};
+use crate::{
+    math, ext,
+    err::{Error, validate_param, add_path},
+};
+use self::ser::json_get;
 
 /// Parameters for background distributions estimation.
 #[derive(Debug, Clone)]
@@ -31,9 +33,6 @@ pub struct Params {
     pub insert_pval: f64,
     /// p-value threhsold for the edit distance.
     pub edit_pval: f64,
-    /// Error probability multiplier: multiply read error probabilities (mismatches, insertions, deletions, clipping),
-    /// by this value. This will soften overly harsh read alignment penalties.
-    pub err_rate_mult: f64,
 }
 
 impl Default for Params {
@@ -42,7 +41,6 @@ impl Default for Params {
             depth: Default::default(),
             insert_pval: 0.001,
             edit_pval: err_prof::DEF_EDIT_PVAL.0,
-            err_rate_mult: 1.0,
         }
     }
 }
@@ -50,8 +48,6 @@ impl Default for Params {
 impl Params {
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(0.2 <= self.err_rate_mult,
-            "Error rate multiplier ({:.5}) should not be too low", self.err_rate_mult);
         for &pval in &[self.insert_pval, self.edit_pval] {
             validate_param!(0.0 < pval && pval < 0.5,
                 "p-value threshold ({}) must be in (0, 0.5)", pval);
@@ -61,6 +57,7 @@ impl Params {
 }
 
 /// Various background distributions.
+#[derive(Clone)]
 pub struct BgDistr {
     seq_info: SequencingInfo,
     /// Insert size distribution,
@@ -82,13 +79,28 @@ impl BgDistr {
         Self { seq_info, insert_distr, err_prof, depth }
     }
 
+    pub fn load_from(path: &Path) -> Result<Self, Error> {
+        let mut stream = ext::sys::open(&path)?;
+        let mut s = String::new();
+        stream.read_to_string(&mut s).map_err(add_path!(path))?;
+        BgDistr::load(&json::parse(&s)?)
+    }
+
     /// Access sequencing information (read length and technology).
     pub fn seq_info(&self) -> &SequencingInfo {
         &self.seq_info
     }
 
+    pub fn set_seq_info(&mut self, seq_info: SequencingInfo) {
+        self.seq_info = seq_info;
+    }
+
     pub fn depth(&self) -> &ReadDepth {
         &self.depth
+    }
+
+    pub fn depth_mut(&mut self) -> &mut ReadDepth {
+        &mut self.depth
     }
 
     pub fn insert_distr(&self) -> &InsertDistr {
@@ -218,6 +230,16 @@ impl Technology {
             Self::PacBio | Self::Nanopore => 0.1,
         }
     }
+
+    /// Returns true if mean read lengths in two datasets are similar enough.
+    pub fn is_read_len_similar(self, len1: f64, len2: f64) -> bool {
+        if self == Self::Illumina {
+            (len1 - len2).abs() < 3.0
+        } else {
+            // Read length does not differ by more than 20%.
+            (len1 - len2).abs() / len1.min(len2) < 0.2
+        }
+    }
 }
 
 impl FromStr for Technology {
@@ -280,6 +302,10 @@ impl SequencingInfo {
 
     pub fn set_total_reads(&mut self, count: u64) {
         self.total_reads = Some(count);
+    }
+
+    pub fn total_reads(&self) -> Option<u64> {
+        self.total_reads
     }
 }
 
