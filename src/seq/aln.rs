@@ -106,7 +106,7 @@ impl fmt::Display for ReadEnd {
 
 /// Light alignment information. Use `Alignemnt` to store alignment name and CIGAR as well.
 #[derive(Clone)]
-pub struct LightAlignment {
+pub struct Alignment {
     interval: Interval,
     cigar: Cigar,
     strand: Strand,
@@ -114,7 +114,7 @@ pub struct LightAlignment {
     ln_prob: f64,
 }
 
-impl LightAlignment {
+impl Alignment {
     /// Creates a new alignment information from a bam record.
     pub fn new(
         record: &Record,
@@ -180,19 +180,19 @@ impl LightAlignment {
     /// Returns insert size (distance between smallest start and largest end).
     /// Panics if two mates are not on the same strand.
     #[inline]
-    pub fn insert_size(&self, mate: &LightAlignment) -> u32 {
+    pub fn insert_size(&self, mate: &Alignment) -> u32 {
         self.interval.furthest_distance(&mate.interval)
             .expect("Alignments must be on the same contig")
     }
 
     /// Returns false for `FR/RF` and true for `FF/RR`.
     #[inline]
-    pub fn pair_orientation(&self, mate: &LightAlignment) -> bool {
+    pub fn pair_orientation(&self, mate: &Alignment) -> bool {
         self.strand == mate.strand
     }
 
     /// Returns probability of two alignments: probability of first * probability of second * insert size probability.
-    pub fn paired_prob(&self, mate: &LightAlignment, insert_distr: &InsertDistr) -> f64 {
+    pub fn paired_prob(&self, mate: &Alignment, insert_distr: &InsertDistr) -> f64 {
         self.ln_prob + mate.ln_prob + insert_distr.ln_prob(self.insert_size(mate), self.pair_orientation(mate))
     }
 
@@ -279,7 +279,7 @@ impl LightAlignment {
 #[derive(Clone)]
 pub struct NamedAlignment {
     name: Vec<u8>,
-    aln: LightAlignment,
+    aln: Alignment,
 }
 
 impl NamedAlignment {
@@ -293,7 +293,7 @@ impl NamedAlignment {
     {
         Self {
             name: record.qname().to_vec(),
-            aln: LightAlignment::new(record, cigar, read_end, contigs, ln_prob),
+            aln: Alignment::new(record, cigar, read_end, contigs, ln_prob),
         }
     }
 
@@ -307,21 +307,21 @@ impl NamedAlignment {
         String::from_utf8_lossy(&self.name)
     }
 
-    pub fn take_light_aln(self) -> LightAlignment {
+    pub fn take_light_aln(self) -> Alignment {
         self.aln
     }
 }
 
 impl Deref for NamedAlignment {
-    type Target = LightAlignment;
+    type Target = Alignment;
 
-    fn deref(&self) -> &LightAlignment {
+    fn deref(&self) -> &Alignment {
         &self.aln
     }
 }
 
 impl DerefMut for NamedAlignment {
-    fn deref_mut(&mut self) -> &mut LightAlignment {
+    fn deref_mut(&mut self) -> &mut Alignment {
         &mut self.aln
     }
 }

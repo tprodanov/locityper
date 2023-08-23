@@ -11,7 +11,7 @@ use crate::{
     err::{Error, add_path},
     seq::{
         Interval, ContigId, ContigNames,
-        aln::{LightAlignment, ReadEnd},
+        aln::{Alignment, ReadEnd},
         cigar::Cigar,
     },
     bg::{
@@ -44,12 +44,12 @@ impl MateSummary {
     }
 }
 
+/// Read information: read name, two sequences and qualities (for both mates).
+#[derive(Default)]
 struct ReadData {
     name: String,
-    seq1:  Vec<u8>,
-    qual1: Vec<u8>,
-    seq2:  Vec<u8>,
-    qual2: Vec<u8>,
+    sequences: [Vec<u8>; 2],
+    qualities: [Vec<u8>; 2],
 }
 
 /// BAM reader, which stores the next record within.
@@ -100,20 +100,28 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     fn next_alns(
         &mut self,
         read_end: ReadEnd,
-        alns: &mut Vec<LightAlignment>,
+        alns: &mut Vec<Alignment>,
+        read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
     ) -> Result<MateSummary, Error>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name_hash = fnv1a(self.record.qname());
+        let name = std::str::from_utf8(self.record.qname()).map_err(|_| Error::InvalidInput(
+            format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))?;
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA\tNA\t{}", name_hash, read_end, self.curr_name()?)
+            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA\tNA\t{}", name_hash, read_end, name)
                 .map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
             return Ok(MateSummary::unmapped(name_hash));
         }
 
+        if read_end == ReadEnd::First {
+            read_data.name = name.to_owned();
+        } else {
+            return Err(Error::InvalidData(format!("Read {} does not have a second read end", name)));
+        }
 
         let start_len = alns.len();
         // Is any of the alignments in the central region of a contig?
@@ -125,8 +133,18 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         self.found_alns.clear();
         loop {
             let primary = !weight.is_nan();
-            let mut aln = LightAlignment::new(&self.record, Cigar::from_raw(self.record.raw_cigar()),
-                read_end, Arc::clone(&self.contigs), f64::NAN);
+            let mut cigar = Cigar::from_raw(self.record.raw_cigar());
+            if primary {
+                assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
+                if self.record.seq().is_empty() {
+                    return Err(Error::InvalidData(format!("Read {} does not have read sequence", read_data.name)));
+                }
+                read_data.sequences[read_end.ix()] = self.record.seq().as_bytes();
+                read_data.qualities[read_end.ix()] = self.record.qual().to_vec();
+            } else {
+                cigar.hard_to_soft();
+            }
+            let mut aln = Alignment::new(&self.record, cigar, read_end, Arc::clone(&self.contigs), f64::NAN);
             let aln_interval = aln.interval();
             let contig_len = self.contigs.get_len(aln_interval.contig_id());
             let central = self.boundary < aln_interval.end() && aln_interval.start() < contig_len - self.boundary;
@@ -147,7 +165,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
                 weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
-                write!(dbg_writer, "\t{:.5}\t{}", weight, self.curr_name()?).map_err(add_path!(!))?;
+                write!(dbg_writer, "\t{:.5}\t{}", weight, read_data.name).map_err(add_path!(!))?;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
@@ -177,7 +195,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             if is_primary(&self.record) {
                 break;
             }
-            assert_eq!(fnv1a(self.record.qname()), name_hash,
+            assert_eq!(self.record.qname(), read_data.name.as_bytes(),
                 "Read {} first alignment is not primary", String::from_utf8_lossy(self.record.qname()));
         }
 
@@ -191,12 +209,6 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 
     fn has_more(&self) -> bool {
         self.has_more
-    }
-
-    /// Returns the name of the next record.
-    fn curr_name(&self) -> Result<&str, Error> {
-        std::str::from_utf8(self.record.qname()).map_err(|_|
-            Error::InvalidInput(format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))
     }
 }
 
@@ -261,9 +273,9 @@ impl PairAlignment {
 /// All alignments that are worse than `best_prob - prob_diff` are discarded.
 fn identify_contig_pair_alns(
     new_alns: &mut Vec<PairAlignment>,
-    alns1: &[LightAlignment],
+    alns1: &[Alignment],
     min_prob1: f64,
-    alns2: &[LightAlignment],
+    alns2: &[Alignment],
     min_prob2: f64,
     weight: f64,
     buffer: &mut Vec<f64>,
@@ -321,7 +333,7 @@ fn identify_contig_pair_alns(
 /// All appropriate alignments for one read pair / single read.
 pub struct GrouppedAlignments {
     /// Read name.
-    read_name: String,
+    read_data: ReadData,
     /// Hash of the read name.
     name_hash: u64,
     /// Probability that both mates are unmapped.
@@ -333,7 +345,7 @@ pub struct GrouppedAlignments {
 impl GrouppedAlignments {
     /// Returns read name.
     pub fn read_name(&self) -> &str {
-        &self.read_name
+        &self.read_data.name
     }
 
     /// Returns the FNV1a hash of the read name.
@@ -391,8 +403,8 @@ impl GrouppedAlignments {
 /// Input alignments are sorted first by contig, and then by read end.
 /// Returns None if the read pair is ignored.
 fn identify_paired_end_alignments(
-    read_name: String,
-    alns: &[LightAlignment],
+    read_data: ReadData,
+    alns: &[Alignment],
     summary1: &MateSummary,
     summary2: &MateSummary,
     buffer: &mut Vec<f64>,
@@ -438,7 +450,7 @@ fn identify_paired_end_alignments(
         aln.ln_prob -= norm_fct;
     }
     Some(GrouppedAlignments {
-        read_name,
+        read_data,
         name_hash: summary1.name_hash,
         unmapped_prob: both_unmapped - norm_fct,
         alns: groupped_alns,
@@ -448,8 +460,8 @@ fn identify_paired_end_alignments(
 /// For a single-end read, sort alignment across contigs, discard improbable alignments, and normalize probabilities.
 /// Input alignments are sorted first by contig.
 fn identify_single_end_alignments(
-    read_name: String,
-    alns: &[LightAlignment],
+    read_data: ReadData,
+    alns: &[Alignment],
     summary: &MateSummary,
     ln_ncontigs: f64,
     params: &super::Params,
@@ -488,7 +500,7 @@ fn identify_single_end_alignments(
         aln.ln_prob -= norm_fct;
     }
     Some(GrouppedAlignments {
-        read_name,
+        read_data,
         name_hash: summary.name_hash,
         unmapped_prob: unmapped_prob - norm_fct,
         alns: groupped_alns,
@@ -534,19 +546,15 @@ impl AllAlignments {
         while reader.has_more() {
             total_reads += 1;
             tmp_alns.clear();
-            let read_name = reader.curr_name()?.to_owned();
-            let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut dbg_writer)?;
+            let mut read_data = ReadData::default();
+            let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
             if !hashes.insert(summary1.name_hash) {
-                log::warn!("Read {} produced hash collision ({:X})", read_name, summary1.name_hash);
+                log::warn!("Read {} produced hash collision ({:X})", read_data.name, summary1.name_hash);
                 collisions += 1;
             }
             let mut central = summary1.any_central;
             let summary2 = if is_paired_end {
-                let summary2 = reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut dbg_writer)?;
-                if summary1.name_hash != summary2.name_hash {
-                    return Err(Error::InvalidData(format!("Read {} with hash {:X} does not have a second read end",
-                        read_name, summary1.name_hash)));
-                }
+                let summary2 = reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
                 central |= summary2.any_central;
                 Some(summary2)
             } else {
@@ -557,12 +565,12 @@ impl AllAlignments {
             }
 
             let groupped_alns = if is_paired_end {
-                tmp_alns.sort_unstable_by_key(LightAlignment::sort_key);
-                identify_paired_end_alignments(read_name, &tmp_alns,
+                tmp_alns.sort_unstable_by_key(Alignment::sort_key);
+                identify_paired_end_alignments(read_data, &tmp_alns,
                     &summary1, summary2.as_ref().unwrap(), &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
-                tmp_alns.sort_unstable_by_key(LightAlignment::contig_id);
-                identify_single_end_alignments(read_name, &tmp_alns, &summary1, ln_ncontigs, params)
+                tmp_alns.sort_unstable_by_key(Alignment::contig_id);
+                identify_single_end_alignments(read_data, &tmp_alns, &summary1, ln_ncontigs, params)
             };
             if let Some(alns) = groupped_alns {
                 all_alns.push(alns);

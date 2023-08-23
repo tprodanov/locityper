@@ -7,7 +7,7 @@ use super::{
     ser::{JsonSer, parse_f64_arr, json_get},
 };
 use crate::{
-    seq::aln::LightAlignment,
+    seq::aln::Alignment,
     algo::{bisect, loess::Loess},
     ext::{
         self,
@@ -31,7 +31,7 @@ pub trait DepthDistr {
 
 /// Count reads in various windows of length `window_size`.
 fn count_reads<'a>(
-    alignments: impl Iterator<Item = &'a LightAlignment>,
+    alignments: impl Iterator<Item = &'a Alignment>,
     n_windows: usize,
     window_getter: &WindowGetter,
 ) -> Vec<[u32; 2]> {
@@ -300,7 +300,7 @@ impl ReadDepth {
     ///
     /// Write debug information if `out_dir` is Some.
     pub fn estimate<'a>(
-        alignments: &[&'a LightAlignment],
+        alignments: &[&'a Alignment],
         windows: &Windows,
         params: &ReadDepthParams,
         subsampling_rate: f64,

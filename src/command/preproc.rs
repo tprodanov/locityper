@@ -26,7 +26,7 @@ use crate::{
         kmers::KmerCounts,
         fastx::{self, FastxRead},
         cigar::{self, Cigar},
-        aln::{NamedAlignment, LightAlignment, ReadEnd},
+        aln::{NamedAlignment, Alignment, ReadEnd},
     },
     bg::{
         self, BgDistr, Technology, SequencingInfo,
@@ -696,7 +696,7 @@ fn estimate_bg_from_paired(
         &args.bg_params, opt_out_dir)?;
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
-    let mut depth_alns: Vec<&LightAlignment> = Vec::with_capacity(errprof_alns.len());
+    let mut depth_alns: Vec<&Alignment> = Vec::with_capacity(errprof_alns.len());
     for chunk in errprof_alns.chunks_exact(2) {
         let aln1 = chunk[0];
         let aln2 = chunk[1];
@@ -726,7 +726,7 @@ fn estimate_bg_from_unpaired(
         &args.bg_params.depth, opt_out_dir)?;
     let err_prof = ErrorProfile::estimate(&alns, interval, &windows, seq_info.mean_read_len(),
         &args.bg_params, opt_out_dir)?;
-    let filt_alns: Vec<&LightAlignment> = alns.iter()
+    let filt_alns: Vec<&Alignment> = alns.iter()
         .filter(|aln| {
             let (edit, len) = aln.count_region_operations(interval).edit_and_read_len();
             edit <= err_prof.allowed_edit_dist(len).0
