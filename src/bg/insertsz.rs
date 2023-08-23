@@ -16,7 +16,7 @@ use crate::{
         DiscretePmf, LinearCache, WithMoments, WithQuantile,
         nbinom::{NBinom, RegularizedEstimator},
     },
-    seq::aln::Alignment,
+    seq::aln::NamedAlignment,
 };
 
 /// Group read alignments in pairs, and returns indices of the pair in the original vector.
@@ -24,7 +24,7 @@ use crate::{
 ///
 /// Input: vector of primary alignments.
 /// There can be at most one first and one second mate for each name.
-pub fn group_mates<'a>(alns: &'a [Alignment]) -> Result<Vec<(usize, usize)>, Error> {
+pub fn group_mates<'a>(alns: &'a [NamedAlignment]) -> Result<Vec<(usize, usize)>, Error> {
     let mut pairs: FnvHashMap<&'a [u8], [Option<usize>; 2]> =
         FnvHashMap::with_capacity_and_hasher(alns.len() / 2, Default::default());
     for (i, aln) in alns.iter().enumerate() {
@@ -73,7 +73,7 @@ impl InsertDistr {
     ///
     /// Write debug information if `out_dir` is Some.
     pub fn estimate(
-        alignments: &[Alignment],
+        alignments: &[NamedAlignment],
         pair_ixs: &[(usize, usize)],
         out_dir: Option<&Path>,
     ) -> Result<Self, Error>

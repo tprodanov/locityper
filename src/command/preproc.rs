@@ -26,7 +26,7 @@ use crate::{
         kmers::KmerCounts,
         fastx::{self, FastxRead},
         cigar::{self, Cigar},
-        aln::{Alignment, LightAlignment, ReadEnd},
+        aln::{NamedAlignment, LightAlignment, ReadEnd},
     },
     bg::{
         self, BgDistr, Technology, SequencingInfo,
@@ -603,7 +603,7 @@ fn load_alns(
     cigar_getter: impl Fn(&bam::Record) -> Option<Cigar>,
     contigs: &Arc<ContigNames>,
     args: &Args
-) -> Result<(Vec<Alignment>, bool), Error>
+) -> Result<(Vec<NamedAlignment>, bool), Error>
 {
     let min_mapq = args.params.min_mapq;
     let max_clipping = args.max_clipping;
@@ -611,15 +611,19 @@ fn load_alns(
 
     let mut alns = Vec::new();
     let mut record = bam::Record::new();
-    let mut discarded = 0;
+    let mut ignored = 0;
+    let mut wo_cigar = 0;
     while let Some(()) = reader.read(&mut record).transpose()? {
         if record.flags() & 3844 == 0 && record.mapq() >= min_mapq && cigar::clipping_rate(&record) <= max_clipping {
             if let Some(cigar) = cigar_getter(&record) {
-                alns.push(Alignment::new(&record, cigar, ReadEnd::from_record(&record), Arc::clone(contigs), f64::NAN));
+                alns.push(NamedAlignment::new(&record, cigar, ReadEnd::from_record(&record),
+                    Arc::clone(contigs), f64::NAN));
                 paired_counts[usize::from(record.is_paired())] += 1;
+            } else {
+                wo_cigar += 1;
             }
         } else {
-            discarded += 1;
+            ignored += 1;
         }
     }
     if paired_counts[0] > 0 && paired_counts[1] > 0 {
@@ -628,14 +632,17 @@ fn load_alns(
     if alns.is_empty() {
         return Err(Error::InvalidData(format!("BAM file contains no reads in the target region")));
     }
-    log::debug!("    Loaded {} alignments, discarded {}", alns.len(), discarded);
+    log::debug!("    Loaded {} alignments, discarded {}", alns.len(), ignored);
+    if wo_cigar > 0 {
+        log::warn!("    Could not load CIGAR for {} records", wo_cigar);
+    }
     Ok((alns, paired_counts[1] > 0))
 }
 
 const MEAN_LEN_RECORDS: usize = 10000;
 
 /// Calculate mean read length from existing alignments.
-fn read_len_from_alns(alns: &[Alignment]) -> f64 {
+fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
     let n = min(alns.len(), MEAN_LEN_RECORDS);
     alns[..n].iter()
         .map(|aln| f64::from(aln.cigar().query_len()))
@@ -655,7 +662,7 @@ fn read_len_from_reads(input: &[PathBuf]) -> Result<f64, Error> {
 }
 
 fn estimate_bg_from_paired(
-    alns: Vec<Alignment>,
+    alns: Vec<NamedAlignment>,
     seq_info: SequencingInfo,
     args: &Args,
     opt_out_dir: Option<&Path>,
@@ -706,7 +713,7 @@ fn estimate_bg_from_paired(
 }
 
 fn estimate_bg_from_unpaired(
-    alns: Vec<Alignment>,
+    alns: Vec<NamedAlignment>,
     seq_info: SequencingInfo,
     args: &Args,
     opt_out_dir: Option<&Path>,
@@ -740,7 +747,7 @@ fn estimate_bg_distrs(
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     let is_paired_end: bool;
-    let alns: Vec<Alignment>;
+    let alns: Vec<NamedAlignment>;
     let mut seq_info: SequencingInfo;
 
     if let Some(alns_filename) = args.alns.as_ref() {
@@ -771,8 +778,12 @@ fn estimate_bg_distrs(
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
-        (alns, is_paired_end) = load_alns(&mut bam_reader, |record| Some(Cigar::from_raw(record)),
-            &data.ref_contigs, args)?;
+        let get_cigar = |record: &bam::Record| -> Option<Cigar> {
+            let cigar = Cigar::from_raw(record.raw_cigar());
+            assert!(!cigar.has_hard_clipping(), "Cannot process primary alignments with hard clipping");
+            Some(cigar)
+        };
+        (alns, is_paired_end) = load_alns(&mut bam_reader, get_cigar, &data.ref_contigs, args)?;
         assert!(is_paired_end == args.is_paired_end());
     }
 

@@ -32,7 +32,10 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
         "h" | "help" | "--help" | "-h" => print_help(),
         "V" | "version" | "--version" | "-V" => print_version(),
         "cite" => print_citation(),
-        cmd => panic!("Unknown command {}", cmd),
+        cmd => {
+            log::error!("Unknown command {}", cmd.red());
+            std::process::exit(1);
+        }
     }
     Ok(())
 }

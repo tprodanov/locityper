@@ -5,7 +5,7 @@ use std::{
     cmp::min,
     ops::Index,
 };
-use htslib::bam::{record, Record};
+use htslib::bam::record;
 use crate::ext::vec::VecOrNone;
 
 /// Subset of CIGAR operations.
@@ -15,6 +15,7 @@ pub enum Operation {
     Equal,
     Diff,
     Soft,
+    Hard,
     Ins,
     Del,
 }
@@ -28,7 +29,7 @@ impl Operation {
     pub const fn consumes_ref(self) -> bool {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff | Operation::Del => true,
-            _ => false,
+            Operation::Soft | Operation::Hard | Operation::Ins => false,
         }
     }
 
@@ -36,7 +37,7 @@ impl Operation {
     pub const fn consumes_query(self) -> bool {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff | Operation::Ins | Operation::Soft => true,
-            _ => false,
+            Operation::Hard | Operation::Del => false,
         }
     }
 
@@ -44,7 +45,7 @@ impl Operation {
     pub const fn consumes_both(self) -> bool {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff => true,
-            _ => false,
+            Operation::Soft | Operation::Hard | Operation::Ins | Operation::Del => false,
         }
     }
 
@@ -57,6 +58,7 @@ impl Operation {
             Operation::Ins => 'I',
             Operation::Del => 'D',
             Operation::Soft => 'S',
+            Operation::Hard => 'H',
         }
     }
 
@@ -68,11 +70,11 @@ impl Operation {
             2 => Operation::Del,
             // 3 => RefSkip,
             4 => Operation::Soft,
-            // 5 => Hard,
+            5 => Operation::Hard,
             // 6 => Padding,
             7 => Operation::Equal,
             8 => Operation::Diff,
-            _ => panic!("Unexpected cigar operation"),
+            _ => panic!("Unsupported cigar operation"),
         }
     }
 
@@ -84,7 +86,7 @@ impl Operation {
             Operation::Del => 2,
             // RefSkip,
             Operation::Soft => 4,
-            // Hard,
+            Operation::Hard => 5,
             // Padding,
             Operation::Equal => 7,
             Operation::Diff => 8,
@@ -100,6 +102,8 @@ impl Operation {
             Operation::Match => Operation::Match,
             Operation::Equal => Operation::Equal,
             Operation::Diff => Operation::Diff,
+
+            Operation::Hard => panic!("Cigar::inverse not supported with Hard clipping"),
         }
     }
 }
@@ -138,19 +142,6 @@ impl CigarItem {
         Self {
             op: Operation::from_u32(val & 0b1111),
             len: val >> 4,
-        }
-    }
-
-    /// Creates a new tuple from HTSLIB format.
-    pub fn from_htslib(op: record::Cigar) -> Self {
-        match op {
-            record::Cigar::Match(len) => CigarItem::new(Operation::Match, len),
-            record::Cigar::Ins(len) => CigarItem::new(Operation::Ins, len),
-            record::Cigar::Del(len) => CigarItem::new(Operation::Del, len),
-            record::Cigar::SoftClip(len) => CigarItem::new(Operation::Soft, len),
-            record::Cigar::Equal(len) => CigarItem::new(Operation::Equal, len),
-            record::Cigar::Diff(len) => CigarItem::new(Operation::Diff, len),
-            _ => panic!("Unexpected CIGAR operation {}", op.char()),
         }
     }
 }
@@ -197,12 +188,32 @@ impl Cigar {
         }
     }
 
-    pub fn from_raw(record: &Record) -> Self {
+    /// Converts raw CIGAR to this struct.
+    pub fn from_raw(raw_cigar: &[u32]) -> Self {
         let mut res = Cigar::new();
-        for &val in record.raw_cigar().iter() {
+        for &val in raw_cigar.iter() {
             res.push(CigarItem::from_u32(val));
         }
         res
+    }
+
+    /// Returns true if the record has Hard clipping. Must not be empty.
+    pub fn has_hard_clipping(&self) -> bool {
+        self.tuples[0].op == Operation::Hard || self.tuples.last().unwrap().op == Operation::Hard
+    }
+
+    /// Replace hard clipping with soft.
+    pub fn hard_to_soft(&mut self) {
+        let first = &mut self.tuples[0];
+        if first.op == Operation::Hard {
+            first.op = Operation::Soft;
+            self.qlen += first.len;
+        }
+        let last = self.tuples.last_mut().unwrap();
+        if last.op == Operation::Hard {
+            last.op = Operation::Soft;
+            self.qlen += last.len;
+        }
     }
 
     /// Inverses reference and query (for example, `10M3I5M -> 10M3D15M`).

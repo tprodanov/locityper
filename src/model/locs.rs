@@ -11,7 +11,7 @@ use crate::{
     err::{Error, add_path},
     seq::{
         Interval, ContigId, ContigNames,
-        aln::{LightAlignment, Alignment, ReadEnd},
+        aln::{LightAlignment, ReadEnd},
         cigar::Cigar,
     },
     bg::{
@@ -44,6 +44,14 @@ impl MateSummary {
     }
 }
 
+struct ReadData {
+    name: String,
+    seq1:  Vec<u8>,
+    qual1: Vec<u8>,
+    seq2:  Vec<u8>,
+    qual2: Vec<u8>,
+}
+
 /// BAM reader, which stores the next record within.
 /// Contains `read_mate_alns` method, which consecutively reads all records with the same name
 /// until the next primary alignment.
@@ -60,6 +68,11 @@ struct FilteredReader<'a, R: bam::Read> {
     found_alns: IntMap<u64, usize>,
 }
 
+#[inline]
+fn is_primary(record: &bam::Record) -> bool {
+    (record.flags() & 2304) == 0
+}
+
 impl<'a, R: bam::Read> FilteredReader<'a, R> {
     fn new(
         mut reader: R,
@@ -69,11 +82,12 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         boundary: u32,
     ) -> Result<Self, Error> {
         let mut record = bam::Record::new();
+        // Reader would return None if there are no more records.
+        let has_more = reader.read(&mut record).transpose()?.is_some();
+        assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
-            // Reader would return None if there are no more records.
-            has_more: reader.read(&mut record).transpose()?.is_some(),
             found_alns: IntMap::default(),
-            reader, record, contigs, err_prof, contig_windows, boundary,
+            reader, record, contigs, err_prof, contig_windows, boundary, has_more,
         })
     }
 
@@ -100,6 +114,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             return Ok(MateSummary::unmapped(name_hash));
         }
 
+
         let start_len = alns.len();
         // Is any of the alignments in the central region of a contig?
         let mut any_central = false;
@@ -109,8 +124,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         let mut weight = f64::NAN;
         self.found_alns.clear();
         loop {
-            let mut aln = Alignment::new_without_name(
-                &self.record, Cigar::from_raw(&self.record), read_end, Arc::clone(&self.contigs), f64::NAN);
+            let primary = !weight.is_nan();
+            let mut aln = LightAlignment::new(&self.record, Cigar::from_raw(self.record.raw_cigar()),
+                read_end, Arc::clone(&self.contigs), f64::NAN);
             let aln_interval = aln.interval();
             let contig_len = self.contigs.get_len(aln_interval.contig_id());
             let central = self.boundary < aln_interval.end() && aln_interval.start() < contig_len - self.boundary;
@@ -129,7 +145,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
                 edit_dist, read_len, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
-            if weight.is_nan() {
+            if primary {
                 weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
                 write!(dbg_writer, "\t{:.5}\t{}", weight, self.curr_name()?).map_err(add_path!(!))?;
             }
@@ -143,12 +159,12 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                         let aln_ix = *entry.get();
                         // Already seen this alignment.
                         if aln_prob > alns[aln_ix].ln_prob() {
-                            alns[aln_ix] = aln.take_light_aln();
+                            alns[aln_ix] = aln;
                         }
                     }
                     Entry::Vacant(entry) => {
                         entry.insert(alns.len());
-                        alns.push(aln.take_light_aln());
+                        alns.push(aln);
                     }
                 }
                 min_prob = aln_prob.min(min_prob);
@@ -158,7 +174,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 break;
             }
             // Next primary record or unmapped read. Either way, it will be a new read or new read end.
-            if !self.record.is_secondary() && !self.record.is_supplementary() {
+            if is_primary(&self.record) {
                 break;
             }
             assert_eq!(fnv1a(self.record.qname()), name_hash,

@@ -12,7 +12,7 @@ use crate::{
     err::{Error, add_path},
     seq::{
         Interval,
-        aln::Alignment,
+        aln::NamedAlignment,
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
@@ -121,7 +121,7 @@ impl ErrorProfile {
     /// Create error profile from the iterator over CIGARs (with extended operations X/=).
     /// If `out_dir` is Some, write debug information.
     pub fn estimate<'a>(
-        alns: &[impl Borrow<Alignment>],
+        alns: &[impl Borrow<NamedAlignment>],
         region: &Interval,
         windows: &super::Windows,
         mean_read_len: f64,
