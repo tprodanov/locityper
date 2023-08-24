@@ -99,18 +99,13 @@ fn prefilter_genotypes(
     genotypes: &[Genotype],
     priors: &[f64],
     all_alns: &AllAlignments,
-    lik_writer: &mut impl Write,
+    writer: &mut impl Write,
     params: &AssgnParams,
-    debug: bool,
     threads: usize,
 ) -> io::Result<Vec<usize>>
 {
     let n = genotypes.len();
     let mut ixs = (0..n).collect();
-    // Need to run anyway in case of `debug`, so that we output all values.
-    if params.min_gts >= n && !debug {
-        return Ok(ixs);
-    }
     log::info!("*** Filtering genotypes based on read alignment likelihood");
 
     let contig_ids: Vec<_> = contigs.ids().collect();
@@ -126,7 +121,7 @@ fn prefilter_genotypes(
                 .for_each(|(best_prob, &curr_prob)| *best_prob = best_prob.max(curr_prob));
         }
         let score = prior + gt_best_probs.iter().sum::<f64>();
-        writeln!(lik_writer, "0\t{}\t{:.3}", gt, Ln::to_log10(score))?;
+        writeln!(writer, "{}\t{:.3}", gt, Ln::to_log10(score))?;
         scores.push(score);
     }
     truncate_ixs(&mut ixs, &scores, genotypes, params.score_thresh, params.min_gts, threads);
@@ -531,16 +526,19 @@ pub fn solve(
         &locus_dir.join("alns."), data.threads, data.debug)?;
     writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
 
-    let lik_filename = locus_dir.join("lik.csv.gz");
-    let mut lik_writer = ext::sys::create_gzip(&lik_filename)?;
-    writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(lik_filename))?;
-    let rem_ixs = if data.scheme.filter {
-        prefilter_genotypes(&data.contigs, &data.genotypes, &data.priors, &data.all_alns, &mut lik_writer,
-            &data.assgn_params, data.debug, data.threads).map_err(add_path!(!))?
+    let rem_ixs = if data.scheme.filter && (data.debug || n_gts > data.assgn_params.min_gts) {
+        let filt_filename = locus_dir.join("filter.csv.gz");
+        let mut filt_writer = ext::sys::create_gzip(&filt_filename)?;
+        writeln!(filt_writer, "genotype\tscore").map_err(add_path!(filt_filename))?;
+        prefilter_genotypes(&data.contigs, &data.genotypes, &data.priors, &data.all_alns, &mut filt_writer,
+            &data.assgn_params, data.threads).map_err(add_path!(filt_filename))?
     } else {
         (0..n_gts).collect()
     };
 
+    let lik_filename = locus_dir.join("lik.csv.gz");
+    let mut lik_writer = ext::sys::create_gzip(&lik_filename)?;
+    writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(lik_filename))?;
     let mut likelihoods = Likelihoods::new(n_gts, rem_ixs);
     let data = Arc::new(data);
     if data.threads == 1 {
