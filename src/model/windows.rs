@@ -395,11 +395,15 @@ impl GenotypeWindows {
         for (i, &contig_id) in self.genotype.ids().iter().enumerate() {
             let contig_ix = u8::try_from(i).unwrap();
             let (start_ix, alns) = groupped_alns.contig_alns(contig_id);
-            for (aln_ix, aln) in (start_ix..).zip(alns) {
-                let ln_prob = aln.ln_prob();
-                if ln_prob >= thresh_prob {
-                    thresh_prob = thresh_prob.max(ln_prob - prob_diff);
-                    out_alns.push(ReadGtAlns::new(aln_ix as u32, contig_ix, aln));
+            if !alns.is_empty() {
+                // First alignment should have highest probability.
+                thresh_prob = thresh_prob.max(alns[0].ln_prob() - prob_diff);
+                for (aln_ix, aln) in (start_ix..).zip(alns) {
+                    if aln.ln_prob() >= thresh_prob {
+                        out_alns.push(ReadGtAlns::new(aln_ix as u32, contig_ix, aln));
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -407,12 +411,10 @@ impl GenotypeWindows {
         if unmapped_prob >= thresh_prob {
             out_alns.push(ReadGtAlns::both_unmapped(unmapped_prob));
         }
-        let keep_alns = {
-            let slice = &mut out_alns[start_len..];
-            // Decreasing sort by ln-probability.
-            slice.sort_unstable_by(|a, b| b.ln_prob.total_cmp(&a.ln_prob));
-            slice.partition_point(|aln| aln.ln_prob >= thresh_prob)
-        };
+        let slice = &mut out_alns[start_len..];
+        // Decreasing sort by ln-probability.
+        slice.sort_unstable_by(|a, b| b.ln_prob.total_cmp(&a.ln_prob));
+        let keep_alns = slice.partition_point(|aln| aln.ln_prob >= thresh_prob);
         out_alns.truncate(start_len + keep_alns);
         keep_alns
     }
