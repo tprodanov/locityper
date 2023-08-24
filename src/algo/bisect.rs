@@ -91,16 +91,16 @@ where F: FnMut(&T) -> Ordering,
     right_by_at(a, f, lo, min(lo + step, hi))
 }
 
-/// Performs linear search between `lo` and `hi`
-/// and finds the first index `i` where `f(a[i]) -> Greater`.
+/// Finds the first index `i` (between `lo` and `hi`) where `! f(a[i])`.
+/// Returns `hi` if all `f(a[i])` for all `i`.
 ///
 /// This function takes $O(hi - lo)$, but can still be faster than binary search if expected $i - lo$ is small.
-pub fn right_linear<T, F>(a: &[T], mut f: F, lo: usize, hi: usize) -> usize
-where F: FnMut(&T) -> Ordering,
+pub fn right_boundary<T, F>(a: &[T], mut f: F, lo: usize, hi: usize) -> usize
+where F: FnMut(&T) -> bool,
 {
-    assert!(hi <= a.len(), "Cannot perform binary search on indices {}, {} (len: {})", lo, hi, a.len());
+    assert!(hi <= a.len(), "Cannot perform linear search on indices {}, {} (len: {})", lo, hi, a.len());
     for i in lo..hi {
-        if f(unsafe { a.get_unchecked(i) }) == Ordering::Greater {
+        if !f(unsafe { a.get_unchecked(i) }) {
             return i;
         }
     }

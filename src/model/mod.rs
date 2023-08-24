@@ -37,8 +37,6 @@ pub struct Params {
     pub alt_cn: (f64, f64),
     /// Use paired-end reads that do not have a mapped mate within any contig.
     pub use_unpaired: bool,
-    /// Use at most this number of alignments (subsample if necessary).
-    pub max_alns: usize,
 
     /// Minimal number of genotypes after each step of solving.
     pub min_gts: usize,
@@ -66,7 +64,6 @@ impl Default for Params {
             tweak: None,
             alt_cn: (0.5, 1.5),
             use_unpaired: false,
-            max_alns: 1_000_000,
 
             min_gts: 8,
             score_thresh: 0.95,
@@ -115,10 +112,6 @@ impl Params {
         validate_param!(self.alt_cn.1 > 1.0,
             "Alternative copy number #2 ({}) must be over 1.", self.alt_cn.1);
 
-        validate_param!(self.max_alns > 0, "Number of alignments must be positive");
-        if self.max_alns < 1000 {
-            log::warn!("Number of alignments ({}) is too small", self.max_alns);
-        }
         validate_param!(0.0 <= self.score_thresh && self.score_thresh <= 1.0,
             "Score threshold ({}) must be within [0, 1]", self.score_thresh);
         validate_param!(self.prob_thresh < 0.0,

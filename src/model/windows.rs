@@ -409,7 +409,7 @@ impl GenotypeWindows {
         }
         let keep_alns = {
             let slice = &mut out_alns[start_len..];
-            // Reverse sort.
+            // Decreasing sort by ln-probability.
             slice.sort_unstable_by(|a, b| b.ln_prob.total_cmp(&a.ln_prob));
             slice.partition_point(|aln| aln.ln_prob >= thresh_prob)
         };

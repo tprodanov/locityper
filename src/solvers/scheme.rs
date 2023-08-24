@@ -117,7 +117,7 @@ fn prefilter_genotypes(
     let best_aln_matrix = all_alns.best_aln_matrix(&contig_ids);
     // Vector (genotype index, score).
     let mut scores = Vec::with_capacity(n);
-    let mut gt_best_probs = vec![0.0_f64; all_alns.len()];
+    let mut gt_best_probs = vec![0.0_f64; all_alns.reads().len()];
     for (gt, &prior) in genotypes.iter().zip(priors) {
         let gt_ids = gt.ids();
         gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
@@ -219,7 +219,7 @@ fn write_alns(
     all_alns: &AllAlignments,
     mut selected: impl Iterator<Item = f64>,
 ) -> io::Result<()> {
-    for (rp, paired_alns) in all_alns.iter().enumerate() {
+    for (rp, paired_alns) in all_alns.reads().iter().enumerate() {
         let hash = paired_alns.name_hash();
         for curr_windows in gt_alns.possible_read_alns(rp) {
             write!(f, "{}\t{:X}\t", prefix, hash)?;

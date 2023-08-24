@@ -197,9 +197,6 @@ fn print_help(extended: bool) {
             "    --use-unpaired".green(), super::flag());
 
         println!("\n{}", "Locus genotyping:".bold());
-        println!("    {:KEY$} {:VAL$}  Use at most {} alignments [{}].",
-            "    --max-alns".green(), "INT".yellow(), "INT".yellow(),
-            super::fmt_def(PrettyUsize(defaults.assgn_params.max_alns)));
         println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
             {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
             "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
@@ -306,8 +303,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 ),
             Long("use-unpaired") => args.assgn_params.use_unpaired = true,
 
-            Long("max-alns") | Long("max-alignments") =>
-                args.assgn_params.max_alns = parser.value()?.parse::<PrettyUsize>()?.get(),
             Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
             Long("score-thresh") | Long("score-threshold") =>
                 args.assgn_params.score_thresh = parser.value()?.parse()?,
@@ -479,7 +474,7 @@ fn load_loci(
     }
     let n = loci.len();
     if n == 0 {
-        return Err(Error::InvalidInput(format!("Zero loci loaded")));
+        log::warn!("Zero loci to analyze");
     } else if n < total_entries {
         log::info!("Loaded {} loci, skipped {} directories", n, total_entries - n);
     } else {
@@ -676,20 +671,14 @@ fn analyze_locus(
         ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink())?
     };
 
-    let mut all_alns = if args.debug {
+    let all_alns = if args.debug {
         let reads_filename = locus.out_dir.join("reads.csv.gz");
         let reads_writer = ext::sys::create_gzip(&reads_filename)?;
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, reads_writer)?
     } else {
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, io::sink())?
     };
-    if all_alns.len() > args.assgn_params.max_alns {
-        let rate = args.assgn_params.max_alns as f64 / all_alns.len() as f64;
-        all_alns.subsample(args.assgn_params.max_alns, &mut rng);
-        ContigWindows::define_all_distributions(&mut contig_windows, &cached_distrs.subsample(rate));
-    } else {
-        ContigWindows::define_all_distributions(&mut contig_windows, cached_distrs);
-    }
+    ContigWindows::define_all_distributions(&mut contig_windows, cached_distrs);
 
     let contig_ids: Vec<ContigId> = contigs.ids().collect();
     let (genotypes, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
@@ -735,6 +724,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
     let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.rerun)?;
+    if loci.is_empty() {
+        return Ok(());
+    }
     recruit_reads(&loci, &args)?;
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);

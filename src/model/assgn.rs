@@ -93,7 +93,7 @@ impl GenotypeAlignments {
         let mut alns = Vec::new();
         let mut read_ixs = vec![ix];
         let mut non_trivial_reads = Vec::new();
-        for (rp, paired_alns) in all_alns.iter().enumerate() {
+        for (rp, paired_alns) in all_alns.reads().iter().enumerate() {
             let nw = gt_windows.extend_read_gt_alns(paired_alns, &mut alns, params.prob_diff);
             // rp - read pair index,
             // nw - number of possible read windows.
