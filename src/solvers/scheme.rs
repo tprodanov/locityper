@@ -29,7 +29,7 @@ use crate::{
     model::{
         Params as AssgnParams,
         locs::{AllAlignments, Pair},
-        assgn::{GenotypeAlignments, ReadAssignment, SelectedCounter},
+        assgn::{GenotypeAlignments, ReadAssignment},
         windows::ContigWindows,
     },
 };
@@ -212,9 +212,12 @@ fn write_alns(
     prefix: &str,
     gt_alns: &GenotypeAlignments,
     all_alns: &AllAlignments,
-    mut selected: impl Iterator<Item = f64>,
+    assgn_counts: &[u16],
+    attempts: u16,
 ) -> io::Result<()> {
-    for (rp, paired_alns) in all_alns.reads().iter().enumerate() {
+    let attempts = f32::from(attempts);
+    assert_eq!(assgn_counts.len(), all_alns.reads().len());
+    for (rp, (paired_alns, &count)) in all_alns.reads().iter().zip(assgn_counts).enumerate() {
         let hash = paired_alns.name_hash();
         for curr_windows in gt_alns.possible_read_alns(rp) {
             write!(f, "{}\t{:X}\t", prefix, hash)?;
@@ -229,10 +232,9 @@ fn write_alns(
                 }?;
             }
             let prob = Ln::to_log10(curr_windows.ln_prob());
-            writeln!(f, "{:.3}\t{:.2}", prob, selected.next().expect("Not enough `selected` values"))?;
+            writeln!(f, "{:.3}\t{:.2}", prob, f32::from(count) / attempts)?;
         }
     }
-    assert!(selected.next().is_none(), "Too many `selected` values");
     Ok(())
 }
 
@@ -255,6 +257,8 @@ struct Likelihoods {
     likelihoods: Vec<(f64, f64)>,
     /// Genotype indices after the latest iteration.
     ixs: Vec<usize>,
+    /// Count how many times each read assignment was selected.
+    assgn_counts: Vec<Option<Vec<u16>>>,
 }
 
 impl Likelihoods {
@@ -262,6 +266,7 @@ impl Likelihoods {
         Self {
             likelihoods: vec![(f64::NEG_INFINITY, 0.0); n_gts],
             ixs,
+            assgn_counts: vec![None; n_gts],
         }
     }
 
@@ -282,7 +287,7 @@ impl Likelihoods {
             return;
         }
 
-        let attempts = params.attempts as f64;
+        let attempts = f64::from(params.attempts);
         // Decreasing sort by average likelihood.
         self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
         let best_ix = self.ixs[0];
@@ -297,17 +302,24 @@ impl Likelihoods {
         const STOP_COUNT: u32 = 5;
         let mut dropped = 0;
         let mut new_ixs = self.ixs[..min_gts].to_vec();
-        for &i in self.ixs[min_gts..].iter() {
-            let (mean_i, var_i) = self.likelihoods[i];
-            let ln_pval = compare_two_likelihoods(mean_i, var_i, mean1, var1, attempts);
+
+        let mut ixs_iter = self.ixs[min_gts..].iter().copied();
+        while let Some(ix) = ixs_iter.next() {
+            let (curr_mean, curr_var) = self.likelihoods[ix];
+            let ln_pval = compare_two_likelihoods(curr_mean, curr_var, mean1, var1, attempts);
             if ln_pval >= params.prob_thresh {
-                new_ixs.push(i);
+                new_ixs.push(ix);
             } else {
                 dropped += 1;
+                self.assgn_counts[ix].take();
                 if dropped >= STOP_COUNT {
                     break;
                 }
             }
+        }
+        // Remove dropped assignment counts.
+        for ix in ixs_iter {
+            self.assgn_counts[ix].take();
         }
         let m = new_ixs.len();
         let (thresh, _) = self.likelihoods[new_ixs[m - 1]];
@@ -327,7 +339,7 @@ impl Likelihoods {
         const THRESH: f64 = -11.512925464970229;
         const MIN_OUTPUT: usize = 4;
         let thresh_prob = THRESH.min(params.prob_thresh);
-        let attempts = params.attempts as f64;
+        let attempts = f64::from(params.attempts);
         self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
         let mut n = self.ixs.len();
         if n < 2 {
@@ -422,7 +434,7 @@ fn solve_single_thread(
     let mut logger = Logger::new(&data.scheme, total_genotypes);
 
     let n_stages = data.scheme.stages.len();
-    let mut selected = SelectedCounter::default();
+    let attempts = data.assgn_params.attempts;
     for (stage_ix, solver) in data.scheme.iter().enumerate() {
         logger.start_stage(stage_ix, likelihoods.curr_len());
         if stage_ix + 1 < n_stages && likelihoods.curr_len() <= data.assgn_params.min_gts {
@@ -430,15 +442,13 @@ fn solve_single_thread(
             continue;
         }
 
-        let mut liks = vec![f64::NAN; data.assgn_params.attempts];
+        let mut liks = vec![f64::NAN; usize::from(attempts)];
         for &ix in likelihoods.ixs.iter() {
             let gt = &data.genotypes[ix];
             let prior = data.priors[ix];
             let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
                 &data.assgn_params);
-            if data.debug {
-                selected.reset(&gt_alns);
-            }
+            let mut counts = gt_alns.create_counts();
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
                 gt_alns.define_read_windows(tweak, rng);
@@ -447,14 +457,12 @@ fn solve_single_thread(
                 if data.debug {
                     let ext_prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                     assgns.write_depth(&mut depth_writer, &ext_prefix).map_err(add_path!(!))?;
-                    if data.debug {
-                        selected.update(&assgns);
-                    }
+                    assgns.update_counts(&mut counts);
                 }
             }
             let prefix = format!("{}\t{}", stage_ix + 1, gt);
             if data.debug {
-                write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, selected.fractions())
+                write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts)
                     .map_err(add_path!(!))?;
             }
             let (lik_mean, lik_var) = F64Ext::mean_variance_or_nan(&liks);
@@ -462,6 +470,7 @@ fn solve_single_thread(
             writeln!(lik_writer, "{}\t{:.3}\t{:.3}", prefix, Ln::to_log10(lik_mean), Ln::to_log10(lik_var.sqrt()))
                 .map_err(add_path!(!))?;
             likelihoods.likelihoods[ix] = (lik_mean, lik_var);
+            likelihoods.assgn_counts[ix] = Some(counts);
         }
         if stage_ix + 1 < n_stages {
             likelihoods.discard_improbable_genotypes(&data.genotypes, &data.assgn_params, 1);
@@ -563,7 +572,7 @@ pub fn solve(
 /// Task, sent to the workers: stage index and a vector of genotype indices.
 type Task = (usize, Vec<usize>);
 /// Genotype index and calculated likelihood mean and variance.
-type Solution = (usize, f64, f64);
+type Solution = (usize, f64, f64, Vec<u16>);
 
 struct MainWorker {
     data: Arc<Data>,
@@ -647,11 +656,12 @@ impl MainWorker {
             while logger.solved_genotypes < m {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
-                        let (ix, lik_mean, lik_var) = receiver.recv().expect("Genotyping worker has failed!");
+                        let (ix, lik_mean, lik_var, counts) = receiver.recv().expect("Genotyping worker has failed!");
                         logger.update(data.genotypes[ix].name(), lik_mean);
                         writeln!(lik_writer, "{}\t{}\t{:.3}\t{:.3}", stage_ix + 1, data.genotypes[ix],
                             Ln::to_log10(lik_mean), Ln::to_log10(lik_var.sqrt())).map_err(add_path!(!))?;
                         likelihoods.likelihoods[ix] = (lik_mean, lik_var);
+                        likelihoods.assgn_counts[ix] = Some(counts);
                         *jobs -= 1;
                     }
                 }
@@ -683,6 +693,7 @@ impl<W: Write, U: Write> Worker<W, U> {
         let data = self.data.deref();
         let tweak = data.assgn_params.tweak.unwrap();
         let scheme = data.scheme.deref();
+        let attempts = data.assgn_params.attempts;
 
         // Block thread and wait for the shipment.
         while let Ok((stage_ix, task)) = self.receiver.recv() {
@@ -690,16 +701,13 @@ impl<W: Write, U: Write> Worker<W, U> {
             let n = task.len();
             assert_ne!(n, 0, "Received empty task");
 
-            let mut liks = vec![f64::NAN; data.assgn_params.attempts];
-            let mut selected = SelectedCounter::default();
+            let mut liks = vec![f64::NAN; usize::from(attempts)];
             for ix in task.into_iter() {
                 let gt = &data.genotypes[ix];
                 let prior = data.priors[ix];
                 let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
                     &data.assgn_params);
-                if data.debug {
-                    selected.reset(&gt_alns);
-                }
+                let mut counts = gt_alns.create_counts();
                 for (attempt, lik) in liks.iter_mut().enumerate() {
                     gt_alns.define_read_windows(tweak, &mut self.rng);
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
@@ -707,15 +715,15 @@ impl<W: Write, U: Write> Worker<W, U> {
                     if data.debug {
                         let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
                         assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
-                        selected.update(&assgns);
+                        assgns.update_counts(&mut counts);
                     }
                 }
                 if data.debug {
                     write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt),
-                        &gt_alns, &data.all_alns, selected.fractions()).map_err(add_path!(!))?;
+                        &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
                 }
                 let (lik_mean, lik_var) = F64Ext::mean_variance_or_nan(&liks);
-                if let Err(_) = self.sender.send((ix, lik_mean, lik_var)) {
+                if let Err(_) = self.sender.send((ix, lik_mean, lik_var, counts)) {
                     log::error!("Read recruitment: main thread stopped before the child thread.");
                     break;
                 }

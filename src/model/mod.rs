@@ -45,7 +45,10 @@ pub struct Params {
     /// Discard genotypes with low probability to be best (after each step).
     pub prob_thresh: f64,
     /// Number of attempts with different tweak sizes.
-    pub attempts: usize,
+    pub attempts: u16,
+
+    /// Generate BAM files for this many best genotypes.
+    pub out_bams: usize,
 }
 
 impl Default for Params {
@@ -69,6 +72,8 @@ impl Default for Params {
             score_thresh: 0.95,
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 20,
+
+            out_bams: 1,
         }
     }
 }

@@ -15,36 +15,6 @@ use super::{
     dp_cache::AlwaysOneDistr,
 };
 
-/// Count how many times each alignment was selected for a read.
-#[derive(Default)]
-pub struct SelectedCounter {
-    buffer: Vec<u16>,
-    total_count: u16,
-}
-
-impl SelectedCounter {
-    /// Resets counts and updates buffer length to the new read assignment.
-    pub fn reset(&mut self, gt_alns: &GenotypeAlignments) {
-        self.buffer.clear();
-        self.buffer.resize(gt_alns.total_possible_alns(), 0);
-        self.total_count = 0;
-    }
-
-    /// Increments selected counts.
-    pub fn update(&mut self, assgn: &ReadAssignment) {
-        self.total_count += 1;
-        for (&read_ix, &read_assgn) in assgn.parent.read_ixs.iter().zip(&assgn.read_assgn) {
-            self.buffer[read_ix + usize::from(read_assgn)] += 1;
-        }
-    }
-
-    /// Returns iterator over fractions (how many times each location was selected / number of iterations).
-    pub fn fractions(&self) -> impl Iterator<Item = f64> + '_ {
-        let mult = 1.0 / f64::from(self.total_count);
-        self.buffer.iter().map(move |&count| mult * f64::from(count))
-    }
-}
-
 fn unmapped_distr() -> DistrBox {
     Box::new(AlwaysOneDistr)
 }
@@ -199,6 +169,11 @@ impl GenotypeAlignments {
     pub fn max_aln_lik(&self) -> f64 {
         // This works as read alignments are sorted by likelihood for each read pair.
         self.read_ixs[..self.read_ixs.len() - 1].iter().map(|&i| self.alns[i].ln_prob()).sum::<f64>()
+    }
+
+    /// Returns vector that stores how many times each read assignment was selected.
+    pub fn create_counts(&self) -> Vec<u16> {
+        vec![0; self.total_possible_alns()]
     }
 }
 
@@ -410,6 +385,12 @@ impl<'a> ReadAssignment<'a> {
             Ln::to_log10(self.aln_lik), Ln::to_log10(self.parent.aln_contrib * self.aln_lik),
             Ln::to_log10(self.depth_lik), Ln::to_log10(self.parent.depth_contrib * self.depth_lik),
             Ln::to_log10(self.likelihood()))
+    }
+
+    pub fn update_counts(&self, counts: &mut [u16]) {
+        for (&read_ix, &read_assgn) in self.parent.read_ixs.iter().zip(&self.read_assgn) {
+            counts[read_ix + usize::from(read_assgn)] += 1;
+        }
     }
 }
 

@@ -221,6 +221,8 @@ fn print_help(extended: bool) {
             "--anneal".green(), "STR".yellow(),
             "--highs".green(), "STR".yellow(),
             "--gurobi".green(), "STR".yellow());
+        println!("    {:KEY$} {:VAL$}  Output BAM files for this number of genotypes [{}].",
+            "-O, --out-bams".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.out_bams));
     }
 
     println!("\n{}", "Execution parameters:".bold());
@@ -323,6 +325,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("anneal") => args.scheme_params.anneal_params.push(parser.value()?.parse()?),
             Long("highs") => args.scheme_params.highs_params.push(parser.value()?.parse()?),
             Long("gurobi") => args.scheme_params.gurobi_params.push(parser.value()?.parse()?),
+            Short('O') | Long("out-bams") => args.assgn_params.out_bams = parser.value()?.parse::<PrettyUsize>()?.get(),
 
             Short('^') | Long("interleaved") => args.interleaved = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
