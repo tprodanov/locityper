@@ -140,7 +140,11 @@ impl Rerun {
     ///     if part:  always returns true, and
     ///         if `success_file` exists, removes it.
     ///     if all: always returns true and always clears output directory.
-    fn need_analysis(self, dir: &Path) -> Result<bool, Error> {
+    ///
+    /// If directory already existed, run `clean(dir)`.
+    fn prepare_and_clean_dir<F>(self, dir: &Path, clean: F) -> Result<bool, Error>
+    where F: FnOnce(&Path) -> Result<(), Error>,
+    {
         if !dir.exists() {
             ext::sys::mkdir(dir)?;
             return Ok(true);
@@ -163,7 +167,12 @@ impl Rerun {
                 return Ok(true);
             }
         }
+        clean(dir)?;
         Ok(true)
+    }
+
+    fn prepare_dir(self, dir: &Path) -> Result<bool, Error> {
+        self.prepare_and_clean_dir(dir, |_| Ok(()))
     }
 }
 

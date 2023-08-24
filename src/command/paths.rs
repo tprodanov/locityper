@@ -27,6 +27,8 @@ pub(super) const LOCUS_DENDROGRAM: &'static str = "all_haplotypes.nwk";
 pub(super) const PREPROC_PARAMS: &'static str = "params.json";
 /// Background distributions are stored in `output/bg/BG_DISTR`.
 pub(super) const BG_DISTR: &'static str = "distr.gz";
+/// Store alignments in `output/ALNS_DIR/GENOTYPE.bam`.
+pub const ALNS_DIR: &'static str = "alns";
 
 /// File, created on the successful completion.
 pub(super) const SUCCESS: &'static str = "success";

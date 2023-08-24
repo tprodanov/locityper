@@ -542,7 +542,7 @@ fn add_locus<R>(
 where R: Read + Seek,
 {
     let locus_dir = loci_dir.join(locus.name());
-    if !super::Rerun::from_force(args.force).need_analysis(&locus_dir)? {
+    if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
         return Ok(true);
     }
     log::info!("{} {}", "Analyzing locus".bold(), locus);
@@ -692,7 +692,7 @@ fn process_locus_from_fasta(
 ) -> Result<(), Error>
 {
     let locus_dir = loci_dir.join(locus);
-    if !super::Rerun::from_force(args.force).need_analysis(&locus_dir)? {
+    if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
         return Ok(())
     }
     let mut fasta_reader = fastx::Reader::from_path(fasta_path)?;

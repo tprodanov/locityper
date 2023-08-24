@@ -427,7 +427,7 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
 
     let bg_dir = out_dir.join(paths::BG_DIR);
     let params_path = bg_dir.join(paths::PREPROC_PARAMS);
-    if !args.rerun.need_analysis(&bg_dir)? {
+    if !args.rerun.prepare_dir(&bg_dir)? {
         if args.params.need_rerun(!args.input.is_empty(), &params_path) {
             log::error!("Please rerun with {} or {}", "--rerun part".red(), "--rerun all".red());
             std::process::exit(1);

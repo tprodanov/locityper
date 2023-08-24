@@ -437,6 +437,27 @@ impl LocusData {
     }
 }
 
+/// Removes all files with `.gz` extension, as well as `alns` directory, if it exists.
+fn clean_dir(dir: &Path) -> Result<(), Error> {
+    let gz_files = ext::sys::filenames_with_ext(dir, "gz")?;
+    let alns_dir = dir.join(paths::ALNS_DIR);
+    let alns_exist = alns_dir.exists();
+    if !gz_files.is_empty() || alns_exist {
+        log::warn!("    Partially cleaning {}", ext::fmt::path(dir));
+    }
+    for filename in ext::sys::filenames_with_ext(dir, "gz")?.into_iter() {
+        if let Err(e) = fs::remove_file(&filename) {
+            log::error!("Cannot remove {}: {}", filename.display(), e);
+        }
+    }
+    if alns_exist {
+        if let Err(e) = fs::remove_file(&alns_dir) {
+            log::error!("Cannot remove directory {}: {}", alns_dir.display(), e);
+        }
+    }
+    Ok(())
+}
+
 /// Loads all loci from the database. If `subset_loci` is not empty, only loads loci that are contained in it.
 fn load_loci(
     db_path: &Path,
@@ -464,7 +485,7 @@ fn load_loci(
             match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS), ()) {
                 Ok(set) => {
                     let locus_data = LocusData::new(set, &path, &out_loci_dir);
-                    if rerun.need_analysis(&locus_data.out_dir)? {
+                    if rerun.prepare_and_clean_dir(&locus_data.out_dir, clean_dir)? {
                         loci.push(locus_data);
                     }
                 },
