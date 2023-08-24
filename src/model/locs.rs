@@ -1,7 +1,6 @@
 use std::{
     sync::Arc,
     io::Write,
-    cmp::Ordering,
     collections::hash_map::Entry,
 };
 use htslib::bam;
@@ -374,18 +373,11 @@ impl GrouppedAlignments {
     /// Returns best alignment probability for each contig (must be sorted).
     pub fn best_for_each_contig<'a>(&'a self, contig_ids: &'a [ContigId]) -> impl Iterator<Item = f64> + 'a {
         let n = self.alns.len();
-        let mut i = 0;
-        contig_ids.iter().map(move |id| {
-            let mut best = self.unmapped_prob;
-            while i < n {
-                match self.alns[i].contig_id().cmp(id) {
-                    Ordering::Less => {}
-                    Ordering::Equal => best = best.max(self.alns[i].ln_prob()),
-                    Ordering::Greater => break,
-                }
-                i += 1;
-            }
-            best
+        let mut j = 0;
+        contig_ids.iter().map(move |&id| {
+            let i = j; // Do this way so that we can immediately return value two lines later.
+            j = bisect::right_boundary(&self.alns, |aln| aln.contig_id() == id, i, n);
+            if i == j { self.unmapped_prob } else { self.alns[i].ln_prob() }
         })
     }
 
