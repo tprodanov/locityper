@@ -369,8 +369,11 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Ite
         }
     }
     if count > 0 {
-        log::warn!("    [{}] {} haplotype pairs with high divergence, highest {:.5} ({} and {})", tag, count,
+        log::warn!("    [{}] {} allele pairs with high divergence, highest {:.5} ({} and {})", tag, count,
             highest, entries[highest_i].name(), entries[highest_j].name());
+        if highest > 0.5 {
+            log::error!("    Please check that all alleles lie on the same strand");
+        }
     }
 }
 

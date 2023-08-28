@@ -77,7 +77,9 @@ impl Aligner {
         Self(unsafe { cwfa::wavefront_aligner_new(&mut attributes) })
     }
 
-    pub fn align(&self, seq1: &[u8], seq2: &[u8]) -> (Cigar, i32) {
+    /// Aligns two sequences and returns pair (Cigar, alignment score).
+    /// If Cigar creation fails, returns violating character.
+    pub fn align(&self, seq1: &[u8], seq2: &[u8]) -> Result<(Cigar, i32), u8> {
         let status = unsafe { cwfa::wavefront_align(
             self.0,
             seq1.as_ptr() as *const c_char,
@@ -87,22 +89,22 @@ impl Aligner {
         ) };
         assert_eq!(status, 0, "WFA alignment failed");
         let c_cigar = unsafe { (*self.0).cigar };
-        let cigar = convert_cigar(c_cigar);
+        let cigar = convert_cigar(c_cigar)?;
         let score = unsafe { (*c_cigar).score };
-        (cigar, score)
+        Ok((cigar, score))
     }
 }
 
-fn convert_cigar(cigar: *const cwfa::cigar_t) -> Cigar {
-    let mut res = Cigar::new();
-    let begin_offset = usize::try_from(unsafe { (*cigar).begin_offset }).unwrap();
-    let end_offset = usize::try_from(unsafe { (*cigar).end_offset }).unwrap();
+fn convert_cigar(c_cigar: *const cwfa::cigar_t) -> Result<Cigar, u8> {
+    let mut cigar = Cigar::new();
+    let begin_offset = usize::try_from(unsafe { (*c_cigar).begin_offset }).unwrap();
+    let end_offset = usize::try_from(unsafe { (*c_cigar).end_offset }).unwrap();
 
     if begin_offset >= end_offset {
-        return res;
+        return Ok(cigar);
     }
 
-    let operations = unsafe { (*cigar).operations };
+    let operations = unsafe { (*c_cigar).operations };
     // Index into c-array.
     let mut last_op = unsafe { *operations.add(begin_offset) } as u8;
     let mut last_len = 1;
@@ -111,23 +113,25 @@ fn convert_cigar(cigar: *const cwfa::cigar_t) -> Cigar {
         if last_op == curr_op {
             last_len += 1;
         } else {
-            res.push(CigarItem::new(op_from_char(last_op), last_len));
+            cigar.push(CigarItem::new(op_from_char(last_op)?, last_len));
             last_op = curr_op;
             last_len = 1;
         }
     }
-    res.push(CigarItem::new(op_from_char(last_op), last_len));
-    res
+    cigar.push(CigarItem::new(op_from_char(last_op)?, last_len));
+    Ok(cigar)
 }
 
 /// Convert char into operation, replacing M with X.
-fn op_from_char(ch: u8) -> Operation {
+/// If invalid, returns character as Err.
+#[inline]
+fn op_from_char(ch: u8) -> Result<Operation, u8> {
     match ch {
-        b'M' | b'=' => Operation::Equal,
-        b'X' => Operation::Diff,
-        b'I' => Operation::Ins,
-        b'D' => Operation::Del,
-        b'S' => Operation::Soft,
-        _ => panic!("Unexpected CIGAR operation '{}'", char::from(ch)),
+        b'M' | b'=' => Ok(Operation::Equal),
+        b'X' => Ok(Operation::Diff),
+        b'I' => Ok(Operation::Ins),
+        b'D' => Ok(Operation::Del),
+        b'S' => Ok(Operation::Soft),
+        _ => Err(ch),
     }
 }

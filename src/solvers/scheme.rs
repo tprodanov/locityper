@@ -217,7 +217,8 @@ fn write_alns(
 ) -> io::Result<()> {
     let attempts = f32::from(attempts);
     assert_eq!(assgn_counts.len(), all_alns.reads().len());
-    for (rp, (paired_alns, &count)) in all_alns.reads().iter().zip(assgn_counts).enumerate() {
+    let mut counts_iter = assgn_counts.iter();
+    for (rp, paired_alns) in all_alns.reads().iter().enumerate() {
         let hash = paired_alns.name_hash();
         for curr_windows in gt_alns.possible_read_alns(rp) {
             write!(f, "{}\t{:X}\t", prefix, hash)?;
@@ -232,9 +233,11 @@ fn write_alns(
                 }?;
             }
             let prob = Ln::to_log10(curr_windows.ln_prob());
+            let count = *counts_iter.next().expect("Not enough counts");
             writeln!(f, "{:.3}\t{:.2}", prob, f32::from(count) / attempts)?;
         }
     }
+    assert!(counts_iter.next().is_none(), "Too many counts");
     Ok(())
 }
 
@@ -311,7 +314,7 @@ impl Likelihoods {
                 new_ixs.push(ix);
             } else {
                 dropped += 1;
-                self.assgn_counts[ix].take();
+                self.assgn_counts[ix] = None;
                 if dropped >= STOP_COUNT {
                     break;
                 }
@@ -319,7 +322,7 @@ impl Likelihoods {
         }
         // Remove dropped assignment counts.
         for ix in ixs_iter {
-            self.assgn_counts[ix].take();
+            self.assgn_counts[ix] = None;
         }
         let m = new_ixs.len();
         let (thresh, _) = self.likelihoods[new_ixs[m - 1]];

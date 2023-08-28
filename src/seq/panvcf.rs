@@ -332,7 +332,12 @@ fn add_variant_to_alns(
                         assert_ne!(allele_i, allele_j, "Two variant alleles are identical");
                         allele_alns.push((Cigar::new_full_mismatch(1), mism_penalty));
                     } else {
-                        allele_alns.push(aligner.align(allele_i, allele_j));
+                        match aligner.align(allele_i, allele_j) {
+                            Ok(cigar_and_score) => allele_alns.push(cigar_and_score),
+                            Err(ch) => panic!("Could not align alleles {} and {}. Violating CIGAR character '{}' ({})",
+                                String::from_utf8_lossy(allele_i), String::from_utf8_lossy(allele_j),
+                                char::from(ch), ch),
+                        }
                     }
                 }
                 Ordering::Equal => allele_alns.push((Cigar::new_full_match(i_len), 0)),

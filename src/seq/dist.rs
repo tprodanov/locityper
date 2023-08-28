@@ -29,6 +29,17 @@ pub fn pairwise_divergences_from_alns(
     Ok(divergences)
 }
 
+fn safe_align(aligner: &Aligner, entry1: &NamedSeq, entry2: &NamedSeq) -> (Cigar, i32) {
+    match aligner.align(entry1.seq(), entry2.seq()) {
+        Ok(cigar_and_score) => cigar_and_score,
+        Err(ch) => {
+            log::error!("Could not align {} and {}. Violating CIGAR character '{}' ({})",
+                entry1.name(), entry2.name(), char::from(ch), ch);
+            (Cigar::new(), i32::MIN)
+        }
+    }
+}
+
 /// Calculates all pairwise divergences between all sequences, writes alignments to PAF file,
 /// and returns condensed distance matrix (see `kodama` crate).
 pub fn pairwise_divergences(
@@ -44,7 +55,7 @@ pub fn pairwise_divergences(
         let aligner = Aligner::new(penalties);
         for (i, entry1) in entries.iter().enumerate() {
             for entry2 in entries[i + 1..].iter() {
-                let (cigar, score) = aligner.align(entry1.seq(), entry2.seq());
+                let (cigar, score) = safe_align(&aligner, entry1, entry2);
                 let divergence = write_paf(&mut paf_writer, entry2, entry1, &cigar, score)?;
                 divergences.push(divergence);
             }
@@ -63,8 +74,8 @@ fn divergences_multithread(
 ) -> io::Result<Vec<f64>> {
     let threads = usize::from(threads);
     log::debug!("        Aligning sequences in {} threads", threads);
-    let seqs = Arc::new(entries.iter().map(|entry| entry.seq.clone()).collect::<Vec<Vec<u8>>>());
-    let n = seqs.len() as u32;
+    let entries = Arc::new(entries.to_vec());
+    let n = entries.len() as u32;
     let pairs: Arc<Vec<(u32, u32)>> = Arc::new(
         (0..n - 1).flat_map(|i| (i + 1..n).map(move |j| (i, j))).collect());
     let n_pairs = pairs.len();
@@ -81,13 +92,13 @@ fn divergences_multithread(
         // Closure with cloned data.
         {
             let pairs = Arc::clone(&pairs);
-            let seqs = Arc::clone(&seqs);
+            let entries = Arc::clone(&entries);
             let penalties = penalties.clone();
             handles.push(thread::spawn(move || {
                 assert!(start < end);
                 let aligner = Aligner::new(&penalties);
                 pairs[start..end].iter()
-                    .map(|&(i, j)| aligner.align(&seqs[i as usize], &seqs[j as usize]))
+                    .map(|&(i, j)| safe_align(&aligner, &entries[i as usize], &entries[j as usize]))
                     .collect::<Vec<_>>()
             }));
         }
@@ -117,14 +128,19 @@ fn write_paf(
     score: i32,
 ) -> io::Result<f64>
 {
-    let qlen = cigar.query_len();
-    let rlen = cigar.ref_len();
-    assert_eq!(query.seq().len() as u32, cigar.query_len());
-    assert_eq!(refer.seq().len() as u32, cigar.ref_len());
     let qname = query.name();
     let rname = refer.name();
+    let qlen = query.seq().len() as u32;
+    let rlen = refer.seq().len() as u32;
     write!(writer, "{qname}\t{qlen}\t0\t{qlen}\t+\t{rname}\t{rlen}\t0\t{rlen}\t")?;
 
+    if cigar.is_empty() {
+        writeln!(writer, "0\t0t\t0")?;
+        return Ok(1.0);
+    }
+
+    assert_eq!(qlen, cigar.query_len());
+    assert_eq!(rlen, cigar.ref_len());
     let mut nmatches = 0;
     let mut total_size = 0;
     for item in cigar.iter() {

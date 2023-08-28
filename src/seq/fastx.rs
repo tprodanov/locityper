@@ -450,7 +450,7 @@ pub fn count_reads(path: &Path) -> Result<u64, Error> {
             b'>' => count_reads_fasta(stream),
             b'@' => count_reads_fastq(stream),
             _ => {
-                log::warn!("Unexpected first symbol '{}', assuming FASTQ file", first_byte[0] as char);
+                log::warn!("Unexpected first symbol '{}', assuming FASTQ file", char::from(first_byte[0]));
                 count_reads_fastq(stream)
             }
         }.map_err(add_path!(path))
