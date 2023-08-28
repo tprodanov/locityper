@@ -2,13 +2,36 @@
 
 import sys
 import itertools
-import functools
 import collections
 import operator
 import argparse
 import numpy as np
 
-from common import open_stream, create_power_mean
+from common import open_stream
+
+
+def averaging_function(mode):
+    mode = mode.lower()
+    if mode == 'min':
+        return np.min
+    elif mode == 'max':
+        return np.max
+    elif mode == 'sum':
+        return np.sum
+    elif mode == 'mean':
+        return np.mean
+
+    power = float(mode)
+    if power == 1:
+        return np.mean
+    elif power == np.inf:
+        return np.max
+    elif power == -np.inf:
+        return np.min
+
+    import scipy
+    import functools
+    return functools.partial(scipy.stats.pmean, p=power)
 
 
 class Contigs:
@@ -95,7 +118,7 @@ def _process_distances(targets, contigs, distances, mean, verbose):
 def main():
     parser = argparse.ArgumentParser(
         description='Calculates distance between a target genotype and all other genotypes',
-        usage='%(prog)s alns.paf target -o out.csv [-t field -p power]')
+        usage='%(prog)s alns.paf target -o out.csv [-f field -a averaging]')
     parser.add_argument('-i', '--input', metavar='FILE',
         help='Input PAF[.gz] file with pairwise distances.')
     parser.add_argument('-g', '--genotype', metavar='STR',
@@ -104,8 +127,9 @@ def main():
         help='Output CSV file [stdout].')
     parser.add_argument('-f', '--field', metavar='STR', default='dv',
         help='Take haplotype distance from this field [%(default)s].')
-    parser.add_argument('-p', '--power', type=float, metavar='FLOAT', default=2,
-        help='Power mean (Hölder mean) parameter [%(default)s].')
+    parser.add_argument('-a', '--averaging', metavar='STR', default='mean',
+        help='Averaging function [%(default)s]. '
+            'Possible values: `min`, `max`, `sum`, `mean`, or FLOAT: Hölder mean.')
     parser.add_argument('-v', '--verbose', action='store_true',
         help='Produce more output')
     args = parser.parse_args()
@@ -113,16 +137,17 @@ def main():
     targets = list(map(str.strip, args.genotype.split(',')))
     with open_stream(args.input) as f:
         contigs, distances = _load_distances(f, args.field, targets, args.verbose)
-    best_dist = _process_distances(targets, contigs, distances, create_power_mean(args.power), args.verbose)
+    aver = averaging_function(args.averaging)
+    best_dist = _process_distances(targets, contigs, distances, aver, args.verbose)
 
     with open_stream(args.output, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         out.write('# target: {}\n'.format(args.genotype))
         out.write('# field: {}\n'.format(args.field))
-        out.write('# power: {}\n'.format(args.power))
+        out.write('# averaging: {}\n'.format(args.averaging))
         out.write('genotype\tdist\n')
         for query, dist in sorted(best_dist.items(), key=operator.itemgetter(1)):
-            out.write('{}\t{:.10f}\n'.format(contigs.fmt_gt(query), dist))
+            out.write('{}\t{:.10g}\n'.format(contigs.fmt_gt(query), dist))
 
 
 if __name__ == '__main__':

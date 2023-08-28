@@ -1,17 +1,5 @@
 import sys
 import gzip
-import numpy as np
-
-def create_power_mean(power):
-    if power == 1:
-        return np.mean
-    elif power == np.inf:
-        return np.max
-    elif power == -np.inf:
-        return np.min
-
-    import scipy
-    return functools.partial(scipy.stats.pmean, p=power)
 
 
 def open_stream(filename, mode='r'):
