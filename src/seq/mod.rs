@@ -25,7 +25,7 @@ pub fn standardize(seq: &mut [u8]) {
             b'T' | b't' => b'T',
             b'N' | b'R' | b'Y' | b'K' | b'M' | b'S' | b'W' | b'B' | b'D' | b'H' | b'V'
                 | b'n' | b'r' | b'y' | b'k' | b'm' | b's' | b'w' | b'b' | b'd' | b'h' | b'v' => b'N',
-            _ => panic!("Unknown nucleotide {}", char::from(*nt)),
+            _ => panic!("Unknown nucleotide {} ({})", char::from(*nt), nt),
         };
     }
 }
@@ -102,4 +102,16 @@ impl NamedSeq {
     pub fn len(&self) -> u32 {
         self.seq.len() as u32
     }
+}
+
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter().rev().map(|&nt| match nt {
+        b'A' | b'a' => b'T',
+        b'C' | b'c' => b'G',
+        b'G' | b'g' => b'C',
+        b'T' | b't' => b'A',
+        b'N' | b'R' | b'Y' | b'K' | b'M' | b'S' | b'W' | b'B' | b'D' | b'H' | b'V'
+            | b'n' | b'r' | b'y' | b'k' | b'm' | b's' | b'w' | b'b' | b'd' | b'h' | b'v' => b'N',
+        _ => panic!("Unknown nucleotide {} ({})", char::from(nt), nt),
+    }).collect()
 }

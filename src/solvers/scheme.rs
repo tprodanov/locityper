@@ -235,11 +235,11 @@ fn write_alns(
                 }
             }
             let prob = Ln::to_log10(curr_windows.ln_prob());
-            let count = *counts_iter.next().expect("Not enough counts");
+            let count = *counts_iter.next().expect("Not enough assignment counts");
             writeln!(f, "{:.3}\t{:.2}", prob, f32::from(count) / attempts)?;
         }
     }
-    assert!(counts_iter.next().is_none(), "Too many counts");
+    assert!(counts_iter.next().is_none(), "Too many assignment counts");
     Ok(())
 }
 

@@ -16,22 +16,15 @@ use crate::{
 
 /// Newtype over strand: false = negative, true = positive.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Strand(bool);
+pub enum Strand {
+    Forward,
+    Reverse,
+}
 
 impl Strand {
     #[inline]
-    pub fn new(forward: bool) -> Self {
-        Self(forward)
-    }
-
-    #[inline]
     pub fn from_record(record: &Record) -> Self {
-        Self(!record.is_reverse())
-    }
-
-    #[inline]
-    pub fn is_forward(self) -> bool {
-        self.0
+        if record.is_reverse() { Self::Reverse } else { Self::Forward }
     }
 }
 
@@ -43,10 +36,9 @@ impl fmt::Debug for Strand {
 
 impl fmt::Display for Strand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.0 {
-            write!(f, "+")
-        } else {
-            write!(f, "-")
+        match self {
+            Self::Forward => f.write_str("+"),
+            Self::Reverse => f.write_str("-"),
         }
     }
 }

@@ -6,11 +6,13 @@ use std::{
 };
 use htslib::bam;
 use nohash::{IntSet, IntMap};
+use once_cell::sync::OnceCell;
 use crate::{
     err::{Error, add_path},
     seq::{
+        self,
         Interval, ContigId, ContigNames,
-        aln::{Alignment, ReadEnd},
+        aln::{Alignment, ReadEnd, Strand},
         cigar::Cigar,
     },
     bg::{
@@ -18,7 +20,7 @@ use crate::{
         err_prof::ErrorProfile,
         insertsz::InsertDistr,
     },
-    algo::{fnv1a, bisect},
+    algo::{fnv1a, bisect, TwoU32},
     math::Ln,
     model::windows::ContigWindows,
 };
@@ -43,23 +45,54 @@ impl MateSummary {
     }
 }
 
+#[derive(Clone)]
+pub struct MateData {
+    strand: Strand,
+    sequence: Vec<u8>,
+    opp_sequence: OnceCell<Vec<u8>>,
+    qualities: Vec<u8>,
+    opp_qualities: OnceCell<Vec<u8>>,
+}
+
+impl MateData {
+    fn new(record: &bam::Record) -> Self {
+        Self {
+            strand: Strand::from_record(record),
+            sequence: record.seq().as_bytes(),
+            opp_sequence: OnceCell::new(),
+            // Need to do this as otherwise htslib will panic.
+            qualities: if record.qual().is_empty() { vec![255; record.seq().len()] } else { record.qual().to_vec() },
+            opp_qualities: OnceCell::new(),
+        }
+    }
+
+    /// Returns sequence and quality for the corresponding strand.
+    pub fn get_seq_and_qual(&self, strand: Strand) -> (&[u8], &[u8]) {
+        if strand == self.strand {
+            (&self.sequence, &self.qualities)
+        } else {
+            (
+                self.opp_sequence.get_or_init(|| seq::reverse_complement(&self.sequence)),
+                self.opp_qualities.get_or_init(|| self.qualities.iter().rev().copied().collect()),
+            )
+        }
+    }
+}
+
 /// Read information: read name, two sequences and qualities (for both mates).
 #[derive(Default, Clone)]
-struct ReadData {
+pub struct ReadData {
     name: String,
-    sequences: [Vec<u8>; 2],
-    qualities: [Vec<u8>; 2],
+    mates: [Option<MateData>; 2],
 }
 
 impl ReadData {
-    fn clone_and_reset(&mut self) -> Self {
-        let clone = self.clone();
-        self.name.clear();
-        for i in 0..2 {
-            self.sequences[i].clear();
-            self.qualities[i].clear();
-        }
-        clone
+    pub fn name(&self) -> &String {
+        &self.name
+    }
+
+    pub fn mate_data(&self, read_end: ReadEnd) -> &MateData {
+        self.mates[read_end.ix()].as_ref().expect("Mate data undefined")
     }
 }
 
@@ -75,8 +108,8 @@ struct FilteredReader<'a, R: bam::Read> {
     err_prof: &'a ErrorProfile,
     contig_windows: &'a [ContigWindows],
     /// Buffer, used for discrard alignments with the same positions.
-    /// Key (contig id << 32 | alignment start), value: index of the previous position.
-    found_alns: IntMap<u64, usize>,
+    /// Key (contig id, alignment start), value: index of the previous position.
+    found_alns: IntMap<TwoU32, usize>,
 }
 
 #[inline]
@@ -121,10 +154,17 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         let name = std::str::from_utf8(self.record.qname()).map_err(|_| Error::InvalidInput(
             format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))?;
         if read_end == ReadEnd::First {
-            read_data.name = name.to_owned();
+            assert!(read_data.name.is_empty());
+            read_data.name.push_str(name);
         } else if name != read_data.name {
-            return Err(Error::InvalidData(format!("Read {} does not have a second read end (old {})", name, read_data.name)));
+            return Err(Error::InvalidData(format!("Read {} does not have a second read end", name)));
         }
+        if self.record.seq().is_empty() {
+            return Err(Error::InvalidData(format!("Read {} does not have read sequence", read_data.name)));
+        }
+        let old_option = read_data.mates[read_end.ix()].replace(MateData::new(&self.record));
+        assert!(old_option.is_none(), "Mate data defined twice");
+
         if self.record.is_unmapped() {
             writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA\tNA\t{}", name_hash, read_end, name)
                 .map_err(add_path!(!))?;
@@ -146,11 +186,6 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let mut cigar = Cigar::from_raw(self.record.raw_cigar());
             if primary {
                 assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
-                if self.record.seq().is_empty() {
-                    return Err(Error::InvalidData(format!("Read {} does not have read sequence", read_data.name)));
-                }
-                read_data.sequences[read_end.ix()] = self.record.seq().as_bytes();
-                read_data.qualities[read_end.ix()] = self.record.qual().to_vec();
             } else {
                 cigar.hard_to_soft();
             }
@@ -179,10 +214,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
-            let pos_key = u64::from(aln.interval().contig_id().get()) << 32 | u64::from(aln.interval().start());
             aln.set_ln_prob(aln_prob);
             if is_passable_dist {
-                match self.found_alns.entry(pos_key) {
+                match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
                     Entry::Occupied(entry) => {
                         let aln_ix = *entry.get();
                         // Already seen this alignment.
@@ -407,6 +441,11 @@ impl GrouppedAlignments {
     pub fn alignment_pairs(&self) -> usize {
         self.aln_pairs.len()
     }
+
+    /// Returns read information, such as sequences, qualities, and read name.
+    pub fn read_data(&self) -> &ReadData {
+        &self.read_data
+    }
 }
 
 /// Store at most 3 alignments for cases when the read/read pair will not be used later.
@@ -591,8 +630,8 @@ impl AllAlignments {
         let mut total_reads = 0;
         let mut reads = Vec::new();
         let mut w0_reads = Vec::new();
-        let mut read_data = ReadData::default();
         while reader.has_more() {
+            let mut read_data = ReadData::default();
             total_reads += 1;
             assert!(tmp_alns.is_empty());
             let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
@@ -613,11 +652,10 @@ impl AllAlignments {
             }
 
             let (groupped_alns, use_read) = if is_paired_end {
-                identify_paired_end_alignments(read_data.clone_and_reset(), &mut tmp_alns,
-                    &summary1, summary2.as_ref().unwrap(), &mut buffer, insert_distr, ln_ncontigs, params)
+                identify_paired_end_alignments(read_data, &mut tmp_alns, &summary1, summary2.as_ref().unwrap(),
+                    &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
-                identify_single_end_alignments(read_data.clone_and_reset(), &mut tmp_alns, &summary1,
-                    ln_ncontigs, params)
+                identify_single_end_alignments(read_data, &mut tmp_alns, &summary1, ln_ncontigs, params)
             };
             if use_read {
                 reads.push(groupped_alns);

@@ -144,6 +144,18 @@ impl CigarItem {
             len: val >> 4,
         }
     }
+
+    pub const fn to_htslib(&self) -> record::Cigar {
+        match self.op {
+            Operation::Match => record::Cigar::Match(self.len),
+            Operation::Ins => record::Cigar::Ins(self.len),
+            Operation::Del => record::Cigar::Del(self.len),
+            Operation::Soft => record::Cigar::SoftClip(self.len),
+            Operation::Hard => record::Cigar::HardClip(self.len),
+            Operation::Equal => record::Cigar::Equal(self.len),
+            Operation::Diff => record::Cigar::Diff(self.len),
+        }
+    }
 }
 
 impl fmt::Display for CigarItem {
