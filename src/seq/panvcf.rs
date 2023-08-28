@@ -334,9 +334,10 @@ fn add_variant_to_alns(
                     } else {
                         match aligner.align(allele_i, allele_j) {
                             Ok(cigar_and_score) => allele_alns.push(cigar_and_score),
-                            Err(ch) => panic!("Could not align alleles {} and {}. Violating CIGAR character '{}' ({})",
+                            Err((ch, raw_cigar)) => panic!(
+                                "Could not align alleles {} and {}. Violating CIGAR character '{}' ({}) in {:?}",
                                 String::from_utf8_lossy(allele_i), String::from_utf8_lossy(allele_j),
-                                char::from(ch), ch),
+                                char::from(ch), ch, raw_cigar),
                         }
                     }
                 }

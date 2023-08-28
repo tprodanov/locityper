@@ -32,9 +32,9 @@ pub fn pairwise_divergences_from_alns(
 fn safe_align(aligner: &Aligner, entry1: &NamedSeq, entry2: &NamedSeq) -> (Cigar, i32) {
     match aligner.align(entry1.seq(), entry2.seq()) {
         Ok(cigar_and_score) => cigar_and_score,
-        Err(ch) => {
-            log::error!("Could not align {} and {}. Violating CIGAR character '{}' ({})",
-                entry1.name(), entry2.name(), char::from(ch), ch);
+        Err((ch, raw_cigar)) => {
+            log::error!("Could not align {} and {}. Violating CIGAR character '{}' ({}) in {:?}",
+                entry1.name(), entry2.name(), char::from(ch), ch, raw_cigar);
             (Cigar::new(), i32::MIN)
         }
     }
