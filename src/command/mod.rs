@@ -157,18 +157,20 @@ impl Rerun {
             return Ok(true);
         }
 
+        let mut need_rerun = true;
         let success_file = dir.join(paths::SUCCESS);
         if success_file.exists() {
             if self == Self::None {
                 log::info!("Skipping directory {} (successfully completed)", ext::fmt::path(&dir));
-                return Ok(false);
+                need_rerun = false;
             } else {
                 fs::remove_file(&success_file).map_err(add_path!(success_file))?;
-                return Ok(true);
             }
         }
-        clean(dir)?;
-        Ok(true)
+        if need_rerun {
+            clean(dir)?;
+        }
+        Ok(need_rerun)
     }
 
     fn prepare_dir(self, dir: &Path) -> Result<bool, Error> {

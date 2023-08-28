@@ -448,13 +448,13 @@ fn clean_dir(dir: &Path) -> Result<(), Error> {
     if !gz_files.is_empty() || alns_exist {
         log::warn!("    Partially cleaning {}", ext::fmt::path(dir));
     }
-    for filename in ext::sys::filenames_with_ext(dir, "gz")?.into_iter() {
+    for filename in gz_files.into_iter() {
         if let Err(e) = fs::remove_file(&filename) {
             log::error!("Cannot remove {}: {}", filename.display(), e);
         }
     }
     if alns_exist {
-        if let Err(e) = fs::remove_file(&alns_dir) {
+        if let Err(e) = fs::remove_dir_all(&alns_dir) {
             log::error!("Cannot remove directory {}: {}", alns_dir.display(), e);
         }
     }
