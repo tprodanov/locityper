@@ -1,4 +1,5 @@
 use std::{
+    cmp::min,
     sync::Arc,
     io::Write,
     collections::hash_map::Entry,
@@ -221,51 +222,43 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     }
 }
 
-/// Enum, that encodes two events, one of them can be missing, but not both.
-pub enum Pair<T> {
-    Both(T, T),
-    First(T),
-    Second(T),
-}
-
-impl<T> Pair<T> {
-    /// Returns any of the values (first if availble, second otherwise).
-    pub fn any(&self) -> &T {
-        match self {
-            Self::Both(a, _) | Self::First(a) => a,
-            Self::Second(b) => b,
-        }
-    }
-
-    /// Returns first element, if available.
-    pub fn first(&self) -> Option<&T> {
-        match self {
-            Self::Both(a, _) | Self::First(a) => Some(a),
-            _ => None,
-        }
-    }
-
-    /// Returns second element, if available.
-    pub fn second(&self) -> Option<&T> {
-        match self {
-            Self::Both(_, b) | Self::Second(b) => Some(b),
-            _ => None,
-        }
-    }
-}
-
+#[derive(Clone)]
 pub struct PairAlignment {
-    intervals: Pair<Interval>,
     ln_prob: f64,
+    contig_id: ContigId,
+    /// Index (across all alignment of this read) and middle of the first alignment (if mapped).
+    aln1: Option<(u32, u32)>,
+    /// Index and middle of the second alignment (if mapped).
+    aln2: Option<(u32, u32)>,
 }
 
 impl PairAlignment {
-    fn new(intervals: Pair<Interval>, ln_prob: f64) -> Self {
-        Self { intervals, ln_prob }
+    fn new_first(ix: usize, interv: &Interval, ln_prob: f64) -> Self {
+        Self {
+            ln_prob,
+            contig_id: interv.contig_id(),
+            aln1: Some((ix as u32, interv.middle())),
+            aln2: None,
+        }
     }
 
-    pub fn intervals(&self) -> &Pair<Interval> {
-        &self.intervals
+    fn new_second(ix: usize, interv: &Interval, ln_prob: f64) -> Self {
+        Self {
+            ln_prob,
+            contig_id: interv.contig_id(),
+            aln1: None,
+            aln2: Some((ix as u32, interv.middle())),
+        }
+    }
+
+    fn new_both(ix1: usize, interv1: &Interval, ix2: usize, interv2: &Interval, ln_prob: f64) -> Self {
+        assert_eq!(interv1.contig_id(), interv2.contig_id());
+        Self {
+            ln_prob,
+            contig_id: interv1.contig_id(),
+            aln1: Some((ix1 as u32, interv1.middle())),
+            aln2: Some((ix2 as u32, interv2.middle())),
+        }
     }
 
     /// Combined probability of the paired alignment.
@@ -274,17 +267,37 @@ impl PairAlignment {
     }
 
     pub fn contig_id(&self) -> ContigId {
-        self.intervals.any().contig_id()
+        self.contig_id
+    }
+
+    /// Returns the middle of the first alignment.
+    pub fn middle1(&self) -> Option<u32> {
+        self.aln1.map(|(_, middle)| middle)
+    }
+
+    /// Returns the middle of the second alignment.
+    pub fn middle2(&self) -> Option<u32> {
+        self.aln2.map(|(_, middle)| middle)
+    }
+
+    /// Returns the index of the first alignment (across all alignments for this read pair).
+    pub fn ix1(&self) -> Option<u32> {
+        self.aln1.map(|(ix, _)| ix)
+    }
+
+    /// Returns the index of the second alignment (across all alignments for this read pair).
+    pub fn ix2(&self) -> Option<u32> {
+        self.aln2.map(|(ix, _)| ix)
     }
 }
 
-/// Find all paired-read alignments to a specific contig for a single paired read.
-/// All alignments that are worse than `best_prob - prob_diff` are discarded.
+/// Groups first end alignments `alignments[i..j]` and second end alignments `alignments[j..]` into `aln_pairs`.
 fn identify_contig_pair_alns(
-    new_alns: &mut Vec<PairAlignment>,
-    alns1: &[Alignment],
+    alignments: &[Alignment],
+    i: usize,
+    j: usize,
+    aln_pairs: &mut Vec<PairAlignment>,
     min_prob1: f64,
-    alns2: &[Alignment],
     min_prob2: f64,
     weight: f64,
     max_alns: usize,
@@ -292,45 +305,49 @@ fn identify_contig_pair_alns(
     insert_distr: &InsertDistr,
     params: &super::Params,
 ) {
-    let start_len = new_alns.len();
+    let start_len = aln_pairs.len();
     let insert_penalty = insert_distr.insert_penalty();
     // Factor, added to `aln1.ln_prob()` to get the cost of the pair `aln1, unmapped2`.
     let term1 = insert_penalty + min_prob2 + params.unmapped_penalty;
 
+    let k = alignments.len();
+    assert!(i <= j && j <= k);
     buffer.clear();
-    buffer.resize(alns2.len(), f64::NEG_INFINITY);
-    for aln1 in alns1.iter() {
+    buffer.resize(k - j, f64::NEG_INFINITY);
+    for ix1 in i..j {
+        let aln1 = unsafe { alignments.get_unchecked(ix1) };
         let mut max_prob1 = f64::NEG_INFINITY;
-        for (aln2, max_prob2) in alns2.iter().zip(buffer.iter_mut()) {
+        for (ix2, max_prob2) in (j..k).zip(buffer.iter_mut()) {
+            let aln2 = unsafe { alignments.get_unchecked(ix2) };
             let prob = aln1.paired_prob(aln2, insert_distr);
             max_prob1 = max_prob1.max(prob);
             *max_prob2 = max_prob2.max(prob);
-            new_alns.push(PairAlignment::new(Pair::Both(aln1.interval().clone(), aln2.interval().clone()),
-                weight * prob));
+            aln_pairs.push(PairAlignment::new_both(ix1, aln1.interval(), ix2, aln2.interval(), weight * prob));
         }
 
         // Only add alignment `aln1,unmapped2` if it is better than any existing paired alignment to the same contig.
         let alone_prob1 = aln1.ln_prob() + term1;
         if alone_prob1 >= max_prob1 {
-            new_alns.push(PairAlignment::new(Pair::First(aln1.interval().clone()), weight * alone_prob1));
+            aln_pairs.push(PairAlignment::new_first(ix1, aln1.interval(), weight * alone_prob1));
         }
     }
 
     let term2 = insert_penalty + min_prob1 + params.unmapped_penalty;
-    for (aln2, &max_prob2) in alns2.iter().zip(buffer.iter()) {
+    for (ix2, &max_prob2) in (j..k).zip(buffer.iter()) {
+        let aln2 = unsafe { alignments.get_unchecked(ix2) };
         let alone_prob2 = aln2.ln_prob() + term2;
         // Only add alignment `unmapped1,aln2` if it is better than existing `aln1,aln2` pairs.
         if alone_prob2 >= max_prob2 {
-            new_alns.push(PairAlignment::new(Pair::Second(aln2.interval().clone()), weight * alone_prob2));
+            aln_pairs.push(PairAlignment::new_second(ix2, aln2.interval(), weight * alone_prob2));
         }
     }
 
-    let slice = &mut new_alns[start_len..];
+    let slice = &mut aln_pairs[start_len..];
     // Decreasing sort by ln-probability.
     slice.sort_unstable_by(|a, b| b.ln_prob.total_cmp(&a.ln_prob));
     let thresh_prob = slice[0].ln_prob - params.prob_diff;
     let keep_alns = slice[..slice.len().min(max_alns)].partition_point(|aln| aln.ln_prob >= thresh_prob);
-    new_alns.truncate(start_len + keep_alns);
+    aln_pairs.truncate(start_len + keep_alns);
 }
 
 /// All appropriate alignments for one read pair / single read.
@@ -341,8 +358,10 @@ pub struct GrouppedAlignments {
     name_hash: u64,
     /// Probability that both mates are unmapped.
     unmapped_prob: f64,
-    /// Vector of alignments & their corresponding ln-probabilities, sorted by contig.
-    alns: Vec<PairAlignment>,
+    /// All read alignments.
+    alignments: Vec<Alignment>,
+    /// Read alignments, groupped into pairs.
+    aln_pairs: Vec<PairAlignment>,
 }
 
 impl GrouppedAlignments {
@@ -361,43 +380,33 @@ impl GrouppedAlignments {
         self.unmapped_prob
     }
 
-    /// For a given contig, returns
-    /// - index of the first appropriate alignment,
-    /// - all alignments to the contig.
-    pub fn contig_alns(&self, contig_id: ContigId) -> (usize, &[PairAlignment]) {
-        let i = bisect::left_by(&self.alns, |paln| paln.contig_id().cmp(&contig_id));
-        let j = bisect::right_boundary(&self.alns, |paln| contig_id == paln.contig_id(), i, self.alns.len());
-        (i, &self.alns[i..j])
+    /// For a given contig, returns alignment pairs, corresponding to this contig.
+    pub fn contig_aln_pairs(&self, contig_id: ContigId) -> &[PairAlignment] {
+        let i = bisect::left_by(&self.aln_pairs, |paln| paln.contig_id().cmp(&contig_id));
+        let j = bisect::right_boundary(&self.aln_pairs, |paln| contig_id == paln.contig_id(), i, self.aln_pairs.len());
+        &self.aln_pairs[i..j]
     }
 
     /// Returns best alignment probability for each contig (must be sorted).
     pub fn best_for_each_contig<'a>(&'a self, contig_ids: &'a [ContigId]) -> impl Iterator<Item = f64> + 'a {
-        let n = self.alns.len();
+        let n = self.aln_pairs.len();
         let mut j = 0;
         contig_ids.iter().map(move |&id| {
             let i = j; // Do this way so that we can immediately return value two lines later.
-            j = bisect::right_boundary(&self.alns, |aln| aln.contig_id() == id, i, n);
-            if i == j { self.unmapped_prob } else { self.alns[i].ln_prob() }
+            j = bisect::right_boundary(&self.aln_pairs, |aln| aln.contig_id() == id, i, n);
+            if i == j { self.unmapped_prob } else { self.aln_pairs[i].ln_prob() }
         })
     }
 
     /// Return `i`-th alignment of all alignments for the read pair.
-    pub fn ith_aln(&self, i: usize) -> &PairAlignment {
-        &self.alns[i]
+    pub fn ith_aln(&self, i: u32) -> &Alignment {
+        &self.alignments[i as usize]
     }
 
-    pub fn len(&self) -> usize {
-        self.alns.len()
+    /// Returns the total number of alignment pairs.
+    pub fn alignment_pairs(&self) -> usize {
+        self.aln_pairs.len()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.alns.is_empty()
-    }
-}
-
-#[inline]
-fn store_by_prob(alns: &mut [Alignment]) {
-    alns.sort_unstable_by(|a, b| b.ln_prob().total_cmp(&a.ln_prob()));
 }
 
 /// Store at most 3 alignments for cases when the read/read pair will not be used later.
@@ -412,7 +421,7 @@ const MAX_USED_ALNS: usize = 10;
 /// Returns groupped alignments and true if the alignments should be used for read assignment.
 fn identify_paired_end_alignments(
     read_data: ReadData,
-    alns: &mut [Alignment],
+    tmp_alns: &mut Vec<Alignment>,
     summary1: &MateSummary,
     summary2: &MateSummary,
     buffer: &mut Vec<f64>,
@@ -426,44 +435,61 @@ fn identify_paired_end_alignments(
     let use_pair = weight >= params.min_weight && (params.use_unpaired || (summary1.mapped && summary2.mapped));
     let max_alns = if use_pair { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
 
-    let mut groupped_alns = Vec::new();
-    let n = alns.len();
-    alns.sort_unstable_by_key(Alignment::sort_key);
-    let mut i = 0;
-    while i < n {
-        // For the current contig id, first mates will be in i..j, and second mates in j..k.
-        let contig_id = alns[i].contig_id();
-        // Sort key = contig_id * 2 + (first_mate ? 0 : 1).
-        // sort_key1: current sort key for first mates, sort_key2: current sort key for second mates.
-        let sort_key1 = contig_id.get() << 1;
-        let sort_key2 = sort_key1 | 1;
-        let j = if alns[i].read_end() == ReadEnd::First {
-            bisect::right_boundary(alns, |aln| sort_key1 == aln.sort_key(), i, n)
-        } else { i };
-        let k = bisect::right_boundary(alns, |aln| sort_key2 == aln.sort_key(), j, n);
+    // First: by contig (decr.), second: by read end (decr.), third: by aln probability (incr.).
+    tmp_alns.sort_unstable_by(|a, b|
+        (b.contig_id(), b.read_end(), a.ln_prob()).partial_cmp(&(a.contig_id(), a.read_end(), b.ln_prob())).unwrap());
+    let mut alignments = Vec::new();
+    let mut aln_pairs = Vec::new();
 
-        store_by_prob(&mut alns[i..j]);
-        store_by_prob(&mut alns[j..k]);
-        identify_contig_pair_alns(&mut groupped_alns,
-            &alns[i..j.min(i + max_alns)], summary1.min_prob,
-            &alns[j..k.min(j + max_alns)], summary2.min_prob,
-            weight, max_alns, buffer, insert_distr, params);
-        i = k;
+    let mut curr_contig = ContigId::new(0);
+    // First-end alignments for this contig are stored in i..j,
+    let mut i = 0;
+    // Second-end alignments are stored in j..k.
+    // j = MAX if there were no second-end alignments.
+    let mut j = usize::MAX;
+    while let Some(aln) = tmp_alns.pop() {
+        let k = alignments.len();
+        if curr_contig != aln.contig_id() {
+            if i < k {
+                // There are some alignments that need to be saved.
+                identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs,
+                    summary1.min_prob, summary2.min_prob, weight, max_alns, buffer, insert_distr, params);
+            }
+            curr_contig = aln.contig_id();
+            i = k;
+            j = usize::MAX;
+        }
+        if aln.read_end() == ReadEnd::First {
+            if k - i < max_alns {
+                alignments.push(aln);
+            }
+        } else {
+            j = min(j, k);
+            if k - j < max_alns {
+                alignments.push(aln);
+            }
+        }
+    }
+    let k = alignments.len();
+    if i < k {
+        // There are some alignments that need to be saved.
+        identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs,
+            summary1.min_prob, summary2.min_prob, weight, max_alns, buffer, insert_distr, params);
     }
 
     let both_unmapped = weight
         * (summary1.min_prob + summary2.min_prob + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty());
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
-    let norm_fct = Ln::map_sum_init(&groupped_alns, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
-    for aln in groupped_alns.iter_mut() {
+    let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
+    for aln in aln_pairs.iter_mut() {
         aln.ln_prob -= norm_fct;
     }
     (GrouppedAlignments {
         read_data,
         name_hash: summary1.name_hash,
         unmapped_prob: both_unmapped - norm_fct,
-        alns: groupped_alns,
+        alignments, aln_pairs,
     }, use_pair)
 }
 
@@ -472,7 +498,7 @@ fn identify_paired_end_alignments(
 /// Returns groupped alignments and true if the alignments should be used for read assignment.
 fn identify_single_end_alignments(
     read_data: ReadData,
-    alns: &mut [Alignment],
+    tmp_alns: &mut Vec<Alignment>,
     summary: &MateSummary,
     ln_ncontigs: f64,
     params: &super::Params,
@@ -482,39 +508,41 @@ fn identify_single_end_alignments(
     let use_read = weight >= params.min_weight;
     let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
 
-    let mut groupped_alns = Vec::new();
-    alns.sort_unstable_by_key(Alignment::contig_id);
-    let n = alns.len();
-    let mut i = 0;
-    while i < n {
-        let contig_id = alns[i].contig_id();
-        let j = bisect::right_boundary(alns, |aln| contig_id == aln.contig_id(), i, n);
-        store_by_prob(&mut alns[i..j]);
-        let max_prob = alns[i].ln_prob();
-        let thresh_prob = weight * max_prob - params.prob_diff;
-        for aln in alns[i..j.min(i + max_alns)].iter() {
-            let wprob = weight * aln.ln_prob();
-            if wprob >= thresh_prob {
-                groupped_alns.push(PairAlignment::new(Pair::First(aln.interval().clone()), wprob));
-            } else {
-                break;
-            }
+    let mut alignments = Vec::new();
+    let mut aln_pairs = Vec::new();
+    // First: by contig (decreasing), then decreasing by ln-probability (increasing).
+    tmp_alns.sort_unstable_by(|a, b| (b.contig_id(), a.ln_prob()).partial_cmp(&(a.contig_id(), b.ln_prob())).unwrap());
+
+    let mut curr_contig = None;
+    let mut thresh_prob = f64::NAN;
+    let mut curr_saved = 0;
+    // Go from end to start.
+    while let Some(aln) = tmp_alns.pop() {
+        if curr_contig != Some(aln.contig_id()) {
+            curr_contig = Some(aln.contig_id());
+            thresh_prob = aln.ln_prob() * weight - params.prob_diff;
+            curr_saved = 0;
         }
-        i = j;
+        let wprob = weight * aln.ln_prob();
+        if wprob >= thresh_prob && curr_saved < max_alns {
+            aln_pairs.push(PairAlignment::new_first(alignments.len(), aln.interval(), wprob));
+            alignments.push(aln);
+            curr_saved += 1;
+        }
     }
 
     let unmapped_prob = weight * (summary.min_prob + params.unmapped_penalty);
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
-    let norm_fct = Ln::map_sum_init(&groupped_alns, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
-    for aln in groupped_alns.iter_mut() {
+    let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
+    for aln in aln_pairs.iter_mut() {
         aln.ln_prob -= norm_fct;
     }
     (GrouppedAlignments {
         read_data,
         name_hash: summary.name_hash,
         unmapped_prob: unmapped_prob - norm_fct,
-        alns: groupped_alns,
+        alignments, aln_pairs,
     }, use_read)
 }
 
@@ -566,7 +594,7 @@ impl AllAlignments {
         let mut read_data = ReadData::default();
         while reader.has_more() {
             total_reads += 1;
-            tmp_alns.clear();
+            assert!(tmp_alns.is_empty());
             let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
             if !hashes.insert(summary1.name_hash) {
                 log::warn!("Read {} produced hash collision ({:X})", read_data.name, summary1.name_hash);

@@ -28,7 +28,7 @@ use crate::{
     seq::contigs::{ContigNames, Genotype},
     model::{
         Params as AssgnParams,
-        locs::{AllAlignments, Pair},
+        locs::AllAlignments,
         assgn::{GenotypeAlignments, ReadAssignment},
         windows::ContigWindows,
     },
@@ -216,21 +216,23 @@ fn write_alns(
     attempts: u16,
 ) -> io::Result<()> {
     let attempts = f32::from(attempts);
-    assert_eq!(assgn_counts.len(), all_alns.reads().len());
     let mut counts_iter = assgn_counts.iter();
-    for (rp, paired_alns) in all_alns.reads().iter().enumerate() {
-        let hash = paired_alns.name_hash();
+    for (rp, groupped_alns) in all_alns.reads().iter().enumerate() {
+        let hash = groupped_alns.name_hash();
         for curr_windows in gt_alns.possible_read_alns(rp) {
             write!(f, "{}\t{:X}\t", prefix, hash)?;
-            let aln_ix = curr_windows.aln_ix();
-            if aln_ix == u32::MAX {
-                write!(f, "*\t*\t")?;
-            } else {
-                match paired_alns.ith_aln(aln_ix as usize).intervals() {
-                    Pair::Both(interv1, interv2) => write!(f, "{}\t{}\t", interv1, interv2),
-                    Pair::First(interv1) => write!(f, "{}\t*\t", interv1),
-                    Pair::Second(interv2) => write!(f, "*\t{}\t", interv2),
-                }?;
+            match curr_windows.parent() {
+                None => write!(f, "*\t*\t")?,
+                Some(aln_pair) => {
+                    match aln_pair.ix1() {
+                        Some(i) => write!(f, "{}\t", groupped_alns.ith_aln(i).interval())?,
+                        None => write!(f, "*\t")?,
+                    };
+                    match aln_pair.ix2() {
+                        Some(i) => write!(f, "{}\t", groupped_alns.ith_aln(i).interval())?,
+                        None => write!(f, "*\t")?,
+                    };
+                }
             }
             let prob = Ln::to_log10(curr_windows.ln_prob());
             let count = *counts_iter.next().expect("Not enough counts");

@@ -5,7 +5,7 @@ use std::{
 use rand::Rng;
 use crate::{
     seq::{
-        self, Interval,
+        self,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::KmerCounts,
     },
@@ -75,29 +75,21 @@ pub(crate) const REG_WINDOW_SHIFT: u32 = 2;
 
 /// Alignment of a read pair to a genotype.
 pub struct ReadGtAlns {
-    /// Index in the list of read-pair alignments.
-    aln_ix: u32,
-    /// ln-probability of this location.
+    /// Contig index within the genome and the parent pair alignment,
+    /// Right: ln-probability, if both mates are considered unmapped.
+    parent: Option<(u8, PairAlignment)>,
+    /// Ln-probability (copied from the parent, if it is defined).
     ln_prob: f64,
-    /// Index of the contig (within the genotype).
-    contig_ix: Option<u8>,
-    /// Middle of the first read alignment.
-    middle1: Option<u32>,
-    /// Middle of the second read alignment.
-    middle2: Option<u32>,
     /// Windows, to which the read is aligned to.
     /// Can change based on the random tweaking.
     windows: [u32; 2],
 }
 
 impl ReadGtAlns {
-    fn new(aln_ix: u32, contig_ix: u8, paln: &PairAlignment) -> Self {
+    fn new(contig_ix: u8, paln: PairAlignment) -> Self {
         Self {
-            aln_ix,
-            contig_ix: Some(contig_ix),
             ln_prob: paln.ln_prob(),
-            middle1: paln.intervals().first().map(Interval::middle),
-            middle2: paln.intervals().second().map(Interval::middle),
+            parent: Some((contig_ix, paln)),
             windows: [UNMAPPED_WINDOW; 2],
         }
     }
@@ -105,36 +97,37 @@ impl ReadGtAlns {
     fn both_unmapped(ln_prob: f64) -> Self {
         Self {
             ln_prob,
-            aln_ix: u32::MAX,
-            contig_ix: None,
-            middle1: None,
-            middle2: None,
+            parent: None,
             windows: [UNMAPPED_WINDOW; 2],
         }
     }
 
+    pub fn parent(&self) -> Option<&PairAlignment> {
+        self.parent.as_ref().map(|(_, paln)| paln)
+    }
+
     pub fn define_windows_determ(&mut self, mcontigs: &GenotypeWindows) {
-        if let Some(i) = self.contig_ix {
-            let contig = &mcontigs.by_contig[i as usize];
-            let shift = mcontigs.wshifts[i as usize];
+        if let Some((contig_ix, paln)) = &self.parent {
+            let contig = &mcontigs.by_contig[usize::from(*contig_ix)];
+            let shift = mcontigs.wshifts[usize::from(*contig_ix)];
             self.windows = [
-                contig.get_shifted_window(shift, self.middle1),
-                contig.get_shifted_window(shift, self.middle2)
+                contig.get_shifted_window(shift, paln.middle1()),
+                contig.get_shifted_window(shift, paln.middle2())
             ];
         }
     }
 
     pub fn define_windows_random(&mut self, mcontigs: &GenotypeWindows, tweak: u32, rng: &mut impl Rng) {
-        if let Some(i) = self.contig_ix {
-            let contig = &mcontigs.by_contig[i as usize];
-            let shift = mcontigs.wshifts[i as usize];
+        if let Some((contig_ix, paln)) = &self.parent {
+            let contig = &mcontigs.by_contig[usize::from(*contig_ix)];
+            let shift = mcontigs.wshifts[usize::from(*contig_ix)];
             let r = rng.next_u64();
             let tweak1 = (r >> 32) as u32 % (2 * tweak + 1);
             let tweak2 = r as u32 % (2 * tweak + 1);
 
             self.windows = [
-                contig.get_shifted_window(shift, self.middle1.map(|middle| middle + tweak1)),
-                contig.get_shifted_window(shift, self.middle2.map(|middle| middle + tweak2)),
+                contig.get_shifted_window(shift, paln.middle1().map(|middle| middle + tweak1)),
+                contig.get_shifted_window(shift, paln.middle2().map(|middle| middle + tweak2)),
             ];
         }
     }
@@ -147,11 +140,6 @@ impl ReadGtAlns {
     /// Returns ln-probability of the alignment.
     pub fn ln_prob(&self) -> f64 {
         self.ln_prob
-    }
-
-    /// Index of the read-pair alignment across all alignments for the read pair.
-    pub(crate) fn aln_ix(&self) -> u32 {
-        self.aln_ix
     }
 }
 
@@ -394,13 +382,13 @@ impl GenotypeWindows {
         let mut thresh_prob = unmapped_prob - prob_diff;
         for (i, &contig_id) in self.genotype.ids().iter().enumerate() {
             let contig_ix = u8::try_from(i).unwrap();
-            let (start_ix, alns) = groupped_alns.contig_alns(contig_id);
+            let alns = groupped_alns.contig_aln_pairs(contig_id);
             if !alns.is_empty() {
                 // First alignment should have highest probability.
                 thresh_prob = thresh_prob.max(alns[0].ln_prob() - prob_diff);
-                for (aln_ix, aln) in (start_ix..).zip(alns) {
+                for aln in alns.iter() {
                     if aln.ln_prob() >= thresh_prob {
-                        out_alns.push(ReadGtAlns::new(aln_ix as u32, contig_ix, aln));
+                        out_alns.push(ReadGtAlns::new(contig_ix, aln.clone()));
                     } else {
                         break;
                     }
