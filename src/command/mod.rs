@@ -1,4 +1,4 @@
-mod paths;
+pub mod paths;
 mod create;
 mod add;
 mod preproc;

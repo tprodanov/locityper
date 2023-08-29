@@ -203,7 +203,7 @@ fn print_help(extended: bool) {
             "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
         println!("    {:KEY$} {:VAL$}  Score threshold for genotype pre-filtering [{}].\n\
             {EMPTY}  Values range from 0 (use all) to 1 (use best-score genotypes).",
-            "    --score-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.score_thresh));
+            "    --filt-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.filt_thresh));
         println!("    {:KEY$} {:VAL$}  After each step, discard genotypes that have\n\
             {EMPTY}  smaller probability than 10^{} to be best [{}].",
             "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
@@ -306,8 +306,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("use-unpaired") => args.assgn_params.use_unpaired = true,
 
             Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
-            Long("score-thresh") | Long("score-threshold") =>
-                args.assgn_params.score_thresh = parser.value()?.parse()?,
+            Long("filt-thresh") | Long("filt-threshold") | Long("filter-thresh") =>
+                args.assgn_params.filt_thresh = parser.value()?.parse()?,
             Long("prob-thresh") | Long("prob-threshold") =>
                 args.assgn_params.prob_thresh = parser.value()?.parse()?,
             Long("min-gts") | Long("min-genotypes") =>
@@ -717,6 +717,7 @@ fn analyze_locus(
         debug: args.debug,
         threads: usize::from(args.threads),
         all_alns, genotypes, priors, contig_windows,
+        is_paired_end: bg_distr.insert_distr().is_paired_end(),
     };
     scheme::solve(data, &locus.out_dir, &mut rng)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;

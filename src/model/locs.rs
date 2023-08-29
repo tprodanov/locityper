@@ -396,6 +396,8 @@ pub struct GrouppedAlignments {
     alignments: Vec<Alignment>,
     /// Read alignments, groupped into pairs.
     aln_pairs: Vec<PairAlignment>,
+    /// Weight of the read pair.
+    weight: f64,
 }
 
 impl GrouppedAlignments {
@@ -446,13 +448,21 @@ impl GrouppedAlignments {
     pub fn read_data(&self) -> &ReadData {
         &self.read_data
     }
+
+    /// Returns the weight of the read pair.
+    pub fn weight(&self) -> f64 {
+        self.weight
+    }
 }
 
 /// Store at most 3 alignments for cases when the read/read pair will not be used later.
-const MAX_UNUSED_ALNS: usize = 3;
+const MAX_UNUSED_ALNS: usize = 2;
 /// Store at most 10 alignments for cases when the read/read pair will not be used later.
 /// NOTE: If we put usize::MAX here, we need to replace `i + max_alns` into `i.saturating_add(max_alns)`.
 const MAX_USED_ALNS: usize = 10;
+
+/// Clip weight at a very small number so that probabilities remain at least somewhat different.
+const WEIGHT_CLIP: f64 = 0.0001;
 
 /// For a paired-end read, combine and pair all mate alignments across all contigs.
 /// Input alignments are sorted first by contig, and then by read end.
@@ -473,6 +483,7 @@ fn identify_paired_end_alignments(
     let weight = 0.5 * (summary1.weight + summary2.weight);
     let use_pair = weight >= params.min_weight && (params.use_unpaired || (summary1.mapped && summary2.mapped));
     let max_alns = if use_pair { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+    let clipped_weight = weight.max(WEIGHT_CLIP);
 
     // First: by contig (decr.), second: by read end (decr.), third: by aln probability (incr.).
     tmp_alns.sort_unstable_by(|a, b|
@@ -492,7 +503,7 @@ fn identify_paired_end_alignments(
             if i < k {
                 // There are some alignments that need to be saved.
                 identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs,
-                    summary1.min_prob, summary2.min_prob, weight, max_alns, buffer, insert_distr, params);
+                    summary1.min_prob, summary2.min_prob, clipped_weight, max_alns, buffer, insert_distr, params);
             }
             curr_contig = aln.contig_id();
             i = k;
@@ -513,10 +524,10 @@ fn identify_paired_end_alignments(
     if i < k {
         // There are some alignments that need to be saved.
         identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs,
-            summary1.min_prob, summary2.min_prob, weight, max_alns, buffer, insert_distr, params);
+            summary1.min_prob, summary2.min_prob, clipped_weight, max_alns, buffer, insert_distr, params);
     }
 
-    let both_unmapped = weight
+    let both_unmapped = clipped_weight
         * (summary1.min_prob + summary2.min_prob + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty());
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
@@ -525,7 +536,7 @@ fn identify_paired_end_alignments(
         aln.ln_prob -= norm_fct;
     }
     (GrouppedAlignments {
-        read_data,
+        read_data, weight,
         name_hash: summary1.name_hash,
         unmapped_prob: both_unmapped - norm_fct,
         alignments, aln_pairs,
@@ -546,6 +557,7 @@ fn identify_single_end_alignments(
     let weight = summary.weight;
     let use_read = weight >= params.min_weight;
     let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+    let clipped_weight = weight.max(WEIGHT_CLIP);
 
     let mut alignments = Vec::new();
     let mut aln_pairs = Vec::new();
@@ -559,10 +571,10 @@ fn identify_single_end_alignments(
     while let Some(aln) = tmp_alns.pop() {
         if curr_contig != Some(aln.contig_id()) {
             curr_contig = Some(aln.contig_id());
-            thresh_prob = aln.ln_prob() * weight - params.prob_diff;
+            thresh_prob = aln.ln_prob() * clipped_weight - params.prob_diff;
             curr_saved = 0;
         }
-        let wprob = weight * aln.ln_prob();
+        let wprob = clipped_weight * aln.ln_prob();
         if wprob >= thresh_prob && curr_saved < max_alns {
             aln_pairs.push(PairAlignment::new_first(alignments.len(), aln.interval(), wprob));
             alignments.push(aln);
@@ -570,7 +582,7 @@ fn identify_single_end_alignments(
         }
     }
 
-    let unmapped_prob = weight * (summary.min_prob + params.unmapped_penalty);
+    let unmapped_prob = clipped_weight * (summary.min_prob + params.unmapped_penalty);
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
@@ -578,7 +590,7 @@ fn identify_single_end_alignments(
         aln.ln_prob -= norm_fct;
     }
     (GrouppedAlignments {
-        read_data,
+        read_data, weight,
         name_hash: summary.name_hash,
         unmapped_prob: unmapped_prob - norm_fct,
         alignments, aln_pairs,

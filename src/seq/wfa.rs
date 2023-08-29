@@ -103,8 +103,9 @@ fn convert_cigar(c_cigar: *const cwfa::cigar_t) -> Result<Cigar, (u8, Vec<u8>)> 
         return Ok(cigar);
     }
 
-    let cigar_slice: &[u8] = unsafe { std::slice::from_raw_parts((*c_cigar).operations as *const u8,
-        end_offset - begin_offset) };
+    let cigar_slice: &[u8] = unsafe {
+        std::slice::from_raw_parts((*c_cigar).operations as *const u8, end_offset - begin_offset)
+    };
     let mut last_op = cigar_slice[0];
     let mut last_len = 1;
     for &curr_op in &cigar_slice[1..] {

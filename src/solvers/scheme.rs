@@ -3,7 +3,7 @@
 
 use std::{
     thread,
-    cmp::min,
+    cmp::{min, max},
     io::{self, Write},
     time::{Instant, Duration},
     path::{Path, PathBuf},
@@ -27,6 +27,7 @@ use crate::{
     err::{Error, validate_param, add_path},
     seq::contigs::{ContigNames, Genotype},
     model::{
+        self,
         Params as AssgnParams,
         locs::AllAlignments,
         assgn::{GenotypeAlignments, ReadAssignment},
@@ -60,7 +61,7 @@ fn truncate_ixs(
     ixs: &mut Vec<usize>,
     scores: &[f64],
     genotypes: &[Genotype],
-    score_thresh: f64,
+    filt_thresh: f64,
     min_size: usize,
     threads: usize,
 ) {
@@ -79,7 +80,7 @@ fn truncate_ixs(
     }
 
     let range = best - worst;
-    let mut thresh = (worst + range * score_thresh).min(best - MIN_DIST);
+    let mut thresh = (worst + range * filt_thresh).min(best - MIN_DIST);
     let mut m = ixs.partition_point(|&i| scores[i] >= thresh);
     if m < min_size {
         thresh = scores[ixs[min_size - 1]];
@@ -124,7 +125,7 @@ fn prefilter_genotypes(
         writeln!(writer, "{}\t{:.3}", gt, Ln::to_log10(score))?;
         scores.push(score);
     }
-    truncate_ixs(&mut ixs, &scores, genotypes, params.score_thresh, params.min_gts, threads);
+    truncate_ixs(&mut ixs, &scores, genotypes, params.filt_thresh, params.min_gts, threads);
     Ok(ixs)
 }
 
@@ -201,6 +202,7 @@ pub struct Data {
     pub assgn_params: AssgnParams,
     pub debug: bool,
     pub threads: usize,
+    pub is_paired_end: bool,
 }
 
 const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\tlik\tselected";
@@ -342,7 +344,7 @@ impl Likelihoods {
     ) -> Genotyping {
         // ln(1e-5).
         const THRESH: f64 = -11.512925464970229;
-        const MIN_OUTPUT: usize = 4;
+        let min_output = max(4, params.out_bams);
         let thresh_prob = THRESH.min(params.prob_thresh);
         let attempts = f64::from(params.attempts);
         self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
@@ -353,17 +355,19 @@ impl Likelihoods {
 
         let mut ln_probs = vec![0.0; n];
         let mut out_genotypes = Vec::with_capacity(n);
+        let mut assgn_counts = Vec::with_capacity(n);
         let mut mean_sds = Vec::with_capacity(n);
         let mut i = 0;
         // Use while instead of for, as upper bound can change.
         while i < n {
             let (mean_i, var_i) = self.likelihoods[self.ixs[i]];
             out_genotypes.push(genotypes[self.ixs[i]].clone());
+            assgn_counts.push(self.assgn_counts[self.ixs[i]].take().expect("Assignment counts undefined"));
             mean_sds.push((mean_i, var_i.sqrt()));
             for j in i + 1..n {
                 let (mean_j, var_j) = self.likelihoods[self.ixs[j]];
                 let prob_j = compare_two_likelihoods(mean_j, var_j, mean_i, var_i, attempts);
-                if i == 0 && j >= MIN_OUTPUT && prob_j < thresh_prob {
+                if i == 0 && j >= min_output && prob_j < thresh_prob {
                     n = j;
                     break;
                 }
@@ -378,7 +382,7 @@ impl Likelihoods {
         let quality = Phred::from_ln_prob(Ln::sum(&ln_probs[1..]));
         Genotyping {
             genotypes: out_genotypes,
-            tag, mean_sds, ln_probs, quality,
+            assgn_counts, tag, mean_sds, ln_probs, quality,
         }
     }
 }
@@ -389,6 +393,8 @@ pub struct Genotyping {
     /// Filtered list with the best genotypes.
     /// Genotypes are sorted from best to worst.
     genotypes: Vec<Genotype>,
+    /// Count how many times each read assignment was selected.
+    assgn_counts: Vec<Vec<u16>>,
     /// Mean and standard deviation, divided by sqrt(attempts).
     mean_sds: Vec<(f64, f64)>,
     /// Normalized ln-probabilities for each genotype.
@@ -571,6 +577,17 @@ pub fn solve(
     let json_filename = locus_dir.join("res.json.gz");
     let mut json_writer = ext::sys::create_gzip(&json_filename)?;
     genotyping.to_json().write_pretty(&mut json_writer, 4).map_err(add_path!(json_filename))?;
+
+    if data.assgn_params.out_bams > 0 {
+        let bam_dir = locus_dir.join(crate::command::paths::ALNS_DIR);
+        ext::sys::mkdir(&bam_dir)?;
+        let mut contig_to_tid = Vec::new();
+        log::info!("    Writing output alignments to {}", ext::fmt::path(&bam_dir));
+        for (gt, assgn_counts) in genotyping.genotypes.iter().zip(&genotyping.assgn_counts)
+                .take(data.assgn_params.out_bams) {
+            model::bam::write_bam(&bam_dir, gt, data, &mut contig_to_tid, assgn_counts)?
+        }
+    }
     Ok(())
 }
 
