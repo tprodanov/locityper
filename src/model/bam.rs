@@ -208,6 +208,7 @@ fn generate_paired_end_records(
 {
     count_alignments::<true>(read_alns, assgn_counts, buffer1, buffer2);
     let read_data = groupped_alns.read_data();
+    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for &(TwoU32(i, j), count) in buffer2.iter() {
         let opt_aln1 = if i == UNMAPPED { None } else { Some(groupped_alns.ith_aln(i)) };
@@ -221,8 +222,8 @@ fn generate_paired_end_records(
         record2.set_mapq(mapq);
         record1.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
         record2.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
-        record1.push_aux(WEIGHT_TAG, bam::record::Aux::Double(groupped_alns.weight()))?;
-        record2.push_aux(WEIGHT_TAG, bam::record::Aux::Double(groupped_alns.weight()))?;
+        record1.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
+        record2.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
         if secondary {
             record1.set_secondary();
             record2.set_secondary();
@@ -246,14 +247,15 @@ fn generate_w0_paired_end_records(
 ) -> htslib::errors::Result<()>
 {
     let read_data = groupped_alns.read_data();
+    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for pair in aln_pairs {
         let opt_aln1 = pair.ix1().map(|i| groupped_alns.ith_aln(i));
         let opt_aln2 = pair.ix2().map(|j| groupped_alns.ith_aln(j));
         let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data, ReadEnd::First, buffer);
         let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data, ReadEnd::Second, buffer);
-        record1.push_aux(WEIGHT_TAG, bam::record::Aux::Double(groupped_alns.weight()))?;
-        record2.push_aux(WEIGHT_TAG, bam::record::Aux::Double(groupped_alns.weight()))?;
+        record1.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
+        record2.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
         if secondary {
             record1.set_secondary();
             record2.set_secondary();
@@ -282,6 +284,7 @@ fn generate_single_end_records(
 {
     count_alignments::<false>(read_alns, assgn_counts, buffer1, buffer2);
     let read_data = groupped_alns.read_data();
+    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for &(TwoU32(i, _), count) in buffer2.iter() {
         let opt_aln = if i == UNMAPPED { None } else { Some(groupped_alns.ith_aln(i)) };
@@ -289,7 +292,7 @@ fn generate_single_end_records(
         let (prob, mapq) = count_to_prob(count, attempts);
         record.set_mapq(mapq);
         record.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
-        record.push_aux(WEIGHT_TAG, bam::record::Aux::Double(groupped_alns.weight()))?;
+        record.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
         if secondary {
             record.set_secondary();
         }
@@ -310,6 +313,7 @@ fn generate_w0_single_end_records(
 ) -> htslib::errors::Result<()>
 {
     let read_data = groupped_alns.read_data();
+    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for pair in aln_pairs {
         let opt_aln = pair.ix1().map(|i| groupped_alns.ith_aln(i));
@@ -318,7 +322,7 @@ fn generate_w0_single_end_records(
             record.set_secondary();
         }
         secondary = true;
-        record.push_aux(WEIGHT_TAG, bam::record::Aux::Double(groupped_alns.weight()))?;
+        record.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
         records.push(record);
     }
     Ok(())
@@ -376,9 +380,12 @@ pub fn write_bam(
     // Stable sort so that we do not separate mates.
     // Convert tid to u32 so that unmapped reads (-1) appear at the end.
     records.sort_by(|rec1, rec2| (rec1.tid() as u32, rec1.pos()).cmp(&(rec2.tid() as u32, rec2.pos())));
-    let mut writer = bam::Writer::from_path(path, &header, bam::Format::Bam)?;
+    let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam)?;
     for record in records.into_iter() {
         writer.write(&record)?;
     }
+    std::mem::drop(writer);
+    // Use 1 thread.
+    bam::index::build(&path, None, bam::index::Type::Bai, 1)?;
     Ok(())
 }
