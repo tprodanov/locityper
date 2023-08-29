@@ -331,14 +331,13 @@ fn generate_w0_single_end_records(
 /// Writes read alignments to a specific genotype.
 /// `contig_to_tid`: converts contig id into BAM tid. Is updated automatically for each genotype.
 pub fn write_bam(
-    dir: &Path,
+    bam_path: &Path,
     gt: &Genotype,
     data: &scheme::Data,
     contig_to_tid: &mut Vec<Option<i32>>,
     assgn_counts: &[u16],
 ) -> htslib::errors::Result<()>
 {
-    let path = dir.join(format!("{}.bam", gt));
     let (header, unique_ids) = create_bam_header(gt, &data.contigs, contig_to_tid);
     let header_view = Rc::new(bam::HeaderView::from_header(&header));
     let mut records = Vec::new();
@@ -380,12 +379,12 @@ pub fn write_bam(
     // Stable sort so that we do not separate mates.
     // Convert tid to u32 so that unmapped reads (-1) appear at the end.
     records.sort_by(|rec1, rec2| (rec1.tid() as u32, rec1.pos()).cmp(&(rec2.tid() as u32, rec2.pos())));
-    let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam)?;
+    let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
     for record in records.into_iter() {
         writer.write(&record)?;
     }
     std::mem::drop(writer);
     // Use 1 thread.
-    bam::index::build(&path, None, bam::index::Type::Bai, 1)?;
+    bam::index::build(&bam_path, None, bam::index::Type::Bai, 1)?;
     Ok(())
 }

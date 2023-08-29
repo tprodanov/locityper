@@ -100,6 +100,12 @@ Additionally, you can estimate WGS characteristics using an already preprocessed
 locityper preproc -i reads1.fastq [reads2.fastq] -o analysis -~ other_analysis
 ```
 
+Finally, if you want to analyze a new set of loci, and do not want to keep the same output folder, you
+can copy preprocessed data to a new location with
+```bash
+rsync -vaP analysis1/bg analysis2
+```
+
 ### Genotyping WGS dataset
 
 In order to genotype a dataset, please run

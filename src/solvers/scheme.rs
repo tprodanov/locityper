@@ -583,9 +583,12 @@ pub fn solve(
         ext::sys::mkdir(&bam_dir)?;
         let mut contig_to_tid = Vec::new();
         log::info!("    Writing output alignments to {}", ext::fmt::path(&bam_dir));
-        for (gt, assgn_counts) in genotyping.genotypes.iter().zip(&genotyping.assgn_counts)
-                .take(data.assgn_params.out_bams) {
-            model::bam::write_bam(&bam_dir, gt, data, &mut contig_to_tid, assgn_counts)?
+        let out_gts = data.assgn_params.out_bams.min(genotyping.genotypes.len());
+        let width = max(2, math::num_digits(out_gts as f64) as usize);
+        for (i, (gt, assgn_counts)) in genotyping.genotypes.iter().zip(&genotyping.assgn_counts)
+                .take(data.assgn_params.out_bams).enumerate() {
+            let bam_path = bam_dir.join(format!("{:0width$}_{}.bam", i, gt));
+            model::bam::write_bam(&bam_path, gt, data, &mut contig_to_tid, assgn_counts)?
         }
     }
     Ok(())
