@@ -389,7 +389,7 @@ impl JfKmerGetter {
 
         let output = child.wait_with_output().map_err(add_path!(!))?;
         if !output.status.success() {
-            return Err(Error::Subprocess(output));
+            return Err(Error::Subprocess(output, vec![self.jf_exe.clone()]));
         }
         // handle.join() returns Result<Result<(), crate::Error>, Any>.
         // expect unwraps the outer Err, then ? returns the inner Err, if any.

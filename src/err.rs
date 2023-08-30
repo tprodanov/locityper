@@ -18,8 +18,8 @@ pub enum Error {
     Htslib(htslib::errors::Error),
     /// Executable not found.
     NoExec(PathBuf),
-    /// Subcommand failed.
-    Subprocess(std::process::Output),
+    /// Subcommand failed. Contains program output and any relevant program versions.
+    Subprocess(std::process::Output, Vec<PathBuf>),
     InvalidInput(String),
     InvalidData(String),
     ParsingError(String),
@@ -97,15 +97,21 @@ impl Error {
             Self::Htslib(e) => write!(s, "{}: {}", "Htslib error".red(), e).unwrap(),
             Self::NoExec(path) => write!(s, "{} at {}", "Could not find executable".red(),
                 ext::fmt::path(path).cyan()).unwrap(),
-            Self::Subprocess(out) => {
+            Self::Subprocess(out, execs) => {
                 write!(s, "{}, {}", "Error while running subprocess".red(), out.status).unwrap();
                 let stdout = clip_msg(&out.stdout);
                 if !stdout.is_empty() {
-                    write!(s, "\n{}: {}\n", "Stdout".bold(), stdout).unwrap();
+                    write!(s, "\n{}: {}", "Stdout".bold(), stdout.trim()).unwrap();
                 }
                 let stderr = clip_msg(&out.stderr);
                 if !stderr.is_empty() {
-                    write!(s, "\n{}: {}\n", "Stdout".bold(), stderr).unwrap();
+                    write!(s, "\n{}: {}", "Stdout".bold(), stderr.trim()).unwrap();
+                }
+                if !execs.is_empty() {
+                    write!(s, "\n{}:", "Versions".bold()).unwrap();
+                    for exe in execs.iter() {
+                        write!(s, "\n    {}", ext::sys::get_program_version(exe)).unwrap();
+                    }
                 }
             }
             Self::InvalidInput(e) => write!(s, "{}: {}", "Invalid input".red(), e).unwrap(),

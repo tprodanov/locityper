@@ -240,8 +240,9 @@ fn print_help(extended: bool) {
     let defaults = Args::default();
     println!("{}", "Preprocess WGS dataset.".yellow());
 
-    println!("\n{} {} preproc -i reads1.fq [reads2.fq] -d db -r reference.fa -o out [arguments]",
-        "Usage:".bold(), super::PROGRAM);
+    println!("\n{}", "Usage:".bold());
+    println!("    {} preproc -i reads1.fq [reads2.fq] -d db -r reference.fa -o out [arguments]", super::PROGRAM);
+    println!("    {} preproc -a aligned.bam           -d db -r reference.fa -o out [arguments]", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
@@ -253,7 +254,7 @@ fn print_help(extended: bool) {
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Reads in indexed BAM/CRAM format, already mapped to the whole genome.\n\
         {EMPTY}  Mutually exclusive with {}.\n\
-        {EMPTY}  This method is much faster, but {}.",
+        {EMPTY}  This method is extremely fast, but sometimes {}.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "less accurate".red());
     println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
         "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
@@ -558,7 +559,7 @@ fn run_mapping(
     let mut mapping_child = mapping.spawn().map_err(add_path!(!))?;
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
-    let mut guard = ext::sys::ChildGuard::new(mapping_child);
+    let guard = ext::sys::ChildGuard::new(mapping_child);
     let handle = set_mapping_stdin(args, mapping_stdin.unwrap(), rng)?;
 
     let mut samtools = Command::new(&args.samtools);
@@ -574,18 +575,24 @@ fn run_mapping(
         .arg("-o").arg(&tmp_bam)
         .stdin(Stdio::from(mapping_stdout.unwrap()));
     log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&mapping), ext::fmt::command(&samtools));
-    let output = samtools.output().map_err(add_path!(!))?;
+    let samtools_output = samtools.output().map_err(add_path!(!))?;
+    if !samtools_output.status.success() {
+        return Err(Error::Subprocess(samtools_output,
+            vec![args.strobealign.clone(), args.minimap.clone(), args.samtools.clone()]));
+    }
+    let mapping_output = guard.take().wait_with_output().map_err(add_path!(!))?;
     log::debug!("");
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
-    if !output.status.success() {
-        return Err(Error::Subprocess(output));
+    if !mapping_output.status.success() {
+        return Err(Error::Subprocess(mapping_output,
+            vec![args.strobealign.clone(), args.minimap.clone(), args.samtools.clone()]));
     }
     let total_reads = handle.join()
         .map_err(|e| Error::RuntimeError(format!("Read mapping failed: {:?}", e)))?
         .map_err(add_path!(!))?;
+    // guard.disarm();
     seq_info.set_total_reads(total_reads);
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
-    guard.disarm();
     Ok(())
 }
 

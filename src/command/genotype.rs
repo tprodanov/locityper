@@ -612,6 +612,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
     let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, bg_distr.seq_info(), &n_locs, args);
     let mut child = mapping_cmd.spawn().map_err(add_path!(!))?;
     let child_stdout = child.stdout.take().unwrap();
+    let guard = ext::sys::ChildGuard::new(child);
 
     let mut samtools_cmd = Command::new(&args.samtools);
     samtools_cmd.args(&["view", "-b"]) // Output BAM.
@@ -622,12 +623,15 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
 
     log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
     let samtools_output = samtools_cmd.output().map_err(add_path!(!))?;
-    let bwa_output = child.wait_with_output().map_err(add_path!(!))?;
+    if !samtools_output.status.success() {
+        return Err(Error::Subprocess(samtools_output,
+            vec![args.strobealign.clone(), args.minimap.clone(), args.samtools.clone()]));
+    }
+    let mapping_output = guard.take().wait_with_output().map_err(add_path!(!))?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
-    if !bwa_output.status.success() {
-        return Err(Error::Subprocess(bwa_output));
-    } else if !samtools_output.status.success() {
-        return Err(Error::Subprocess(samtools_output));
+    if !mapping_output.status.success() {
+        return Err(Error::Subprocess(mapping_output,
+            vec![args.strobealign.clone(), args.minimap.clone(), args.samtools.clone()]));
     }
     fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
         .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;

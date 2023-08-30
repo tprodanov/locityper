@@ -143,36 +143,54 @@ pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut write
 }
 
 /// RAII child wrapper, that kills the child if it gets dropped.
-pub struct ChildGuard {
-    child: Child,
-    armed: bool,
-}
+pub struct ChildGuard(Option<Child>);
 
 impl ChildGuard {
     pub fn new(child: Child) -> Self {
-        Self {
-            child,
-            armed: true,
-        }
+        Self(Some(child))
     }
 
-    pub fn disarm(&mut self) {
-        self.armed = false;
+    /// Consumes guard and returns the child process.
+    pub fn take(mut self) -> Child {
+        self.0.take().expect("Cannot take child twice")
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if self.armed {
-            match self.child.kill() {
+        if let Some(child) = self.0.as_mut() {
+            match child.kill() {
                 Err(e) => {
                     // InvalidInput means that the process exited already.
                     if e.kind() != io::ErrorKind::InvalidInput {
                         log::error!("Could not kill child process: {}", e);
                     }
                 }
-                Ok(_) => log::error!("Successfully killed child process"),
+                Ok(_) => log::error!("Killed child process"),
             }
         }
+    }
+}
+
+/// Returns program version.
+/// This function does not panic, but can return `version unavailable`.
+pub fn get_program_version(exe: &Path) -> String {
+    let program_name = || exe.file_name().unwrap_or(exe.as_os_str()).to_string_lossy();
+
+    let out = match std::process::Command::new(exe).arg("--version").output() {
+        Ok(out) => out,
+        Err(_) => return format!("{} version unavailable", program_name()),
+    };
+    let msg = if out.stdout.is_empty() { out.stderr } else { out.stdout };
+    if msg.is_empty() {
+        return format!("{} version unavailable", program_name())
+    }
+    const MAX_SIZE: usize = 1000;
+    let i = msg.iter().take(MAX_SIZE).position(|&ch| ch == b'\n').unwrap_or(MAX_SIZE.min(msg.len()));
+    let msg_head = String::from_utf8_lossy(&msg[..i]);
+    if msg_head.contains(' ') {
+        msg_head.trim().to_string()
+    } else {
+        format!("{} {}", program_name(), msg_head.trim())
     }
 }

@@ -230,7 +230,7 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
     if output.status.success() {
         Ok(jf_path)
     } else {
-        Err(Error::Subprocess(output))
+        Err(Error::Subprocess(output, vec![args.jellyfish.clone()]))
     }
 }
 
