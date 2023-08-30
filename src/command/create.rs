@@ -225,7 +225,7 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
         .stderr(Stdio::piped());
     log::info!("Counting {}-mers in {} threads", args.kmer_size, args.threads);
     log::debug!("    {}", ext::fmt::command(&command));
-    let child = command.spawn().map_err(add_path!(!))?;
+    let child = command.spawn().map_err(add_path!(args.jellyfish))?;
     let guard = ext::sys::PipeGuard::new(args.jellyfish.clone(), child);
     guard.wait()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(timer.elapsed()));

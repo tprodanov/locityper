@@ -445,12 +445,11 @@ fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
 macro_rules! create_handle {
     ($reader:ident, $writer:ident, $rate:ident, $rng:ident) => {
         Ok(thread::spawn(move || {
-            if $rate < 1.0 {
-                $reader.subsample(&mut $writer, $rate, &mut $rng)?;
+            Ok(if $rate < 1.0 {
+                $reader.subsample(&mut $writer, $rate, &mut $rng)?
             } else {
-                $reader.copy(&mut $writer)?;
-            }
-            Ok($reader.total_reads())
+                $reader.copy(&mut $writer)?
+            })
         }))
     }
 }
@@ -494,6 +493,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "--eqx",       // Output X/= instead of M operations,
             "-t", &args.threads.to_string(), // Specify the number of threads,
             "-r", &format!("{:.0}", seq_info.mean_read_len()), // Provide mean read length.
+            "--no-progress",
             ]);
         if args.is_paired_end() {
             command.arg("--interleaved");
@@ -558,7 +558,7 @@ fn run_mapping(
     let start = Instant::now();
     let mut mapping = create_mapping_command(args, seq_info, ref_filename);
     let mapping_exe = PathBuf::from(mapping.get_program().to_owned());
-    let mut mapping_child = mapping.spawn().map_err(add_path!(!))?;
+    let mut mapping_child = mapping.spawn().map_err(add_path!(mapping_exe))?;
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
@@ -578,7 +578,7 @@ fn run_mapping(
         .stdin(Stdio::from(mapping_stdout.unwrap()))
         .stdout(Stdio::piped()).stderr(Stdio::piped());
     log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&mapping), ext::fmt::command(&samtools));
-    let samtools_child = samtools.spawn().map_err(add_path!(!))?;
+    let samtools_child = samtools.spawn().map_err(add_path!(args.samtools))?;
     pipe_guard.push(args.samtools.clone(), samtools_child);
     pipe_guard.wait()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));

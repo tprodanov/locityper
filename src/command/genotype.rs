@@ -611,7 +611,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, bg_distr.seq_info(), &n_locs, args);
     let mapping_exe = PathBuf::from(mapping_cmd.get_program().to_owned());
-    let mut mapping_child = mapping_cmd.spawn().map_err(add_path!(!))?;
+    let mut mapping_child = mapping_cmd.spawn().map_err(add_path!(mapping_exe))?;
     let child_stdout = mapping_child.stdout.take().unwrap();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
 
@@ -624,7 +624,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
         .stdout(Stdio::piped()).stderr(Stdio::piped());
 
     log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
-    let samtools_child = samtools_cmd.spawn().map_err(add_path!(!))?;
+    let samtools_child = samtools_cmd.spawn().map_err(add_path!(args.samtools))?;
     pipe_guard.push(args.samtools.clone(), samtools_child);
     pipe_guard.wait()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));

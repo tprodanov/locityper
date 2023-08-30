@@ -3,6 +3,7 @@ use std::{
     io::{self, BufRead},
     cmp::min,
     path::Path,
+    time::{Instant, Duration},
 };
 use crate::{
     ext,
@@ -176,7 +177,6 @@ impl RecordExt for PairedRecord {
 pub struct Reader<R: BufRead> {
     stream: R,
     buffer: Vec<u8>,
-    total_reads: u64,
 }
 
 impl Reader<Box<dyn BufRead + Send>> {
@@ -191,7 +191,6 @@ impl<R: BufRead> Reader<R> {
         read_line(&mut stream, &mut buffer)?;
         Ok(Self {
             stream, buffer,
-            total_reads: 0,
         })
     }
 
@@ -277,6 +276,39 @@ impl<R: BufRead + Send> Reader<R> {
     }
 }
 
+// Write log messages at most every ten seconds.
+pub const UPDATE_SECS: u64 = 10;
+
+struct SubsampleLogger {
+    timer: Instant,
+    last_msg: Duration,
+    reads: u64,
+}
+
+impl SubsampleLogger {
+    fn new() -> Self {
+        Self {
+            timer: Instant::now(),
+            last_msg: Duration::default(),
+            reads: 0,
+        }
+    }
+
+    #[inline]
+    fn inc(&mut self) {
+        self.reads += 1;
+        if self.reads % 100_000 == 0 {
+            let elapsed = self.timer.elapsed();
+            if (elapsed - self.last_msg).as_secs() >= UPDATE_SECS {
+                self.last_msg = elapsed;
+                let reads_f64 = self.reads as f64;
+                let speed = 1e-3 * f64::from(reads_f64) / elapsed.as_secs_f64();
+                log::debug!("    Processed {:7.1}M reads, {:4.0}k reads/s", 1e-6 * reads_f64, speed);
+            }
+        }
+    }
+}
+
 /// Trait for reading and writing FASTA/Q single-end and paired-end records.
 pub trait FastxRead: Send {
     type Record: RecordExt;
@@ -298,28 +330,29 @@ pub trait FastxRead: Send {
     }
 
     /// Subsamples the reader with the `rate` and optional `seed`.
-    fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, rng: &mut impl rand::Rng) -> io::Result<()> {
+    fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, rng: &mut impl rand::Rng) -> io::Result<u64> {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate ({}) must be within (0, 1).", rate);
         let mut record = Self::Record::default();
+        let mut logger = SubsampleLogger::new();
         while self.read_next(&mut record)? {
+            logger.inc();
             if rng.gen::<f64>() <= rate {
                 record.write_to(writer)?;
             }
         }
-        Ok(())
+        Ok(logger.reads)
     }
 
     /// Writes input stream to output.
-    fn copy(&mut self, writer: &mut impl io::Write) -> io::Result<()> {
+    fn copy(&mut self, writer: &mut impl io::Write) -> io::Result<u64> {
         let mut record = Self::Record::default();
+        let mut logger = SubsampleLogger::new();
         while self.read_next(&mut record)? {
+            logger.inc();
             record.write_to(writer)?;
         }
-        Ok(())
+        Ok(logger.reads)
     }
-
-    /// Returns the total number of consumed reads/read pairs.
-    fn total_reads(&self) -> u64;
 }
 
 impl<R: BufRead + Send> FastxRead for Reader<R> {
@@ -336,7 +369,6 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
         if self.buffer.is_empty() {
             return Ok(false);
         }
-        self.total_reads += 1;
 
         record.full_name.extend_from_slice(&self.buffer[1..]);
         if self.buffer[0] == b'>' {
@@ -344,11 +376,6 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
         } else {
             self.fill_fastq_record(record)
         }
-    }
-
-    /// Returns the total number of single end reads.
-    fn total_reads(&self) -> u64 {
-        self.total_reads
     }
 }
 
@@ -377,11 +404,6 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
             Ok(true)
         }
     }
-
-    /// Returns the total number of consumed paired reads.
-    fn total_reads(&self) -> u64 {
-        self.reader.total_reads() / 2
-    }
 }
 
 /// Two paired-end FASTA/Q readers, that stores two buffer records to reduce memory allocations.
@@ -409,11 +431,6 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
             _ => Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Different number of records in two input files.")),
         }
-    }
-
-    /// Returns the total number of consumed paired reads.
-    fn total_reads(&self) -> u64 {
-        self.reader1.total_reads()
     }
 }
 

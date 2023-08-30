@@ -4,7 +4,7 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
-    process::Child,
+    process::{Child, Output},
     mem::ManuallyDrop,
     borrow::Cow,
 };
@@ -183,78 +183,95 @@ fn clip_msg(bytes: &[u8]) -> Cow<'_, str> {
     }
 }
 
+fn format_output(s: &mut String, out: &Output) {
+    match out.status.code() {
+        Some(code) => writeln!(s, "    {}: {}", "Exit code".bold(), code).unwrap(),
+        None => writeln!(s, "    {}: {}", "Exit code".bold(), "unknown").unwrap(),
+    };
+    let stdout = clip_msg(&out.stdout);
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        writeln!(s, "    {}: {}", "Stdout".bold(), stdout).unwrap();
+    }
+    let stderr = clip_msg(&out.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        writeln!(s, "    {}: {}", "Stderr".bold(), stderr).unwrap();
+    }
+}
+
 pub struct PipeGuard {
-    // Path to the executable and the child.
-    steps: Vec<(PathBuf, Child)>,
+    /// Executable, corresponding to each of the children.
+    executables: Vec<PathBuf>,
+    /// Child processes. Some components may be dropped, then corresponding output is set to self.outputs.
+    children: Vec<Option<Child>>,
+    /// Outputs, collected from the child processes.
+    outputs: Vec<io::Result<Output>>,
+    /// Was `wait` or `fail` already called?
+    finished: bool,
 }
 
 impl PipeGuard {
     pub fn new(exe: PathBuf, child: Child) -> Self {
         Self {
-            steps: vec![(exe, child)],
+            executables: vec![exe],
+            children: vec![Some(child)],
+            outputs: vec![Err(io::Error::from(io::ErrorKind::NotFound))],
+            finished: false,
         }
     }
 
     pub fn push(&mut self, exe: PathBuf, child: Child) {
-        self.steps.push((exe, child));
+        self.executables.push(exe);
+        self.children.push(Some(child));
+        self.outputs.push(Err(io::Error::from(io::ErrorKind::NotFound)));
     }
 
     /// We already know that the pipe failed, need to kill all steps and collect available information.
     pub fn fail(&mut self) -> String {
         let mut s = String::new();
-        for (exe, mut child) in self.steps.drain(..) {
+        for (exe, (child, output)) in self.executables.iter()
+                .zip(self.children.iter_mut().zip(self.outputs.iter_mut())) {
             writeln!(s, "{}", get_program_version(&exe).bold()).unwrap();
-            if let Err(e) = child.kill() {
-                if e.kind() != io::ErrorKind::InvalidInput {
-                    writeln!(s, "    {}: {}", "Could not kill process".red(), e).unwrap();
+            if let Some(mut child) = child.take() {
+                if let Err(e) = child.kill() {
+                    if e.kind() != io::ErrorKind::InvalidInput {
+                        writeln!(s, "    {}: {}", "Could not kill process".red(), e).unwrap();
+                    }
                 }
+                *output = child.wait_with_output();
             }
-            let out = match child.wait_with_output() {
-                Err(e) => {
-                    writeln!(s, "    {}: {}", "Could not get child output".red(), e).unwrap();
-                    continue;
-                }
-                Ok(out) => out,
-            };
-            match out.status.code() {
-                Some(code) => writeln!(s, "    {}: {}", "Exit code".bold(), code).unwrap(),
-                None => writeln!(s, "    {}: {}", "Exit code".bold(), "unknown").unwrap(),
-            };
-            let stdout = clip_msg(&out.stdout);
-            let stdout = stdout.trim();
-            if !stdout.is_empty() {
-                writeln!(s, "    {}: {}", "Stdout".bold(), stdout).unwrap();
-            }
-            let stderr = clip_msg(&out.stderr);
-            let stderr = stderr.trim();
-            if !stderr.is_empty() {
-                writeln!(s, "    {}: {}", "Stderr".bold(), stderr).unwrap();
+            match output {
+                Ok(out) => format_output(&mut s, out),
+                Err(e) => writeln!(s, "    {}: {}", "Could not get child output".red(), e).unwrap(),
             }
         }
         if s.ends_with('\n') {
             s.pop();
         }
+        self.finished = true;
         s
     }
 
     /// Waits for each process from end to start.
     /// If all processed finished successfully, returns output of the last process.
-    pub fn wait(mut self) -> Result<std::process::Output, Error> {
-        for (_, child) in self.steps.iter_mut().rev() {
-            if !child.wait().map(|status| status.success()).unwrap_or(false) {
-                let msg = self.fail();
-                return Err(Error::Subprocess(msg));
+    pub fn wait(mut self) -> Result<Output, Error> {
+        for (child, output) in self.children.iter_mut().rev().zip(self.outputs.iter_mut().rev()) {
+            if let Some(child) = child.take() {
+                *output = child.wait_with_output();
+                if !output.as_ref().map(|out| out.status.success()).unwrap_or(false) {
+                    return Err(Error::Subprocess(self.fail()));
+                }
             }
         }
-        let out = self.steps.pop().expect("At least one process must be present")
-            .1.wait_with_output().expect("Could not get output from successfully finished process");
-        Ok(out)
+        self.finished = true;
+        Ok(self.outputs.pop().expect("At least one process must be present").expect("Last output must be defined"))
     }
 }
 
 impl Drop for PipeGuard {
     fn drop(&mut self) {
-        if !self.steps.is_empty() {
+        if !self.finished {
             log::error!("Subprocess killed:\n{}", self.fail());
         }
     }

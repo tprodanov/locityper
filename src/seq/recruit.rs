@@ -14,6 +14,7 @@ use crate::{
     seq::{
         kmers::{self, Kmer},
         fastx::{RecordExt, FastxRead},
+        fastx::UPDATE_SECS,
     },
 };
 
@@ -72,9 +73,6 @@ struct Stats {
     last_msg: Duration,
 }
 
-// Update frequency in seconds.
-const UPDATE_SECS: u64 = 10;
-
 impl Stats {
     fn new() -> Self {
         Self {
@@ -96,7 +94,7 @@ impl Stats {
     fn print_log_always(&mut self, elapsed: Duration) {
         let processed = self.processed as f64;
         let speed = 1e-3 * processed / elapsed.as_secs_f64();
-        log::debug!("    Recruited {:11} /{:8.2}M reads,  {:.0}k reads/s", self.recruited, 1e-6 * processed, speed);
+        log::debug!("    Recruited {:11} /{:8.2}M reads, {:4.0}k reads/s", self.recruited, 1e-6 * processed, speed);
         self.last_msg = elapsed;
     }
 
