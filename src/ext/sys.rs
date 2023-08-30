@@ -1,16 +1,19 @@
 use std::{
+    fmt::Write as FmtWrite,
     io::{self, Read, BufRead, BufReader, Write, BufWriter, stdin},
     fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
     process::Child,
     mem::ManuallyDrop,
+    borrow::Cow,
 };
 use flate2::{
     bufread::MultiGzDecoder,
     write::GzEncoder,
     Compression,
 };
+use colored::Colorize;
 use crate::err::{Error, add_path};
 
 /// Finds an executable, and returns Error, if executable is not available.
@@ -142,48 +145,21 @@ pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut write
     Ok(())
 }
 
-/// RAII child wrapper, that kills the child if it gets dropped.
-pub struct ChildGuard(Option<Child>);
-
-impl ChildGuard {
-    pub fn new(child: Child) -> Self {
-        Self(Some(child))
-    }
-
-    /// Consumes guard and returns the child process.
-    pub fn take(mut self) -> Child {
-        self.0.take().expect("Cannot take child twice")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
-            match child.kill() {
-                Err(e) => {
-                    // InvalidInput means that the process exited already.
-                    if e.kind() != io::ErrorKind::InvalidInput {
-                        log::error!("Could not kill child process: {}", e);
-                    }
-                }
-                Ok(_) => log::error!("Killed child process"),
-            }
-        }
-    }
+/// Returns path basename, or `???`, if it is empty.
+fn safe_basename(path: &Path) -> Cow<'_, str> {
+    path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()
 }
 
 /// Returns program version.
 /// This function does not panic, but can return `version unavailable`.
 pub fn get_program_version(exe: &Path) -> String {
-    let program_name = || exe.file_name().unwrap_or(exe.as_os_str()).to_string_lossy();
-
     let out = match std::process::Command::new(exe).arg("--version").output() {
         Ok(out) => out,
-        Err(_) => return format!("{} version unavailable", program_name()),
+        Err(_) => return format!("{} version unavailable", safe_basename(exe)),
     };
     let msg = if out.stdout.is_empty() { out.stderr } else { out.stdout };
     if msg.is_empty() {
-        return format!("{} version unavailable", program_name())
+        return format!("{} version unavailable", safe_basename(exe))
     }
     const MAX_SIZE: usize = 1000;
     let i = msg.iter().take(MAX_SIZE).position(|&ch| ch == b'\n').unwrap_or(MAX_SIZE.min(msg.len()));
@@ -191,6 +167,95 @@ pub fn get_program_version(exe: &Path) -> String {
     if msg_head.contains(' ') {
         msg_head.trim().to_string()
     } else {
-        format!("{} {}", program_name(), msg_head.trim())
+        format!("{} {}", safe_basename(exe), msg_head.trim())
+    }
+}
+
+/// Clips errors message at 10000 characters.
+fn clip_msg(bytes: &[u8]) -> Cow<'_, str> {
+    const MAX_LEN: usize = 10000;
+    if bytes.len() > MAX_LEN {
+        let mut s = String::from_utf8_lossy(&bytes[..MAX_LEN]).into_owned();
+        write!(s, " ...").unwrap();
+        Cow::Owned(s)
+    } else {
+        String::from_utf8_lossy(bytes)
+    }
+}
+
+pub struct PipeGuard {
+    // Path to the executable and the child.
+    steps: Vec<(PathBuf, Child)>,
+}
+
+impl PipeGuard {
+    pub fn new(exe: PathBuf, child: Child) -> Self {
+        Self {
+            steps: vec![(exe, child)],
+        }
+    }
+
+    pub fn push(&mut self, exe: PathBuf, child: Child) {
+        self.steps.push((exe, child));
+    }
+
+    /// We already know that the pipe failed, need to kill all steps and collect available information.
+    pub fn fail(&mut self) -> String {
+        let mut s = String::new();
+        for (exe, mut child) in self.steps.drain(..) {
+            writeln!(s, "{}", get_program_version(&exe).bold()).unwrap();
+            if let Err(e) = child.kill() {
+                if e.kind() != io::ErrorKind::InvalidInput {
+                    writeln!(s, "    {}: {}", "Could not kill process".red(), e).unwrap();
+                }
+            }
+            let out = match child.wait_with_output() {
+                Err(e) => {
+                    writeln!(s, "    {}: {}", "Could not get child output".red(), e).unwrap();
+                    continue;
+                }
+                Ok(out) => out,
+            };
+            match out.status.code() {
+                Some(code) => writeln!(s, "    {}: {}", "Exit code".bold(), code).unwrap(),
+                None => writeln!(s, "    {}: {}", "Exit code".bold(), "unknown").unwrap(),
+            };
+            let stdout = clip_msg(&out.stdout);
+            let stdout = stdout.trim();
+            if !stdout.is_empty() {
+                writeln!(s, "    {}: {}", "Stdout".bold(), stdout).unwrap();
+            }
+            let stderr = clip_msg(&out.stderr);
+            let stderr = stderr.trim();
+            if !stderr.is_empty() {
+                writeln!(s, "    {}: {}", "Stderr".bold(), stderr).unwrap();
+            }
+        }
+        if s.ends_with('\n') {
+            s.pop();
+        }
+        s
+    }
+
+    /// Waits for each process from end to start.
+    /// If all processed finished successfully, returns output of the last process.
+    pub fn wait(mut self) -> Result<std::process::Output, Error> {
+        for (_, child) in self.steps.iter_mut().rev() {
+            if !child.wait().map(|status| status.success()).unwrap_or(false) {
+                let msg = self.fail();
+                return Err(Error::Subprocess(msg));
+            }
+        }
+        let out = self.steps.pop().expect("At least one process must be present")
+            .1.wait_with_output().expect("Could not get output from successfully finished process");
+        Ok(out)
+    }
+}
+
+impl Drop for PipeGuard {
+    fn drop(&mut self) {
+        if !self.steps.is_empty() {
+            log::error!("Subprocess killed:\n{}", self.fail());
+        }
     }
 }

@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write, Seek},
     cmp::{min, max},
     sync::Arc,
-    process::Command,
+    process::{Command, Stdio},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -214,24 +214,22 @@ fn run_jellyfish(db_path: &Path, ref_filename: &Path, args: &Args, genome_size: 
     }
 
     let timer = Instant::now();
-    let mut command = Command::new(&args.jellyfish);
     let jf_size = args.jf_size.unwrap_or(min(genome_size, 10_000_000_000));
+    let mut command = Command::new(&args.jellyfish);
     command.args(&["count", "--canonical", "--lower-count=2", "--out-counter-len=1",
             &format!("--mer-len={}", args.kmer_size),
             &format!("--threads={}", args.threads),
             &format!("--size={}", jf_size)])
         .arg("--output").arg(&jf_path)
-        .arg(ref_filename);
+        .arg(ref_filename)
+        .stderr(Stdio::piped());
     log::info!("Counting {}-mers in {} threads", args.kmer_size, args.threads);
     log::debug!("    {}", ext::fmt::command(&command));
-
-    let output = command.output().map_err(add_path!(!))?;
+    let child = command.spawn().map_err(add_path!(!))?;
+    let guard = ext::sys::PipeGuard::new(args.jellyfish.clone(), child);
+    guard.wait()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(timer.elapsed()));
-    if output.status.success() {
-        Ok(jf_path)
-    } else {
-        Err(Error::Subprocess(output, vec![args.jellyfish.clone()]))
-    }
+    Ok(jf_path)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {

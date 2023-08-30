@@ -9,6 +9,7 @@ use std::{
 use crate::{
     err::{Error, add_path},
     seq::{self, ContigId},
+    ext::sys::PipeGuard,
 };
 
 /// Store k-mers in integers of different length (15-mers in u32, 31-mers in u64, 63-mers in u128).
@@ -380,6 +381,7 @@ impl JfKmerGetter {
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().map_err(add_path!(self.jf_exe))?;
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
+        let pipe_guard = PipeGuard::new(self.jf_exe.clone(), child);
         let handle = std::thread::spawn(move || -> Result<(), Error> {
             for seq in seqs.iter() {
                 seq::write_fasta(&mut child_stdin, b"", seq).map_err(add_path!(!))?;
@@ -387,10 +389,7 @@ impl JfKmerGetter {
             Ok(())
         });
 
-        let output = child.wait_with_output().map_err(add_path!(!))?;
-        if !output.status.success() {
-            return Err(Error::Subprocess(output, vec![self.jf_exe.clone()]));
-        }
+        let output = pipe_guard.wait()?;
         // handle.join() returns Result<Result<(), crate::Error>, Any>.
         // expect unwraps the outer Err, then ? returns the inner Err, if any.
         handle.join().expect("Process failed for unknown reason")?;

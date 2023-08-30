@@ -18,8 +18,8 @@ pub enum Error {
     Htslib(htslib::errors::Error),
     /// Executable not found.
     NoExec(PathBuf),
-    /// Subcommand failed. Contains program output and any relevant program versions.
-    Subprocess(std::process::Output, Vec<PathBuf>),
+    /// Subcommand failed.
+    Subprocess(String),
     InvalidInput(String),
     InvalidData(String),
     ParsingError(String),
@@ -58,17 +58,6 @@ impl From<json::JsonError> for Error {
     }
 }
 
-fn clip_msg(bytes: &[u8]) -> String {
-    const MAX_LEN: usize = 10000;
-    if bytes.len() > MAX_LEN {
-        let mut s = String::from_utf8_lossy(&bytes[..MAX_LEN]).into_owned();
-        write!(s, " ...").unwrap();
-        s
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
-}
-
 impl Error {
     /// Converts an error, produced by a solver.
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {
@@ -97,23 +86,7 @@ impl Error {
             Self::Htslib(e) => write!(s, "{}: {}", "Htslib error".red(), e).unwrap(),
             Self::NoExec(path) => write!(s, "{} at {}", "Could not find executable".red(),
                 ext::fmt::path(path).cyan()).unwrap(),
-            Self::Subprocess(out, execs) => {
-                write!(s, "{}, {}", "Error while running subprocess".red(), out.status).unwrap();
-                let stdout = clip_msg(&out.stdout);
-                if !stdout.is_empty() {
-                    write!(s, "\n{}: {}", "Stdout".bold(), stdout.trim()).unwrap();
-                }
-                let stderr = clip_msg(&out.stderr);
-                if !stderr.is_empty() {
-                    write!(s, "\n{}: {}", "Stdout".bold(), stderr.trim()).unwrap();
-                }
-                if !execs.is_empty() {
-                    write!(s, "\n{}:", "Versions".bold()).unwrap();
-                    for exe in execs.iter() {
-                        write!(s, "\n    {}", ext::sys::get_program_version(exe)).unwrap();
-                    }
-                }
-            }
+            Self::Subprocess(e) => write!(s, "{}:\n{}", "Subprocess error".red(), e).unwrap(),
             Self::InvalidInput(e) => write!(s, "{}: {}", "Invalid input".red(), e).unwrap(),
             Self::InvalidData(e) => write!(s, "{}: {}", "Invalid data".red(), e).unwrap(),
             Self::ParsingError(e) => write!(s, "{}: {}", "Parsing error".red(), e).unwrap(),

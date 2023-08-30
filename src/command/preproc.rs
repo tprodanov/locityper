@@ -508,13 +508,14 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "--secondary=no", // Do not output secondary alignments,
             "-f", "0.001", // Discard more minimizers to speed up alignment,
             "--eqx",       // Output X/= instead of M operations,
-            "-t", &args.threads.to_string() // Specify the number of threads,
+            "-t", &args.threads.to_string(), // Specify the number of threads,
             ]);
     }
     // Provide paths to the reference and pipe reads.
     command.arg(&ref_filename).arg("-")
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     command
 }
 
@@ -556,10 +557,11 @@ fn run_mapping(
 
     let start = Instant::now();
     let mut mapping = create_mapping_command(args, seq_info, ref_filename);
+    let mapping_exe = PathBuf::from(mapping.get_program().to_owned());
     let mut mapping_child = mapping.spawn().map_err(add_path!(!))?;
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
-    let guard = ext::sys::ChildGuard::new(mapping_child);
+    let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
     let handle = set_mapping_stdin(args, mapping_stdin.unwrap(), rng)?;
 
     let mut samtools = Command::new(&args.samtools);
@@ -573,24 +575,16 @@ fn run_mapping(
             ])
         .arg("-L").arg(&bed_target)
         .arg("-o").arg(&tmp_bam)
-        .stdin(Stdio::from(mapping_stdout.unwrap()));
+        .stdin(Stdio::from(mapping_stdout.unwrap()))
+        .stdout(Stdio::piped()).stderr(Stdio::piped());
     log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&mapping), ext::fmt::command(&samtools));
-    let samtools_output = samtools.output().map_err(add_path!(!))?;
-    if !samtools_output.status.success() {
-        return Err(Error::Subprocess(samtools_output,
-            vec![args.strobealign.clone(), args.minimap.clone(), args.samtools.clone()]));
-    }
-    let mapping_output = guard.take().wait_with_output().map_err(add_path!(!))?;
-    log::debug!("");
+    let samtools_child = samtools.spawn().map_err(add_path!(!))?;
+    pipe_guard.push(args.samtools.clone(), samtools_child);
+    pipe_guard.wait()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
-    if !mapping_output.status.success() {
-        return Err(Error::Subprocess(mapping_output,
-            vec![args.strobealign.clone(), args.minimap.clone(), args.samtools.clone()]));
-    }
     let total_reads = handle.join()
         .map_err(|e| Error::RuntimeError(format!("Read mapping failed: {:?}", e)))?
         .map_err(add_path!(!))?;
-    // guard.disarm();
     seq_info.set_total_reads(total_reads);
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
     Ok(())
