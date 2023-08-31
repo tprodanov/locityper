@@ -1,7 +1,8 @@
 //! Preprocess WGS dataset.
 
 use std::{
-    fs, io, thread,
+    fs, thread,
+    io::{self, Write},
     fmt::Write as FmtWrite,
     cmp::{min, max},
     path::{Path, PathBuf},
@@ -22,11 +23,12 @@ use crate::{
     },
     err::{Error, validate_param, add_path},
     seq::{
-        ContigNames, Interval,
+        Interval,
         kmers::KmerCounts,
         fastx::{self, FastxRead},
         cigar::{self, Cigar},
         aln::{NamedAlignment, Alignment, ReadEnd},
+        contigs::{ContigNames, GenomeVersion},
     },
     bg::{
         self, BgDistr, Technology, SequencingInfo,
@@ -38,91 +40,6 @@ use crate::{
 };
 use super::paths;
 
-/// Parameters, that need to be saved between preprocessing executions.
-/// On a new run, rerun is recommended if the parameters have changed.
-struct Params {
-    technology: Technology,
-    min_mapq: u8,
-    subsampling_rate: f64,
-    seed: Option<u64>,
-}
-
-impl Default for Params {
-    fn default() -> Self {
-        Self {
-            technology: Technology::Illumina,
-            min_mapq: 20,
-            subsampling_rate: 0.1,
-            seed: None,
-        }
-    }
-}
-
-impl Params {
-    fn validate(&mut self) -> Result<(), Error> {
-        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
-            "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
-        if self.subsampling_rate > 0.99 {
-            self.subsampling_rate = 1.0;
-        }
-        Ok(())
-    }
-
-    /// Loads parameters from the previous run. If the parameters do not match, or cannot be loaded, returns true.
-    fn need_rerun(&self, from_reads: bool, path: &Path) -> bool {
-        if !path.exists() {
-            log::error!("Cannot find old parameters at {}", ext::fmt::path(path));
-            return true;
-        }
-        let old_params = match ext::sys::load_json(&path)
-                .map_err(|e| Error::from(e))
-                .and_then(|json| Params::load(&json)) {
-            Err(_) => {
-                log::error!("Cannot load old parameters from {}", ext::fmt::path(path));
-                return true;
-            }
-            Ok(val) => val,
-        };
-        if self.technology != old_params.technology {
-            log::error!("Sequencing technology has changed ({} -> {})", old_params.technology, self.technology);
-            true
-        } else if from_reads && self.min_mapq != old_params.min_mapq {
-            log::error!("Minimal MAPQ has changed ({} -> {})", old_params.min_mapq, self.min_mapq);
-            true
-        } else if from_reads && self.subsampling_rate != old_params.subsampling_rate {
-            log::error!("Subsampling rate has changed ({} -> {})", old_params.subsampling_rate, self.subsampling_rate);
-            true
-        } else {
-            // Not critical.
-            if from_reads && self.seed != old_params.seed {
-                log::warn!("Subsampling seed has changed ({:?} -> {:?})",
-                    old_params.seed, self.seed);
-            }
-            false
-        }
-    }
-}
-
-impl JsonSer for Params {
-    fn save(&self) -> json::JsonValue {
-        json::object!{
-            technology: self.technology.to_str(),
-            min_mapq: self.min_mapq,
-            subsampling_rate: self.subsampling_rate,
-            subsampling_seed: self.seed,
-        }
-    }
-
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> technology (as_str), min_mapq (as_u8), subsampling_rate (as_f64), subsampling_seed? (as_u64));
-        let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
-        Ok(Self {
-            technology, min_mapq, subsampling_rate,
-            seed: subsampling_seed,
-        })
-    }
-}
-
 struct Args {
     input: Vec<PathBuf>,
     alns: Option<PathBuf>,
@@ -130,6 +47,12 @@ struct Args {
     reference: Option<PathBuf>,
     output: Option<PathBuf>,
     similar_dataset: Option<PathBuf>,
+    bg_region: Option<String>,
+
+    technology: Technology,
+    min_mapq: u8,
+    subsampling_rate: f64,
+    seed: Option<u64>,
 
     interleaved: bool,
     threads: u16,
@@ -137,15 +60,14 @@ struct Args {
     strobealign: PathBuf,
     minimap: PathBuf,
     samtools: PathBuf,
+    jellyfish: PathBuf,
     debug: bool,
     /// Was technology explicitely provided?
     explicit_technology: bool,
-
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
     max_clipping: f64,
 
-    params: Params,
     bg_params: bg::Params,
 }
 
@@ -158,6 +80,12 @@ impl Default for Args {
             reference: None,
             output: None,
             similar_dataset: None,
+            bg_region: None,
+
+            technology: Technology::Illumina,
+            min_mapq: 20,
+            subsampling_rate: 0.1,
+            seed: None,
 
             interleaved: false,
             threads: 8,
@@ -166,10 +94,9 @@ impl Default for Args {
             strobealign: PathBuf::from("strobealign"),
             minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
+            jellyfish: PathBuf::from("jellyfish"),
             explicit_technology: false,
-
             max_clipping: 0.02,
-            params: Params::default(),
             bg_params: bg::Params::default(),
         }
     }
@@ -187,9 +114,9 @@ impl Args {
         validate_param!(n_input != 2 || !self.interleaved,
             "Two read files (-i/--input) are provided, however, --interleaved is specified");
         if n_input > 0 {
-            let paired_end_allowed = self.params.technology.paired_end_allowed();
+            let paired_end_allowed = self.technology.paired_end_allowed();
             validate_param!(self.is_single_end() || paired_end_allowed,
-                "Paired end reads are not supported by {}", self.params.technology.long_name());
+                "Paired end reads are not supported by {}", self.technology.long_name());
             if self.is_single_end() && paired_end_allowed {
                 log::warn!("Running in single-end mode.");
             }
@@ -200,25 +127,29 @@ impl Args {
             // No more checks are needed.
             return Ok(self);
         }
-
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
 
-        if self.params.technology == Technology::Illumina {
+        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
+            "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
+        if self.subsampling_rate > 0.99 {
+            self.subsampling_rate = 1.0;
+        }
+
+        if self.technology == Technology::Illumina {
             self.strobealign = ext::sys::find_exe(self.strobealign)?;
         } else {
             self.minimap = ext::sys::find_exe(self.minimap)?;
         }
         self.samtools = ext::sys::find_exe(self.samtools)?;
+        self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
 
         validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
         if self.alns.is_some() {
-            self.params.subsampling_rate = 1.0;
-            self.params.seed = None;
+            self.subsampling_rate = 1.0;
+            self.seed = None;
         }
-
-        self.params.validate()?;
         self.bg_params.validate()?;
         Ok(self)
     }
@@ -257,27 +188,33 @@ fn print_help(extended: bool) {
         {EMPTY}  This method is extremely fast, but sometimes {}.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "less accurate".red());
     println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
-        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
+        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
-    println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
-        "-^, --interleaved".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  This dataset is similar to already preprocessed dataset.\n\
         {EMPTY}  {}. Only utilizes difference in the number of reads.",
         "-~, --like".green(), "DIR".yellow(), "Use with care".red());
+
+    println!("\n{}", "Optional arguments:".bold());
+    println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
+        "-^, --interleaved".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Sequencing technology [{}]:\n\
         {EMPTY}  sr  | illumina : short-read sequencing,\n\
         {EMPTY}    hifi         : PacBio HiFi,\n\
         {EMPTY}  pb  | pacbio   : PacBio CLR,\n\
         {EMPTY}  ont | nanopore : Oxford Nanopore.",
-        "-t, --technology".green(), "STR".yellow(), super::fmt_def(defaults.params.technology));
+        "-t, --technology".green(), "STR".yellow(), super::fmt_def(defaults.technology));
+    println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region,\n\
+        {EMPTY}  preferably >3 Mb and without many duplications.\n\
+        {EMPTY}  Default regions are defined for CHM13, GRCh38 and GRCh37.",
+        "-b, --bg-region".green(), "STR".yellow());
 
     if extended {
         println!("\n{}", "Insert size and error profile estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
-            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.params.min_mapq));
+            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.min_mapq));
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
             "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(defaults.max_clipping));
@@ -292,7 +229,7 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
             "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.bg_params.depth.ploidy));
         println!("    {:KEY$} {:VAL$}  Subsample input reads by this factor [{}].",
-            "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.params.subsampling_rate));
+            "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
         println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [{}].\n\
             {EMPTY}  Default: half of the mean read length.",
             "-w, --window".green(), "INT".yellow(), "auto".cyan());
@@ -317,7 +254,7 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(defaults.bg_params.depth.tail_var_mult));
     }
 
-    println!("\n{}", "Execution parameters:".bold());
+    println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun everything ({}); do not rerun\n\
@@ -336,9 +273,11 @@ fn print_help(extended: bool) {
             "    --minimap".green(), "EXE".yellow(), super::fmt_def(defaults.minimap.display()));
         println!("    {:KEY$} {:VAL$}  Samtools executable    [{}].",
             "    --samtools".green(), "EXE".yellow(), super::fmt_def(defaults.samtools.display()));
+        println!("    {:KEY$} {:VAL$}  Jellyfish executable   [{}].",
+            "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
     }
 
-    println!("\n{}", "Other parameters:".bold());
+    println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show short help message.", "-h, --help".green(), "");
     println!("    {:KEY$} {:VAL$}  Show {} help message.", "-H, --full-help".green(), "", "extended".red());
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
@@ -359,16 +298,17 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
                 args.alns = Some(parser.value()?.parse()?),
-            Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Short('t') | Long("technology") => {
                 args.explicit_technology = true;
-                args.params.technology = parser.value()?.parse()?;
+                args.technology = parser.value()?.parse()?;
             }
             Short('~') | Long("like") => args.similar_dataset = Some(parser.value()?.parse()?),
+            Short('b') | Long("bg") | Long("bg-region") => args.bg_region = Some(parser.value()?.parse()?),
 
-            Short('q') | Long("min-mapq") | Long("min-mq") => args.params.min_mapq = parser.value()?.parse()?,
+            Short('q') | Long("min-mapq") | Long("min-mq") => args.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
             Long("pval-thresh") | Long("pval-threshold") | Long("pvalue-threshold") => {
                 args.bg_params.insert_pval = parser.value()?.parse()?;
@@ -376,7 +316,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
 
             Short('p') | Long("ploidy") => args.bg_params.depth.ploidy = parser.value()?.parse()?,
-            Long("subsample") => args.params.subsampling_rate = parser.value()?.parse()?,
+            Long("subsample") => args.subsampling_rate = parser.value()?.parse()?,
             Short('w') | Long("window") => {
                 let val = parser.value()?;
                 args.bg_params.depth.window_size = if val == "auto" {
@@ -402,7 +342,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
-            Short('s') | Long("seed") => args.params.seed = Some(parser.value()?.parse()?),
+            Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
+            Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -425,20 +366,61 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
     let out_dir = args.output.as_ref().unwrap();
     ext::sys::mkdir(out_dir)?;
-
     let bg_dir = out_dir.join(paths::BG_DIR);
-    let params_path = bg_dir.join(paths::PREPROC_PARAMS);
     if !args.rerun.prepare_dir(&bg_dir)? {
-        if args.params.need_rerun(!args.input.is_empty(), &params_path) {
-            log::error!("Please rerun with {} or {}", "--rerun part".red(), "--rerun all".red());
-            std::process::exit(1);
-        }
         std::process::exit(0);
     }
-
-    let mut params_file = ext::sys::create_file(&params_path)?;
-    args.params.save().write_pretty(&mut params_file, 4).map_err(add_path!(params_path))?;
     Ok(bg_dir)
+}
+
+/// Returns default background region.
+fn default_region(ver: GenomeVersion) -> &'static str {
+    match ver {
+        GenomeVersion::Chm13 => "chr17:72950001-77450000",
+        GenomeVersion::GRCh38 => "chr17:72062001-76562000",
+        GenomeVersion::GRCh37 => "chr17:70060001-74560000",
+    }
+}
+
+/// Returns the first appropriate interval for the contig names.
+/// If `bg_region` is set, try to parse it. Otherwise, iterate over `BG_REGIONS`.
+///
+/// Returns error if no interval is appropriate (chromosome not in the contig set, or interval is out of bounds).
+fn select_bg_interval(
+    ref_filename: &Path,
+    contigs: &Arc<ContigNames>,
+    bg_region: &Option<String>
+) -> Result<Interval, Error>
+{
+    if let Some(s) = bg_region {
+        let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
+            format!("Reference genome {} does not contain region {}", ext::fmt::path(ref_filename), s)))?;
+        return if contigs.in_bounds(&region) {
+            Ok(region)
+        } else {
+            Err(Error::InvalidInput(format!("Region {} is out of bounds", s)))
+        };
+    }
+
+    let genome = GenomeVersion::guess(contigs)
+        .ok_or_else(|| Error::RuntimeError(
+            "Could not recognize reference genome. Please provide background region (-b) explicitely, \
+            preferably >3 Mb long and without significant duplications".to_owned()))?;
+    let region = default_region(genome);
+    log::info!("Recognized {} reference genome, using background region {}", genome, region);
+    // Try to crop `chr` if region cannot be found.
+    for &crop in &[0, 3] {
+        if let Ok(region) = Interval::parse(&region[crop..], contigs) {
+            if contigs.in_bounds(&region) {
+                return Ok(region);
+            } else {
+                return Err(Error::InvalidInput(format!("Region {} is too long for the reference genome", region)));
+            }
+        }
+    }
+    Err(Error::InvalidInput(format!("Reference genome {} does not contain any of the default background regions. \
+        Please provide background region (-b) explicitely, preferably >3 Mb long and without significant duplications",
+        ext::fmt::path(ref_filename))))
 }
 
 // The same code is executed several times. This macro pastes the code where needed.
@@ -461,7 +443,7 @@ fn set_mapping_stdin(
     rng: &mut XoshiroRng,
 ) -> Result<thread::JoinHandle<Result<u64, io::Error>>, Error>
 {
-    let rate = args.params.subsampling_rate;
+    let rate = args.subsampling_rate;
     let mut local_rng = rng.clone();
     rng.long_jump();
     let mut writer = io::BufWriter::new(child_stdin);
@@ -521,13 +503,13 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
 
 fn first_step_str(args: &Args) -> String {
     let mut s = String::new();
-    if args.params.subsampling_rate == 1.0 {
-        return s;
-    }
-
-    write!(s, "_subsample_ --rate {}", args.params.subsampling_rate).unwrap();
-    if let Some(seed) = args.params.seed {
-        write!(s, " --seed {}", seed).unwrap();
+    if args.subsampling_rate == 1.0 {
+        write!(s, "_interleave_").unwrap();
+    } else {
+        write!(s, "_subsample_ --rate {}", args.subsampling_rate).unwrap();
+        if let Some(seed) = args.seed {
+            write!(s, " --seed {}", seed).unwrap();
+        }
     }
     write!(s, " -i {}", ext::fmt::path(&args.input[0])).unwrap();
     if args.input.len() > 1 {
@@ -537,6 +519,99 @@ fn first_step_str(args: &Args) -> String {
     s
 }
 
+/// Mapping parameters will be stored at `analysis/bg/MAPPING_PARAMS`.
+const MAPPING_PARAMS: &'static str = "mapping.json";
+
+struct MappingParams {
+    technology: Technology,
+    min_mapq: u8,
+    subsampling: f64,
+    bg_region: String,
+}
+
+impl MappingParams {
+    fn new(args: &Args, bg_region: &Interval) -> Self {
+        MappingParams {
+            technology: args.technology,
+            min_mapq: args.min_mapq,
+            subsampling: args.subsampling_rate,
+            bg_region: bg_region.to_string(),
+        }
+    }
+
+    /// Compares mapping parameters against parameters from the previous run.
+    /// Returns `Ok` if two parameters match, and there is no reason for remapping.
+    /// Otherwise, returns `Err` with explanation.
+    fn compare(&self, path: &Path) -> Result<(), String> {
+        if !path.exists() {
+            log::error!("Cannot find previous mapping parameters at {}. Continuing anyway", ext::fmt::path(path));
+            return Ok(())
+        }
+        let old = match ext::sys::load_json(&path).map_err(Error::from).and_then(|json| MappingParams::load(&json)) {
+            Err(e) => {
+                return Err(format!("Cannot load previous mapping parameters: {}", e.display()));
+            }
+            Ok(val) => val,
+        };
+        if self.technology != old.technology {
+            Err(format!("Sequencing technologies do not match ({} -> {})", old.technology, self.technology))
+        } else if self.min_mapq < old.min_mapq {
+            Err(format!("Minimal mapping quality decreased ({} -> {})", old.min_mapq, self.min_mapq))
+        } else if (self.subsampling - old.subsampling).abs() > 1e-8 {
+            Err(format!("Subsampling rate changed ({} -> {})", old.subsampling, self.subsampling))
+        } else if self.bg_region != old.bg_region {
+            Err(format!("Background region has changed ({} -> {})", old.bg_region, self.bg_region))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl JsonSer for MappingParams {
+    fn save(&self) -> json::JsonValue {
+        json::object!{
+            technology: self.technology.to_str(),
+            min_mapq: self.min_mapq,
+            subsampling: self.subsampling,
+            bg_region: &self.bg_region as &str,
+        }
+    }
+
+    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+        json_get!(obj -> technology (as_str), min_mapq (as_u8), subsampling (as_f64), bg_region (as_str));
+        let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
+        Ok(Self {
+            technology, min_mapq, subsampling,
+            bg_region: bg_region.to_owned(),
+        })
+    }
+}
+
+/// Returns true if read mapping can be skipped.
+/// Panics if output BAM file exists, but cannot be used.
+fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: &Interval) -> Result<bool, Error> {
+    let params_path = out_dir.join(MAPPING_PARAMS);
+    let curr_params = MappingParams::new(args, bg_region);
+    if !out_bam.exists() {
+        let mut params_file = ext::sys::create_file(&params_path)?;
+        curr_params.save().write_pretty(&mut params_file, 4).map_err(add_path!(params_path))?;
+        return Ok(true);
+    }
+    match curr_params.compare(&params_path) {
+        Ok(()) => {
+            log::warn!("BAM file {} exists, skipping read mapping", ext::fmt::path(out_bam));
+            Ok(false)
+        }
+        Err(s) => {
+            log::error!("Problem comparing read mapping parameters against {}", ext::fmt::path(&params_path));
+            log::error!("    {}", s);
+            log::error!("Please use `--rerun full`, or remove file {} to force partial analysis",
+                ext::fmt::path(&params_path));
+            std::process::exit(1)
+        }
+    }
+}
+
 /// Map reads to the whole reference genome, and then take only reads mapped to the corresponding BED file.
 /// Subsample reads if the corresponding rate is less than 1.
 /// Return the total number of reads/read pairs.
@@ -544,14 +619,13 @@ fn run_mapping(
     args: &Args,
     seq_info: &mut SequencingInfo,
     ref_filename: &Path,
-    bed_target: &Path,
+    out_dir: &Path,
     out_bam: &Path,
+    bg_region: &Interval,
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let tmp_bam = out_bam.with_extension("tmp.bam");
-    if out_bam.exists() {
-        log::warn!("    BAM file {} exists, skipping read mapping", ext::fmt::path(out_bam));
+    if !need_mapping(args, out_dir, out_bam, bg_region)? {
         return Ok(());
     }
 
@@ -564,6 +638,12 @@ fn run_mapping(
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
     let handle = set_mapping_stdin(args, mapping_stdin.unwrap(), rng)?;
 
+    let tmp_bed = out_dir.join("tmp.bed");
+    let mut bed_file = ext::sys::create_file(&tmp_bed)?;
+    writeln!(bed_file, "{}", bg_region.bed_fmt()).map_err(add_path!(tmp_bed))?;
+    std::mem::drop(bed_file);
+
+    let tmp_bam = out_dir.join("tmp.bam");
     let mut samtools = Command::new(&args.samtools);
     // See SAM flags here: https://broadinstitute.github.io/picard/explain-flags.html.
     samtools.args(&["view",
@@ -571,9 +651,9 @@ fn run_mapping(
             // Ignore reads where any of the mates is unmapped,
             // + ignore secondary & supplementary alignments + ignore failed checks.
             "-F", "3852",
-            "-q", &args.params.min_mapq.to_string(),
+            "-q", &args.min_mapq.to_string(),
             ])
-        .arg("-L").arg(&bed_target)
+        .arg("-L").arg(&tmp_bed)
         .arg("-o").arg(&tmp_bam)
         .stdin(Stdio::from(mapping_stdout.unwrap()))
         .stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -587,12 +667,13 @@ fn run_mapping(
         .map_err(add_path!(!))?;
     seq_info.set_total_reads(total_reads);
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
+    fs::remove_file(&tmp_bed).map_err(add_path!(tmp_bed))?;
     Ok(())
 }
 
 /// Loads records and converts them to Alignments.
 /// All returned alignments are primary, have MAPQ over the `args.min_mapq`,
-/// and clipping under the threshold `argsbg_params.max_clipping`.
+/// and clipping under the threshold `bg_params.max_clipping`.
 ///
 /// Ignore reads, for which `cigar_getter` returns None.
 ///
@@ -606,7 +687,7 @@ fn load_alns(
     args: &Args
 ) -> Result<(Vec<NamedAlignment>, bool), Error>
 {
-    let min_mapq = args.params.min_mapq;
+    let min_mapq = args.min_mapq;
     let max_clipping = args.max_clipping;
     let mut paired_counts = [0_u64, 0];
 
@@ -667,7 +748,7 @@ fn estimate_bg_from_paired(
     seq_info: SequencingInfo,
     args: &Args,
     opt_out_dir: Option<&Path>,
-    data: &RefData,
+    bg_region: &BgRegion,
 ) -> Result<BgDistr, Error>
 {
     // Group reads into pairs, and estimate insert size from them.
@@ -678,8 +759,8 @@ fn estimate_bg_from_paired(
     log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
         min_insert, max_insert, crate::math::fmt_signif(100.0 * conf_lvl, 5));
 
-    let interval = &data.interval;
-    let windows = bg::Windows::create(interval, &data.sequence, &data.kmer_counts, &seq_info,
+    let interval = &bg_region.interval;
+    let windows = bg::Windows::create(interval, &bg_region.sequence, &bg_region.kmer_counts, &seq_info,
         &args.bg_params.depth, opt_out_dir)?;
 
     // Estimate error profile from read pairs with appropriate insert size.
@@ -709,7 +790,7 @@ fn estimate_bg_from_paired(
         }
     }
     let depth_distr = ReadDepth::estimate(&depth_alns, &windows,
-        &args.bg_params.depth, args.params.subsampling_rate, true, &seq_info, opt_out_dir)?;
+        &args.bg_params.depth, args.subsampling_rate, true, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -718,12 +799,12 @@ fn estimate_bg_from_unpaired(
     seq_info: SequencingInfo,
     args: &Args,
     opt_out_dir: Option<&Path>,
-    data: &RefData,
+    bg_region: &BgRegion,
 ) -> Result<BgDistr, Error>
 {
     let insert_distr = InsertDistr::undefined();
-    let interval = &data.interval;
-    let windows = bg::Windows::create(interval, &data.sequence, &data.kmer_counts, &seq_info,
+    let interval = &bg_region.interval;
+    let windows = bg::Windows::create(interval, &bg_region.sequence, &bg_region.kmer_counts, &seq_info,
         &args.bg_params.depth, opt_out_dir)?;
     let err_prof = ErrorProfile::estimate(&alns, interval, &windows, seq_info.mean_read_len(),
         &args.bg_params, opt_out_dir)?;
@@ -735,7 +816,7 @@ fn estimate_bg_from_unpaired(
         .map(Deref::deref)
         .collect();
     let depth_distr = ReadDepth::estimate(&filt_alns, &windows,
-        &args.bg_params.depth, args.params.subsampling_rate, true, &seq_info, opt_out_dir)?;
+        &args.bg_params.depth, args.subsampling_rate, true, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -743,10 +824,11 @@ fn estimate_bg_from_unpaired(
 fn estimate_bg_distrs(
     args: &Args,
     out_dir: &Path,
-    data: &RefData,
+    bg_region: &BgRegion,
 ) -> Result<BgDistr, Error>
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
+    let ref_filename = args.reference.as_ref().unwrap();
     let is_paired_end: bool;
     let alns: Vec<NamedAlignment>;
     let mut seq_info: SequencingInfo;
@@ -754,28 +836,28 @@ fn estimate_bg_distrs(
     if let Some(alns_filename) = args.alns.as_ref() {
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
-        bam_reader.set_reference(&data.ref_filename)?;
-        let interval = &data.interval;
+        bam_reader.set_reference(&ref_filename)?;
+        let interval = &bg_region.interval;
         let interval_start = interval.start();
-        let ref_seq = &data.sequence;
+        let ref_seq = &bg_region.sequence;
         bam_reader.fetch((interval.contig_name(), i64::from(interval_start), i64::from(interval.end())))?;
         (alns, is_paired_end) = load_alns(&mut bam_reader,
             |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
-            &data.ref_contigs, args)?;
-        if is_paired_end && !args.params.technology.paired_end_allowed() {
+            &bg_region.ref_contigs, args)?;
+        if is_paired_end && !args.technology.paired_end_allowed() {
             return Err(Error::InvalidInput(format!("Paired end reads are not supported by {}",
-                args.params.technology.long_name())));
+                args.technology.long_name())));
         }
-        seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.params.technology, args.explicit_technology)?;
+        seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.technology, args.explicit_technology)?;
     } else {
-        seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.params.technology,
+        seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.technology,
             args.explicit_technology)?;
         log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
 
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
-        let mut rng = init_rng(args.params.seed);
-        run_mapping(args, &mut seq_info, &data.ref_filename, &data.bed_filename, &bam_filename, &mut rng)?;
+        let mut rng = init_rng(args.seed);
+        run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, &bg_region.interval, &mut rng)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
@@ -784,14 +866,14 @@ fn estimate_bg_distrs(
             assert!(!cigar.has_hard_clipping(), "Cannot process primary alignments with hard clipping");
             Some(cigar)
         };
-        (alns, is_paired_end) = load_alns(&mut bam_reader, get_cigar, &data.ref_contigs, args)?;
+        (alns, is_paired_end) = load_alns(&mut bam_reader, get_cigar, &bg_region.ref_contigs, args)?;
         assert!(is_paired_end == args.is_paired_end());
     }
 
     if is_paired_end {
-        estimate_bg_from_paired(alns, seq_info, args, opt_out_dir, data)
+        estimate_bg_from_paired(alns, seq_info, args, opt_out_dir, bg_region)
     } else {
-        estimate_bg_from_unpaired(alns, seq_info, args, opt_out_dir, data)
+        estimate_bg_from_unpaired(alns, seq_info, args, opt_out_dir, bg_region)
     }
 }
 
@@ -807,7 +889,7 @@ fn estimate_like(args: &Args, similar_dataset: &Path) -> Result<BgDistr, Error> 
             "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(similar_dataset)))),
     };
 
-    let seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.params.technology,
+    let seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.technology,
         args.explicit_technology)?;
     if similar_seq_info.technology() != seq_info.technology() {
         return Err(Error::InvalidInput(format!(
@@ -841,34 +923,29 @@ fn estimate_like(args: &Args, similar_dataset: &Path) -> Result<BgDistr, Error> 
     Ok(new_distr)
 }
 
-struct RefData {
-    ref_filename: PathBuf,
+/// Information about the background region.
+struct BgRegion {
     ref_contigs: Arc<ContigNames>,
-    bed_filename: PathBuf,
+    /// Background region.
     interval: Interval,
+    /// Sequence of the background region.
     sequence: Vec<u8>,
+    /// k-mer counts on the background region.
     kmer_counts: KmerCounts,
 }
 
-impl RefData {
-    fn new(ref_filename: PathBuf, db_path: &Path) -> Result<Self, Error> {
+impl BgRegion {
+    fn new(args: &Args) -> Result<Self, Error> {
+        let db_path = args.database.as_ref().unwrap();
+        let ref_filename = args.reference.as_ref().unwrap();
         let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
+        let interval = select_bg_interval(&ref_filename, &ref_contigs, &args.bg_region)?;
 
-        // Load and parse background region coordinates.
-        let bed_filename = db_path.join(paths::BG_BED);
-        let bed_contents = fs::read_to_string(&bed_filename).map_err(add_path!(bed_filename))?;
-        let bg_intervals: Vec<_> = bed_contents.split('\n')
-            .filter(|s| !s.starts_with('#') && s.contains('\t')).collect();
-        if bg_intervals.len() != 1 {
-            return Err(Error::InvalidData(format!("Incorrect number of regions in {}", ext::fmt::path(&bed_filename))));
-        }
-        let interval = Interval::parse_bed(&mut bg_intervals[0].split('\t'), &ref_contigs)?;
+        let kmer_getter = super::add::load_kmer_getter(db_path, args.jellyfish.clone())?;
         let sequence = interval.fetch_seq(&mut ref_fasta).map_err(add_path!(ref_filename))?;
-
-        // Load k-mer counts for the background region.
-        let kmers_filename = db_path.join(paths::KMERS);
-        let kmer_counts = KmerCounts::load(ext::sys::open(&kmers_filename)?, &[interval.len()])?;
-        Ok(Self { ref_filename, ref_contigs, bed_filename, interval, sequence, kmer_counts })
+        log::info!("Calculating k-mer counts on the background region");
+        let kmer_counts = kmer_getter.fetch_one(sequence.clone())?;
+        Ok(Self { ref_contigs, interval, sequence, kmer_counts })
     }
 }
 
@@ -882,10 +959,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let bg_distr = if let Some(similar_dataset) = args.similar_dataset.as_ref() {
         estimate_like(&args, similar_dataset)?
     } else {
-        log::info!("Loading background non-duplicated region into memory");
-        let db_path = args.database.as_ref().unwrap().join(paths::BG_DIR);
-        let ref_data = RefData::new(args.reference.clone().unwrap(), &db_path)?;
-        estimate_bg_distrs(&args, &out_bg_dir, &ref_data)?
+        let bg_region = BgRegion::new(&args)?;
+
+        estimate_bg_distrs(&args, &out_bg_dir, &bg_region)?
     };
 
     let distr_filename = out_bg_dir.join(paths::BG_DISTR);

@@ -51,15 +51,11 @@ First, we create a database, that would later contain information about complex 
 ```bash
 locityper create -d db -r reference.fasta
 ```
-Locityper would attempt to automatically identify the genome version, however, if this does not happen,
-please use `-b/--bg-region` to provide a long region (>3Mb) without significant duplications.
-This region is later used to evaluate WGS dataset characteristics, such as read depth and error profiles.
-By default, the following regions are used: `chr17:72950001-77450000` *(CHM13)*,
-`chr17:72062001-76562000` *(GRCh38)* and `chr17:70060001-74560000` *(GRCh37)*.
+During database creation, Locityper collects *k*-mer counts across the reference genome using `jellyfish`.
 
-If you already have a database, you can create a copy of it without any of the complex loci by running command
+If you already have a database, you can create a copy of it without any of the complex loci by running
 ```bash
-rsync -vaP db/{bg,jf} new_db
+rsync -vaP db/jf new_db
 ```
 
 ### Adding loci to the database
@@ -88,7 +84,22 @@ For that, please use
 ```bash
 locityper preproc -i reads1.fastq [reads2.fastq] -d db -r reference.fasta -o analysis
 ```
-Use can also use `fasta` input files, as well as gzipped input files.
+Use can also provide input files in FASTA format.
+Locityper accepts input files compressed with `gzip`, `bgzip` or `lz4`.
+
+During sample preprocessing Locityper examines read alignments to a long *simple* region in the reference genome
+without significant duplications or other structural variantions.
+Locityper attempts to automatically identify the genome version, however, if this does not happen,
+please use `-b/--bg-region` to provide such region (preferable ≥3 Mb).
+By default, the following regions are used: `chr17:72950001-77450000` *(CHM13)*,
+`chr17:72062001-76562000` *(GRCh38)* and `chr17:70060001-74560000` *(GRCh37)*.
+
+There are two other ways to preprocess WGS dataset:
+If you already have read mappings to the whole genome, you can use them via
+```bash
+locityper preproc -a aligned.bam -d db -r reference.fasta -o analysis
+```
+However, this calculation may be less accurate than from the reads depending on the read mapping.
 
 Additionally, you can estimate WGS characteristics using an already preprocessed file.
 > [!WARNING]

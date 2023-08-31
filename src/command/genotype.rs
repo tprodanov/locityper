@@ -129,10 +129,10 @@ fn print_help(extended: bool) {
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
-        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
+        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
     println!("    {:KEY$} {:VAL$}  Output directory   (initialized with {}).",
         "-o, --output".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
-    println!("    {:KEY$} {:VAL$}  Input reads are interleaved.",
+    println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
         "-^, --interleaved".green(), super::flag());
     if extended {
         println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
@@ -225,7 +225,7 @@ fn print_help(extended: bool) {
             "-O, --out-bams".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.out_bams));
     }
 
-    println!("\n{}", "Execution parameters:".bold());
+    println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), defaults.threads.to_string().cyan());
     println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun all loci ({}); do not rerun\n\
@@ -246,7 +246,7 @@ fn print_help(extended: bool) {
             "    --samtools".green(), "EXE".yellow(), super::fmt_def(defaults.samtools.display()));
     }
 
-    println!("\n{}", "Other parameters:".bold());
+    println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
     println!("    {:KEY$} {:VAL$}  Show {} help message.", "-H, --full-help".green(), "", "extended".red());
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
@@ -265,7 +265,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
         match arg {
             Short('i') | Long("input") =>
                 args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
-            Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Long("subset-loci") => {
                 for val in parser.values()? {

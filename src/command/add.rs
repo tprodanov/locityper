@@ -125,7 +125,7 @@ fn print_help() {
 
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory (initialized with {}).",
-        "-d, --db".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline());
+        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.\n\
@@ -165,7 +165,7 @@ fn print_help() {
         {EMPTY}  accurate as possible (may be slower).",
         "    --true-aln".green(), super::flag());
 
-    println!("\n{}", "Haplotype clustering parameters:".bold());
+    println!("\n{}", "Haplotype clustering:".bold());
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
         "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
     println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
@@ -176,7 +176,7 @@ fn print_help() {
         {EMPTY}  used to discard almost identical locus alleles [{}].",
         "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
 
-    println!("\n{}", "Execution parameters:".bold());
+    println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
@@ -184,7 +184,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
 
-    println!("\n{}", "Other parameters:".bold());
+    println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
@@ -200,7 +200,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('d') | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('v') | Long("vcf") => args.variants = Some(parser.value()?.parse()?),
 
@@ -729,6 +729,16 @@ fn run_with_fasta(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> R
     Ok((succeed, total as u32))
 }
 
+/// Finds exactly one file under `db/jf/*.jf` and creates k-mer getter.
+pub(super) fn load_kmer_getter(db_path: &Path, jellyfish_exe: PathBuf) -> Result<JfKmerGetter, Error> {
+    let mut jf_filenames = ext::sys::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
+    if jf_filenames.len() != 1 {
+        return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
+            db_path.display(), jf_filenames.len())));
+    }
+    JfKmerGetter::new(jellyfish_exe, jf_filenames.pop().expect("At least one filename must be present"))
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut args = parse_args(argv)?.validate()?;
     super::greet();
@@ -738,13 +748,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci_dir = db_path.join(paths::LOCI_DIR);
     ext::sys::mkdir(&loci_dir)?;
 
-    let mut jf_filenames = ext::sys::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
-    if jf_filenames.len() != 1 {
-        return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
-            db_path.display(), jf_filenames.len())));
-    }
-    // unwrap, as we know that there is exactly one filename.
-    let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), jf_filenames.pop().unwrap())?;
+    let kmer_getter = load_kmer_getter(db_path, args.jellyfish.clone())?;
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
     let (succeed, total) = if args.sequences.is_empty() {
