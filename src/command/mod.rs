@@ -208,6 +208,9 @@ fn greet() {
     let command = std::env::args().map(|arg| ext::fmt::path(Path::new(&arg))).collect::<Vec<_>>().join(" ");
     log::debug!("{}", command);
     log::debug!("{} v{} @ {}", PROGRAM, VERSION, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    #[cfg(debug_assertions)] {
+        log::warn!("Debug assertions enabled - faster optimization is available");
+    }
 }
 
 // /// Writes command line arguments, current version and time.

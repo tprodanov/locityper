@@ -146,7 +146,7 @@ impl ReadGtAlns {
 /// Calculate weight function [0, 1] -> [0, 1].
 struct WeightCalculator {
     coeff: f64,
-    power: f64,
+    double_power: f64,
 }
 
 impl WeightCalculator {
@@ -156,20 +156,19 @@ impl WeightCalculator {
     ///   The bigger the power, the faster the change.
     fn new(breakpoint: f64, power: f64) -> Self {
         assert!(0.0 < breakpoint && breakpoint < 1.0 && power > 0.0);
+        let double_power = power * 2.0;
         Self {
-            coeff: (1.0 - breakpoint).powf(power) / breakpoint.powf(power),
-            power,
+            coeff: ((1.0 - breakpoint) / breakpoint).powf(double_power),
+            double_power,
         }
     }
 
-    /// Calculates weight according to the function $t^2 / (t^2 + 1)$
-    /// where $t = C x^p / (1-x)^p$.
+    /// See supplementary methods.
     fn get(&self, x: f64) -> f64 {
         if x == 1.0 {
             1.0
         } else {
-            let t = self.coeff * x.powf(self.power) / (1.0 - x).powf(self.power);
-            let t2 = t * t;
+            let t2 = self.coeff * (x / (1.0 - x)).powf(self.double_power);
             t2 / (t2 + 1.0)
         }
     }

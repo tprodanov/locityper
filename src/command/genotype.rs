@@ -471,6 +471,9 @@ fn load_loci(
 {
     log::info!("Loading database");
     let db_loci_dir = db_path.join(paths::LOCI_DIR);
+    if !db_loci_dir.exists() {
+        return Err(Error::InvalidInput(format!("No loci present in the database {}", ext::fmt::path(&db_loci_dir))));
+    }
     let out_loci_dir = out_path.join(paths::LOCI_DIR);
     ext::sys::mkdir(&out_loci_dir)?;
 

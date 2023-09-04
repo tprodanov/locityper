@@ -71,14 +71,14 @@ impl Error {
             Self::Io(e, files) => {
                 write!(s, "{} in relation to ", "Input/Output error".red()).unwrap();
                 if files.is_empty() {
-                    writeln!(s, "unnamed streams").unwrap();
+                    write!(s, "unnamed streams").unwrap();
                 } else {
-                    writeln!(s, "{}.", files.iter().map(|f| ext::fmt::path(f).cyan().to_string())
+                    write!(s, "{}", files.iter().map(|f| ext::fmt::path(f).cyan().to_string())
                         .collect::<Vec<_>>().join(" ")).unwrap();
                 }
-                write!(s, "{} error", e.kind()).unwrap();
+                write!(s, ": {}", e.kind()).unwrap();
                 if let Some(e2) = e.get_ref() {
-                    write!(s, ": {}", e2).unwrap();
+                    write!(s, ", {}", e2).unwrap();
                 }
             }
             Self::Solver(solver, e) => write!(s, "ILP solver {} produced error {}", solver.red(), e).unwrap(),
