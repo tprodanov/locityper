@@ -1,9 +1,9 @@
 use std::{
-    cmp::max,
     ffi::c_char,
 };
 use crate::{
     seq::cigar::{Cigar, CigarItem, Operation},
+    err::{Error, validate_param},
 };
 
 #[allow(non_upper_case_globals)]
@@ -17,9 +17,9 @@ mod cwfa {
 #[derive(Clone)]
 pub struct Penalties {
     // NOTE: Adding match may lead to problems in other places (such as `panvcf` divergence calculation).
-    pub mismatch: u32,
-    pub gap_opening: u32,
-    pub gap_extension: u32,
+    pub mismatch: i32,
+    pub gap_opening: i32,
+    pub gap_extension: i32,
     // Similarly, adding separate parameters for insert/deletion penalties may lead to problems elsewhere.
 }
 
@@ -34,13 +34,11 @@ impl Default for Penalties {
 }
 
 impl Penalties {
-    /// Returns worst possible score (everything is not aligned).
-    pub fn worst_score(&self, mut len1: u32, mut len2: u32) -> u32 {
-        if len1 > len2 {
-            (len1, len2) = (len2, len1);
-        }
-        max(self.mismatch * len1 + if len1 == len2 { 0 } else { self.gap_opening + self.gap_extension * (len2 - len1) },
-            2 * self.gap_opening + self.gap_extension * (len1 + len2))
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_param!(self.mismatch >= 0, "Mismatch penalty ({}) must be non-negative", self.mismatch);
+        validate_param!(self.gap_opening >= 0, "Gap opening penalty ({}) must be non-negative", self.gap_opening);
+        validate_param!(self.gap_extension >= 0, "Gap extension penalty ({}) must be non-negative", self.gap_extension);
+        Ok(())
     }
 }
 

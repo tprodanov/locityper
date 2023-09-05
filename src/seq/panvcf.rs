@@ -14,7 +14,7 @@ use crate::{
     Error,
     seq::{
         self,
-        cigar::Cigar,
+        cigar::{Cigar, CigarItem, Operation},
         wfa::{Aligner, Penalties},
     },
     ext::vec::F64Ext,
@@ -225,7 +225,6 @@ pub fn reconstruct_sequences(
         }
     }
     let aligner = Aligner::new(aln_penalties);
-    let mism_penalty = -(aln_penalties.mismatch as i32);
     // Number of unavailable nucleotides for each sequence.
     let mut unavail_size = vec![0_u32; haplotypes.total];
 
@@ -239,7 +238,8 @@ pub fn reconstruct_sequences(
                 format_var(var, header))));
         }
         let var_start = u32::try_from(var.pos()).unwrap();
-        let var_end = var_start + alleles[0].len() as u32;
+        let ref_len = alleles[0].len() as u32;
+        let var_end = var_start + ref_len;
         if var_end <= ref_start {
             continue;
         }
@@ -267,7 +267,7 @@ pub fn reconstruct_sequences(
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) => allele_ix as usize,
                     GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing =>
                     {
-                        unavail_size[haplotype.shift_ix] += alleles[0].len() as u32;
+                        unavail_size[haplotype.shift_ix] += ref_len;
                         0 // Use reference allele
                     }
                 };
@@ -276,7 +276,12 @@ pub fn reconstruct_sequences(
             }
         }
         if let Some(ref mut alns) = pairwise_alns {
-            add_variant_to_alns(var_start - ref_pos, &alleles, &aligner, mism_penalty, &last_allele, *alns);
+            if ref_len > 30_000 {
+                log::warn!("        {} bp variant at {}, alignment may take some time",
+                    ref_len, format_var(var, header));
+            }
+            add_variant_to_alns(var_start - ref_pos, &alleles, &aligner, aln_penalties, &last_allele, *alns)
+                .map_err(|e| Error::InvalidData(format!("Invalid variant {}: {}", format_var(var, header), e)))?;
         }
         ref_pos = var_end;
     }
@@ -310,38 +315,60 @@ pub fn reconstruct_sequences(
     Ok(avail_seqs)
 }
 
+#[inline]
+fn align_alleles(a: &[u8], b: &[u8], aligner: &Aligner, penalties: &Penalties) -> Result<(Cigar, i32), String> {
+    match (a.len(), b.len()) {
+        (1, 1) =>
+            if a == b {
+                Err("Variant alleles are identical".to_owned())
+            } else {
+                Ok((Cigar::new_full_mismatch(1), -penalties.mismatch))
+            },
+        (1, blen @ _) =>
+            if a[0] != b[0] {
+                Err(format!("Indel does not start at the same nucleotide (alleles {} and {})",
+                    String::from_utf8_lossy(a), String::from_utf8_lossy(b)))
+            } else {
+                let mut cigar = Cigar::new_full_match(1);
+                cigar.push(CigarItem::new(Operation::Ins, blen as u32 - 1));
+                Ok((cigar, -penalties.gap_opening - (blen - 1) as i32 * penalties.gap_extension))
+            },
+        (alen @ _, 1) =>
+            if a[0] != b[0] {
+                Err(format!("Indel does not start at the same nucleotide (alleles {} and {})",
+                    String::from_utf8_lossy(a), String::from_utf8_lossy(b)))
+            } else {
+                let mut cigar = Cigar::new_full_match(1);
+                cigar.push(CigarItem::new(Operation::Del, alen as u32 - 1));
+                Ok((cigar, -penalties.gap_opening - (alen - 1) as i32 * penalties.gap_extension))
+            },
+        (_, _) =>
+            aligner.align(a, b).map_err(|(ch, raw_cigar)|
+                format!("Could not align alleles {} and {}. Violating CIGAR character '{}' ({}) in {:?}",
+                    String::from_utf8_lossy(a), String::from_utf8_lossy(b),
+                    char::from(ch), ch, raw_cigar)),
+    }
+}
+
 /// Finds alignments between all alleles.
 /// Returns vector of size `n * n`, where `n` is the number of alleles.
 fn add_variant_to_alns(
     between_dist: u32,
     alleles: &[&[u8]],
     aligner: &Aligner,
-    mism_penalty: i32,
+    penalties: &Penalties,
     last_allele: &[usize],
     pairwise_alns: &mut [(Cigar, i32)],
-) {
+) -> Result<(), String>
+{
     let n = alleles.len();
     // Vector with all alignment CIGARs and scores between two alleles.
     let mut allele_alns = Vec::with_capacity(n * n);
     for (i, allele_i) in alleles.iter().enumerate() {
-        let i_len = allele_i.len() as u32;
         for (j, allele_j) in alleles.iter().enumerate() {
             match i.cmp(&j) {
-                Ordering::Less => {
-                    if i_len == 1 && allele_j.len() == 1 {
-                        assert_ne!(allele_i, allele_j, "Two variant alleles are identical");
-                        allele_alns.push((Cigar::new_full_mismatch(1), mism_penalty));
-                    } else {
-                        match aligner.align(allele_i, allele_j) {
-                            Ok(cigar_and_score) => allele_alns.push(cigar_and_score),
-                            Err((ch, raw_cigar)) => panic!(
-                                "Could not align alleles {} and {}. Violating CIGAR character '{}' ({}) in {:?}",
-                                String::from_utf8_lossy(allele_i), String::from_utf8_lossy(allele_j),
-                                char::from(ch), ch, raw_cigar),
-                        }
-                    }
-                }
-                Ordering::Equal => allele_alns.push((Cigar::new_full_match(i_len), 0)),
+                Ordering::Less => allele_alns.push(align_alleles(allele_i, allele_j, aligner, penalties)?),
+                Ordering::Equal => allele_alns.push((Cigar::new_full_match(allele_i.len() as u32), 0)),
                 Ordering::Greater => {
                     let (cigar, score) = &allele_alns[j * n + i];
                     allele_alns.push((cigar.inverse(), *score));
@@ -362,4 +389,5 @@ fn add_variant_to_alns(
             aln.1 += *allele_score;
         }
     }
+    Ok(())
 }

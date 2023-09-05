@@ -107,6 +107,7 @@ impl Args {
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         // Make window size odd.
         self.moving_window += 1 - self.moving_window % 2;
+        self.penalties.validate()?;
         Ok(self)
     }
 }
@@ -349,7 +350,7 @@ fn find_best_boundary<const LEFT: bool>(
 }
 
 /// Check divergencies and warns if they are too high.
-fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Iterator<Item = f64>) {
+fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Iterator<Item = f64>, from_vcf: bool) {
     let n = entries.len();
     let mut count = 0;
     let mut highest = 0.0;
@@ -371,7 +372,7 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Ite
     if count > 0 {
         log::warn!("    [{}] {} allele pairs with high divergence, highest {:.5} ({} and {})", tag, count,
             highest, entries[highest_i].name(), entries[highest_j].name());
-        if highest > 0.5 {
+        if highest > 0.5 && !from_vcf {
             log::error!("    Please check that all alleles lie on the same strand");
         }
     }
@@ -448,7 +449,7 @@ fn process_haplotypes(
         Some(alns) => dist::pairwise_divergences_from_alns(&entries, alns, paf_writer),
         None => dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads),
     }.map_err(add_path!(paf_filename))?;
-    check_divergencies(tag, &entries, divergences.iter().copied());
+    check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
 
     log::info!("    Clustering haploypes");
     let nwk_filename = locus_dir.join(paths::LOCUS_DENDROGRAM);
