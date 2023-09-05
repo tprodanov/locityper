@@ -582,8 +582,8 @@ where R: Read + Seek,
             kmer_getter, args.max_expansion)? {
         Some(pos) => pos,
         None => {
-            log::error!("Cannot expand_size locus {} to the left.\n    \
-                Try increasing -e/--expand_size parameter or manually modifying region boundaries.", locus);
+            log::error!("Cannot expand locus {} to the left due to a variant overlapping boundary.\n    \
+                Try increasing -e/--expand parameter or manually modifying region boundaries.", locus);
             return Ok(false);
         }
     };
@@ -595,8 +595,8 @@ where R: Read + Seek,
             kmer_getter, args.max_expansion)? {
         Some(pos) => pos + 1,
         None => {
-            log::error!("Cannot expand_size locus {} to the right.\n    \
-                Try increasing -e/--expand_size parameter or manually modify region boundaries.", locus);
+            log::error!("Cannot expand locus {} to the right due to a variant overlapping boundary.\n    \
+                Try increasing -e/--expand parameter or manually modify region boundaries.", locus);
             return Ok(false);
         }
     };
