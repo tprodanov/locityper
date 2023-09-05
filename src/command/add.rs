@@ -48,7 +48,7 @@ struct Args {
     moving_window: u32,
 
     penalties: Penalties,
-    unavail_rate: f64,
+    unknown_frac: f64,
     max_divergence: f64,
 
     threads: u16,
@@ -73,7 +73,7 @@ impl Default for Args {
             moving_window: 500,
 
             penalties: Default::default(),
-            unavail_rate: 0.0001,
+            unknown_frac: 0.0001,
             max_divergence: 0.0001,
 
             threads: 8,
@@ -99,8 +99,8 @@ impl Args {
                 "Loci (-l/-L) are mutually exclusive with sequences (-s)");
         }
 
-        validate_param!(0.0 <= self.unavail_rate && self.unavail_rate <= 1.0,
-            "Unavailable rate ({}) must be within [0, 1]", self.unavail_rate);
+        validate_param!(0.0 <= self.unknown_frac && self.unknown_frac <= 1.0,
+            "Unknown fraction ({}) must be within [0, 1]", self.unknown_frac);
         validate_param!(0.0 <= self.max_divergence && self.max_divergence <= 1.0,
             "Maximum divergence ({}) must be within [0, 1]", self.max_divergence);
 
@@ -159,7 +159,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
         {EMPTY}  (relative to the haplotype length). Variants that have no known\n\
         {EMPTY}  variation in the input VCF pangenome are ignored.",
-        "-u, --unavail".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unavail_rate));
+        "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
     println!("    {:KEY$} {:VAL$}  Calculate sequence alignments between alleles as\n\
@@ -227,7 +227,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.penalties.gap_extension = parser.value()?.parse()?,
             Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
-            Short('u') | Long("unavail") | Long("unavailable") => args.unavail_rate = parser.value()?.parse()?,
+            Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
@@ -623,7 +623,7 @@ where R: Read + Seek,
         Some(vec![(Cigar::new(), 0); haplotypes.total() * (haplotypes.total() - 1) / 2])
     };
     let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
-        pairwise_alns.as_mut(), vcf_file.header(), args.unavail_rate, &args.penalties);
+        pairwise_alns.as_mut(), vcf_file.header(), args.unknown_frac, &args.penalties);
     match reconstruction {
         Ok(seqs) => process_haplotypes(&locus_dir, new_locus.name(), seqs, pairwise_alns.as_ref(), kmer_getter, &args)?,
         Err(Error::InvalidData(e)) => {

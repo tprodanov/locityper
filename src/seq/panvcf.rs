@@ -197,6 +197,47 @@ fn format_var(var: &Record, header: &HeaderView) -> String {
     format!("{}:{}", chrom, var.pos() + 1)
 }
 
+/// Discard sequences with too many unknown nucleotides, as well as the corresponding pairwise alignments.
+fn discard_unknown(
+    seqs: &mut Vec<NamedSeq>,
+    pairwise_alns: Option<&mut Vec<(Cigar, i32)>>,
+    unknown_nts: &[u32],
+    unknown_frac: f64,
+) {
+    let aver_unknown = F64Ext::mean(unknown_nts);
+    if aver_unknown > 0.0 {
+        log::debug!("        On average, {:.1} bp unknown per haplotype", aver_unknown);
+    }
+    let keep_seqs: Vec<_> = seqs.iter().zip(unknown_nts)
+        .map(|(seq, &unknown)| f64::from(unknown) <= unknown_frac * f64::from(seq.len()))
+        .collect();
+    let total = seqs.len();
+    let n_remain: usize = keep_seqs.iter().copied().map(usize::from).sum();
+    let n_discard = total - n_remain;
+    if n_discard == 0 {
+        return;
+    }
+
+    let unfilt_seqs = std::mem::replace(seqs, Vec::with_capacity(n_remain));
+    seqs.extend(unfilt_seqs.into_iter().zip(&keep_seqs)
+        .filter_map(|(seq, &keep)| if keep { Some(seq) } else { None }));
+    log::warn!("        Reconstructed {} haplotypes ({} unavailable)", n_remain, n_discard);
+
+    if let Some(alns) = pairwise_alns {
+        let unfilt_alns = std::mem::replace(alns, Vec::with_capacity(n_remain * (n_remain - 1) / 2));
+        let mut alns_iter = unfilt_alns.into_iter();
+        for (i, &keep_i) in keep_seqs.iter().enumerate() {
+            for &keep_j in keep_seqs[i + 1..].iter() {
+                let curr_aln = alns_iter.next().expect("Not enough pairwise alignments");
+                if keep_i && keep_j {
+                    alns.push(curr_aln);
+                }
+            }
+        }
+        assert!(alns_iter.next().is_none(), "Too many pairwise alignments");
+    }
+}
+
 /// Reconstructs sample sequences by adding variants to the reference sequence.
 /// Returns a vector of named sequences.
 /// If `pairwise_alns` is Some, calculates all pairwise alignments between all haplotypes.
@@ -207,7 +248,7 @@ pub fn reconstruct_sequences(
     haplotypes: &AllHaplotypes,
     mut pairwise_alns: Option<&mut Vec<(Cigar, i32)>>,
     header: &HeaderView,
-    unavail_rate: f64,
+    unknown_frac: f64,
     aln_penalties: &Penalties,
 ) -> Result<Vec<NamedSeq>, Error>
 {
@@ -225,8 +266,8 @@ pub fn reconstruct_sequences(
         }
     }
     let aligner = Aligner::new(aln_penalties);
-    // Number of unavailable nucleotides for each sequence.
-    let mut unavail_size = vec![0_u32; haplotypes.total];
+    // Number of unknown nucleotides for each sequence.
+    let mut unknown_nts = vec![0_u32; haplotypes.total];
 
     // Store last allele for each sample in this buffer.
     let mut last_allele = vec![0; haplotypes.total];
@@ -267,7 +308,7 @@ pub fn reconstruct_sequences(
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) => allele_ix as usize,
                     GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing =>
                     {
-                        unavail_size[haplotype.shift_ix] += ref_len;
+                        unknown_nts[haplotype.shift_ix] += ref_len;
                         0 // Use reference allele
                     }
                 };
@@ -297,22 +338,12 @@ pub fn reconstruct_sequences(
         }
     }
 
-    let aver_unavail = F64Ext::mean(&unavail_size);
-    if aver_unavail > 0.0 {
-        log::debug!("        On average, {:.1} bp unavailable per haplotype", aver_unavail);
+    discard_unknown(&mut seqs, pairwise_alns, &unknown_nts, unknown_frac);
+    if seqs.len() < 2 {
+        Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()))
+    } else {
+        Ok(seqs)
     }
-    let avail_seqs: Vec<NamedSeq> = seqs.into_iter().zip(unavail_size.into_iter())
-        .filter(|(seq, unavail)| f64::from(*unavail) <= unavail_rate * f64::from(seq.len()))
-        .map(|(seq, _)| seq)
-        .collect();
-    let n_remain = avail_seqs.len();
-    if n_remain < haplotypes.total {
-        log::warn!("        Reconstructed {} haplotypes ({} unavailable)", n_remain, haplotypes.total - n_remain);
-    }
-    if n_remain < 2 {
-        return Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()));
-    }
-    Ok(avail_seqs)
 }
 
 #[inline]
