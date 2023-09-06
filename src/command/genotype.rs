@@ -488,6 +488,10 @@ fn load_loci(
         total_entries += 1;
         let path = entry.path();
         if let Some(name) = locus_name_matches(&path, subset_loci) {
+            if !path.join(paths::SUCCESS).exists() {
+                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
+                continue;
+            }
             match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS), ()) {
                 Ok(set) => {
                     let locus_data = LocusData::new(set, &path, &out_loci_dir);
@@ -495,7 +499,8 @@ fn load_loci(
                         loci.push(locus_data);
                     }
                 },
-                Err(e) => log::error!("Could not load locus information from {}: {:?}", ext::fmt::path(&path), e),
+                Err(e) => log::error!("Could not load locus information from {}: {}",
+                    ext::fmt::path(&path), e.display()),
             }
         }
     }

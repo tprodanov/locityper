@@ -584,7 +584,7 @@ where R: Read + Seek,
         Some(pos) => pos,
         None => {
             log::error!("Cannot expand locus {} to the left due to a variant overlapping boundary.\n    \
-                Try increasing -e/--expand parameter or manually modifying region boundaries.", locus);
+                Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name());
             return Ok(false);
         }
     };
@@ -597,7 +597,7 @@ where R: Read + Seek,
         Some(pos) => pos + 1,
         None => {
             log::error!("Cannot expand locus {} to the right due to a variant overlapping boundary.\n    \
-                Try increasing -e/--expand parameter or manually modify region boundaries.", locus);
+                Try increasing -e/--expand parameter or manually modify region boundaries.", locus.name());
             return Ok(false);
         }
     };
