@@ -638,7 +638,7 @@ impl AllAlignments {
         while reader.has_more() {
             let mut read_data = ReadData::default();
             total_reads += 1;
-            assert!(tmp_alns.is_empty());
+            tmp_alns.clear();
             let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
             if !hashes.insert(summary1.name_hash) {
                 log::warn!("Read {} produced hash collision ({:X})", read_data.name, summary1.name_hash);
