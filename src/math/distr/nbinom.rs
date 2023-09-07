@@ -44,8 +44,24 @@ impl NBinom {
     /// Create Negative Binomial distribution from mean `m` and variance `v`.
     /// Conditions: 0 < m < v.
     pub fn estimate(m: f64, v: f64) -> NBinom {
-        assert!(v > m, "Negative Binomial: cannot estimate parameters for mean {:.3} and variance {:.3}", m, v);
+        assert!(0.0 < m && m < v, "Cannot estimate N.Binom. parameters from mean {:.3} and variance {:.3}", m, v);
         NBinom::new(m * m / (v - m), m / v)
+    }
+
+    /// Estimate Negative Binomial from mean `m` and variance `v`.
+    /// Uses distribution, close to Poisson if variance is too low.
+    pub fn estimate_corrected(m: f64, v: f64) -> NBinom {
+        assert!(0.0 < m, "Cannot estimate N.Binom. parameters from mean {:.3} and variance {:.3}", m, v);
+        const PMAX: f64 = 0.99999;
+        let p = m / v;
+        if p > PMAX {
+            if 0.9 * v < m {
+                log::warn!("    Cannot not accurately fit Negative Binomial to mean {:.3} and variance {:.3}", m, v);
+            }
+            NBinom::new(PMAX * m / (1.0 - PMAX), PMAX)
+        } else {
+            NBinom::new(m * m / (v - m), p)
+        }
     }
 
     /// Create a new distribution where n is multiplied by `coeff` and p stays the same.

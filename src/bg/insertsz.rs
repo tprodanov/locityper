@@ -134,9 +134,9 @@ impl InsertDistr {
         let m = bisect::right(&insert_sizes, &est_limit);
         let lim_insert_sizes = &insert_sizes[..m];
         let (mean, var) = F64Ext::mean_variance(lim_insert_sizes);
-        let distr = NBinom::estimate(mean, var.max(mean * 1.000001));
+        let distr = NBinom::estimate_corrected(mean, var);
         let pred_mean = distr.mean();
-        log::info!("    Insert size: observed {:.1} ± {:.1}, predicted {:.1} ± {:.1}",
+        log::info!("    Insert size: observed {:.1} ± {:.1}, fitted {:.1} ± {:.1}",
             mean, var.sqrt(), pred_mean, distr.variance().sqrt());
 
         let size = cache_size(&distr);
