@@ -14,7 +14,7 @@ use crate::{
     bg::ser::{JsonSer, json_get},
     math::distr::{
         DiscretePmf, LinearCache, WithMoments, WithQuantile,
-        nbinom::{NBinom, RegularizedEstimator},
+        nbinom::NBinom,
     },
     seq::aln::NamedAlignment,
 };
@@ -134,7 +134,7 @@ impl InsertDistr {
         let m = bisect::right(&insert_sizes, &est_limit);
         let lim_insert_sizes = &insert_sizes[..m];
         let (mean, var) = F64Ext::mean_variance(lim_insert_sizes);
-        let distr = RegularizedEstimator::default().estimate(mean, var);
+        let distr = NBinom::estimate(mean, var);
         log::info!("    Insert size mean = {:.1},  st.dev. = {:.1}", distr.mean(), distr.variance().sqrt());
 
         let size = cache_size(&distr);
