@@ -6,8 +6,8 @@ use std::{
 };
 
 /// Calculates FNV1a function for given bytes.
-pub fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hasher = fnv::FnvHasher::default();
+pub fn fx_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = fx::FxHasher::default();
     hasher.write(bytes);
     hasher.finish()
 }

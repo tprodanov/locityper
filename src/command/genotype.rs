@@ -9,7 +9,7 @@ use std::{
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
-use fnv::{FnvHashSet, FnvHashMap};
+use fx::{FxHashSet, FxHashMap};
 use htslib::bam;
 use crate::{
     err::{Error, validate_param, add_path},
@@ -35,7 +35,7 @@ struct Args {
     input: Vec<PathBuf>,
     database: Option<PathBuf>,
     output: Option<PathBuf>,
-    subset_loci: FnvHashSet<String>,
+    subset_loci: FxHashSet<String>,
     ploidy: u8,
     priors: Option<PathBuf>,
 
@@ -61,7 +61,7 @@ impl Default for Args {
             input: Vec::new(),
             database: None,
             output: None,
-            subset_loci: FnvHashSet::default(),
+            subset_loci: FxHashSet::default(),
             ploidy: 2,
             priors: None,
 
@@ -354,7 +354,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
-fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> Option<&'a str> {
+fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FxHashSet<String>) -> Option<&'a str> {
     match path.file_name().unwrap().to_str() {
         None => {
             log::error!("Skipping directory {:?} - filename is not a valid UTF-8", path);
@@ -378,8 +378,8 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &FnvHashSet<String>) -> O
 /// Repeated lines <locus> <genotype> are not allowed.
 ///
 /// Output dictionary: `locus -> { genotype -> ln-prior }`.
-fn load_priors(path: &Path) -> Result<FnvHashMap<String, FnvHashMap<String, f64>>, Error> {
-    let mut res: FnvHashMap<String, FnvHashMap<String, f64>> = FnvHashMap::default();
+fn load_priors(path: &Path) -> Result<FxHashMap<String, FxHashMap<String, f64>>, Error> {
+    let mut res: FxHashMap<String, FxHashMap<String, f64>> = FxHashMap::default();
     for line in ext::sys::open(path)?.lines() {
         let line = line.map_err(add_path!(path))?;
         if line.starts_with('#') {
@@ -465,7 +465,7 @@ fn clean_dir(dir: &Path) -> Result<(), Error> {
 fn load_loci(
     db_path: &Path,
     out_path: &Path,
-    subset_loci: &FnvHashSet<String>,
+    subset_loci: &FxHashSet<String>,
     rerun: super::Rerun,
 ) -> Result<Vec<LocusData>, Error>
 {
@@ -646,7 +646,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
 fn generate_genotypes(
     contig_ids: &[ContigId],
     contigs: &ContigNames,
-    opt_priors: Option<&FnvHashMap<String, f64>>,
+    opt_priors: Option<&FxHashMap<String, f64>>,
     ploidy: usize,
 ) -> Result<(Vec<Genotype>, Vec<f64>), Error>
 {
@@ -681,7 +681,7 @@ fn analyze_locus(
     bg_distr: &BgDistr,
     scheme: &Arc<Scheme>,
     cached_distrs: &CachedDepthDistrs<'_>,
-    opt_priors: Option<&FnvHashMap<String, f64>>,
+    opt_priors: Option<&FxHashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
 ) -> Result<(), Error>

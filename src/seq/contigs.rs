@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 use smallvec::SmallVec;
-use fnv::FnvHashMap;
+use fx::FxHashMap;
 use bio::io::fasta::{self, FastaRead};
 use crate::{
     err::{Error, add_path},
@@ -54,7 +54,7 @@ pub struct ContigNames {
     tag: String,
     names: Vec<String>,
     lengths: Vec<u32>,
-    name_to_id: FnvHashMap<String, ContigId>,
+    name_to_id: FxHashMap<String, ContigId>,
 }
 
 impl ContigNames {
@@ -64,7 +64,7 @@ impl ContigNames {
     pub fn new(tag: impl Into<String>, it: impl Iterator<Item = (String, u32)>) -> Result<Self, Error> {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
-        let mut name_to_id = FnvHashMap::default();
+        let mut name_to_id = FxHashMap::default();
 
         for (name, length) in it {
             let contig_id = ContigId::new(names.len());

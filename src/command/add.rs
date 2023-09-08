@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use fnv::FnvHashSet;
+use fx::FxHashSet;
 use bio::io::fasta;
 use htslib::bcf::{
     self,
@@ -42,7 +42,7 @@ struct Args {
     sequences: Vec<String>,
 
     ref_name: Option<String>,
-    leave_out: FnvHashSet<String>,
+    leave_out: FxHashSet<String>,
     max_expansion: u32,
     moving_window: u32,
 
@@ -243,7 +243,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 /// Loads named interval from a list of loci and a list of BED files. Names must not repeat.
 fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) -> Result<Vec<NamedInterval>, Error> {
     let mut intervals = Vec::new();
-    let mut names = FnvHashSet::default();
+    let mut names = FxHashSet::default();
     for locus in loci.iter() {
         let interval = NamedInterval::parse_explicit(locus, contigs)?;
         if !names.insert(interval.name().to_string()) {

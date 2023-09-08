@@ -3,7 +3,7 @@
 use std::{
     str::from_utf8,
 };
-use fnv::FnvHashSet;
+use fx::FxHashSet;
 use htslib::bcf::{
     self,
     header::HeaderView,
@@ -68,12 +68,12 @@ impl AllHaplotypes {
     pub fn new(
         reader: &mut impl bcf::Read,
         ref_name: &str,
-        leave_out: &FnvHashSet<String>,
+        leave_out: &FxHashSet<String>,
     ) -> Result<Self, Error>
     {
         let mut discarded = 0;
         let mut total = 0;
-        let mut hap_names = FnvHashSet::default();
+        let mut hap_names = FxHashSet::default();
         let ref_name = if leave_out.contains(ref_name) {
             discarded += 1;
             None
