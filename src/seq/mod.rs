@@ -16,7 +16,7 @@ pub use contigs::{ContigId, ContigNames, ContigSet};
 pub use fastx::write_fasta;
 
 /// Make nucleotide sequence standard: only letters A,C,G,T,N.
-pub fn standardize(seq: &mut [u8]) {
+pub fn standardize(seq: &mut [u8]) -> Result<(), u8> {
     for nt in seq.iter_mut() {
         *nt = match &nt {
             b'A' | b'a' => b'A',
@@ -25,9 +25,10 @@ pub fn standardize(seq: &mut [u8]) {
             b'T' | b't' => b'T',
             b'N' | b'R' | b'Y' | b'K' | b'M' | b'S' | b'W' | b'B' | b'D' | b'H' | b'V'
                 | b'n' | b'r' | b'y' | b'k' | b'm' | b's' | b'w' | b'b' | b'd' | b'h' | b'v' => b'N',
-            _ => panic!("Unknown nucleotide {} ({})", char::from(*nt), nt),
+            _ => return Err(*nt),
         };
     }
+    Ok(())
 }
 
 /// Does the sequence include unknown (N) nucleotides?
@@ -83,6 +84,10 @@ impl NamedSeq {
         &self.name
     }
 
+    pub fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+
     /// Returns reference to the sequence.
     pub fn seq(&self) -> &[u8] {
         &self.seq
@@ -91,6 +96,11 @@ impl NamedSeq {
     /// Returns mutable sequence reference.
     pub fn seq_mut(&mut self) -> &mut Vec<u8> {
         &mut self.seq
+    }
+
+    /// Destroys the structure and returns both name and sequence.
+    pub fn take_both(self) -> (String, Vec<u8>) {
+        (self.name, self.seq)
     }
 
     /// Consumes this object and returns owned sequence.

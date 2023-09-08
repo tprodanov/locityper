@@ -544,7 +544,7 @@ where R: Read + Seek,
     // Add extra half-window to each sides.
     let halfw = args.moving_window / 2;
     let full_interv = inner_interv.expand(args.max_expansion + halfw, args.max_expansion + halfw);
-    let full_seq = full_interv.fetch_seq(fasta_file).map_err(add_path!(args.reference.as_ref().unwrap()))?;
+    let full_seq = full_interv.fetch_seq(fasta_file)?;
 
     let outer_interv = match process_unknown_seq(locus.name(), &full_seq, &full_interv, &inner_interv) {
         Some(interv) => interv,
@@ -685,7 +685,7 @@ fn process_locus_from_fasta(
         return Ok(())
     }
     let mut fasta_reader = fastx::Reader::from_path(fasta_path)?;
-    let seqs = fasta_reader.read_all().map_err(add_path!(fasta_path))?;
+    let seqs = fasta_reader.read_all()?;
     check_sequences(&seqs, locus)?;
     process_haplotypes(&locus_dir, locus, seqs, kmer_getter, &args)?;
     Ok(())

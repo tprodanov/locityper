@@ -42,16 +42,19 @@ impl Penalties {
     }
 }
 
-pub struct Aligner(*mut cwfa::wavefront_aligner_t);
+pub struct Aligner {
+    inner: *mut cwfa::wavefront_aligner_t,
+    penalties: Penalties,
+}
 
 impl Drop for Aligner {
     fn drop(&mut self) {
-        unsafe { cwfa::wavefront_aligner_delete(self.0) }
+        unsafe { cwfa::wavefront_aligner_delete(self.inner) }
     }
 }
 
 impl Aligner {
-    pub fn new(penalties: &Penalties) -> Self {
+    pub fn new(penalties: Penalties) -> Self {
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
         // Use Adaptive heuristic.
         attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_wfadaptive;
@@ -72,22 +75,32 @@ impl Aligner {
         attributes.affine_penalties.gap_opening = penalties.gap_opening as i32;
         attributes.affine_penalties.gap_extension = penalties.gap_extension as i32;
 
-        Self(unsafe { cwfa::wavefront_aligner_new(&mut attributes) })
+        Self {
+            inner: unsafe { cwfa::wavefront_aligner_new(&mut attributes) },
+            penalties,
+        }
+    }
+
+    pub fn penalties(&self) -> &Penalties {
+        &self.penalties
     }
 
     /// Aligns two sequences and returns pair (Cigar, alignment score).
     /// If Cigar creation fails, returns violating character.
-    pub fn align(&self, seq1: &[u8], seq2: &[u8]) -> Result<(Cigar, i32), (u8, Vec<u8>)> {
+    pub fn align(&self, seq1: &[u8], seq2: &[u8]) -> Result<(Cigar, i32), Error> {
         let status = unsafe { cwfa::wavefront_align(
-            self.0,
+            self.inner,
             seq1.as_ptr() as *const c_char,
             seq1.len() as i32,
             seq2.as_ptr() as *const c_char,
             seq2.len() as i32,
         ) };
         assert_eq!(status, 0, "WFA alignment failed");
-        let c_cigar = unsafe { (*self.0).cigar };
-        let cigar = convert_cigar(c_cigar)?;
+        let c_cigar = unsafe { (*self.inner).cigar };
+        let cigar = convert_cigar(c_cigar)
+            .map_err(|(ch, raw_cigar)| Error::RuntimeError(format!(
+                "Could not align {} and {}. Violating CIGAR character '{}' ({}) in {:?}",
+                String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2), char::from(ch), ch, raw_cigar)))?;
         let score = unsafe { (*c_cigar).score };
         Ok((cigar, score))
     }

@@ -6,11 +6,15 @@ use std::{
 };
 use smallvec::SmallVec;
 use fx::FxHashMap;
-use bio::io::fasta::{self, FastaRead};
+use bio::io::fasta;
 use crate::{
     err::{Error, add_path},
-    ext::{self, vec::VecOrNone},
-    seq::kmers::KmerCounts,
+    ext,
+    seq::{
+        fastx,
+        NamedSeq,
+        kmers::KmerCounts,
+    },
 };
 
 /// Contig identificator - newtype over u16.
@@ -96,38 +100,6 @@ impl ContigNames {
     /// First argument: overall name of the contig name set.
     pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> Result<Self, Error> {
         Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
-    }
-
-    /// Reads all entries from fasta and saves them into memory.
-    ///
-    /// Descriptions are stored in either `&mut Vector<Option<String>>` or `()`, if they are not needed.
-    ///
-    /// Returns tuple
-    /// - ContigNames,
-    /// - Vector of contig sequences.
-    pub fn load_fasta(
-        tag: impl Into<String>,
-        filename: &Path,
-        mut descriptions: impl VecOrNone<Option<String>>,
-    ) -> Result<(Self, Vec<Vec<u8>>), Error>
-    {
-        let mut reader = fasta::Reader::from_bufread(ext::sys::open(&filename)?);
-        let mut names_lengths = Vec::new();
-        let mut seqs = Vec::new();
-        let mut record = fasta::Record::new();
-        loop {
-            reader.read(&mut record).map_err(add_path!(filename))?;
-            if record.is_empty() {
-                let contigs = Self::new(tag, names_lengths.into_iter())?;
-                return Ok((contigs, seqs));
-            }
-
-            let mut ref_seq = record.seq().to_vec();
-            super::standardize(&mut ref_seq);
-            names_lengths.push((record.id().to_string(), u32::try_from(ref_seq.len()).unwrap()));
-            seqs.push(ref_seq.to_vec());
-            descriptions.push(record.desc().map(str::to_string));
-        }
     }
 
     /// Loads indexed fasta and stored contig names and lengths.
@@ -265,10 +237,13 @@ impl ContigSet {
         tag: impl Into<String>,
         fasta_filename: &Path,
         kmers_filename: &Path,
-        descriptions: impl VecOrNone<Option<String>>,
     ) -> Result<Self, Error>
     {
-        let (contigs, seqs) = ContigNames::load_fasta(tag, fasta_filename, descriptions)?;
+        let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
+        let mut named_seqs = fasta_reader.read_all()?;
+        let contigs = ContigNames::new(tag,
+            named_seqs.iter_mut().map(|entry| (std::mem::replace(entry.name_mut(), String::new()), entry.len())))?;
+        let seqs: Vec<_> = named_seqs.into_iter().map(NamedSeq::take_seq).collect();
         let kmer_counts = KmerCounts::load(ext::sys::open(kmers_filename)?, contigs.lengths())?;
         Ok(Self {
             contigs: Arc::new(contigs),

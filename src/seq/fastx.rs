@@ -266,11 +266,17 @@ impl<R: BufRead + Send> Reader<R> {
 
 impl<R: BufRead + Send> Reader<R> {
     /// Reads all sequences into memory.
-    pub fn read_all(&mut self) -> io::Result<Vec<NamedSeq>> {
+    /// Each sequence is standartized and checked for invalid nucleotides.
+    pub fn read_all(&mut self) -> Result<Vec<NamedSeq>, Error> {
         let mut record = Record::default();
         let mut records = Vec::new();
-        while self.read_next(&mut record)? {
-            records.push(NamedSeq::new(record.name_only().into_owned(), record.seq().to_owned()));
+        while self.read_next(&mut record).map_err(add_path!(!))? {
+            let name = record.name_only().into_owned();
+            let mut seq = record.seq().to_owned();
+            crate::seq::standardize(&mut seq)
+                .map_err(|nt| Error::InvalidData(format!("Invalid nucleotide `{}` ({}) for sequence {}",
+                    char::from(nt), nt, name)))?;
+            records.push(NamedSeq::new(name, seq));
         }
         Ok(records)
     }

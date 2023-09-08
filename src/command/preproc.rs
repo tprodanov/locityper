@@ -942,7 +942,7 @@ impl BgRegion {
         let interval = select_bg_interval(&ref_filename, &ref_contigs, &args.bg_region)?;
 
         let kmer_getter = super::add::load_kmer_getter(db_path, args.jellyfish.clone())?;
-        let sequence = interval.fetch_seq(&mut ref_fasta).map_err(add_path!(ref_filename))?;
+        let sequence = interval.fetch_seq(&mut ref_fasta)?;
         log::info!("Calculating k-mer counts on the background region");
         let kmer_counts = kmer_getter.fetch_one(sequence.clone())?;
         Ok(Self { ref_contigs, interval, sequence, kmer_counts })

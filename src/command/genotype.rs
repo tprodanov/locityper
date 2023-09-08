@@ -492,7 +492,7 @@ fn load_loci(
                 log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
                 continue;
             }
-            match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS), ()) {
+            match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS)) {
                 Ok(set) => {
                     let locus_data = LocusData::new(set, &path, &out_loci_dir);
                     if rerun.prepare_and_clean_dir(&locus_data.out_dir, clean_dir)? {
@@ -536,7 +536,7 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
     for locus in filt_loci.iter() {
         let fasta_path = locus.db_locus_dir.join(paths::LOCUS_FASTA_ALL);
         let mut fasta_reader = fastx::Reader::from_path(&fasta_path)?;
-        let locus_all_seqs = fasta_reader.read_all().map_err(add_path!(fasta_path))?;
+        let locus_all_seqs = fasta_reader.read_all()?;
         target_builder.add(locus_all_seqs.iter().map(NamedSeq::seq));
         // Output files with a large buffer (4 Mb).
         const BUFFER: usize = 4_194_304;

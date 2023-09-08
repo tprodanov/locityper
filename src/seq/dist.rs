@@ -3,41 +3,70 @@ use std::{
     sync::Arc,
     io::{self, Write},
 };
+use fx::FxHashMap;
+use smallvec::SmallVec;
 use super::{
     NamedSeq,
     wfa::{Aligner, Penalties},
     cigar::{Cigar, Operation},
 };
 
-/// With already known alignments between sequences, calculates divergences from alignments and writes PAF file.
-pub fn pairwise_divergences_from_alns(
-    entries: &[NamedSeq],
-    alns: &[(Cigar, i32)],
-    mut paf_writer: impl Write,
-) -> io::Result<Vec<f64>> {
-    let n = entries.len();
-    assert_eq!(alns.len(), n * (n - 1) / 2);
-    let mut divergences = Vec::with_capacity(alns.len());
-    let mut alns_iter = alns.iter();
-    for (i, entry1) in entries.iter().enumerate() {
-        for entry2 in entries[i + 1..].iter() {
-            let (cigar, score) = alns_iter.next().unwrap();
-            let divergence = write_paf(&mut paf_writer, entry2, entry1, &cigar, *score)?;
-            divergences.push(divergence);
-        }
+const CAPACITY: usize = 4;
+type KmerCache<'a> = FxHashMap<&'a [u8], SmallVec<[u32; CAPACITY]>>;
+
+/// Creates a HashMap containing all the k-mers in the sequence.
+/// A good rolling hash function should speed up the code.
+fn cache_kmers(seq: &[u8], k: usize) -> KmerCache {
+    let mut map = KmerCache::default();
+    for (i, kmer) in seq.windows(k).enumerate() {
+        map.entry(kmer)
+            .or_insert_with(SmallVec::new)
+            .push(i as u32);
     }
-    Ok(divergences)
+    map
 }
 
-fn safe_align(aligner: &Aligner, entry1: &NamedSeq, entry2: &NamedSeq) -> (Cigar, i32) {
-    match aligner.align(entry1.seq(), entry2.seq()) {
-        Ok(cigar_and_score) => cigar_and_score,
-        Err((ch, raw_cigar)) => {
-            log::error!("Could not align {} and {}. Violating CIGAR character '{}' ({}) in {:?}",
-                entry1.name(), entry2.name(), char::from(ch), ch, raw_cigar);
-            (Cigar::new(), i32::MIN)
+/// Finds all matches between k-mers in two caches.
+fn kmer_matches(cache1: &KmerCache, cache2: &KmerCache) -> Vec<(u32, u32)> {
+    let mut matches = Vec::new();
+    for (kmer1, positions1) in cache1.iter() {
+        if let Some(positions2) = cache2.get(kmer1) {
+            for &pos1 in positions1 {
+                for &pos2 in positions2 {
+                    matches.push((pos1, pos2));
+                }
+            }
         }
     }
+    matches.sort_unstable();
+    matches
+}
+
+// /// Aligns two sequences between k-mer matches.
+// fn align(
+//     seq1: &[u8],
+//     cache1: &KmerCache,
+//     seq2: &[u8],
+//     cache2: &KmerCache,
+//     aligner: &Aligner,
+//     penalties: &Penalties,
+//     k: usize,
+// ) -> Result<(Cigar, i32), Error>
+// {
+//     let matches = kmer_matches(cache1, cache2);
+
+// }
+
+fn safe_align(aligner: &Aligner, entry1: &NamedSeq, entry2: &NamedSeq) -> (Cigar, i32) {
+    unimplemented!()
+    // match aligner.align(entry1.seq(), entry2.seq()) {
+    //     Ok(cigar_and_score) => cigar_and_score,
+    //     Err((ch, raw_cigar)) => {
+    //         log::error!("Could not align {} and {}. Violating CIGAR character '{}' ({}) in {:?}",
+    //             entry1.name(), entry2.name(), char::from(ch), ch, raw_cigar);
+    //         (Cigar::new(), i32::MIN)
+    //     }
+    // }
 }
 
 /// Calculates all pairwise divergences between all sequences, writes alignments to PAF file,
@@ -52,7 +81,7 @@ pub fn pairwise_divergences(
         log::debug!("        Aligning sequences in 1 thread");
         let n = entries.len();
         let mut divergences = Vec::with_capacity(n * (n - 1) / 2);
-        let aligner = Aligner::new(penalties);
+        let aligner = Aligner::new(penalties.clone());
         for (i, entry1) in entries.iter().enumerate() {
             for entry2 in entries[i + 1..].iter() {
                 let (cigar, score) = safe_align(&aligner, entry1, entry2);
@@ -96,7 +125,7 @@ fn divergences_multithread(
             let penalties = penalties.clone();
             handles.push(thread::spawn(move || {
                 assert!(start < end);
-                let aligner = Aligner::new(&penalties);
+                let aligner = Aligner::new(penalties);
                 pairs[start..end].iter()
                     .map(|&(i, j)| safe_align(&aligner, &entries[i as usize], &entries[j as usize]))
                     .collect::<Vec<_>>()

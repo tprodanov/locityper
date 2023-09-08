@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    io::{self, Read, Seek},
+    io::{Read, Seek},
     sync::Arc,
     cmp::{min, max, Ordering},
 };
@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 use const_format::formatcp;
 use bio::io::fasta;
 use crate::{
-    Error,
+    err::{Error, add_path},
     ext::fmt::PrettyU32,
 };
 use super::{ContigId, ContigNames};
@@ -205,11 +205,13 @@ impl Interval {
     }
 
     /// Fetches sequence of the interval from an indexed fasta reader.
-    pub fn fetch_seq<R: Read + Seek>(&self, fasta: &mut fasta::IndexedReader<R>) -> io::Result<Vec<u8>> {
-        fasta.fetch(self.contig_name(), u64::from(self.start), u64::from(self.end))?;
+    pub fn fetch_seq<R: Read + Seek>(&self, fasta: &mut fasta::IndexedReader<R>) -> Result<Vec<u8>, Error> {
+        fasta.fetch(self.contig_name(), u64::from(self.start), u64::from(self.end)).map_err(add_path!(!))?;
         let mut seq = Vec::with_capacity(self.len() as usize);
-        fasta.read(&mut seq)?;
-        crate::seq::standardize(&mut seq);
+        fasta.read(&mut seq).map_err(add_path!(!))?;
+        crate::seq::standardize(&mut seq)
+            .map_err(|nt| Error::InvalidData(format!("Unknown nucleotide `{}` ({}) in {}",
+                char::from(nt), nt, self)))?;
         Ok(seq)
     }
 }
