@@ -1,7 +1,7 @@
 use std::{
     thread,
     sync::Arc,
-    io::{self, Write},
+    io::Write,
 };
 use fx::FxHashMap;
 use smallvec::SmallVec;
@@ -62,28 +62,42 @@ fn align(
     let mut i1 = 0;
     let mut j1 = 0;
     let k = k as u32;
+    let mut curr_match = 0;
     for ix in sparse_aln.path.into_iter() {
         let (i2, j2) = kmer_matches[ix];
         if i1 > i2 {
+            curr_match += 1;
+            i1 += 1;
+            j1 += 1;
             continue;
+        }
+
+        if curr_match > 0 {
+            cigar.push_unchecked(Operation::Equal, curr_match);
+            curr_match = 0;
         }
         let jump1 = i2 - i1;
         let jump2 = j2.checked_sub(j1).unwrap();
         if jump1 > 0 && jump2 > 0 {
-            score += aligner.align(&seq1[i1 as usize..i2 as usize], &seq2[j1 as usize..j2 as usize], &mut cigar)?;
+            let subseq1 = &seq1[i1 as usize..i2 as usize];
+            let subseq2 = &seq2[j1 as usize..j2 as usize];
+            score += aligner.align(subseq1, subseq2, &mut cigar)?;
         } else if jump1 > 0 {
             score -= penalties.gap_open + jump1 as i32 * penalties.gap_extend;
-            cigar.push_checked(Operation::Del, jump1);
+            cigar.push_unchecked(Operation::Del, jump1);
         } else if jump2 > 0 {
             score -= penalties.gap_open + jump2 as i32 * penalties.gap_extend;
-            cigar.push_checked(Operation::Ins, jump2);
+            cigar.push_unchecked(Operation::Ins, jump2);
         }
 
-        cigar.push_checked(Operation::Equal, k);
+        curr_match += k;
         i1 = i2 + k;
         j1 = j2 + k;
     }
 
+    if curr_match > 0 {
+        cigar.push_unchecked(Operation::Equal, curr_match);
+    }
     let n = seq1.len() as u32;
     let m = seq2.len() as u32;
     let jump1 = n.checked_sub(i1).unwrap();
@@ -92,10 +106,10 @@ fn align(
         score += aligner.align(&seq1[i1 as usize..n as usize], &seq2[j1 as usize..m as usize], &mut cigar)?;
     } else if jump1 > 0 {
         score -= penalties.gap_open + jump1 as i32 * penalties.gap_extend;
-        cigar.push_checked(Operation::Del, jump1);
+        cigar.push_unchecked(Operation::Del, jump1);
     } else if jump2 > 0 {
         score -= penalties.gap_open + jump2 as i32 * penalties.gap_extend;
-        cigar.push_checked(Operation::Ins, jump2);
+        cigar.push_unchecked(Operation::Ins, jump2);
     }
     Ok((cigar, score))
 }
@@ -119,9 +133,7 @@ pub fn pairwise_divergences(
             for (entry2, cache2) in entries[i + 1..].iter().zip(&caches[i + 1..]) {
                 let kmer_matches = find_kmer_matches(cache1, cache2);
                 let (cigar, score) = align(&aligner, entry1.seq(), entry2.seq(), &kmer_matches, k)?;
-                let divergence = write_paf(&mut paf_writer, entry2, entry1, &cigar, score)
-                    .map_err(add_path!(!))?;
-                divergences.push(divergence);
+                divergences.push(write_paf(&mut paf_writer, entry2, entry1, &cigar, score)?);
             }
         }
         Ok(divergences)
@@ -183,8 +195,7 @@ fn divergences_multithread(
     for res in results.into_iter() {
         for (cigar, score) in res?.into_iter() {
             let &(i, j) = pairs_iter.next().expect("Number of solutions does not match the number of tasks");
-            divergences.push(write_paf(&mut paf_writer, &entries[j as usize], &entries[i as usize], &cigar, score)
-                .map_err(add_path!(!))?);
+            divergences.push(write_paf(&mut paf_writer, &entries[j as usize], &entries[i as usize], &cigar, score)?);
         }
     }
     assert!(pairs_iter.next().is_none(), "Number of solutions does not match the number of tasks");
@@ -199,21 +210,24 @@ fn write_paf(
     refer: &NamedSeq,
     cigar: &Cigar,
     score: i32,
-) -> io::Result<f64>
+) -> Result<f64, Error>
 {
     let qname = query.name();
     let rname = refer.name();
     let qlen = query.seq().len() as u32;
     let rlen = refer.seq().len() as u32;
-    write!(writer, "{qname}\t{qlen}\t0\t{qlen}\t+\t{rname}\t{rlen}\t0\t{rlen}\t")?;
+    write!(writer, "{qname}\t{qlen}\t0\t{qlen}\t+\t{rname}\t{rlen}\t0\t{rlen}\t").map_err(add_path!(!))?;
 
     if cigar.is_empty() {
-        writeln!(writer, "0\t0t\t0")?;
+        writeln!(writer, "0\t0t\t0").map_err(add_path!(!))?;
         return Ok(1.0);
     }
 
-    assert_eq!(qlen, cigar.query_len());
-    assert_eq!(rlen, cigar.ref_len());
+    if qlen != cigar.query_len() || rlen != cigar.ref_len() {
+        return Err(Error::RuntimeError(format!(
+            "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
+            qname, qlen, rname, rlen, cigar.query_len(), cigar.ref_len())));
+    }
     let mut nmatches = 0;
     let mut total_size = 0;
     for item in cigar.iter() {
@@ -225,6 +239,6 @@ fn write_paf(
     let edit_dist = total_size - nmatches;
     let divergernce = f64::from(edit_dist) / f64::from(total_size);
     writeln!(writer, "{nmatches}\t{total_size}\t60\t\
-        NM:i:{edit_dist}\tAS:i:{score}\tdv:f:{divergernce:.7}\tcg:Z:{cigar}")?;
+        NM:i:{edit_dist}\tAS:i:{score}\tdv:f:{divergernce:.7}\tcg:Z:{cigar}").map_err(add_path!(!))?;
     Ok(divergernce)
 }

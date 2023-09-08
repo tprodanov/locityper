@@ -21,6 +21,7 @@ pub struct Penalties {
     pub mismatch: i32,
     pub gap_open: i32,
     pub gap_extend: i32,
+    pub more_heuristics: bool,
 }
 
 impl Default for Penalties {
@@ -29,6 +30,7 @@ impl Default for Penalties {
             mismatch: 4,
             gap_open: 6,
             gap_extend: 1,
+            more_heuristics: true,
         }
     }
 }
@@ -56,14 +58,19 @@ impl Drop for Aligner {
 impl Aligner {
     pub fn new(penalties: Penalties) -> Self {
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
-        // Use Adaptive heuristic.
-        attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_wfadaptive;
-        attributes.heuristic.min_wavefront_length = 50;
-        attributes.heuristic.max_distance_threshold = 1000;
-        attributes.heuristic.steps_between_cutoffs = 10;
-        // Use less memory at the expense of running time.
-        attributes.memory_mode = cwfa::wavefront_memory_t_wavefront_memory_low;
+        if penalties.more_heuristics {
+            // Limit the number of alignment steps.
+            attributes.system.max_alignment_steps = 1000;
+        }
 
+        // Use X-drop heuristic.
+        attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_xdrop;
+        attributes.heuristic.min_wavefront_length = 100;
+        attributes.heuristic.steps_between_cutoffs = 100;
+        attributes.heuristic.xdrop = if penalties.more_heuristics { 50 } else { 5000 };
+
+        // High memory for some reason produces alignments with M both for X and =.
+        attributes.memory_mode = cwfa::wavefront_memory_t_wavefront_memory_med;
         // Compute score and CIGAR as well.
         attributes.alignment_scope = cwfa::alignment_scope_t_compute_alignment;
         // Compute global alignment.
@@ -85,7 +92,8 @@ impl Aligner {
         &self.penalties
     }
 
-    /// Aligns two sequences, extends `cigar`, and returns alignment score.
+    /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
+    /// If the alignment is dropped, returns VERY approximate alignment.
     pub fn align(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> Result<i32, Error> {
         let status = unsafe { cwfa::wavefront_align(
             self.inner,
@@ -94,7 +102,26 @@ impl Aligner {
             seq2.as_ptr() as *const c_char,
             seq2.len() as i32,
         ) };
-        assert_eq!(status, 0, "WFA alignment failed");
+        if status != 0 {
+            // Alignment was dropped, create approximate alignment.
+            let n = seq1.len() as u32;
+            let m = seq2.len() as u32;
+            let score = if n < m {
+                cigar.push_checked(Operation::Diff, n);
+                cigar.push_unchecked(Operation::Ins, m - n);
+                -self.penalties.mismatch * n as i32
+                    - self.penalties.gap_open - self.penalties.gap_extend * (m - n) as i32
+            } else if m < n {
+                cigar.push_checked(Operation::Diff, m);
+                cigar.push_unchecked(Operation::Del, n - m);
+                -self.penalties.mismatch * m as i32
+                    - self.penalties.gap_open - self.penalties.gap_extend * (n - m) as i32
+            } else {
+                cigar.push_checked(Operation::Diff, n);
+                -self.penalties.mismatch * n as i32
+            };
+            return Ok(score);
+        }
 
         let c_cigar = unsafe { (*self.inner).cigar };
         let begin_offset = usize::try_from(unsafe { (*c_cigar).begin_offset }).unwrap();

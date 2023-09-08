@@ -172,6 +172,8 @@ fn print_help() {
         "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
     println!("    {:KEY$} {:VAL$}  Backbone alignment k-mer size [{}].",
         "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
+    println!("    {:KEY$} {:VAL$}  Perform more accurate allele alignment (takes more time).",
+        "    --better-aln".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Sequence divergence threshold,\n\
         {EMPTY}  used to discard almost identical locus alleles [{}].",
         "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
@@ -225,6 +227,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.penalties.gap_extend = parser.value()?.parse()?,
             Short('k') | Long("backbone-k") => args.backbone_k = parser.value()?.parse()?,
+            Long("better-aln") | Long("aln-better") => args.penalties.more_heuristics = false,
             Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
 
