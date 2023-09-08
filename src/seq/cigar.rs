@@ -204,7 +204,7 @@ impl Cigar {
     pub fn from_raw(raw_cigar: &[u32]) -> Self {
         let mut res = Cigar::new();
         for &val in raw_cigar.iter() {
-            res.push(CigarItem::from_u32(val));
+            res.push_unchecked(CigarItem::from_u32(val));
         }
         res
     }
@@ -248,7 +248,7 @@ impl Cigar {
     }
 
     /// Push a new `CigarItem`, does not merge with the latest entry.
-    pub fn push(&mut self, item: CigarItem) {
+    pub fn push_unchecked(&mut self, item: CigarItem) {
         if item.op.consumes_ref() {
             self.rlen += item.len;
         }
@@ -259,10 +259,10 @@ impl Cigar {
     }
 
     /// Push a new entry, merges with the latest entry, if relevant.
-    pub fn checked_push(&mut self, op: Operation, len: u32) {
+    pub fn push_checked(&mut self, op: Operation, len: u32) {
         let n = self.tuples.len();
         if n == 0 || self.tuples[n - 1].op != op {
-            self.push(CigarItem::new(op, len));
+            self.push_unchecked(CigarItem::new(op, len));
         } else {
             if op.consumes_ref() {
                 self.rlen += len;
@@ -329,7 +329,7 @@ impl Cigar {
         for &val in rec.raw_cigar() {
             let item = CigarItem::from_u32(val);
             if item.op != Operation::Match {
-                cigar.push(item);
+                cigar.push_unchecked(item);
                 continue;
             }
 
@@ -345,13 +345,13 @@ impl Cigar {
             for i in 0..item.len as usize {
                 let now_equal = ref_seq[ref_shift + i] == query_seq[query_shift + i];
                 if now_equal != curr_equal && curr_len > 0 {
-                    cigar.push(CigarItem::new(if curr_equal { Operation::Equal } else { Operation::Diff }, curr_len));
+                    cigar.push_unchecked(CigarItem::new(if curr_equal { Operation::Equal } else { Operation::Diff }, curr_len));
                     curr_len = 0;
                 }
                 curr_equal = now_equal;
                 curr_len += 1;
             }
-            cigar.push(CigarItem::new(if curr_equal { Operation::Equal } else { Operation::Diff }, curr_len));
+            cigar.push_unchecked(CigarItem::new(if curr_equal { Operation::Equal } else { Operation::Diff }, curr_len));
         }
         let in_query_len = query_seq.len() as u32;
         // If the query sequence is missing, in_query_len will be 0.
@@ -566,7 +566,7 @@ impl<'a, V: VecOrNone<u8>> ExtCigarData<'a, V> {
             }
 
         } else if tup.op.consumes_query() {
-            self.new_cigar.push(CigarItem::new(tup.op, tup.len));
+            self.new_cigar.push_unchecked(CigarItem::new(tup.op, tup.len));
 
         } else {
             if let MdEntry::Deletion(start, end) = self.md_entries[self.md_ix] {
@@ -577,7 +577,7 @@ impl<'a, V: VecOrNone<u8>> ExtCigarData<'a, V> {
                         self.ref_seq.push(self.raw_md[i as usize]);
                     }
                 }
-                self.new_cigar.push(CigarItem::new(tup.op, tup.len));
+                self.new_cigar.push_unchecked(CigarItem::new(tup.op, tup.len));
                 self.md_ix += 1;
             }
         }
@@ -598,7 +598,7 @@ impl<'a, V: VecOrNone<u8>> ExtCigarData<'a, V> {
             self.md_ix += 1;
             self.md_shift = 0;
         }
-        self.new_cigar.checked_push(Operation::Equal, pos_inc);
+        self.new_cigar.push_checked(Operation::Equal, pos_inc);
         *op_len -= pos_inc;
     }
 
@@ -617,7 +617,7 @@ impl<'a, V: VecOrNone<u8>> ExtCigarData<'a, V> {
             self.md_ix += 1;
             self.md_shift = 0;
         }
-        self.new_cigar.checked_push(Operation::Diff, pos_inc);
+        self.new_cigar.push_checked(Operation::Diff, pos_inc);
         *op_len -= pos_inc;
     }
 }

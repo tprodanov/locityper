@@ -47,6 +47,7 @@ struct Args {
     moving_window: u32,
 
     penalties: Penalties,
+    backbone_k: usize,
     unknown_frac: f64,
     max_divergence: f64,
 
@@ -71,6 +72,7 @@ impl Default for Args {
             moving_window: 500,
 
             penalties: Default::default(),
+            backbone_k: 101,
             unknown_frac: 0.0001,
             max_divergence: 0.0001,
 
@@ -100,6 +102,7 @@ impl Args {
             "Unknown fraction ({}) must be within [0, 1]", self.unknown_frac);
         validate_param!(0.0 <= self.max_divergence && self.max_divergence <= 1.0,
             "Maximum divergence ({}) must be within [0, 1]", self.max_divergence);
+        validate_param!(self.backbone_k >= 5, "Backbone alignment k-mer size ({}) must be at least 5", self.backbone_k);
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         // Make window size odd.
@@ -160,13 +163,15 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
 
-    println!("\n{}", "Haplotype clustering:".bold());
+    println!("\n{}", "Haplotype alignment and clustering:".bold());
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
         "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
     println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
-        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_opening));
+        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_open));
     println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
-        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extension));
+        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
+    println!("    {:KEY$} {:VAL$}  Backbone alignment k-mer size [{}].",
+        "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
     println!("    {:KEY$} {:VAL$}  Sequence divergence threshold,\n\
         {EMPTY}  used to discard almost identical locus alleles [{}].",
         "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
@@ -216,9 +221,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('M') | Long("mismatch") => args.penalties.mismatch = parser.value()?.parse()?,
             Short('O') | Long("gap-open") | Long("gap-opening") =>
-                args.penalties.gap_opening = parser.value()?.parse()?,
+                args.penalties.gap_open = parser.value()?.parse()?,
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
-                args.penalties.gap_extension = parser.value()?.parse()?,
+                args.penalties.gap_extend = parser.value()?.parse()?,
+            Short('k') | Long("backbone-k") => args.backbone_k = parser.value()?.parse()?,
             Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
 
@@ -437,8 +443,7 @@ fn process_haplotypes(
     log::info!("    Calculating haplotype divergence");
     let paf_filename = locus_dir.join(paths::LOCUS_PAF);
     let paf_writer = ext::sys::create_gzip(&paf_filename)?;
-    let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.threads)
-        .map_err(add_path!(paf_filename))?;
+    let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.backbone_k, args.threads)?;
     check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
 
     log::info!("    Clustering haploypes");
