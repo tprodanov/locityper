@@ -1,17 +1,19 @@
 use std::{
     thread,
+    path::Path,
     sync::Arc,
-    io::Write,
+    rc::Rc,
 };
 use fx::FxHashMap;
 use smallvec::SmallVec;
+use htslib::bam;
 use crate::{
     seq::{
         NamedSeq,
         wfa::{Aligner, Penalties},
-        cigar::{Cigar, Operation},
+        cigar::{Cigar, CigarItem, Operation},
     },
-    err::{Error, add_path},
+    Error,
 };
 
 const CAPACITY: usize = 4;
@@ -117,39 +119,38 @@ fn align(
 /// Calculates all pairwise divergences between all sequences, writes alignments to PAF file,
 /// and returns condensed distance matrix (see `kodama` crate).
 pub fn pairwise_divergences(
+    bam_path: &Path,
     entries: &[NamedSeq],
-    mut paf_writer: impl Write,
     penalties: &Penalties,
     k: usize,
     threads: u16,
 ) -> Result<Vec<f64>, Error> {
     let caches: Vec<_> = entries.iter().map(|entry| cache_kmers(entry.seq(), k)).collect();
-    if threads == 1 {
+    let alns = if threads == 1 {
         log::debug!("        Aligning sequences in 1 thread");
         let n = entries.len();
-        let mut divergences = Vec::with_capacity(n * (n - 1) / 2);
+        let mut alns = Vec::with_capacity(n * (n - 1) / 2);
         let aligner = Aligner::new(penalties.clone());
         for (i, (entry1, cache1)) in entries.iter().zip(&caches).enumerate() {
             for (entry2, cache2) in entries[i + 1..].iter().zip(&caches[i + 1..]) {
                 let kmer_matches = find_kmer_matches(cache1, cache2);
-                let (cigar, score) = align(&aligner, entry1.seq(), entry2.seq(), &kmer_matches, k)?;
-                divergences.push(write_paf(&mut paf_writer, entry2, entry1, &cigar, score)?);
+                alns.push(align(&aligner, entry1.seq(), entry2.seq(), &kmer_matches, k)?);
             }
         }
-        Ok(divergences)
+        alns
     } else {
-        divergences_multithread(entries, &caches, paf_writer, penalties, k, threads)
-    }
+        divergences_multithread(entries, &caches, penalties, k, threads)?
+    };
+    write_all(bam_path, entries, alns, k, penalties.accuracy)
 }
 
 fn divergences_multithread(
     entries: &[NamedSeq],
     caches: &[KmerCache],
-    mut paf_writer: impl Write,
     penalties: &Penalties,
     k: usize,
     threads: u16,
-) -> Result<Vec<f64>, Error> {
+) -> Result<Vec<(Cigar, i32)>, Error> {
     let threads = usize::from(threads);
     log::debug!("        Aligning sequences in {} threads", threads);
     let n = entries.len() as u32;
@@ -190,55 +191,108 @@ fn divergences_multithread(
 
     // Collect all results so that even if there is a problem in one of the sequences, all handles are closed.
     let results: Vec<_> = handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect();
-    let mut pairs_iter = pairs.iter();
-    let mut divergences = Vec::with_capacity(n_pairs);
+    let mut alns = Vec::with_capacity(n_pairs);
     for res in results.into_iter() {
-        for (cigar, score) in res?.into_iter() {
-            let &(i, j) = pairs_iter.next().expect("Number of solutions does not match the number of tasks");
-            divergences.push(write_paf(&mut paf_writer, &entries[j as usize], &entries[i as usize], &cigar, score)?);
-        }
+        alns.extend(res?.into_iter());
     }
-    assert!(pairs_iter.next().is_none(), "Number of solutions does not match the number of tasks");
-    Ok(divergences)
+    Ok(alns)
 }
 
-/// Writes the alignment to PAF file and returns sequence divergence (edit distance / total aln length),
-/// where total alignment length includes gaps into both sequences.
-fn write_paf(
-    writer: &mut impl Write,
+fn create_bam_header(entries: &[NamedSeq], k: usize, accuracy: u8) -> bam::header::Header {
+    let mut header = bam::header::Header::new();
+    let mut prg = bam::header::HeaderRecord::new(b"PG");
+    prg.push_tag(b"ID", crate::command::PROGRAM);
+    prg.push_tag(b"PN", crate::command::PROGRAM);
+    prg.push_tag(b"VN", crate::command::VERSION);
+    prg.push_tag(b"CL", &std::env::args().collect::<Vec<_>>().join(" "));
+    header.push_record(&prg);
+    header.push_comment(format!("backbone-k={};accuracy-lvl={}", k, accuracy).as_bytes());
+
+    for entry in entries {
+        let mut record = bam::header::HeaderRecord::new(b"SQ");
+        record.push_tag(b"SN", entry.name());
+        record.push_tag(b"LN", entry.len());
+        header.push_record(&record);
+    }
+    header
+}
+
+fn fill_cigar_buffer(buffer: &mut bam::record::CigarString, iter: impl Iterator<Item = CigarItem>) {
+    buffer.0.clear();
+    buffer.0.extend(iter.map(CigarItem::to_htslib));
+}
+
+fn create_record(
+    header: &Rc<bam::HeaderView>,
     query: &NamedSeq,
-    refer: &NamedSeq,
-    cigar: &Cigar,
+    refid: usize,
+    cigar_view: &bam::record::CigarString,
+    edit_dist: u32,
     score: i32,
-) -> Result<f64, Error>
+    divergence: f64,
+) -> bam::Record
 {
-    let qname = query.name();
-    let rname = refer.name();
-    let qlen = query.seq().len() as u32;
-    let rlen = refer.seq().len() as u32;
-    write!(writer, "{qname}\t{qlen}\t0\t{qlen}\t+\t{rname}\t{rlen}\t0\t{rlen}\t").map_err(add_path!(!))?;
+    let mut record = bam::Record::new();
+    record.set_header(Rc::clone(header));
+    record.set_tid(refid as i32);
+    record.set_pos(0);
+    record.set_mtid(-1);
+    record.set_mpos(-1);
+    record.set(query.name().as_bytes(), Some(cigar_view), &[], &[]);
+    record.push_aux(b"NM", bam::record::Aux::U32(edit_dist)).expect("Cannot set NM tag");
+    record.push_aux(b"AS", bam::record::Aux::I32(score)).expect("Cannot set AS tag");
+    record.push_aux(b"dv", bam::record::Aux::Double(divergence)).expect("Cannot set `dv` tag");
+    record
+}
 
-    if cigar.is_empty() {
-        writeln!(writer, "0\t0t\t0").map_err(add_path!(!))?;
-        return Ok(1.0);
-    }
+/// Creates BAM file, writes all pairwise records, and returns linear vector of divergences.
+fn write_all(
+    bam_path: &Path,
+    entries: &[NamedSeq],
+    alns: Vec<(Cigar, i32)>,
+    k: usize,
+    accuracy: u8,
+) -> Result<Vec<f64>, Error> {
+    let header = create_bam_header(entries, k, accuracy);
+    let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
+    writer.set_compression_level(bam::CompressionLevel::Maximum)?;
+    let mut cigar_buffer = bam::record::CigarString(Vec::new());
 
-    if qlen != cigar.query_len() || rlen != cigar.ref_len() {
-        return Err(Error::RuntimeError(format!(
-            "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
-            qname, qlen, rname, rlen, cigar.query_len(), cigar.ref_len())));
-    }
-    let mut nmatches = 0;
-    let mut total_size = 0;
-    for item in cigar.iter() {
-        total_size += item.len();
-        if item.operation() == Operation::Equal {
-            nmatches += item.len();
+    let n = entries.len();
+    let mut pairwise_records = vec![None; n * n];
+    let mut divergences = Vec::new();
+    let header_view = Rc::new(bam::HeaderView::from_header(&header));
+    let mut alns_iter = alns.into_iter();
+    for (i, refer) in entries.iter().enumerate() {
+        let rlen = refer.len();
+        fill_cigar_buffer(&mut cigar_buffer, std::iter::once(CigarItem::new(Operation::Equal, rlen)));
+        pairwise_records[i * n + i] = Some(create_record(&header_view, refer, i, &cigar_buffer, 0, 0, 0.0));
+
+        for (j, query) in (i + 1..).zip(&entries[i + 1..]) {
+            let (cigar, score) = alns_iter.next().expect("Too few pairwse alignments");
+            if query.len() != cigar.query_len() || rlen != cigar.ref_len() {
+                return Err(Error::RuntimeError(format!(
+                    "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
+                    query.name(), query.len(), refer.name(), rlen, cigar.query_len(), cigar.ref_len())));
+            }
+
+            let (nmatches, total_size) = cigar.frac_matches();
+            let edit_dist = total_size - nmatches;
+            let divergence = f64::from(edit_dist) / f64::from(total_size);
+            divergences.push(divergence);
+            fill_cigar_buffer(&mut cigar_buffer, cigar.iter().copied());
+            pairwise_records[i * n + j] = Some(
+                create_record(&header_view, query, i, &cigar_buffer, edit_dist, score, divergence));
+
+            fill_cigar_buffer(&mut cigar_buffer, cigar.iter().map(CigarItem::invert));
+            pairwise_records[j * n + i] = Some(
+                create_record(&header_view, refer, j, &cigar_buffer, edit_dist, score, divergence));
         }
     }
-    let edit_dist = total_size - nmatches;
-    let divergernce = f64::from(edit_dist) / f64::from(total_size);
-    writeln!(writer, "{nmatches}\t{total_size}\t60\t\
-        NM:i:{edit_dist}\tAS:i:{score}\tdv:f:{divergernce:.7}\tcg:Z:{cigar}").map_err(add_path!(!))?;
-    Ok(divergernce)
+    assert!(alns_iter.next().is_none(), "Too many pairwise alignments");
+
+    for record in pairwise_records.into_iter() {
+        writer.write(&record.expect("Alignment record is not set"))?;
+    }
+    Ok(divergences)
 }

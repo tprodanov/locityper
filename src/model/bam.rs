@@ -36,7 +36,6 @@ fn create_bam_header(
     let mut header = bam::header::Header::new();
     let mut tid = 0;
     for &id in gt.ids().iter() {
-        let mut record = bam::header::HeaderRecord::new(b"SQ");
         if contig_to_tid[id.ix()].is_some() {
             // This contig was already included in the genotype.
             continue;
@@ -44,6 +43,7 @@ fn create_bam_header(
         unique_ids.push(id);
         contig_to_tid[id.ix()] = Some(tid);
         tid += 1;
+        let mut record = bam::header::HeaderRecord::new(b"SQ");
         record.push_tag(b"SN", contigs.get_name(id));
         record.push_tag(b"LN", contigs.get_len(id));
         header.push_record(&record);
@@ -103,7 +103,7 @@ fn create_record(
             record.set_reverse();
         }
         cigar_buffer.0.clear();
-        cigar_buffer.0.extend(aln.cigar().iter().map(CigarItem::to_htslib));
+        cigar_buffer.0.extend(aln.cigar().iter().copied().map(CigarItem::to_htslib));
         (Some(cigar_buffer as &bam::record::CigarString), strand)
     } else {
         record.set_unmapped();

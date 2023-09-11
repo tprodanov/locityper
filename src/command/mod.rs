@@ -15,8 +15,8 @@ use crate::{
     err::{Error, add_path},
 };
 
-const PROGRAM: &'static str = env!("CARGO_PKG_NAME");
-const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+pub const PROGRAM: &'static str = env!("CARGO_PKG_NAME");
+pub const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 pub fn run(argv: &[String]) -> Result<(), Error> {
     if argv.len() <= 1 {

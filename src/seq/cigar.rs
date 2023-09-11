@@ -93,8 +93,8 @@ impl Operation {
         }
     }
 
-    /// Inverses reference and query.
-    pub const fn inverse(self) -> Self {
+    /// inverts reference and query.
+    pub const fn invert(self) -> Self {
         match self {
             Operation::Ins | Operation::Soft => Operation::Del,
             Operation::Del => Operation::Ins,
@@ -103,7 +103,7 @@ impl Operation {
             Operation::Equal => Operation::Equal,
             Operation::Diff => Operation::Diff,
 
-            Operation::Hard => panic!("Cigar::inverse not supported with Hard clipping"),
+            Operation::Hard => panic!("Cigar::invert not supported with Hard clipping"),
         }
     }
 }
@@ -145,7 +145,7 @@ impl CigarItem {
         }
     }
 
-    pub const fn to_htslib(&self) -> record::Cigar {
+    pub const fn to_htslib(self) -> record::Cigar {
         match self.op {
             Operation::Match => record::Cigar::Match(self.len),
             Operation::Ins => record::Cigar::Ins(self.len),
@@ -154,6 +154,13 @@ impl CigarItem {
             Operation::Hard => record::Cigar::HardClip(self.len),
             Operation::Equal => record::Cigar::Equal(self.len),
             Operation::Diff => record::Cigar::Diff(self.len),
+        }
+    }
+
+    pub fn invert(&self) -> Self {
+        Self {
+            op: self.op.invert(),
+            len: self.len,
         }
     }
 }
@@ -228,10 +235,10 @@ impl Cigar {
         }
     }
 
-    /// Inverses reference and query (for example, `10M3I5M -> 10M3D15M`).
-    pub fn inverse(&self) -> Self {
+    /// inverts reference and query (for example, `10M3I5M -> 10M3D15M`).
+    pub fn invert(&self) -> Self {
         Self {
-            tuples: self.tuples.iter().map(|item| CigarItem::new(item.op.inverse(), item.len)).collect(),
+            tuples: self.tuples.iter().map(|item| CigarItem::new(item.op.invert(), item.len)).collect(),
             rlen: self.qlen,
             qlen: self.rlen,
         }
@@ -434,6 +441,17 @@ impl Cigar {
             }
         }
         (left, right)
+    }
+
+    /// Returns the number of matches and the total size of the alignment.
+    pub fn frac_matches(&self) -> (u32, u32) {
+        let mut nmatches = 0;
+        let mut total_size = 0;
+        for item in self.iter() {
+            total_size += item.len;
+            nmatches += if item.op == Operation::Equal { item.len } else { 0 };
+        }
+        (nmatches, total_size)
     }
 }
 

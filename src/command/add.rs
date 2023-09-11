@@ -451,9 +451,8 @@ fn process_haplotypes(
 {
     log::info!("    Writing {} haplotypes to {}/", entries.len(), ext::fmt::path(locus_dir));
     log::info!("    Calculating haplotype divergence");
-    let paf_filename = locus_dir.join(paths::LOCUS_PAF);
-    let paf_writer = ext::sys::create_gzip(&paf_filename)?;
-    let divergences = dist::pairwise_divergences(&entries, paf_writer, &args.penalties, args.backbone_k, args.threads)?;
+    let bam_path = locus_dir.join(paths::LOCUS_BAM);
+    let divergences = dist::pairwise_divergences(&bam_path, &entries, &args.penalties, args.backbone_k, args.threads)?;
     check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
 
     log::info!("    Clustering haploypes");

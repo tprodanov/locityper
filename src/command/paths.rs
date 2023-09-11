@@ -15,8 +15,8 @@ pub(super) const LOCUS_BED: &'static str = "ref.bed";
 pub(super) const LOCUS_FASTA_ALL: &'static str = "all_haplotypes.fa.gz";
 /// Filtered haplotypes for the locus are stored in `database/loci/<locus_name>/LOCUS_FASTA`.
 pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
-/// Pairwise haplotype alignments are stored in `database/loci/<locus_name>/LOCUS_PAF`.
-pub(super) const LOCUS_PAF: &'static str = "all_haplotypes.paf.gz";
+/// Pairwise haplotype alignments are stored in `database/loci/<locus_name>/LOCUS_BAM`.
+pub(super) const LOCUS_BAM: &'static str = "all_haplotypes.bam";
 /// Dendrogram is stored in `database/loci/<locus_name>/LOCUS_DENDROGRAM`.
 pub(super) const LOCUS_DENDROGRAM: &'static str = "all_haplotypes.nwk";
 
