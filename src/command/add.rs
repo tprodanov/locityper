@@ -148,7 +148,7 @@ fn print_help() {
         {EMPTY}  Fourth column must contain locus name (all names should be unique).",
         "-L, --loci-bed".green(), "FILE".yellow());
 
-    println!("\n{}", "Haplotype extraction parameters:".bold());
+    println!("\n{}", "Allele extraction parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
         "-g, --genome".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
@@ -156,14 +156,14 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.moving_window)));
-    println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
-        {EMPTY}  (relative to the haplotype length). Variants that have no known\n\
+    println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per allele [{}]\n\
+        {EMPTY}  (relative to the allele length). Variants that have no known\n\
         {EMPTY}  variation in the input VCF pangenome are ignored.",
         "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
 
-    println!("\n{}", "Haplotype alignment and clustering:".bold());
+    println!("\n{}", "Alignment and clustering of alleles:".bold());
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
         "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
     println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
@@ -172,8 +172,12 @@ fn print_help() {
         "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
     println!("    {:KEY$} {:VAL$}  Backbone alignment k-mer size [{}].",
         "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
-    println!("    {:KEY$} {:VAL$}  Perform more accurate allele alignment (takes more time).",
-        "    --better-aln".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Alignment accuracy level (between 0 and 9) [{}].\n\
+        {EMPTY}  Small values produce fast but inaccurate alignment between alleles,\n\
+        {EMPTY}  large values produce slow and accurate alignments.\n\
+        {EMPTY}  You can use {} and {} as a shorthand for {} and {}.",
+        "-a, --accuracy".green(), "INT".yellow(), super::fmt_def(defaults.penalties.accuracy),
+        "-0".green(), "-9".green(), "-a 0".green(), "-a 9".green());
     println!("    {:KEY$} {:VAL$}  Sequence divergence threshold,\n\
         {EMPTY}  used to discard almost identical locus alleles [{}].",
         "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
@@ -227,7 +231,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.penalties.gap_extend = parser.value()?.parse()?,
             Short('k') | Long("backbone-k") => args.backbone_k = parser.value()?.parse()?,
-            Long("better-aln") | Long("aln-better") => args.penalties.more_heuristics = false,
+            Short('a') | Long("accuracy") => args.penalties.accuracy = parser.value()?.parse()?,
+            Short('0') => args.penalties.accuracy = 0,
+            Short('9') => args.penalties.accuracy = 9,
+
             Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
 

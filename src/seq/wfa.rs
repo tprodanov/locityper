@@ -14,6 +14,9 @@ mod cwfa {
     include!(concat!(env!("OUT_DIR"), "/bindings_wfa.rs"));
 }
 
+/// Maximum accuracy level (need to change `add` help message, if changed this).
+const MAX_ACCURACY: u8 = 9;
+
 #[derive(Clone)]
 pub struct Penalties {
     // NOTE: Adding match may lead to problems in other places (such as `panvcf` divergence calculation).
@@ -21,7 +24,8 @@ pub struct Penalties {
     pub mismatch: i32,
     pub gap_open: i32,
     pub gap_extend: i32,
-    pub more_heuristics: bool,
+    /// Accuracy level [0, 9]. 0 - very fast and inaccurate, 9 - very slow and accurate.
+    pub accuracy: u8,
 }
 
 impl Default for Penalties {
@@ -30,7 +34,7 @@ impl Default for Penalties {
             mismatch: 4,
             gap_open: 6,
             gap_extend: 1,
-            more_heuristics: true,
+            accuracy: 3,
         }
     }
 }
@@ -40,7 +44,64 @@ impl Penalties {
         validate_param!(self.mismatch >= 0, "Mismatch penalty ({}) must be non-negative", self.mismatch);
         validate_param!(self.gap_open >= 0, "Gap opening penalty ({}) must be non-negative", self.gap_open);
         validate_param!(self.gap_extend >= 0, "Gap extension penalty ({}) must be non-negative", self.gap_extend);
+        validate_param!(self.accuracy <= MAX_ACCURACY, "Alignment accuracy level ({}) must be between 0 and {}.",
+            self.accuracy, MAX_ACCURACY);
         Ok(())
+    }
+
+    /// Simple alignment between two sequences: insert/deletion at the start,
+    /// followed by a sequence of =/X without any gaps.
+    fn align_simple(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> i32 {
+        let n = seq1.len();
+        let m = seq2.len();
+        assert!(n > 0 && m > 0, "Cannot align empty sequences");
+        let diff = n as i32 - m as i32;
+        let mut score;
+        let (i, j) = if diff < 0 {
+            cigar.push_unchecked(Operation::Ins, (-diff) as u32);
+            score = -self.gap_open + diff * self.gap_extend;
+            (0, (-diff) as usize)
+        } else if diff > 0 {
+            cigar.push_unchecked(Operation::Del, diff as u32);
+            score = -self.gap_open - diff * self.gap_extend;
+            (diff as usize, 0)
+        } else {
+            score = 0;
+            (0, 0)
+        };
+
+        let mut curr_match = seq1[i] == seq2[j];
+        let mut curr_len = 1;
+        for (&nt1, &nt2) in seq1[i + 1..].iter().zip(&seq2[j + 1..]) {
+            if (nt1 == nt2) != curr_match {
+                cigar.push_unchecked(if curr_match { Operation::Equal } else { Operation::Diff }, curr_len);
+                score -= if curr_match { 0 } else { self.mismatch * curr_len as i32 };
+                curr_match = !curr_match;
+                curr_len = 1;
+            } else {
+                curr_len += 1;
+            }
+        }
+        cigar.push_unchecked(if curr_match { Operation::Equal } else { Operation::Diff }, curr_len);
+        score -= if curr_match { 0 } else { self.mismatch * curr_len as i32 };
+        score
+    }
+}
+
+/// Number of alignment steps based on the accuracy level (0-9).
+fn alignment_steps(accuracy: u8) -> i32 {
+    match accuracy {
+        0 =>       1,
+        1 =>     100,
+        2 =>     500,
+        3 =>   1_000,
+        4 =>   3_000,
+        5 =>   5_000,
+        6 =>  10_000,
+        7 =>  50_000,
+        8 => 100_000,
+        9 => i32::MAX,
+        _ => unreachable!(),
     }
 }
 
@@ -58,19 +119,15 @@ impl Drop for Aligner {
 impl Aligner {
     pub fn new(penalties: Penalties) -> Self {
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
-        if penalties.more_heuristics {
-            // Limit the number of alignment steps.
-            attributes.system.max_alignment_steps = 1000;
-        }
-
-        // Use X-drop heuristic.
-        attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_xdrop;
-        attributes.heuristic.min_wavefront_length = 100;
-        attributes.heuristic.steps_between_cutoffs = 100;
-        attributes.heuristic.xdrop = if penalties.more_heuristics { 50 } else { 5000 };
+        // Limit the number of alignment steps.
+        attributes.system.max_alignment_steps = alignment_steps(penalties.accuracy);
 
         // High memory for some reason produces alignments with M both for X and =.
-        attributes.memory_mode = cwfa::wavefront_memory_t_wavefront_memory_med;
+        attributes.memory_mode = if penalties.accuracy < 7 {
+            cwfa::wavefront_memory_t_wavefront_memory_med
+        } else {
+            cwfa::wavefront_memory_t_wavefront_memory_low
+        };
         // Compute score and CIGAR as well.
         attributes.alignment_scope = cwfa::alignment_scope_t_compute_alignment;
         // Compute global alignment.
@@ -95,6 +152,9 @@ impl Aligner {
     /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
     /// If the alignment is dropped, returns VERY approximate alignment.
     pub fn align(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> Result<i32, Error> {
+        if self.penalties.accuracy == 0 {
+            return Ok(self.penalties.align_simple(seq1, seq2, cigar));
+        }
         let status = unsafe { cwfa::wavefront_align(
             self.inner,
             seq1.as_ptr() as *const c_char,
@@ -104,23 +164,7 @@ impl Aligner {
         ) };
         if status != 0 {
             // Alignment was dropped, create approximate alignment.
-            let n = seq1.len() as u32;
-            let m = seq2.len() as u32;
-            let score = if n < m {
-                cigar.push_checked(Operation::Diff, n);
-                cigar.push_unchecked(Operation::Ins, m - n);
-                -self.penalties.mismatch * n as i32
-                    - self.penalties.gap_open - self.penalties.gap_extend * (m - n) as i32
-            } else if m < n {
-                cigar.push_checked(Operation::Diff, m);
-                cigar.push_unchecked(Operation::Del, n - m);
-                -self.penalties.mismatch * m as i32
-                    - self.penalties.gap_open - self.penalties.gap_extend * (n - m) as i32
-            } else {
-                cigar.push_checked(Operation::Diff, n);
-                -self.penalties.mismatch * n as i32
-            };
-            return Ok(score);
+            return Ok(self.penalties.align_simple(seq1, seq2, cigar));
         }
 
         let c_cigar = unsafe { (*self.inner).cigar };
