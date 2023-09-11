@@ -54,29 +54,19 @@ class Contigs:
         return ','.join(self.contigs[i] for i in ixs)
 
 
-def _load_distances(f, field, targets, verbose):
+def _load_distances(f, get_info, targets, verbose):
     targets = { target: i for i, target in enumerate(targets) }
     contigs = Contigs()
     uns_distances = []
-    prefix = f'{field}:'
 
     if verbose:
         sys.stderr.write('Load distances\n')
-    for line in f:
-        if line.startswith('#'):
-            continue
-        line = line.strip().split('\t')
-        contig1 = line[0]
-        contig2 = line[5]
+    for record in f:
+        contig1, contig2, dist = get_info(record)
         # Second contig is reference, therefore goes first.
         contigs.add_if_needed(contig2)
         contigs.add_if_needed(contig1)
         if contig1 in targets or contig2 in targets:
-            try:
-                dist = float(next(col.rsplit(':', 1)[1] for col in line[12:] if col.startswith(prefix)))
-            except StopIteration:
-                sys.stderr.write(f'Distance not available for contigs {contig1} and {contig2}\n')
-                exit(1)
             uns_distances.append((contig1, contig2, dist))
             if verbose:
                 sys.stderr.write(f'    {contig1} {contig2} -> {dist:.10f}\n')
@@ -115,12 +105,33 @@ def _process_distances(targets, contigs, distances, mean, verbose):
     return best_dist
 
 
+def _get_info_paf(tag):
+    prefix = tag + ':'
+    def inner(line):
+        line = line.strip().split('\t')
+        contig1 = line[0]
+        contig2 = line[5]
+        try:
+            dist = float(next(col.rsplit(':', 1)[1] for col in line[12:] if col.startswith(prefix)))
+        except StopIteration:
+            sys.stderr.write(f'Distance not available for contigs {contig1} and {contig2}\n')
+            exit(1)
+        return contig1, contig2, dist
+    return inner
+
+
+def _get_info_bam(tag):
+    def inner(record):
+        return record.query_name, record.reference_name, record.get_tag(tag)
+    return inner
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Calculates distance between a target genotype and all other genotypes',
         usage='%(prog)s alns.paf target -o out.csv [-f field -a averaging]')
     parser.add_argument('-i', '--input', metavar='FILE',
-        help='Input PAF[.gz] file with pairwise distances.')
+        help='Input PAF[.gz] or BAM file with pairwise distances.')
     parser.add_argument('-g', '--genotype', metavar='STR',
         help='Target genotype (through comma).')
     parser.add_argument('-o', '--output', metavar='FILE', required=False,
@@ -135,8 +146,16 @@ def main():
     args = parser.parse_args()
 
     targets = list(map(str.strip, args.genotype.split(',')))
-    with open_stream(args.input) as f:
-        contigs, distances = _load_distances(f, args.field, targets, args.verbose)
+    if args.input.endswith('.bam'):
+        import pysam
+        save = pysam.set_verbosity(0)
+        with pysam.AlignmentFile(args.input, require_index=False) as f:
+            pysam.set_verbosity(save)
+            contigs, distances = _load_distances(f, _get_info_bam(args.field), targets, args.verbose)
+    else:
+        with open_stream(args.input) as f:
+            contigs, distances = _load_distances(f, _get_info_paf(args.field), targets, args.verbose)
+
     aver = averaging_function(args.averaging)
     best_dist = _process_distances(targets, contigs, distances, aver, args.verbose)
 
