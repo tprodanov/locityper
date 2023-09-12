@@ -20,7 +20,7 @@ use crate::{
         err_prof::ErrorProfile,
         insertsz::InsertDistr,
     },
-    algo::{bisect, TwoU32},
+    algo::{bisect, TwoU32, get_hash},
     math::Ln,
     model::windows::ContigWindows,
 };
@@ -150,7 +150,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     ) -> Result<MateSummary, Error>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
-        let name_hash = wyhash2::wyhash_single(self.record.qname(), 0);
+        let name_hash = get_hash(self.record.qname());
         let name = std::str::from_utf8(self.record.qname()).map_err(|_| Error::InvalidInput(
             format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))?;
         if read_end == ReadEnd::First {

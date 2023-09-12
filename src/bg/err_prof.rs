@@ -15,7 +15,7 @@ use crate::{
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
-    algo::HashMap,
+    algo::TwoU32,
     ext,
 };
 
@@ -132,7 +132,7 @@ impl ErrorProfile {
         log::info!("Estimating read error profiles from {} reads", alns.len());
         let mut total_counts = OperCounts::<u64>::default();
         // HashMap, values: (edit_dist, read_len), keys: number of appearances.
-        let mut edit_distances = HashMap::<(u32, u32), u64>::default();
+        let mut edit_distances = IntMap::<TwoU32, u64>::default();
         for aln in alns.iter() {
             let aln = aln.borrow();
             if !windows.keep_window(aln.interval().middle()) {
@@ -141,14 +141,14 @@ impl ErrorProfile {
             let counts = aln.count_region_operations(region);
             total_counts += &counts;
             let (edit_dist, read_len) = counts.edit_and_read_len();
-            edit_distances.entry((edit_dist, read_len))
+            edit_distances.entry(TwoU32(edit_dist, read_len))
                 .and_modify(|counter| *counter += 1)
                 .or_insert(1);
         }
 
         let oper_probs = total_counts.to_ln_probs();
         let edit_distances: Vec<_> = edit_distances.into_iter()
-            .map(|((k, n), count)| (k, n, count as f64))
+            .map(|(TwoU32(k, n), count)| (k, n, count as f64))
             .collect();
         let edit_distr = BetaBinomial::max_lik_estimate(&edit_distances);
 
