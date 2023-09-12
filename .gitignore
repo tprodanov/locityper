@@ -1,6 +1,7 @@
 /target
 /logs
 /*.log
+/vendor
 Cargo.lock
 /src/test.rs
 __pycache__
