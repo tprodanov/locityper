@@ -76,8 +76,16 @@ impl Default for Args {
 
             penalties: Default::default(),
             backbone_k: 101,
-            accuracy: 0,
             unknown_frac: 0.0001,
+
+            #[cfg(feature = "aln")]
+            accuracy: 2,
+            #[cfg(not(feature = "aln"))]
+            accuracy: 0,
+
+            #[cfg(feature = "aln")]
+            max_divergence: 0.0001,
+            #[cfg(not(feature = "aln"))]
             max_divergence: 0.0,
 
             threads: 8,
@@ -110,9 +118,10 @@ impl Args {
         validate_param!(self.accuracy <= crate::seq::wfa::MAX_ACCURACY,
             "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, crate::seq::wfa::MAX_ACCURACY);
         #[cfg(not(feature = "aln"))] {
-            validate_param!(self.accuracy == 0, "Cannot specify alignment accuracy when `aln` feature is disabled");
+            validate_param!(self.accuracy == 0,
+                "Cannot set non-zero alignment accuracy level when `aln` feature is disabled");
             validate_param!(self.max_divergence == 0.0,
-                "Cannot specify sequence divergence when `aln` feature is disabled");
+                "Cannot set non-zero sequence divergence when `aln` feature is disabled");
         }
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
