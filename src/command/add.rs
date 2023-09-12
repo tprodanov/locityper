@@ -196,8 +196,8 @@ fn print_help() {
         {EMPTY}  0: no sequence alignment, 1: fast and inaccurate alignment,\n\
         {EMPTY}  9: slow and accurate alignment.",
         "-a, --accuracy".green(), "INT".yellow(), super::fmt_def(defaults.accuracy));
-    println!("    {:KEY$} {:VAL$}  Discard alleles with sequence divergence under the threshold [{}].\n\
-        {EMPTY}  Use 0 to keep all distinct alleles.",
+    println!("    {:KEY$} {:VAL$}  Sequence divergence threshold, used to discard very similar\n\
+        {EMPTY}  alleles [{}]. Use 0 to keep all distinct alleles.",
         "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
 
     println!("\n{}", "Execution arguments:".bold());
@@ -587,7 +587,7 @@ where R: Read + Seek,
     if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
         return Ok(true);
     }
-    log::info!("{} {}", "Analyzing locus".bold(), locus);
+    log::info!("{} {}", "Analyzing".bold(), locus.name().bold());
     let inner_interv = locus.interval();
     // Add extra half-window to each sides.
     let halfw = args.moving_window / 2;
@@ -732,6 +732,7 @@ fn process_locus_from_fasta(
     if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
         return Ok(())
     }
+    log::info!("{} {}", "Analyzing".bold(), locus.bold());
     let mut fasta_reader = fastx::Reader::from_path(fasta_path)?;
     let seqs = fasta_reader.read_all()?;
     check_sequences(&seqs, locus)?;
