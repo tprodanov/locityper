@@ -3,7 +3,6 @@
 use std::{
     str::from_utf8,
 };
-use fx::FxHashSet;
 use htslib::bcf::{
     self,
     header::HeaderView,
@@ -13,6 +12,7 @@ use crate::{
     Error,
     seq::self,
     ext::vec::F64Ext,
+    algo::HashSet,
 };
 use super::NamedSeq;
 
@@ -68,12 +68,12 @@ impl AllHaplotypes {
     pub fn new(
         reader: &mut impl bcf::Read,
         ref_name: &str,
-        leave_out: &FxHashSet<String>,
+        leave_out: &HashSet<String>,
     ) -> Result<Self, Error>
     {
         let mut discarded = 0;
         let mut total = 0;
-        let mut hap_names = FxHashSet::default();
+        let mut hap_names = HashSet::default();
         let ref_name = if leave_out.contains(ref_name) {
             discarded += 1;
             None

@@ -4,7 +4,6 @@ use std::{
     sync::Arc,
     rc::Rc,
 };
-use fx::FxHashMap;
 use smallvec::SmallVec;
 use htslib::bam;
 use crate::{
@@ -14,10 +13,11 @@ use crate::{
         cigar::{Cigar, CigarItem, Operation},
     },
     Error,
+    algo::HashMap,
 };
 
 const CAPACITY: usize = 4;
-type KmerCache<'a> = FxHashMap<&'a [u8], SmallVec<[u32; CAPACITY]>>;
+type KmerCache<'a> = HashMap<&'a [u8], SmallVec<[u32; CAPACITY]>>;
 
 /// Creates a HashMap containing all the k-mers in the sequence.
 /// A good rolling hash function should speed up the code.

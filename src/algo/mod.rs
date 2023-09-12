@@ -1,16 +1,11 @@
 pub mod loess;
 pub mod bisect;
 
-use std::{
-    hash::Hasher,
-};
+// Use these types instead of the default Hash Map.
 
-/// Calculates FNV1a function for given bytes.
-pub fn fx_hash(bytes: &[u8]) -> u64 {
-    let mut hasher = fx::FxHasher::default();
-    hasher.write(bytes);
-    hasher.finish()
-}
+pub type BuildHasher = std::hash::BuildHasherDefault<wyhash2::WyHash>;
+pub type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasher>;
+pub type HashSet<T> = std::collections::HashSet<T, BuildHasher>;
 
 /// Newtype over two u32 values, useful for nohash IntMap.
 #[derive(PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]

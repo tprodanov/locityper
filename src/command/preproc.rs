@@ -867,7 +867,7 @@ fn estimate_bg_distrs(
             Some(cigar)
         };
         (alns, is_paired_end) = load_alns(&mut bam_reader, get_cigar, &bg_region.ref_contigs, args)?;
-        assert!(is_paired_end == args.is_paired_end());
+        assert_eq!(is_paired_end, args.is_paired_end());
     }
 
     if is_paired_end {

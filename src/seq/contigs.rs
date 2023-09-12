@@ -5,7 +5,6 @@ use std::{
     path::Path,
 };
 use smallvec::SmallVec;
-use fx::FxHashMap;
 use bio::io::fasta;
 use crate::{
     err::{Error, add_path},
@@ -15,6 +14,7 @@ use crate::{
         NamedSeq,
         kmers::KmerCounts,
     },
+    algo::HashMap,
 };
 
 /// Contig identificator - newtype over u16.
@@ -58,7 +58,7 @@ pub struct ContigNames {
     tag: String,
     names: Vec<String>,
     lengths: Vec<u32>,
-    name_to_id: FxHashMap<String, ContigId>,
+    name_to_id: HashMap<String, ContigId>,
 }
 
 impl ContigNames {
@@ -68,7 +68,7 @@ impl ContigNames {
     pub fn new(tag: impl Into<String>, it: impl Iterator<Item = (String, u32)>) -> Result<Self, Error> {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
-        let mut name_to_id = FxHashMap::default();
+        let mut name_to_id = HashMap::default();
 
         for (name, length) in it {
             let contig_id = ContigId::new(names.len());

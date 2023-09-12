@@ -4,7 +4,6 @@ use std::{
     ops::{Add, AddAssign},
     cell::RefCell,
     borrow::Borrow,
-    collections::HashMap,
     path::Path,
 };
 use nohash::IntMap;
@@ -16,6 +15,7 @@ use crate::{
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
+    algo::HashMap,
     ext,
 };
 
@@ -132,7 +132,7 @@ impl ErrorProfile {
         log::info!("Estimating read error profiles from {} reads", alns.len());
         let mut total_counts = OperCounts::<u64>::default();
         // HashMap, values: (edit_dist, read_len), keys: number of appearances.
-        let mut edit_distances = HashMap::<(u32, u32), u64>::new();
+        let mut edit_distances = HashMap::<(u32, u32), u64>::default();
         for aln in alns.iter() {
             let aln = aln.borrow();
             if !windows.keep_window(aln.interval().middle()) {

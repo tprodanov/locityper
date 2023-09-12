@@ -1,7 +1,7 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.7.3-1"
+version = "0.7.3-2"
 edition = "2021"
 
 [dependencies]
@@ -34,7 +34,7 @@ kodama = { version = "0.3", default-features = false }
 argmin = { version = "0.8", default-features = false }
 argmin-math = { version = "0.3", default-features = false, features = ["vec"] }
 lz4 = { version = "1.24", default-features = false }
-fx = { package = "rustc-hash", version = "1.1.0", default-features = false, features = ["std"] }
+wyhash2 = { version = "0.2", default-features = false }
 
 [build-dependencies]
 bindgen = { version = "0.66", default-features = false, features = ["runtime"] }

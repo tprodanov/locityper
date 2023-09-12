@@ -5,11 +5,10 @@ use std::{
     ops::Deref,
     io::Write,
 };
-use fx::FxHashMap;
 use nohash::IntMap;
 use crate::{
     err::{Error, add_path},
-    algo::bisect,
+    algo::{bisect, HashMap},
     ext::{self, vec::F64Ext},
     bg::ser::{JsonSer, json_get},
     math::distr::{
@@ -25,8 +24,8 @@ use crate::{
 /// Input: vector of primary alignments.
 /// There can be at most one first and one second mate for each name.
 pub fn group_mates<'a>(alns: &'a [NamedAlignment]) -> Result<Vec<(usize, usize)>, Error> {
-    let mut pairs: FxHashMap<&'a [u8], [Option<usize>; 2]> =
-        FxHashMap::with_capacity_and_hasher(alns.len() / 2, Default::default());
+    let mut pairs: HashMap<&'a [u8], [Option<usize>; 2]> =
+        HashMap::with_capacity_and_hasher(alns.len() / 2, Default::default());
     for (i, aln) in alns.iter().enumerate() {
         let ix = aln.read_end().ix();
         // Insert alignment and return Error, if there already was an alignment there.
