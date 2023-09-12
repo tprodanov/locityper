@@ -1,7 +1,7 @@
 use std::{
     cmp::min,
     sync::Arc,
-    io::Write,
+    io::{self, Write},
     collections::hash_map::Entry,
 };
 use htslib::bam;
@@ -452,6 +452,24 @@ impl GrouppedAlignments {
     pub fn weight(&self) -> f64 {
         self.weight
     }
+
+    fn write_read_pair_info(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
+        for pair in self.aln_pairs.iter() {
+            write!(f, "{:X}\t{}\t", self.name_hash, contigs.get_name(pair.contig_id))?;
+            if let Some((i, _)) = pair.aln1 {
+                write!(f, "{}\t", self.alignments[i as usize].interval().start() + 1)?;
+            } else {
+                write!(f, "*\t")?;
+            }
+            if let Some((j, _)) = pair.aln2 {
+                write!(f, "{}\t", self.alignments[j as usize].interval().start() + 1)?;
+            } else {
+                write!(f, "*\t")?;
+            }
+            writeln!(f, "{:.4}", Ln::to_log10(pair.ln_prob))?;
+        }
+        Ok(())
+    }
 }
 
 /// Store at most 3 alignments for cases when the read/read pair will not be used later.
@@ -698,5 +716,19 @@ impl AllAlignments {
             }
         }
         best_aln_probs
+    }
+
+    /// Writes debug information about all read pairs.
+    pub fn write_read_pair_info(&self, mut f: impl Write, contigs: &ContigNames, include_w0: bool) -> io::Result<()> {
+        writeln!(f, "read_hash\tcontig\tpos1\tpos2\tlik")?;
+        for read in self.reads.iter() {
+            read.write_read_pair_info(&mut f, contigs)?;
+        }
+        if include_w0 {
+            for read in self.w0_reads.iter() {
+                read.write_read_pair_info(&mut f, contigs)?;
+            }
+        }
+        Ok(())
     }
 }

@@ -689,6 +689,7 @@ fn analyze_locus(
     log::info!("{} {}", "Analyzing".bold(), locus.set.tag().bold());
     let timer = Instant::now();
     map_reads(locus, bg_distr, &args)?;
+    let is_paired_end = bg_distr.insert_distr().is_paired_end();
 
     log::info!("    Calculating read alignment probabilities");
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
@@ -703,12 +704,16 @@ fn analyze_locus(
     };
 
     let all_alns = if args.debug {
-        let reads_filename = locus.out_dir.join("reads.csv.gz");
-        let reads_writer = ext::sys::create_gzip(&reads_filename)?;
+        let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, reads_writer)?
     } else {
         AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, io::sink())?
     };
+    if is_paired_end && args.debug {
+        let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
+        let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
+        all_alns.write_read_pair_info(pairs_writer, contigs, false).map_err(add_path!(read_pairs_filename))?;
+    }
     ContigWindows::define_all_distributions(&mut contig_windows, cached_distrs);
 
     let contig_ids: Vec<ContigId> = contigs.ids().collect();
@@ -723,8 +728,7 @@ fn analyze_locus(
         assgn_params: args.assgn_params.clone(),
         debug: args.debug,
         threads: usize::from(args.threads),
-        all_alns, genotypes, priors, contig_windows,
-        is_paired_end: bg_distr.insert_distr().is_paired_end(),
+        all_alns, genotypes, priors, contig_windows, is_paired_end,
     };
     scheme::solve(data, &locus.out_dir, &mut rng)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
