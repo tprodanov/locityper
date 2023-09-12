@@ -15,7 +15,7 @@ mod cwfa {
 }
 
 /// Maximum accuracy level (need to change `add` help message, if changed this).
-const MAX_ACCURACY: u8 = 9;
+pub const MAX_ACCURACY: u8 = 9;
 
 #[derive(Clone)]
 pub struct Penalties {
@@ -24,8 +24,6 @@ pub struct Penalties {
     pub mismatch: i32,
     pub gap_open: i32,
     pub gap_extend: i32,
-    /// Accuracy level [0, 9]. 0 - very fast and inaccurate, 9 - very slow and accurate.
-    pub accuracy: u8,
 }
 
 impl Default for Penalties {
@@ -34,7 +32,6 @@ impl Default for Penalties {
             mismatch: 4,
             gap_open: 6,
             gap_extend: 1,
-            accuracy: 3,
         }
     }
 }
@@ -44,8 +41,6 @@ impl Penalties {
         validate_param!(self.mismatch >= 0, "Mismatch penalty ({}) must be non-negative", self.mismatch);
         validate_param!(self.gap_open >= 0, "Gap opening penalty ({}) must be non-negative", self.gap_open);
         validate_param!(self.gap_extend >= 0, "Gap extension penalty ({}) must be non-negative", self.gap_extend);
-        validate_param!(self.accuracy <= MAX_ACCURACY, "Alignment accuracy level ({}) must be between 0 and {}.",
-            self.accuracy, MAX_ACCURACY);
         Ok(())
     }
 
@@ -117,13 +112,15 @@ impl Drop for Aligner {
 }
 
 impl Aligner {
-    pub fn new(penalties: Penalties) -> Self {
+    /// Accuracy level must be in [1, 9], 0 - very fast and inaccurate, 9 - very slow and accurate.
+    pub fn new(penalties: Penalties, accuracy: u8) -> Self {
+        assert!(1 <= accuracy && accuracy <= MAX_ACCURACY, "Cannot construct WFA aligner for accuracy {}", accuracy);
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
         // Limit the number of alignment steps.
-        attributes.system.max_alignment_steps = alignment_steps(penalties.accuracy);
+        attributes.system.max_alignment_steps = alignment_steps(accuracy);
 
         // High memory for some reason produces alignments with M both for X and =.
-        attributes.memory_mode = if penalties.accuracy < 7 {
+        attributes.memory_mode = if accuracy < 7 {
             cwfa::wavefront_memory_t_wavefront_memory_med
         } else {
             cwfa::wavefront_memory_t_wavefront_memory_low
@@ -152,9 +149,6 @@ impl Aligner {
     /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
     /// If the alignment is dropped, returns VERY approximate alignment.
     pub fn align(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> Result<i32, Error> {
-        if self.penalties.accuracy == 0 {
-            return Ok(self.penalties.align_simple(seq1, seq2, cigar));
-        }
         let status = unsafe { cwfa::wavefront_align(
             self.inner,
             seq1.as_ptr() as *const c_char,

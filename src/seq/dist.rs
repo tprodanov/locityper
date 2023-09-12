@@ -123,6 +123,7 @@ pub fn pairwise_divergences(
     entries: &[NamedSeq],
     penalties: &Penalties,
     k: usize,
+    accuracy: u8,
     threads: u16,
 ) -> Result<Vec<f64>, Error> {
     let caches: Vec<_> = entries.iter().map(|entry| cache_kmers(entry.seq(), k)).collect();
@@ -130,7 +131,7 @@ pub fn pairwise_divergences(
         log::debug!("        Aligning sequences in 1 thread");
         let n = entries.len();
         let mut alns = Vec::with_capacity(n * (n - 1) / 2);
-        let aligner = Aligner::new(penalties.clone());
+        let aligner = Aligner::new(penalties.clone(), accuracy);
         for (i, (entry1, cache1)) in entries.iter().zip(&caches).enumerate() {
             for (entry2, cache2) in entries[i + 1..].iter().zip(&caches[i + 1..]) {
                 let kmer_matches = find_kmer_matches(cache1, cache2);
@@ -139,9 +140,9 @@ pub fn pairwise_divergences(
         }
         alns
     } else {
-        divergences_multithread(entries, &caches, penalties, k, threads)?
+        divergences_multithread(entries, &caches, penalties, k, accuracy, threads)?
     };
-    write_all(bam_path, entries, alns, k, penalties.accuracy)
+    write_all(bam_path, entries, alns, k, accuracy)
 }
 
 fn divergences_multithread(
@@ -149,6 +150,7 @@ fn divergences_multithread(
     caches: &[KmerCache],
     penalties: &Penalties,
     k: usize,
+    accuracy: u8,
     threads: u16,
 ) -> Result<Vec<(Cigar, i32)>, Error> {
     let threads = usize::from(threads);
@@ -179,7 +181,7 @@ fn divergences_multithread(
             let penalties = penalties.clone();
             handles.push(thread::spawn(move || {
                 assert!(start < end);
-                let aligner = Aligner::new(penalties);
+                let aligner = Aligner::new(penalties, accuracy);
                 pairs[start..end].iter().zip(all_kmer_matches[start..end].iter()).map(|(&(i, j), kmer_matches)|
                         align(&aligner, &entries[i as usize].seq(), entries[j as usize].seq(), kmer_matches, k))
                     .collect::<Result<Vec<_>, Error>>()

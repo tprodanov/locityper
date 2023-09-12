@@ -47,6 +47,8 @@ struct Args {
 
     penalties: Penalties,
     backbone_k: usize,
+    /// Alignment accuracy between 0 and 9.
+    accuracy: u8,
     unknown_frac: f64,
     max_divergence: f64,
 
@@ -72,8 +74,9 @@ impl Default for Args {
 
             penalties: Default::default(),
             backbone_k: 101,
+            accuracy: 0,
             unknown_frac: 0.0001,
-            max_divergence: 0.0001,
+            max_divergence: 0.0,
 
             threads: 8,
             force: false,
@@ -102,6 +105,8 @@ impl Args {
         validate_param!(0.0 <= self.max_divergence && self.max_divergence <= 1.0,
             "Maximum divergence ({}) must be within [0, 1]", self.max_divergence);
         validate_param!(self.backbone_k >= 5, "Backbone alignment k-mer size ({}) must be at least 5", self.backbone_k);
+        validate_param!(self.accuracy <= crate::seq::wfa::MAX_ACCURACY,
+            "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, crate::seq::wfa::MAX_ACCURACY);
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         // Make window size odd.
@@ -171,14 +176,12 @@ fn print_help() {
         "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
     println!("    {:KEY$} {:VAL$}  Backbone alignment k-mer size [{}].",
         "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
-    println!("    {:KEY$} {:VAL$}  Alignment accuracy level (between 0 and 9) [{}].\n\
-        {EMPTY}  Small values produce fast but inaccurate alignment between alleles,\n\
-        {EMPTY}  large values produce slow and accurate alignments.\n\
-        {EMPTY}  You can use {} and {} as a shorthand for {} and {}.",
-        "-a, --accuracy".green(), "INT".yellow(), super::fmt_def(defaults.penalties.accuracy),
-        "-0".green(), "-9".green(), "-a 0".green(), "-a 9".green());
-    println!("    {:KEY$} {:VAL$}  Sequence divergence threshold,\n\
-        {EMPTY}  used to discard almost identical locus alleles [{}].",
+    println!("    {:KEY$} {:VAL$}  Accuracy level of allele alignments (0-9) [{}].\n\
+        {EMPTY}  0: no sequence alignment, 1: fast and inaccurate alignment,\n\
+        {EMPTY}  9: slow and accurate alignment.",
+        "-a, --accuracy".green(), "INT".yellow(), super::fmt_def(defaults.accuracy));
+    println!("    {:KEY$} {:VAL$}  Discard alleles with sequence divergence under the threshold [{}].\n\
+        {EMPTY}  Use 0 to keep all distinct alleles.",
         "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
 
     println!("\n{}", "Execution arguments:".bold());
@@ -230,9 +233,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.penalties.gap_extend = parser.value()?.parse()?,
             Short('k') | Long("backbone-k") => args.backbone_k = parser.value()?.parse()?,
-            Short('a') | Long("accuracy") => args.penalties.accuracy = parser.value()?.parse()?,
-            Short('0') => args.penalties.accuracy = 0,
-            Short('9') => args.penalties.accuracy = 9,
+            Short('a') | Long("accuracy") => args.accuracy = parser.value()?.parse()?,
 
             Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
@@ -428,7 +429,7 @@ fn cluster_haplotypes(
             keep_seqs[i] = true;
         } else {
             let step = &steps[i - n];
-            if step.dissimilarity <= thresh {
+            if step.dissimilarity == 0.0 || step.dissimilarity <= thresh {
                 keep_seqs[cluster_repr[i]] = true;
             } else {
                 queue.push(step.cluster1);
@@ -448,11 +449,23 @@ fn process_haplotypes(
     args: &Args,
 ) -> Result<(), Error>
 {
-    log::info!("    Writing {} haplotypes to {}/", entries.len(), ext::fmt::path(locus_dir));
+    let n_entries = entries.len();
+    log::info!("    Writing {} haplotypes to {}/", n_entries, ext::fmt::path(locus_dir));
     log::info!("    Calculating haplotype divergence");
-    let bam_path = locus_dir.join(paths::LOCUS_BAM);
-    let divergences = dist::pairwise_divergences(&bam_path, &entries, &args.penalties, args.backbone_k, args.threads)?;
-    check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
+    let divergences: Vec<f64>;
+    if args.accuracy > 0 {
+        let bam_path = locus_dir.join(paths::LOCUS_BAM);
+        divergences = dist::pairwise_divergences(&bam_path, &entries,
+            &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
+        check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
+    } else {
+        // Need this so that `entries` are not consumed by `move` closure.
+        let entries_ref = &entries;
+        divergences = (0..n_entries)
+            .flat_map(|i| (i + 1..n_entries)
+                .map(move |j| if entries_ref[i].seq() == entries_ref[j].seq() { 0.0 } else { 1.0 }))
+            .collect();
+    }
 
     log::info!("    Clustering haploypes");
     let nwk_filename = locus_dir.join(paths::LOCUS_DENDROGRAM);
@@ -460,10 +473,10 @@ fn process_haplotypes(
     let keep_seqs = cluster_haplotypes(nwk_writer, &entries, divergences, args.max_divergence)
         .map_err(add_path!(nwk_filename))?;
     let n_filtered = keep_seqs.iter().fold(0, |sum, &keep| sum + usize::from(keep));
-    if n_filtered == entries.len() {
+    if n_filtered == n_entries {
         log::info!("        Keep all sequences after clustering");
     } else {
-        log::info!("        Discard {} sequences after clustering", entries.len() - n_filtered);
+        log::info!("        Discard {} sequences after clustering", n_entries - n_filtered);
     }
 
     let filt_fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
