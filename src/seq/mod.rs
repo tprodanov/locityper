@@ -2,14 +2,13 @@ pub mod contigs;
 pub mod interv;
 pub mod cigar;
 pub mod aln;
-#[cfg(feature = "devel")]
-pub mod compl;
 pub mod kmers;
 pub mod panvcf;
-pub mod dist;
 pub mod fastx;
 pub mod recruit;
 pub mod wfa;
+#[cfg(feature = "aln")]
+pub mod dist;
 
 pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames, ContigSet};

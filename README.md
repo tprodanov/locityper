@@ -40,6 +40,19 @@ cargo build --release
 cargo install
 ```
 
+### Compiling without WFA and GCC
+
+It is possible to reduce the number of dependencies by sacrificing some functionality.
+In particular, one can compile `locityper` without `WFA` library and appropriate `GCC` compiler with
+```bash
+git clone https://github.com/tprodanov/locityper
+cd locityper
+cargo build --release --no-default-features
+cargo install
+```
+However, in such configuration it is impossible to align locus haplotypes and discard similar alleles,
+only identical alleles will be removed.
+
 General usage
 -------------
 

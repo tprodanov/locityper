@@ -24,12 +24,14 @@ use crate::{
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        dist, panvcf, interv, fastx,
+        panvcf, interv, fastx,
         contigs::GenomeVersion,
         kmers::JfKmerGetter,
         wfa::Penalties,
     },
 };
+#[cfg(feature = "aln")]
+use crate::seq::dist;
 use super::paths;
 
 struct Args {
@@ -107,6 +109,11 @@ impl Args {
         validate_param!(self.backbone_k >= 5, "Backbone alignment k-mer size ({}) must be at least 5", self.backbone_k);
         validate_param!(self.accuracy <= crate::seq::wfa::MAX_ACCURACY,
             "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, crate::seq::wfa::MAX_ACCURACY);
+        #[cfg(not(feature = "aln"))] {
+            validate_param!(self.accuracy == 0, "Cannot specify alignment accuracy when `aln` feature is disabled");
+            validate_param!(self.max_divergence == 0.0,
+                "Cannot specify sequence divergence when `aln` feature is disabled");
+        }
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         // Make window size odd.
@@ -359,6 +366,7 @@ fn find_best_boundary<const LEFT: bool>(
 }
 
 /// Check divergencies and warns if they are too high.
+#[cfg(feature = "aln")]
 fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Iterator<Item = f64>, from_vcf: bool) {
     let n = entries.len();
     let mut count = 0;
@@ -443,6 +451,7 @@ fn cluster_haplotypes(
 /// Process haplotypes: write FASTA, PAF, kmers files, cluster sequences.
 fn process_haplotypes(
     locus_dir: &Path,
+    #[allow(unused_variables)]
     tag: &str,
     entries: Vec<NamedSeq>,
     kmer_getter: &JfKmerGetter,
@@ -454,10 +463,14 @@ fn process_haplotypes(
     log::info!("    Calculating haplotype divergence");
     let divergences: Vec<f64>;
     if args.accuracy > 0 {
-        let bam_path = locus_dir.join(paths::LOCUS_BAM);
-        divergences = dist::pairwise_divergences(&bam_path, &entries,
-            &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
-        check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
+        #[cfg(feature = "aln")] {
+            let bam_path = locus_dir.join("all_haplotypes.bam");
+            divergences = dist::pairwise_divergences(&bam_path, &entries,
+                &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
+            check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
+        } #[cfg(not(feature = "aln"))] {
+            panic!("Accuracy > 0, but `aln` feature is disabled");
+        }
     } else {
         // Need this so that `entries` are not consumed by `move` closure.
         let entries_ref = &entries;
