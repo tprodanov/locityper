@@ -66,7 +66,11 @@ if (sum(sol$contig == 'summary') != 1) {
     stop('Unexpected number of solutions!')
 }
 sol <- filter(sol, contig != 'summary') |>
-    mutate(contig = gt[as.numeric(contig)], window = as.numeric(window))
+    mutate(
+        contig_ix = as.numeric(contig),
+        contig = gt[contig_ix],
+        contig_ext = sprintf('%s-%d', contig, contig_ix),
+        window = as.numeric(window))
 
 # Load window information.
 
@@ -150,7 +154,8 @@ ggplot(sol) +
           size = 0.5, color = main_color)
     }) +
 
-    facet_wrap(~ contig, ncol = 1, strip.position = 'top') +
+    facet_wrap(~ contig_ext, ncol = 1, strip.position = 'top',
+        labeller = as_labeller(function(x) sub('-[0-9]$', '', x))) +
     ggtitle(title, subtitle) +
     scale_x_continuous('Window',
         expand = expansion(mult = 0.005),

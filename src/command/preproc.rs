@@ -829,7 +829,7 @@ fn estimate_bg_distrs(
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     let ref_filename = args.reference.as_ref().unwrap();
-    let is_paired_end: bool;
+    let aln_is_paired_end: bool;
     let alns: Vec<NamedAlignment>;
     let mut seq_info: SequencingInfo;
 
@@ -841,10 +841,10 @@ fn estimate_bg_distrs(
         let interval_start = interval.start();
         let ref_seq = &bg_region.sequence;
         bam_reader.fetch((interval.contig_name(), i64::from(interval_start), i64::from(interval.end())))?;
-        (alns, is_paired_end) = load_alns(&mut bam_reader,
+        (alns, aln_is_paired_end) = load_alns(&mut bam_reader,
             |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
             &bg_region.ref_contigs, args)?;
-        if is_paired_end && !args.technology.paired_end_allowed() {
+        if aln_is_paired_end && !args.technology.paired_end_allowed() {
             return Err(Error::InvalidInput(format!("Paired end reads are not supported by {}",
                 args.technology.long_name())));
         }
@@ -866,11 +866,18 @@ fn estimate_bg_distrs(
             assert!(!cigar.has_hard_clipping(), "Cannot process primary alignments with hard clipping");
             Some(cigar)
         };
-        (alns, is_paired_end) = load_alns(&mut bam_reader, get_cigar, &bg_region.ref_contigs, args)?;
-        assert_eq!(is_paired_end, args.is_paired_end());
+        (alns, aln_is_paired_end) = load_alns(&mut bam_reader, get_cigar, &bg_region.ref_contigs, args)?;
+        if aln_is_paired_end != args.is_paired_end() {
+            return Err(Error::RuntimeError(format!(
+                "Input data is {}-end, while alignment file is {}-end. \
+                Perhaps preprocessing was run multiple times with different inputs?",
+                if args.is_paired_end() { "paired" } else { "single" },
+                if aln_is_paired_end { "paired" } else { "single" },
+            )));
+        }
     }
 
-    if is_paired_end {
+    if aln_is_paired_end {
         estimate_bg_from_paired(alns, seq_info, args, opt_out_dir, bg_region)
     } else {
         estimate_bg_from_unpaired(alns, seq_info, args, opt_out_dir, bg_region)
