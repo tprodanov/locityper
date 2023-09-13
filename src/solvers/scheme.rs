@@ -34,7 +34,8 @@ use crate::{
         Params as AssgnParams,
         locs::AllAlignments,
         assgn::{GenotypeAlignments, ReadAssignment},
-        windows::ContigWindows,
+        windows::ContigInfo,
+        distr_cache::DistrCache,
     },
 };
 use super::Solver;
@@ -196,7 +197,8 @@ pub struct Data {
     pub contigs: Arc<ContigNames>,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
-    pub contig_windows: Vec<ContigWindows>,
+    pub all_contig_infos: Vec<Arc<ContigInfo>>,
+    pub distr_cache: Arc<DistrCache>,
 
     /// Genotypes and their priors.
     pub genotypes: Vec<Genotype>,
@@ -443,12 +445,12 @@ fn solve_single_thread(
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    let tweak = data.assgn_params.tweak.unwrap();
     let total_genotypes = data.genotypes.len();
     let mut logger = Logger::new(&data.scheme, total_genotypes);
 
     let n_stages = data.scheme.stages.len();
     let attempts = data.assgn_params.attempts;
+    let distr_cache = data.distr_cache.deref();
     for (stage_ix, solver) in data.scheme.iter().enumerate() {
         logger.start_stage(stage_ix, likelihoods.curr_len());
         if stage_ix + 1 < n_stages && likelihoods.curr_len() <= data.assgn_params.min_gts {
@@ -460,12 +462,12 @@ fn solve_single_thread(
         for &ix in likelihoods.ixs.iter() {
             let gt = &data.genotypes[ix];
             let prior = data.priors[ix];
-            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
+            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.all_contig_infos, &data.all_alns,
                 &data.assgn_params);
             let mut counts = gt_alns.create_counts();
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
-                gt_alns.define_read_windows(tweak, rng);
+                gt_alns.apply_tweak(rng, distr_cache, &data.assgn_params);
                 let assgns = solver.solve(&gt_alns, rng)?;
                 *lik = prior + assgns.likelihood();
                 if data.debug {
@@ -719,9 +721,9 @@ struct Worker<W, U> {
 impl<W: Write, U: Write> Worker<W, U> {
     fn run(mut self) -> Result<(), Error> {
         let data = self.data.deref();
-        let tweak = data.assgn_params.tweak.unwrap();
         let scheme = data.scheme.deref();
         let attempts = data.assgn_params.attempts;
+        let distr_cache = data.distr_cache.deref();
 
         // Block thread and wait for the shipment.
         while let Ok((stage_ix, task)) = self.receiver.recv() {
@@ -733,11 +735,11 @@ impl<W: Write, U: Write> Worker<W, U> {
             for ix in task.into_iter() {
                 let gt = &data.genotypes[ix];
                 let prior = data.priors[ix];
-                let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_windows, &data.all_alns,
+                let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.all_contig_infos, &data.all_alns,
                     &data.assgn_params);
                 let mut counts = gt_alns.create_counts();
                 for (attempt, lik) in liks.iter_mut().enumerate() {
-                    gt_alns.define_read_windows(tweak, &mut self.rng);
+                    gt_alns.apply_tweak(&mut self.rng, distr_cache, &data.assgn_params);
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = prior + assgns.likelihood();
                     if data.debug {

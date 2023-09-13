@@ -22,7 +22,7 @@ use crate::{
     },
     algo::{bisect, TwoU32, get_hash},
     math::Ln,
-    model::windows::ContigWindows,
+    model::windows::ContigInfo,
 };
 
 struct MateSummary {
@@ -106,7 +106,7 @@ struct FilteredReader<'a, R: bam::Read> {
     contigs: Arc<ContigNames>,
     boundary: u32,
     err_prof: &'a ErrorProfile,
-    contig_windows: &'a [ContigWindows],
+    all_contig_infos: &'a [Arc<ContigInfo>],
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id, alignment start), value: index of the previous position.
     found_alns: IntMap<TwoU32, usize>,
@@ -122,7 +122,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         mut reader: R,
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
-        contig_windows: &'a [ContigWindows],
+        all_contig_infos: &'a [Arc<ContigInfo>],
         boundary: u32,
     ) -> Result<Self, Error> {
         let mut record = bam::Record::new();
@@ -131,7 +131,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
             found_alns: IntMap::default(),
-            reader, record, contigs, err_prof, contig_windows, boundary, has_more,
+            reader, record, contigs, err_prof, all_contig_infos, boundary, has_more,
         })
     }
 
@@ -209,7 +209,8 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 edit_dist, read_len, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
-                weight = self.contig_windows[aln_interval.contig_id().ix()].get_window_weight(aln_interval.middle());
+                weight = self.all_contig_infos[aln_interval.contig_id().ix()]
+                    .default_window_weight(aln_interval.middle());
                 write!(dbg_writer, "\t{:.5}\t{}", weight, read_data.name).map_err(add_path!(!))?;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
@@ -627,7 +628,7 @@ impl AllAlignments {
         reader: impl bam::Read,
         contigs: &Arc<ContigNames>,
         bg_distr: &BgDistr,
-        contig_windows: &[ContigWindows],
+        all_contig_infos: &[Arc<ContigInfo>],
         params: &super::Params,
         mut dbg_writer: impl Write,
     ) -> Result<Self, Error>
@@ -640,7 +641,7 @@ impl AllAlignments {
         writeln!(dbg_writer, "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\
             \tlik\tweight\tread_name").map_err(add_path!(!))?;
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(),
-            contig_windows, boundary)?;
+            all_contig_infos, boundary)?;
 
         let insert_distr = bg_distr.insert_distr();
         let is_paired_end = insert_distr.is_paired_end();
@@ -653,6 +654,8 @@ impl AllAlignments {
         let mut total_reads = 0;
         let mut reads = Vec::new();
         let mut w0_reads = Vec::new();
+        let mut out_of_bounds_reads = 0;
+        let mut unmapped_reads = 0;
         while reader.has_more() {
             let mut read_data = ReadData::default();
             total_reads += 1;
@@ -662,15 +665,21 @@ impl AllAlignments {
                 log::warn!("Read {} produced hash collision ({:X})", read_data.name, summary1.name_hash);
                 collisions += 1;
             }
+            let mut mapped = summary1.mapped;
             let mut central = summary1.any_central;
             let summary2 = if is_paired_end {
                 let summary2 = reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
+                mapped |= summary2.mapped;
                 central |= summary2.any_central;
                 Some(summary2)
             } else {
                 None
             };
-            if !central {
+            if !mapped {
+                unmapped_reads += 1;
+                continue;
+            } else if !central {
+                out_of_bounds_reads += 1;
                 continue;
             }
 
@@ -686,10 +695,10 @@ impl AllAlignments {
                 w0_reads.push(groupped_alns);
             }
         }
-        log::info!("    Total {} read{},  {} good,  {} low weight{},  {} out of bounds",
+        log::info!("    Total {} read{},  {} good,  {} low weight{},  {} out of bounds,  {} unmapped",
             total_reads, if is_paired_end { " pairs" } else { "s" }, reads.len(),
             w0_reads.len(), if is_paired_end && !params.use_unpaired { "/unpaired" } else { "" },
-            total_reads - reads.len() - w0_reads.len());
+            out_of_bounds_reads, unmapped_reads);
         if collisions > 2 && collisions * 100 > total_reads {
             return Err(Error::RuntimeError(format!("Too many hash collisions ({})", collisions)));
         }

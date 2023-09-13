@@ -1,5 +1,6 @@
 use std::{
     io,
+    sync::Arc,
 };
 use rand::Rng;
 use crate::{
@@ -11,17 +12,9 @@ use crate::{
 };
 use super::{
     locs::AllAlignments,
-    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadGtAlns, ContigWindows, GenotypeWindows},
-    dp_cache::AlwaysOneDistr,
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadGtAlns, ContigInfo, GenotypeWindows},
+    distr_cache::{TrivialDistr, DistrCache},
 };
-
-fn unmapped_distr() -> DistrBox {
-    Box::new(AlwaysOneDistr)
-}
-
-fn boundary_distr() -> DistrBox {
-    Box::new(AlwaysOneDistr)
-}
 
 /// All read alignments to a specific genotype.
 pub struct GenotypeAlignments {
@@ -30,6 +23,8 @@ pub struct GenotypeAlignments {
     gt_windows: GenotypeWindows,
     /// Read depth distribution at each window (length: `gt_windows.total_windows()`).
     depth_distrs: Vec<DistrBox>,
+    /// Current window weights.
+    curr_weights: Vec<f64>,
     /// Is this window weight over the threshold?
     use_window: Vec<bool>,
 
@@ -48,17 +43,23 @@ pub struct GenotypeAlignments {
     non_trivial_reads: Vec<usize>,
 }
 
+
+#[inline]
+fn trivial_box() -> Box<TrivialDistr> {
+    Box::new(TrivialDistr)
+}
+
 impl GenotypeAlignments {
     /// Creates an instance that stores read assignments to a given genotype.
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
         genotype: Genotype,
-        contig_windows: &[ContigWindows],
+        all_contig_infos: &[Arc<ContigInfo>],
         all_alns: &AllAlignments,
         params: &super::Params,
     ) -> Self
     {
-        let gt_windows = GenotypeWindows::new(genotype, contig_windows);
+        let gt_windows = GenotypeWindows::new(genotype, all_contig_infos);
         let mut ix = 0;
         let mut alns = Vec::new();
         let mut read_ixs = vec![ix];
@@ -83,21 +84,19 @@ impl GenotypeAlignments {
         const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
             "Constants have changed!");
         let total_windows = gt_windows.total_windows() as usize;
-        let mut depth_distrs = Vec::with_capacity(total_windows);
+        let mut curr_weights = Vec::with_capacity(total_windows);
         let mut use_window = Vec::with_capacity(total_windows);
-        depth_distrs.push(unmapped_distr());
-        use_window.push(false);
-        depth_distrs.push(boundary_distr());
-        use_window.push(false);
-        for contig_windows in gt_windows.contig_windows() {
-            depth_distrs.extend_from_slice(contig_windows.depth_distrs());
-            use_window.extend_from_slice(contig_windows.use_window());
+        let mut depth_distrs: Vec<DistrBox> = Vec::with_capacity(total_windows);
+        for _ in 0..REG_WINDOW_SHIFT {
+            curr_weights.push(0.0);
+            use_window.push(false);
+            depth_distrs.push(trivial_box());
         }
 
         Self {
             depth_contrib: params.lik_skew + 1.0,
             aln_contrib: 1.0 - params.lik_skew,
-            gt_windows, depth_distrs, use_window, alns, read_ixs, non_trivial_reads,
+            gt_windows, alns, depth_distrs, curr_weights, use_window, read_ixs, non_trivial_reads,
         }
     }
 
@@ -141,17 +140,30 @@ impl GenotypeAlignments {
         (self.depth_contrib, self.aln_contrib)
     }
 
-    // /// Returns the genotype.
-    // pub fn genotype(&self) -> &Genotype {
-    //     self.gt_windows.genotype()
-    // }
-
-    /// Define read windows by randomly moving read middle by at most `tweak` bp to either side.
-    pub fn define_read_windows(&mut self, tweak: u32, rng: &mut impl Rng) {
+    /// Randomly tweak read centers and window weights, and define read depth distributions later.
+    pub fn apply_tweak(&mut self, rng: &mut impl Rng, distr_cache: &DistrCache, params: &super::Params) {
+        let tweak = params.tweak.unwrap();
         if tweak == 0 {
             self.alns.iter_mut().for_each(|rw| rw.define_windows_determ(&self.gt_windows));
         } else {
             self.alns.iter_mut().for_each(|rw| rw.define_windows_random(&self.gt_windows, tweak, rng));
+        }
+
+        self.curr_weights.truncate(REG_WINDOW_SHIFT as usize);
+        self.use_window.truncate(REG_WINDOW_SHIFT as usize);
+        self.depth_distrs.truncate(REG_WINDOW_SHIFT as usize);
+        for contig_info in self.gt_windows.contig_infos() {
+            for (wstart, wend) in contig_info.generate_windows(tweak, rng) {
+                let (gc, _uniq_kmers, weight) = contig_info.window_characteristics(wstart, wend);
+                self.curr_weights.push(weight);
+                if weight < params.min_weight {
+                    self.depth_distrs.push(trivial_box());
+                    self.use_window.push(false);
+                } else {
+                    self.depth_distrs.push(distr_cache.get_distribution(gc, weight));
+                    self.use_window.push(true);
+                }
+            }
         }
     }
 
@@ -362,7 +374,7 @@ impl<'a> ReadAssignment<'a> {
             .sum();
     }
 
-    pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tdepth\tlik";
+    pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tweight\tdepth\tlik";
 
     /// Write read depth to a CSV file in the following format (tab-separated):
     /// General lines:  `prefix  contig(1|2)  window  depth     depth_lik`.
@@ -374,8 +386,9 @@ impl<'a> ReadAssignment<'a> {
             let wshift_end = gt_windows.get_wshift(i + 1) as usize;
             for w in wshift..wshift_end {
                 let depth = self.depth[w];
-            let log10_prob = Ln::to_log10(self.parent.depth_distrs[w].ln_pmf(depth));
-                writeln!(f, "{}\t{}\t{}\t{}\t{:.3}", prefix, i + 1, w - wshift + 1, depth, log10_prob)?;
+                let log10_prob = Ln::to_log10(self.parent.depth_distrs[w].ln_pmf(depth));
+                writeln!(f, "{}\t{}\t{}\t{:.4}\t{}\t{:.3}", prefix, i + 1, w - wshift + 1,
+                    self.parent.curr_weights[w], depth, log10_prob)?;
             }
         }
 

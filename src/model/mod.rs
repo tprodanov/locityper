@@ -1,7 +1,7 @@
 pub mod windows;
 pub mod locs;
 pub mod assgn;
-pub mod dp_cache;
+pub mod distr_cache;
 pub mod bam;
 
 use crate::{

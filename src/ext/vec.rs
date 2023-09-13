@@ -1,6 +1,6 @@
 use std::{
     fmt::{self, Write},
-    ops::{Add, Sub},
+    ops::{Add, AddAssign, Sub},
 };
 
 /// Static methods extending slices.
@@ -40,7 +40,7 @@ impl VecExt {
     /// For each moving window of size `w`, calculates sum over elements in `a`.
     /// Returns `a.len() - w + 1` sums.
     pub fn moving_window_sums<T>(a: &[T], w: usize) -> Vec<T>
-    where T: Add<Output = T> + Sub<Output = T> + Copy
+    where T: Add<Output = T> + Sub<Output = T> + Copy,
     {
         assert!(w >= 1, "moving_window_sums: window size ({}) must be at least 1.", w);
         let n = a.len();
@@ -228,6 +228,20 @@ impl IterExt {
     /// Panics on an empty iterator.
     pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
         Self::arg_optimal(it, |opt, e| opt > e)
+    }
+
+    /// Calculates cumulative sums over iterator and returns the vector of length `len(iter) + 1`.
+    /// First element = 0.
+    pub fn cumul_sums<T, U>(it: impl Iterator<Item = T>) -> Vec<U>
+    where U: From<T> + num_traits::Zero + AddAssign + Copy,
+    {
+        let mut c = U::zero();
+        let mut res = vec![c];
+        for el in it {
+            c += U::from(el);
+            res.push(c);
+        }
+        res
     }
 }
 

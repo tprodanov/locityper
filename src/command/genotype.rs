@@ -23,8 +23,8 @@ use crate::{
     model::{
         Params as AssgnParams,
         locs::AllAlignments,
-        windows::ContigWindows,
-        dp_cache::CachedDepthDistrs,
+        windows::ContigInfo,
+        distr_cache::DistrCache,
     },
     solvers::scheme::{self, Scheme, SchemeParams},
     algo::{HashSet, HashMap},
@@ -625,11 +625,12 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
 
     let mut samtools_cmd = Command::new(&args.samtools);
     samtools_cmd.args(&["view", "-b"]) // Output BAM.
-        .arg("-o").arg(&locus.tmp_aln_filename)
-        // Ignore reads with both mates unmapped.
-        .arg(if bg_distr.insert_distr().is_paired_end() { "-G12" } else { "-F4" })
-        .stdin(Stdio::from(child_stdout))
-        .stdout(Stdio::piped()).stderr(Stdio::piped());
+        .arg("-o").arg(&locus.tmp_aln_filename);
+    if !bg_distr.insert_distr().is_paired_end() {
+        // Cannot do this if we have paired-end reads: need sequences from both mates.
+        samtools_cmd.arg("-F4");
+    }
+    samtools_cmd.stdin(Stdio::from(child_stdout)).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
     let samtools_child = samtools_cmd.spawn().map_err(add_path!(args.samtools))?;
@@ -680,7 +681,7 @@ fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
     scheme: &Arc<Scheme>,
-    cached_distrs: &CachedDepthDistrs<'_>,
+    distr_cache: &Arc<DistrCache>,
     opt_priors: Option<&HashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
@@ -695,26 +696,25 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let mut contig_windows = if args.debug {
+    let all_contig_infos = if args.debug {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, windows_writer)?
+        ContigInfo::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, windows_writer)?
     } else {
-        ContigWindows::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink())?
+        ContigInfo::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink())?
     };
 
     let all_alns = if args.debug {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
-        AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, reads_writer)?
+        AllAlignments::load(bam_reader, contigs, bg_distr, &all_contig_infos, &args.assgn_params, reads_writer)?
     } else {
-        AllAlignments::load(bam_reader, contigs, bg_distr, &contig_windows, &args.assgn_params, io::sink())?
+        AllAlignments::load(bam_reader, contigs, bg_distr, &all_contig_infos, &args.assgn_params, io::sink())?
     };
     if is_paired_end && args.debug {
         let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
         let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
         all_alns.write_read_pair_info(pairs_writer, contigs, false).map_err(add_path!(read_pairs_filename))?;
     }
-    ContigWindows::define_all_distributions(&mut contig_windows, cached_distrs);
 
     let contig_ids: Vec<ContigId> = contigs.ids().collect();
     let (genotypes, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
@@ -725,10 +725,11 @@ fn analyze_locus(
     let data = scheme::Data {
         scheme: Arc::clone(scheme),
         contigs: Arc::clone(contigs),
+        distr_cache: Arc::clone(distr_cache),
         assgn_params: args.assgn_params.clone(),
         debug: args.debug,
         threads: usize::from(args.threads),
-        all_alns, genotypes, priors, contig_windows, is_paired_end,
+        all_alns, genotypes, priors, all_contig_infos, is_paired_end,
     };
     scheme::solve(data, &locus.out_dir, &mut rng)?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
@@ -766,7 +767,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     recruit_reads(&loci, &args)?;
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
-    let cached_distrs = CachedDepthDistrs::new(&bg_distr, &args.assgn_params);
+    let distr_cache = Arc::new(DistrCache::new(&bg_distr, args.assgn_params.alt_cn));
     let mut successes = 0;
     for locus in loci.iter() {
         // Remove to get ownership of the locus priors.
@@ -778,7 +779,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         let rng_clone = rng.clone();
         // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
         rng.long_jump();
-        if let Err(e) = analyze_locus(locus, &bg_distr, &scheme, &cached_distrs, locus_priors, rng_clone, &args) {
+        if let Err(e) = analyze_locus(locus, &bg_distr, &scheme, &distr_cache, locus_priors, rng_clone, &args) {
             log::error!("Error in locus {}: {}", locus.set.tag(), e.display());
         } else {
             successes += 1;

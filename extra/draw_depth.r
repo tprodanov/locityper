@@ -72,20 +72,6 @@ sol <- filter(sol, contig != 'summary') |>
         contig_ext = sprintf('%s-%d', contig, contig_ix),
         window = as.numeric(window))
 
-# Load window information.
-
-windows <- read.csv(file.path(dir, 'windows.bed.gz'), sep = '\t')
-names(windows)[1] <- 'contig'
-windows <- filter(windows, contig %in% gt) |>
-    group_by(contig) |>
-    mutate(window = 1:n()) |>
-    ungroup()
-
-sol <- full_join(sol, windows, by = c('contig', 'window'))
-if (with(sol, any(is.na(weight) | is.na(depth)))) {
-    stop('Window information does not match depth information completely')
-}
-
 # Parse information.
 
 info <- unlist(strsplit(summary_info$info, ' ')) |>
