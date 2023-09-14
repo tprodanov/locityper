@@ -1,12 +1,10 @@
 use std::ops::Deref;
 
-pub mod uniform;
 pub mod nbinom;
 pub mod lincache;
 pub mod bayes;
 pub mod betabinom;
 
-pub use uniform::Uniform;
 pub use nbinom::NBinom;
 pub use lincache::LinearCache;
 pub use bayes::BayesCalc;

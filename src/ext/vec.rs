@@ -15,14 +15,6 @@ impl VecExt {
         ixs
     }
 
-    /// Decreasing argsort.
-    pub fn argsort_decr<T: PartialOrd>(a: &[T]) -> Vec<usize> {
-        let mut ixs: Vec<usize> = (0..a.len()).collect();
-        ixs.sort_unstable_by(|&i, &j| a[j].partial_cmp(&a[i])
-            .expect("Error in `argsort`: elements are not comparable"));
-        ixs
-    }
-
     /// Reorders array by taking elements with indices `ixs` and cloning them. Returns a new vector.
     pub fn reorder<T: Clone>(a: &[T], ixs: &[usize]) -> Vec<T> {
         let mut res = Vec::with_capacity(ixs.len());

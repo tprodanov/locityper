@@ -90,10 +90,6 @@ fn create_lz4(filename: &Path, level: u32) -> Result<AutoFinishLz4<BufWriter<Fil
     })
 }
 
-pub fn create_lz4_fast(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
-    create_lz4(filename, 1)
-}
-
 pub fn create_lz4_slow(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
     create_lz4(filename, 7)
 }

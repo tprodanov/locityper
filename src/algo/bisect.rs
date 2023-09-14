@@ -1,6 +1,6 @@
 //! Various functions related by binary search.
 
-use std::cmp::{min, Ordering};
+use std::cmp::Ordering;
 
 /// Performs binary search and finds index `i` such that `a[i-1] < target <= a[i].
 #[inline]
@@ -74,21 +74,6 @@ pub fn right_by_at<T, F: FnMut(&T) -> Ordering>(a: &[T], mut f: F, mut lo: usize
         }
     }
     lo
-}
-
-/// Performs binary search between `lo` and `hi`
-/// and finds the index `i` such that `f(a[i-1]) -> Less | Equal` and `f(a[i]) -> Greater`.
-///
-/// First, values are examined between `lo` and `lo+step`, with `step` gradually increased, if needed.
-pub fn right_by_approx<T, F>(a: &[T], mut f: F, lo: usize, hi: usize, mut step: usize) -> usize
-where F: FnMut(&T) -> Ordering,
-{
-    assert!(hi <= a.len() && step > 0,
-        "Cannot perform binary search on indices {}, {} (len: {}, step: {})", lo, hi, a.len(), step);
-    while lo + step < hi && f(unsafe { a.get_unchecked(lo + step - 1) }) != Ordering::Greater {
-        step *= 2;
-    }
-    right_by_at(a, f, lo, min(lo + step, hi))
 }
 
 /// Finds the first index `i` (between `lo` and `hi`) where `! f(a[i])`.

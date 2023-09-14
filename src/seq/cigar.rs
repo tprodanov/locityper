@@ -20,10 +20,6 @@ pub enum Operation {
     Del,
 }
 
-/// In total, there are 9 possible operations in the SAM file specification.
-/// Some of them (3, 5 & 6) are impossible in our case.
-pub const RAW_OPERATIONS: usize = 9;
-
 impl Operation {
     /// Does the Cigar operation consume reference sequence?
     pub const fn consumes_ref(self) -> bool {
