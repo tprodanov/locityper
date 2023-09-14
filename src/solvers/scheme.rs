@@ -133,6 +133,16 @@ fn prefilter_genotypes(
     Ok(ixs)
 }
 
+/// Calculates average sum window weights across remaining genotypes.
+fn calc_average_sum_weight(genotypes: &[Genotype], ixs: &[usize], contig_infos: &[Arc<ContigInfo>]) -> f64 {
+    let mut s = 0.0;
+    for &i in ixs {
+        s += genotypes[i].ids().iter()
+            .map(|id| contig_infos[id.ix()].default_weights().iter().sum::<f64>()).sum::<f64>();
+    }
+    s / ixs.len() as f64
+}
+
 const MAX_STAGES: usize = 10;
 const LATIN_NUMS: [&'static str; MAX_STAGES] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
 
@@ -438,11 +448,12 @@ impl Genotyping {
 /// Returns: vector of likelihood means and variances (same order ).
 fn solve_single_thread(
     data: &Data,
+    mean_weight: f64,
+    rng: &mut XoshiroRng,
     likelihoods: &mut Likelihoods,
     mut lik_writer: impl Write,
     mut depth_writer: impl Write,
     mut aln_writer: impl Write,
-    rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
     let total_genotypes = data.genotypes.len();
@@ -467,7 +478,7 @@ fn solve_single_thread(
             let mut counts = gt_alns.create_counts();
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
-                gt_alns.apply_tweak(rng, distr_cache, &data.assgn_params);
+                gt_alns.apply_tweak(rng, distr_cache, mean_weight, &data.assgn_params);
                 let assgns = solver.solve(&gt_alns, rng)?;
                 *lik = prior + assgns.likelihood();
                 if data.debug {
@@ -560,6 +571,7 @@ pub fn solve(
     } else {
         (0..n_gts).collect()
     };
+    let mean_weight = calc_average_sum_weight(&data.genotypes, &rem_ixs, &data.all_contig_infos);
 
     let lik_filename = locus_dir.join("lik.csv.gz");
     let mut lik_writer = ext::sys::create_gzip(&lik_filename)?;
@@ -567,10 +579,10 @@ pub fn solve(
     let mut likelihoods = Likelihoods::new(n_gts, rem_ixs);
     let data = Arc::new(data);
     if data.threads == 1 {
-        solve_single_thread(&data, &mut likelihoods, lik_writer,
-            depth_writers.pop().unwrap(), aln_writers.pop().unwrap(), rng)?;
+        solve_single_thread(&data, mean_weight, rng, &mut likelihoods, lik_writer,
+            depth_writers.pop().unwrap(), aln_writers.pop().unwrap())?;
     } else {
-        let main_worker = MainWorker::new(Arc::clone(&data), rng, depth_writers, aln_writers);
+        let main_worker = MainWorker::new(Arc::clone(&data), mean_weight, rng, depth_writers, aln_writers);
         main_worker.run(rng, &mut likelihoods, lik_writer)?;
     }
     merge_dbg_files(&depth_filenames)?;
@@ -614,6 +626,7 @@ struct MainWorker {
 impl MainWorker {
     fn new(
         data: Arc<Data>,
+        mean_weight: f64,
         rng: &mut XoshiroRng,
         depth_writers: Vec<impl Write + Send + 'static>,
         aln_writers: Vec<impl Write + Send + 'static>,
@@ -633,7 +646,7 @@ impl MainWorker {
                 rng: rng.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
-                depth_writer, aln_writer,
+                depth_writer, aln_writer, mean_weight,
             };
             rng.jump();
             senders.push(task_sender);
@@ -716,6 +729,7 @@ struct Worker<W, U> {
     sender: Sender<Solution>,
     depth_writer: W,
     aln_writer: U,
+    mean_weight: f64,
 }
 
 impl<W: Write, U: Write> Worker<W, U> {
@@ -739,7 +753,7 @@ impl<W: Write, U: Write> Worker<W, U> {
                     &data.assgn_params);
                 let mut counts = gt_alns.create_counts();
                 for (attempt, lik) in liks.iter_mut().enumerate() {
-                    gt_alns.apply_tweak(&mut self.rng, distr_cache, &data.assgn_params);
+                    gt_alns.apply_tweak(&mut self.rng, distr_cache, self.mean_weight, &data.assgn_params);
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = prior + assgns.likelihood();
                     if data.debug {

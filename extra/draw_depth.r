@@ -7,8 +7,9 @@ suppressMessages(library(dplyr, quietly = T))
 suppressMessages(library(stringi, quietly = T))
 
 msg <- function(...) cat(sprintf(...), sep='', file=stderr())
-comma_int <- scales::label_comma(accuracy = 1)
-comma_prec2 <- scales::label_comma(accuracy = 0.01, style_positive = 'plus')
+int_fmt <- scales::label_comma(accuracy = 1)
+float_fmt2 <- scales::label_comma(accuracy = 0.01, style_positive = 'plus')
+float_fmt5 <- scales::label_comma(accuracy = 0.00001)
 
 parser <- argparse::ArgumentParser(description = 'Draw read assignment.')
 parser$add_argument('dir', metavar = 'DIR',
@@ -104,13 +105,10 @@ for (gt_str in args$genotype) {
     title <- paste(gt, collapse = ', ')
     subtitle <- paste(
         sprintf('Total reads: %s  (unmapped: %s,  out of bounds: %s).',
-            comma_int(info['reads']),
-            comma_int(info['unmapped']),
-            comma_int(info['boundary'])),
-        sprintf('log₁₀-likelihood: %s  =  %s (alns)   %s (depth)',
-            comma_prec2(info['lik']),
-            comma_prec2(info['aln_lik']),
-            comma_prec2(info['depth_lik'])),
+            int_fmt(info['reads']), int_fmt(info['unmapped']), int_fmt(info['boundary'])),
+        sprintf('log₁₀-likelihood: %s  =  [alignment] %s ⋅ %s  +  [depth] %s ⋅ %s',
+            float_fmt2(info['lik']), float_fmt5(info['aln_contrib']), float_fmt2(info['aln_lik']),
+            float_fmt5(info['depth_contrib']), float_fmt2(info['depth_lik'])),
         sep = '\n')
 
     # Drawing and saving.

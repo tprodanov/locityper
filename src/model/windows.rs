@@ -304,6 +304,11 @@ impl ContigInfo {
         self.window_getter.middle_window(middle).map(|w| self.default_weights[w as usize]).unwrap_or(1.0)
     }
 
+    /// Default window weights (can change due to random tweaking).
+    pub fn default_weights(&self) -> &[f64] {
+        &self.default_weights
+    }
+
     /// Returns window range within the contig based on the read alignment range.
     fn get_shifted_window_ix(&self, shift: u32, middle: Option<u32>) -> u32 {
         match middle {

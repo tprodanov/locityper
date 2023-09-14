@@ -94,8 +94,8 @@ impl GenotypeAlignments {
         }
 
         Self {
-            depth_contrib: params.lik_skew + 1.0,
             aln_contrib: 1.0 - params.lik_skew,
+            depth_contrib: f64::NAN,
             gt_windows, alns, depth_distrs, curr_weights, use_window, read_ixs, non_trivial_reads,
         }
     }
@@ -141,7 +141,13 @@ impl GenotypeAlignments {
     }
 
     /// Randomly tweak read centers and window weights, and define read depth distributions later.
-    pub fn apply_tweak(&mut self, rng: &mut impl Rng, distr_cache: &DistrCache, params: &super::Params) {
+    pub fn apply_tweak(
+        &mut self,
+        rng: &mut impl Rng,
+        distr_cache: &DistrCache,
+        mean_sum_weight: f64,
+        params: &super::Params,
+    ) {
         let tweak = params.tweak.unwrap();
         if tweak == 0 {
             self.alns.iter_mut().for_each(|rw| rw.define_windows_determ(&self.gt_windows));
@@ -165,6 +171,8 @@ impl GenotypeAlignments {
                 }
             }
         }
+        let sum_weight = self.curr_weights.iter().sum::<f64>();
+        self.depth_contrib = (params.lik_skew + 1.0) * (mean_sum_weight / sum_weight).clamp(0.9, 1.111);
     }
 
     /// Returns read depth distribution for the window.
@@ -392,12 +400,11 @@ impl<'a> ReadAssignment<'a> {
             }
         }
 
-        writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} scaled_aln_lik={:.5} \
-            depth_lik={:.5} scaled_depth_lik={:.5} lik={:.5}", prefix,
-            self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
-            Ln::to_log10(self.aln_lik), Ln::to_log10(self.parent.aln_contrib * self.aln_lik),
-            Ln::to_log10(self.depth_lik), Ln::to_log10(self.parent.depth_contrib * self.depth_lik),
-            Ln::to_log10(self.likelihood()))
+        writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} aln_contrib={:.7} \
+            depth_lik={:.5} depth_contrib={:.7} lik={:.5}",
+            prefix, self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
+            Ln::to_log10(self.aln_lik), self.parent.aln_contrib,
+            Ln::to_log10(self.depth_lik), self.parent.depth_contrib, Ln::to_log10(self.likelihood()))
     }
 
     pub fn update_counts(&self, counts: &mut [u16]) {
