@@ -9,10 +9,7 @@ use crate::{
     ext,
     err::{Error, add_path},
 };
-use super::{
-    NamedSeq,
-    kmers::{self, Kmer},
-};
+use super::NamedSeq;
 
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
@@ -125,6 +122,15 @@ impl Record {
             Some(&self.qual)
         }
     }
+
+    /// Writes in FASTQ (if qualities are set) or FASTA format.
+    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
+        if self.qual.is_empty() {
+            write_fasta(writer, &self.full_name, &self.seq)
+        } else {
+            write_fastq(writer, &self.full_name, &self.seq, &self.qual)
+        }
+    }
 }
 
 impl fmt::Debug for Record {
@@ -136,40 +142,57 @@ impl fmt::Debug for Record {
 }
 
 /// Extension over a single- or paired-records.
-pub trait RecordExt : Default + Clone + Send + 'static {
-    /// Writes the single- or paired-read to the stream.
-    fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()>;
+pub trait RecordGroup : Default + Clone + Send + 'static {
+    const PAIRED: bool;
 
-    /// Extracts all minimizers from the record (see `kmers::minimizers`).
-    /// The function does not clear the buffer in advance.
-    fn minimizers<K: Kmer>(&self, k: u8, n: u8, buffer: &mut Vec<K>);
+    /// Returns the first read end.
+    fn first(&self) -> &Record;
+
+    /// Returns the second read end. Panics if called on the single-end reads.
+    fn second(&self) -> &Record;
+
+    /// Writes one or two reads to output in the interleaved mode.
+    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()>;
 }
 
-impl RecordExt for Record {
-    fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
-        if self.qual.is_empty() {
-            write_fasta(writer, &self.full_name, &self.seq)
-        } else {
-            write_fastq(writer, &self.full_name, &self.seq, &self.qual)
-        }
+impl RecordGroup for Record {
+    const PAIRED: bool = false;
+
+    #[inline]
+    fn first(&self) -> &Record {
+        &self
     }
 
-    fn minimizers<K: Kmer>(&self, k: u8, n: u8, buffer: &mut Vec<K>) {
-        kmers::minimizers(&self.seq, k, n, buffer);
+    #[inline]
+    fn second(&self) -> &Record {
+        panic!("Cannot get second mate from single-end reads")
+    }
+
+    #[inline]
+    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
+        self.write_to(f)
     }
 }
 
 pub type PairedRecord = [Record; 2];
 
-impl RecordExt for PairedRecord {
-    fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
-        self[0].write_to(writer)?;
-        self[1].write_to(writer)
+impl RecordGroup for PairedRecord {
+    const PAIRED: bool = true;
+
+    #[inline]
+    fn first(&self) -> &Record {
+        &self[0]
     }
 
-    fn minimizers<K: Kmer>(&self, k: u8, n: u8, buffer: &mut Vec<K>) {
-        kmers::minimizers(&self[0].seq, k, n, buffer);
-        kmers::minimizers(&self[1].seq, k, n, buffer);
+    #[inline]
+    fn second(&self) -> &Record {
+        &self[1]
+    }
+
+    #[inline]
+    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
+        self.first().write_to(f)?;
+        self.second().write_to(f)
     }
 }
 
@@ -317,7 +340,7 @@ impl SubsampleLogger {
 
 /// Trait for reading and writing FASTA/Q single-end and paired-end records.
 pub trait FastxRead: Send {
-    type Record: RecordExt;
+    type Record: RecordGroup;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self, record: &mut Self::Record) -> io::Result<bool>;

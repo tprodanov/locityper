@@ -1,7 +1,6 @@
 use std::{
     fs,
-    fmt::Write as FmtWrite,
-    io::{self, Read, BufRead},
+    io::{self, BufRead},
     process::{Command, Stdio},
     cmp::{min, max},
     path::{Path, PathBuf},
@@ -607,159 +606,6 @@ fn create_mapping_command(
     cmd
 }
 
-// /// Parses SAM record and returns flag.
-// #[inline]
-// fn sam_flag(rec: &[u8]) -> Result<u16, Error> {
-//     let i = rec.iter().position(|&ch| ch == b'\t')
-//         .ok_or_else(|| Error::InvalidData("Malformed SAM record".to_owned()))?;
-//     let mut flag = u16::from(rec[i + 1] - b'0');
-//     for &ch in &rec[i + 2..] {
-//         if ch == b'\t' {
-//             break;
-//         }
-//         flag = 10 * flag + u16::from(ch - b'0');
-//     }
-//     Ok(flag)
-// }
-
-// /// Input reads are supplied as unpaired.
-// /// We do not need read pairs where both mates are unmapped, but we may need reads where one of the mates is mapped.
-// /// This function filters input stream and discards consecutive reads (must have equal names) if both are unmapped.
-// fn discard_unmapped_pairs(stream: impl Read, out_filename: &Path) -> Result<(), Error> {
-//     // Read SAM file directly, without htslib, because it cannot read from a stream.
-//     let mut reader = io::BufReader::with_capacity(8192, stream);
-//     let mut header_buffer = Vec::new();
-//     let mut header_len = 0;
-
-//     // Already used vectors, can be useful to reduce allocations.
-//     let mut empty_vecs = Vec::new();
-//     let mut byte_records = Vec::new();
-//     while reader.read_until(b'\n', &mut header_buffer).map_err(add_path!(!))? > 0 {
-//         if header_buffer[header_len] != b'@' {
-//             // log::debug!("    Read & push {}",
-//             //     String::from_utf8_lossy(&header_buffer[header_len..]).trim_end());
-//             byte_records.push(header_buffer[header_len..].to_vec());
-//             header_buffer.truncate(header_len);
-//             break;
-//         }
-//         header_len = header_buffer.len();
-//     }
-//     let header_view = bam::HeaderView::from_bytes(&header_buffer);
-//     let mut writer = bam::Writer::from_path(out_filename, &bam::header::Header::from_template(&header_view),
-//         bam::Format::Bam)?;
-
-//     let mut both_mapped = match byte_records.last() {
-//         None => return Ok(()), // Input stream contains no records.
-//         Some(s) => (sam_flag(s)? & 4) == 0,
-//     };
-//     let mut first_mate = true;
-
-//     loop {
-//         // log::debug!("    Currently, {} entries", byte_records.len());
-//         let mut s = empty_vecs.pop().unwrap_or_else(Vec::new);
-//         if reader.read_until(b'\n', &mut s).map_err(add_path!(!))? == 0 {
-//             break;
-//         }
-//         let flag = sam_flag(&s)?;
-//         // log::debug!("    Read {} -> {}", String::from_utf8_lossy(&s).trim_end(), flag);
-//         if (flag & 0x900) == 0 {
-//             // Not secondary or supplementary alignment.
-//             if first_mate {
-//                 // Now have second mate.
-//                 // log::debug!("Now second mate");
-//                 first_mate = false;
-//                 both_mapped &= (flag & 4) == 0;
-//             } else {
-//                 // Now obtained first mate, need to output all buffered records.
-//                 // log::debug!("Both mapped? {}", both_mapped);
-//                 if both_mapped {
-//                     for s2 in byte_records.iter() {
-//                         // log::debug!("    Output {}", String::from_utf8_lossy(s2).trim_end());
-//                         writer.write(&bam::record::Record::from_sam(&header_view, s2)?)?;
-//                     }
-//                 }
-//                 while let Some(mut s2) = byte_records.pop() {
-//                     s2.clear();
-//                     empty_vecs.push(s2);
-//                 }
-//                 both_mapped = (flag & 4) == 0;
-//                 first_mate = true;
-//                 // log::debug!("Now first mate");
-//             }
-//         }
-//         // log::debug!("    Push {} -> {}", String::from_utf8_lossy(&s).trim_end(), flag);
-//         byte_records.push(s);
-//     }
-//     if both_mapped {
-//         for s in byte_records.iter() {
-//             writer.write(&bam::record::Record::from_sam(&header_view, s)?)?;
-//         }
-//     }
-//     Ok(())
-// }
-
-/// Input reads are supplied as unpaired.
-/// We do not need read pairs where both mates are unmapped, but we may need reads where one of the mates is mapped.
-/// This function filters input stream and discards consecutive reads (must have equal names) if both are unmapped.
-fn discard_unmapped_pairs(stream: impl Read, out_filename: &Path) -> Result<(), Error> {
-    // Read SAM file directly, without htslib, because it cannot read from a stream.
-    let mut reader = io::BufReader::with_capacity(8192, stream);
-    let mut header_buffer = Vec::new();
-    let mut header_len = 0;
-    while reader.read_until(b'\n', &mut header_buffer).map_err(add_path!(!))? > 0
-            && header_buffer[header_len] == b'@' {
-        header_len = header_buffer.len();
-    }
-    let header_view = bam::HeaderView::from_bytes(&header_buffer[..header_len]);
-    let mut writer = bam::Writer::from_path(out_filename, &bam::header::Header::from_template(&header_view),
-        bam::Format::Bam)?;
-
-    if header_len == header_buffer.len() {
-        // There are no reads at all.
-        return Ok(());
-    }
-
-    let first_rec = bam::record::Record::from_sam(&header_view, &header_buffer[header_len..])?;
-    let mut both_mapped = !first_rec.is_unmapped();
-    let mut first_mate = true;
-    let mut records = vec![first_rec];
-
-    let mut s = Vec::new();
-    loop {
-        s.clear();
-        if reader.read_until(b'\n', &mut s).map_err(add_path!(!))? == 0 {
-            break;
-        }
-        let rec = bam::record::Record::from_sam(&header_view, &s)?;
-        let flag = rec.flags();
-        if (flag & 0x900) == 0 {
-            // Not secondary or supplementary alignment.
-            if first_mate {
-                // Now have second mate.
-                first_mate = false;
-                both_mapped &= (flag & 4) == 0;
-            } else {
-                // Now obtained first mate, need to output all buffered records.
-                if both_mapped {
-                    for rec in records.iter() {
-                        writer.write(rec)?;
-                    }
-                }
-                records.clear();
-                both_mapped = (flag & 4) == 0;
-                first_mate = true;
-            }
-        }
-        records.push(rec);
-    }
-    if both_mapped {
-        for rec in records.iter() {
-            writer.write(&rec)?;
-        }
-    }
-    Ok(())
-}
-
 fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), Error> {
     if locus.aln_filename.exists() {
         log::info!("    Skipping read mapping");
@@ -777,25 +623,19 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
     let child_stdout = mapping_child.stdout.take().unwrap();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
 
-    if false { //bg_distr.insert_distr().is_paired_end() {
-        log::debug!("    {} | __discard_unmapped_pairs__ -o {}",
-            ext::fmt::command(&mapping_cmd), ext::fmt::path(&locus.tmp_aln_filename));
-        if let Err(e) = discard_unmapped_pairs(child_stdout, &locus.tmp_aln_filename) {
-            let mut fail_msg = pipe_guard.fail();
-            writeln!(fail_msg, "\n{}\n", e.display()).unwrap();
-            return Err(Error::Subprocess(fail_msg));
-        }
-    } else {
-        let mut samtools_cmd = Command::new(&args.samtools);
-        samtools_cmd.args(&["view", "-b"])//, "-F4"]) // Output BAM, ignore unmapped reads.
-            .arg("-o").arg(&locus.tmp_aln_filename);
-        samtools_cmd.stdin(Stdio::from(child_stdout)).stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
-        let samtools_child = samtools_cmd.spawn().map_err(add_path!(args.samtools))?;
-        pipe_guard.push(args.samtools.clone(), samtools_child);
-        pipe_guard.wait()?;
+    let mut samtools_cmd = Command::new(&args.samtools);
+    samtools_cmd.args(&["view", "-b"]); // Output BAM.
+    if !bg_distr.insert_distr().is_paired_end() {
+        samtools_cmd.arg("-F4"); // ignore unmapped reads in case of single-end reads.
     }
+    samtools_cmd.arg("-o").arg(&locus.tmp_aln_filename);
+    samtools_cmd.stdin(Stdio::from(child_stdout)).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
+    let samtools_child = samtools_cmd.spawn().map_err(add_path!(args.samtools))?;
+    pipe_guard.push(args.samtools.clone(), samtools_child);
+    pipe_guard.wait()?;
+
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
         .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;
