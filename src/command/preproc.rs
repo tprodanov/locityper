@@ -233,7 +233,7 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
             "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.bg_params.depth.ploidy));
         println!("    {:KEY$} {:VAL$}  Subsample input reads by this factor [{}].",
-            "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
+            "-S, --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
         println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [{}].\n\
             {EMPTY}  Default: half of the mean read length.",
             "-w, --window".green(), "INT".yellow(), "auto".cyan());
@@ -320,7 +320,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
 
             Short('p') | Long("ploidy") => args.bg_params.depth.ploidy = parser.value()?.parse()?,
-            Long("subsample") => args.subsampling_rate = parser.value()?.parse()?,
+            Short('S') | Long("subsample") => args.subsampling_rate = parser.value()?.parse()?,
             Short('w') | Long("window") => {
                 let val = parser.value()?;
                 args.bg_params.depth.window_size = if val == "auto" {
