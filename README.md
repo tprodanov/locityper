@@ -87,13 +87,16 @@ tabix -p vcf hprc-v1.1-grch38.vcf.gz
 Database with target loci can be constructed in two ways:
 first, locus alleles can be directly provided using a FASTA file.
 ```bash
-locityper add -d db -j counts.jf -s alleles.fasta=name # where `name` is the name of the locus.
+locityper add -d db -j counts.jf -s alleles.fasta=name
+# `name` is the name of the locus.
 ```
 Alternatively, locus alleles can be extracted from the pangenome VCF file:
 ```bash
-locityper add -d db -f counts.jf -r reference.fasta -v pangenome.vcf.gz -l chr:start-end=name
+locityper add -d db -f counts.jf -r reference.fasta \
+    -v pangenome.vcf.gz -l chr:start-end=name
 # or
-locityper add -d db -f counts.jf -r reference.fasta -v pangenome.vcf.gz -L loci.bed
+locityper add -d db -f counts.jf -r reference.fasta \
+    -v pangenome.vcf.gz -L loci.bed
 ```
 You can freely add more loci to the database using the same commands.
 
@@ -102,7 +105,8 @@ You can freely add more loci to the database using the same commands.
 Before locus genotyping can be performed, WGS dataset needs to be preprocessed.
 For that, please use
 ```bash
-locityper preproc -i reads1.fastq [reads2.fastq] -j counts.jf -r reference.fasta -o preproc_out
+locityper preproc -i reads1.fastq [reads2.fastq] -j counts.jf \
+    -r reference.fasta -o preproc_out
 ```
 Input files can have FASTA or FASTQ format, and can be uncompressed or compressed with `gzip`, `bgzip` or `lz4`.
 

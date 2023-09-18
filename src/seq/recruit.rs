@@ -37,7 +37,7 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Self {
-            minimizer_k: 31,
+            minimizer_k: 25,
             minimizer_w: 10,
             matches_frac: 0.5,
             chunk_size: 10000,

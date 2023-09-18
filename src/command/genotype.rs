@@ -34,7 +34,7 @@ use super::paths;
 struct Args {
     input: Vec<PathBuf>,
     preproc: Option<PathBuf>,
-    database: Option<PathBuf>,
+    databases: Vec<PathBuf>,
     output: Option<PathBuf>,
     subset_loci: HashSet<String>,
     ploidy: u8,
@@ -60,7 +60,7 @@ impl Default for Args {
         Self {
             input: Vec::new(),
             preproc: None,
-            database: None,
+            databases: Vec::new(),
             output: None,
             subset_loci: HashSet::default(),
             ploidy: 2,
@@ -94,7 +94,7 @@ impl Args {
         validate_param!(self.ploidy > 0 && self.ploidy <= 11, "Ploidy ({}) must be within [1, 10]", self.ploidy);
 
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
-        validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
+        validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
@@ -129,10 +129,13 @@ fn print_help(extended: bool) {
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Preprocessed dataset information (see {}).",
         "-p, --preproc".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
-    println!("    {:KEY$} {:VAL$}  Database directory (initialized with {}).",
-        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " add").underline());
+    println!("    {:KEY$} {:VAL$}  Database directory (initialized with {}).\n\
+        {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
+        "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " add").underline());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
+
+    println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
         "-^, --interleaved".green(), super::flag());
     if extended {
@@ -144,8 +147,8 @@ fn print_help(extended: bool) {
             "    --priors".green(), "FILE".yellow());
 
         println!("\n{}", "Read recruitment:".bold());
-        println!("    {}  {}  Use k-mers of size {} (<= {}) that have\n\
-            {EMPTY}  smallest hash across {} consecutive k-mers [{} {}].",
+        println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
+            {EMPTY}  across {} consecutive k-mers [{} {}].",
             "-M, --minimizer".green(), "INT INT".yellow(),
             "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
             super::fmt_def(defaults.recr_params.minimizer_k), super::fmt_def(defaults.recr_params.minimizer_w));
@@ -264,9 +267,13 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('i') | Long("input") =>
                 args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
             Short('p') | Long("preproc") | Long("preprocessing") => args.preproc = Some(parser.value()?.parse()?),
-            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Short('d') | Long("db") | Long("database") | Long("databases") => {
+                for val in parser.values()? {
+                    args.databases.push(val.parse()?);
+                }
+            }
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
-            Long("subset-loci") => {
+            Long("subset-loci") | Long("loci-subset") => {
                 for val in parser.values()? {
                     args.subset_loci.insert(val.parse()?);
                 }
@@ -464,44 +471,53 @@ fn clean_dir(dir: &Path) -> Result<(), Error> {
 
 /// Loads all loci from the database. If `subset_loci` is not empty, only loads loci that are contained in it.
 fn load_loci(
-    db_path: &Path,
+    databases: &[PathBuf],
     out_path: &Path,
     subset_loci: &HashSet<String>,
     rerun: super::Rerun,
 ) -> Result<Vec<LocusData>, Error>
 {
     log::info!("Loading database");
-    let db_loci_dir = db_path.join(paths::LOCI_DIR);
-    if !db_loci_dir.exists() {
-        return Err(Error::InvalidInput(format!("No loci present in the database {}", ext::fmt::path(&db_loci_dir))));
-    }
     let out_loci_dir = out_path.join(paths::LOCI_DIR);
     ext::sys::mkdir(&out_loci_dir)?;
-
     let mut loci = Vec::new();
     let mut total_entries = 0;
-    for entry in fs::read_dir(&db_loci_dir).map_err(add_path!(db_loci_dir))? {
-        let entry = entry.map_err(add_path!(!))?;
-        if !entry.file_type().map_err(add_path!(entry.path()))?.is_dir() {
+    let mut loci_names = HashSet::default();
+
+    for db_path in databases {
+        let db_path = db_path.join(paths::LOCI_DIR);
+        if !db_path.exists() {
+            log::error!("Database directory {} does not exist", ext::fmt::path(&db_path));
             continue;
         }
 
-        total_entries += 1;
-        let path = entry.path();
-        if let Some(name) = locus_name_matches(&path, subset_loci) {
-            if !path.join(paths::SUCCESS).exists() {
-                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
+        for entry in fs::read_dir(&db_path).map_err(add_path!(db_path))? {
+            let entry = entry.map_err(add_path!(!))?;
+            if !entry.file_type().map_err(add_path!(entry.path()))?.is_dir() {
                 continue;
             }
-            match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS)) {
-                Ok(set) => {
-                    let locus_data = LocusData::new(set, &path, &out_loci_dir);
-                    if rerun.prepare_and_clean_dir(&locus_data.out_dir, clean_dir)? {
-                        loci.push(locus_data);
-                    }
-                },
-                Err(e) => log::error!("Could not load locus information from {}: {}",
-                    ext::fmt::path(&path), e.display()),
+
+            total_entries += 1;
+            let path = entry.path();
+            if let Some(name) = locus_name_matches(&path, subset_loci) {
+                if !path.join(paths::SUCCESS).exists() {
+                    log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
+                    continue;
+                }
+                if !loci_names.insert(name.to_owned()) {
+                    log::error!("Duplicate locus {} in the database, ignoring second instance", name);
+                    continue;
+                }
+                match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS)) {
+                    Ok(set) => {
+                        let locus_data = LocusData::new(set, &path, &out_loci_dir);
+                        if rerun.prepare_and_clean_dir(&locus_data.out_dir, clean_dir)? {
+                            loci.push(locus_data);
+                        }
+                    },
+                    Err(e) => log::error!("Could not load locus information from {}: {}",
+                        ext::fmt::path(&path), e.display()),
+                }
             }
         }
     }
@@ -743,7 +759,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     super::greet();
     let timer = Instant::now();
     let mut rng = ext::rand::init_rng(args.seed);
-    let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
     ext::sys::mkdir(out_dir)?;
     let preproc_dir = args.preproc.as_ref().unwrap();
@@ -763,7 +778,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     }
 
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
-    let loci = load_loci(db_dir, out_dir, &args.subset_loci, args.rerun)?;
+    let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun)?;
     if loci.is_empty() {
         return Ok(());
     }
