@@ -2,6 +2,7 @@
 
 use std::{
     io, thread,
+    cmp::max,
     collections::hash_map::Entry,
     time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
@@ -107,7 +108,8 @@ impl Stats {
 
 const CAPACITY: usize = 4;
 /// Key: minimizer, value: vector of loci indices, where the minimizer appears.
-type MinimToLoci = IntMap<Minimizer, SmallVec<[u16; CAPACITY]>>;
+/// Value is None if the minimizer is too repetitive.
+type MinimToLoci = IntMap<Minimizer, Option<SmallVec<[u16; CAPACITY]>>>;
 /// Vector of loci indices, to which the read was recruited.
 type Answer = Vec<u16>;
 
@@ -141,12 +143,12 @@ impl TargetBuilder {
             for &minimizer in self.buffer.iter() {
                 match self.minim_to_loci.entry(minimizer) {
                     Entry::Occupied(entry) => {
-                        let loci_ixs = entry.into_mut();
+                        let loci_ixs = entry.into_mut().as_mut().unwrap();
                         if *loci_ixs.last().unwrap() != self.locus_ix {
                             loci_ixs.push(self.locus_ix);
                         }
                     }
-                    Entry::Vacant(entry) => { entry.insert(smallvec![self.locus_ix]); }
+                    Entry::Vacant(entry) => { entry.insert(Some(smallvec![self.locus_ix])); }
                 }
                 self.minim_counts.entry(minimizer).and_modify(|count| *count += 1).or_insert(1);
             }
@@ -170,7 +172,7 @@ impl TargetBuilder {
             log::info!("    Discard {} most common minimizers, smallest occurance: {}",
                 discard, minim_counts[discard - 1].1);
             for (minim, _) in minim_counts[..discard].iter() {
-                self.minim_to_loci.remove(minim);
+                *self.minim_to_loci.get_mut(minim).unwrap() = None;
             }
         }
         assert!(!self.minim_to_loci.is_empty(), "Retained zero minimizers");
@@ -205,17 +207,22 @@ impl Targets {
         matches.clear();
         rec_minims.clear();
         kmers::minimizers(record.first().seq(), self.params.minimizer_k, self.params.minimizer_w, rec_minims);
+        let mut total = rec_minims.len();
         for minimizer in rec_minims.iter() {
-            if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &locus_ix in loci_ixs.iter() {
-                    *matches.entry(locus_ix).or_default() += 1;
+            match self.minim_to_loci.get(minimizer) {
+                None => {}
+                Some(None) => total -= 1,
+                Some(Some(loci_ixs)) => {
+                    for &locus_ix in loci_ixs.iter() {
+                        *matches.entry(locus_ix).or_default() += 1;
+                    }
                 }
             }
         }
 
         answer.clear();
         const FLOAT_U32_MAX: f32 = u32::MAX as f32;
-        let thresh = (rec_minims.len() as f32 * self.params.matches_frac).ceil().min(FLOAT_U32_MAX) as u32;
+        let thresh = max(1, (total as f32 * self.params.matches_frac).ceil().min(FLOAT_U32_MAX) as u32);
         for (&locus_ix, &count) in matches.iter() {
             if count >= thresh {
                 answer.push(locus_ix);
@@ -237,13 +244,17 @@ impl Targets {
         // First mate.
         rec_minims.clear();
         kmers::minimizers(record.first().seq(), self.params.minimizer_k, self.params.minimizer_w, rec_minims);
-        let total1 = rec_minims.len();
+        let mut total1 = rec_minims.len();
         for minimizer in rec_minims.iter() {
-            if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &locus_ix in loci_ixs.iter() {
-                    let count = matches.entry(locus_ix).or_default();
-                    let counts = unsafe { std::mem::transmute::<&mut u32, &mut [u16; 2]>(count) };
-                    counts[0] = counts[0].saturating_add(1);
+            match self.minim_to_loci.get(minimizer) {
+                None => {}
+                Some(None) => total1 -= 1,
+                Some(Some(loci_ixs)) => {
+                    for &locus_ix in loci_ixs.iter() {
+                        let count = matches.entry(locus_ix).or_default();
+                        let counts = unsafe { std::mem::transmute::<&mut u32, &mut [u16; 2]>(count) };
+                        counts[0] = counts[0].saturating_add(1);
+                    }
                 }
             }
         }
@@ -251,26 +262,33 @@ impl Targets {
         // Second mate.
         rec_minims.clear();
         kmers::minimizers(record.second().seq(), self.params.minimizer_k, self.params.minimizer_w, rec_minims);
-        let total2 = rec_minims.len();
+        let mut total2 = rec_minims.len();
         for minimizer in rec_minims.iter() {
-            if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &locus_ix in loci_ixs.iter() {
-                    // No reason to insert new loci if they did not match the first read end.
-                    if let Some(count) = matches.get_mut(&locus_ix) {
-                        let counts = unsafe { std::mem::transmute::<&mut u32, &mut [u16; 2]>(count) };
-                        counts[1] = counts[1].saturating_add(1);
+            match self.minim_to_loci.get(minimizer) {
+                None => {}
+                Some(None) => total2 -= 1,
+                Some(Some(loci_ixs)) => {
+                    for locus_ix in loci_ixs.iter() {
+                        // No reason to insert new loci if they did not match the first read end.
+                        if let Some(count) = matches.get_mut(locus_ix) {
+                            let counts = unsafe { std::mem::transmute::<&mut u32, &mut [u16; 2]>(count) };
+                            counts[1] = counts[1].saturating_add(1);
+                        }
                     }
                 }
             }
         }
 
         answer.clear();
+        if total1 == 0 && total2 == 0 {
+            return;
+        }
         const FLOAT_U16_MAX: f32 = u16::MAX as f32;
-        let thresh1 = (total1 as f32 * self.params.matches_frac).ceil().min(FLOAT_U16_MAX) as u16;
-        let thresh2 = (total2 as f32 * self.params.matches_frac).ceil().min(FLOAT_U16_MAX) as u16;
+        let thresh1 = max(1, (total1 as f32 * self.params.matches_frac).ceil().min(FLOAT_U16_MAX) as u16);
+        let thresh2 = max(1, (total2 as f32 * self.params.matches_frac).ceil().min(FLOAT_U16_MAX) as u16);
         for (&locus_ix, &count) in matches.iter() {
             let [count1, count2] = unsafe { std::mem::transmute::<u32, [u16; 2]>(count) };
-            if count1 >= thresh1 && count2 >= thresh2 {
+            if (total1 == 0 || count1 >= thresh1) && (total2 == 0 || count2 >= thresh2) {
                 answer.push(locus_ix);
             }
         }
