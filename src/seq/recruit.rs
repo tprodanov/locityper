@@ -160,7 +160,7 @@ impl TargetBuilder {
         let n_loci = self.locus_ix;
         let total_minims = self.minim_to_loci.len();
         log::info!("Collected {} minimizers across {} loci and {} sequences", total_minims, n_loci, self.total_seqs);
-        assert!(total_minims == 0, "No minimizers for recruitment");
+        assert!(total_minims > 0, "No minimizers for recruitment");
         Targets {
             params: self.params,
             n_loci,
