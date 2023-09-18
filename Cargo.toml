@@ -34,7 +34,7 @@ kodama = { version = "0.3", default-features = false }
 argmin = { version = "0.8", default-features = false }
 argmin-math = { version = "0.3", default-features = false, features = ["vec"] }
 lz4 = { version = "1.24", default-features = false }
-seahash = { version = "4.1", default-features = false }
+wyhash = { version = "0.5.0", default-features = false }
 num-traits = { version = "0.2", default-features = false }
 
 [build-dependencies]

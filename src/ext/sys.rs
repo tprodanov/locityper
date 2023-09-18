@@ -207,12 +207,17 @@ pub struct PipeGuard {
     finished: bool,
 }
 
+#[inline]
+fn init_output() -> io::Result<Output> {
+    Err(io::Error::from(io::ErrorKind::NotFound))
+}
+
 impl PipeGuard {
     pub fn new(exe: PathBuf, child: Child) -> Self {
         Self {
             executables: vec![exe],
             children: vec![Some(child)],
-            outputs: vec![Err(io::Error::from(io::ErrorKind::NotFound))],
+            outputs: vec![init_output()],
             finished: false,
         }
     }
@@ -220,7 +225,7 @@ impl PipeGuard {
     pub fn push(&mut self, exe: PathBuf, child: Child) {
         self.executables.push(exe);
         self.children.push(Some(child));
-        self.outputs.push(Err(io::Error::from(io::ErrorKind::NotFound)));
+        self.outputs.push(init_output());
     }
 
     /// We already know that the pipe failed, need to kill all steps and collect available information.
