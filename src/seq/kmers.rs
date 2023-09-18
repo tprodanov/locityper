@@ -1,6 +1,7 @@
 use std::{
     fmt::Display,
     io::{self, Write, BufRead},
+    fs,
     path::PathBuf,
     cmp::{min, max, Ord},
     process::{Stdio, Command},
@@ -8,6 +9,7 @@ use std::{
 };
 use crate::{
     err::{Error, add_path},
+    bg::ser::json_get,
     seq::{self, ContigId},
     ext::sys::PipeGuard,
 };
@@ -252,6 +254,11 @@ pub fn minimizers<K: Kmer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
 /// Store k-mer counts as u16.
 pub type KmerCount = u8;
 
+#[inline]
+fn parse_count(s: &str) -> Result<KmerCount, std::num::ParseIntError> {
+    s.parse::<u64>().map(|x| KmerCount::try_from(x).unwrap_or(KmerCount::MAX))
+}
+
 /// Stores k-mer counts for each input k-mer across a set of sequences.
 pub struct KmerCounts {
     k: u32,
@@ -278,7 +285,7 @@ impl KmerCounts {
                 .ok_or_else(|| Error::InvalidData(
                     "File with k-mer counts does not contain enough contigs".to_owned()))?.map_err(add_path!(!))?
                 .split(' ')
-                .map(str::parse)
+                .map(parse_count)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| Error::ParsingError(format!("Cannot parse k-mer counts: {}", e)))?;
 
@@ -348,7 +355,7 @@ pub struct JfKmerGetter {
     /// Jellyfish executable.
     jf_exe: PathBuf,
     /// Jellyfish database.
-    jf_db: PathBuf,
+    jf_counts: PathBuf,
     /// k-mer size. Extracted from the filename of the jellyfish database.
     k: u32,
 }
@@ -356,14 +363,14 @@ pub struct JfKmerGetter {
 impl JfKmerGetter {
     /// Creates a new jellyfish k-mer getter.
     /// Arguments: `jellyfish` executable and database. Database filename must be in the form `*/<kmer-size>.*`.
-    pub fn new(jf_exe: PathBuf, jf_db: PathBuf) -> Result<Self, Error> {
-        let k = jf_db.file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(||
-                Error::ParsingError(format!("Cannot parse jellyfish database filename {:?}", jf_db)))?;
-        assert!(k % 2 == 1, "k-mer size ({}) must be odd!", k);
-        Ok(Self { jf_exe, jf_db, k })
+    pub fn new(jf_exe: PathBuf, jf_counts: PathBuf) -> Result<Self, Error> {
+        let k = parse_jellyfish_header(&jf_counts)?;
+        if k % 2 != 1 {
+            return Err(Error::InvalidData(
+                format!("Jellyfish counts are calculated for an even k size ({}), odd k is required", k)));
+        }
+        log::debug!("    Jellyfish k-mer size: {}", k);
+        Ok(Self { jf_exe, jf_counts, k })
     }
 
     /// Returns k-mer size.
@@ -377,7 +384,7 @@ impl JfKmerGetter {
         let n_kmers: Vec<_> = seqs.iter()
             .map(|seq| (seq.len() + 1).saturating_sub(self.k as usize)).collect();
         let mut child = Command::new(&self.jf_exe)
-            .args(&["query", "-s", "/dev/stdin"]).arg(&self.jf_db)
+            .args(&["query", "-s", "/dev/stdin"]).arg(&self.jf_counts)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().map_err(add_path!(self.jf_exe))?;
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
@@ -403,7 +410,7 @@ impl JfKmerGetter {
                     .ok_or_else(|| Error::ParsingError("Not enough k-mer counts!".to_owned()))?;
                 let count = line.split_once(' ')
                     .map(|tup| tup.1)
-                    .and_then(|s| s.parse().ok())
+                    .and_then(|s| parse_count(s).ok())
                     .ok_or_else(||
                         Error::ParsingError(format!("Failed to parse Jellyfish output line '{}'", line)))?;
                 // Assume that each k-mer appears at least 1.
@@ -426,4 +433,39 @@ impl JfKmerGetter {
     pub fn fetch_one(&self, seq: Vec<u8>) -> Result<KmerCounts, Error> {
         self.fetch(vec![seq])
     }
+}
+
+/// Based on the jellyfish counts file, extracts k-mer size, and checks if k-mers are canonical.
+fn parse_jellyfish_header(filename: &std::path::Path) -> Result<u32, Error> {
+    let mut reader = io::BufReader::new(fs::File::open(filename).map_err(add_path!(filename))?);
+    let mut buffer = Vec::new();
+    // Skip until JSON starts.
+    if reader.read_until(b'{', &mut buffer).map_err(add_path!(filename))? == 0 {
+        return Err(Error::InvalidData("Cannot parse jellyfish counts file: empty file".to_owned()));
+    }
+    buffer.clear();
+    buffer.push(b'{');
+
+    let mut prev_len = buffer.len();
+    let mut depth = 1;
+    while depth > 0 {
+        if reader.read_until(b'}', &mut buffer).map_err(add_path!(filename))? == 0 {
+            return Err(Error::InvalidData("Cannot parse jellyfish counts file: Header stops unexpectedly".to_owned()));
+        }
+        depth += buffer[prev_len..].iter().filter(|&&ch| ch == b'{').count() - 1;
+        prev_len = buffer.len();
+    }
+    let json_str = std::str::from_utf8(&buffer).map_err(|_|
+        Error::InvalidData("Cannot parse jellyfish counts file: Header is not UTF-8".to_owned()))?;
+    let obj = json::parse(json_str).map_err(|_|
+        Error::InvalidData("Cannot parse jellyfish counts file: header contains invalid JSON".to_owned()))?;
+    json_get!(&obj => canonical (as_bool), key_len (as_u32));
+    if !canonical {
+        log::warn!("Jellyfish counts file contains non-canonical k-mer counts. \
+            Consider using canonical counts (jellyfish --canonical)");
+    }
+    if key_len % 2 != 0 {
+        return Err(Error::InvalidData("Cannot parse jellyfish counts file: key length is odd".to_owned()));
+    }
+    Ok(key_len / 2)
 }

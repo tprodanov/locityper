@@ -2,11 +2,7 @@
 
 /// k-mer counts are stored in this file.
 pub(super) const KMERS: &'static str = "kmers.lz4";
-/// Jellyfish data is stored in `database/jf/`.
-pub(super) const JF_DIR: &'static str = "jf";
 
-/// Store sample background information in `analysis/BG_DIR`.
-pub(super) const BG_DIR: &'static str = "bg";
 /// Information about a locus is stored in `database/LOCI_DIR/<locus_name>`.
 pub(super) const LOCI_DIR: &'static str = "loci";
 /// Reference locus location is stored in `database/loci/<locus_name>/LOCUS_BED`.

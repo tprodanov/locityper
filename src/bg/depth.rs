@@ -397,7 +397,7 @@ impl JsonSer for ReadDepth {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> ploidy (as_u8), window (as_u32), neighb (as_u32));
+        json_get!(obj => ploidy (as_u8), window (as_u32), neighb (as_u32));
         let mut n_params = vec![0.0; GC_BINS];
         let mut p_params = vec![0.0; GC_BINS];
         parse_f64_arr(obj, "n", &mut n_params)?;

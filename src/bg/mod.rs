@@ -79,7 +79,11 @@ impl BgDistr {
         Self { seq_info, insert_distr, err_prof, depth }
     }
 
-    pub fn load_from(path: &Path) -> Result<Self, Error> {
+    pub fn load_from(path: &Path, success_file: &Path) -> Result<Self, Error> {
+        if !success_file.exists() {
+            log::warn!("File {} does not exist, possibly preprocessing was not completed",
+                ext::fmt::path(success_file));
+        }
         let mut stream = ext::sys::open(&path)?;
         let mut s = String::new();
         stream.read_to_string(&mut s).map_err(add_path!(path))?;
@@ -319,7 +323,7 @@ impl JsonSer for SequencingInfo {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> read_len (as_f64), technology (as_str), total_reads? (as_u64));
+        json_get!(obj => read_len (as_f64), technology (as_str), total_reads? (as_u64));
         let technology = Technology::from_str(technology).map_err(|e| Error::JsonLoad(e))?;
         Ok(Self { read_len, technology, total_reads })
     }

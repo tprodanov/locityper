@@ -196,7 +196,7 @@ impl JsonSer for InsertDistr {
             return Ok(Self::undefined());
         }
 
-        json_get!(obj -> n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
+        json_get!(obj => n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
         let distr = NBinom::new(n, p);
         let size = cache_size(&distr);
         let distr = distr.cached(size);

@@ -217,7 +217,7 @@ impl JsonSer for ErrorProfile {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> matches (as_f64), mismatches (as_f64), insertions (as_f64),
+        json_get!(obj => matches (as_f64), mismatches (as_f64), insertions (as_f64),
             deletions (as_f64), clipping (as_f64),
             alpha (as_f64), beta (as_f64));
         Ok(Self {

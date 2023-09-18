@@ -33,6 +33,7 @@ use super::paths;
 
 struct Args {
     input: Vec<PathBuf>,
+    preproc: Option<PathBuf>,
     database: Option<PathBuf>,
     output: Option<PathBuf>,
     subset_loci: HashSet<String>,
@@ -59,6 +60,7 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             input: Vec::new(),
+            preproc: None,
             database: None,
             output: None,
             subset_loci: HashSet::default(),
@@ -93,6 +95,7 @@ impl Args {
             "Two read files (-i/--input) are provided, however, --interleaved is specified");
         validate_param!(self.ploidy > 0 && self.ploidy <= 11, "Ploidy ({}) must be within [1, 10]", self.ploidy);
 
+        validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         self.samtools = ext::sys::find_exe(self.samtools)?;
@@ -117,7 +120,7 @@ fn print_help(extended: bool) {
     let defaults = Args::default();
     println!("{}", "Genotype complex loci.".yellow());
 
-    println!("\n{} {} genotype -i reads1.fq [reads2.fq] -d db -o out [arguments]",
+    println!("\n{} {} genotype -i reads1.fq [reads2.fq] -p preproc -d db -o out [args]",
         "Usage:".bold(), super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
@@ -128,10 +131,12 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
-    println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
-        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
-    println!("    {:KEY$} {:VAL$}  Output directory   (initialized with {}).",
-        "-o, --output".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
+    println!("    {:KEY$} {:VAL$}  Preprocessed dataset information (see {}).",
+        "-p, --preproc".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
+    println!("    {:KEY$} {:VAL$}  Database directory (initialized with {}).",
+        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " add").underline());
+    println!("    {:KEY$} {:VAL$}  Output directory.",
+        "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
         "-^, --interleaved".green(), super::flag());
     if extended {
@@ -143,18 +148,17 @@ fn print_help(extended: bool) {
             "    --priors".green(), "FILE".yellow());
 
         println!("\n{}", "Read recruitment:".bold());
-        println!("    {:KEY$} {:VAL$}  Minimizer k-mer size (no larger than {}) [{}].",
-            "-k, --recr-kmer".green(), "INT".yellow(), recruit::Minimizer::MAX_KMER_SIZE,
-            super::fmt_def(defaults.recr_params.minimizer_k));
-        println!("    {:KEY$} {:VAL$}  Take k-mers with smallest hash across {} consecutive k-mers [{}].",
-            "-w, --recr-window".green(), "INT".yellow(), "INT".yellow(),
-            super::fmt_def(defaults.recr_params.minimizer_w));
+        println!("    {}  {}  Use k-mers of size {} (<= {}) that have\n\
+            {EMPTY}  smallest hash across {} consecutive k-mers [{} {}].",
+            "-M, --minimizer".green(), "INT INT".yellow(),
+            "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
+            super::fmt_def(defaults.recr_params.minimizer_k), super::fmt_def(defaults.recr_params.minimizer_w));
         println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
             {EMPTY}  of minimizers matching one of the targets.\n\
             {EMPTY}  Default: {}.",
             "-m, --matches-frac".green(), "FLOAT".yellow(),
             Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
-        println!("    {:KEY$} {:VAL$}  Discard top fraction of repetitive minimizers [{}].",
+        println!("    {:KEY$} {:VAL$} Discard top fraction of repetitive minimizers [{}].",
             "-f, --discard-minim".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.discard_minim));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
@@ -265,6 +269,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
         match arg {
             Short('i') | Long("input") =>
                 args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
+            Short('p') | Long("preproc") | Long("preprocessing") => args.preproc = Some(parser.value()?.parse()?),
             Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Long("subset-loci") => {
@@ -274,7 +279,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
 
-            Short('k') | Long("recr-kmer") => args.recr_params.minimizer_k = parser.value()?.parse()?,
+            Short('M') | Long("minimizer") | Long("minimizers") => {
+                args.recr_params.minimizer_k = parser.value()?.parse()?;
+                args.recr_params.minimizer_w = parser.value()?.parse()?;
+            }
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
             Short('m') | Long("matches-frac") | Long("matches-fraction") =>
                 args.matches_frac = Some(parser.value()?.parse()?),
@@ -744,8 +752,10 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut rng = ext::rand::init_rng(args.seed);
     let db_dir = args.database.as_ref().unwrap();
     let out_dir = args.output.as_ref().unwrap();
+    ext::sys::mkdir(out_dir)?;
+    let preproc_dir = args.preproc.as_ref().unwrap();
 
-    let mut bg_distr = BgDistr::load_from(&out_dir.join(paths::BG_DIR).join(paths::BG_DISTR))?;
+    let mut bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     args.recr_params.set_matches_frac(
         args.matches_frac.unwrap_or_else(|| bg_distr.seq_info().technology().default_matches_frac()) as f32)?;

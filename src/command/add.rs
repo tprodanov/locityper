@@ -13,7 +13,7 @@ use htslib::bcf::{
     record::Record as VcfRecord,
 };
 use colored::Colorize;
-use const_format::{str_repeat, concatcp};
+use const_format::str_repeat;
 use crate::{
     err::{Error, validate_param, add_path},
     algo::{bisect, HashSet},
@@ -36,6 +36,7 @@ use super::paths;
 
 struct Args {
     database: Option<PathBuf>,
+    jf_counts: Option<PathBuf>,
     reference: Option<PathBuf>,
     variants: Option<PathBuf>,
     loci: Vec<String>,
@@ -63,6 +64,7 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             database: None,
+            jf_counts: None,
             reference: None,
             variants: None,
             loci: Vec::new(),
@@ -98,11 +100,12 @@ impl Default for Args {
 impl Args {
     fn validate(mut self) -> Result<Self, Error> {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
+        validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         if self.sequences.is_empty() {
             validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
             validate_param!(self.variants.is_some(), "Pangenome VCF file is not provided (see -v/--vcf)");
             validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
-                "Complex loci are not provided (see -l/--locus and -L/--loci-bed)");
+                "Target loci are not provided (see -l/--locus and -L/--loci-bed)");
         } else {
             validate_param!(self.reference.is_none(), "Reference (-r) is mutually exclusive with sequences (-s)");
             validate_param!(self.variants.is_none(), "VCF file (-v) is mutually exclusive with sequences (-s)");
@@ -132,21 +135,27 @@ impl Args {
     }
 }
 
-fn print_help() {
+fn print_help(extended: bool) {
     const KEY: usize = 16;
     const VAL: usize = 5;
     const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
     let defaults = Args::default();
-    println!("{}", "Adds complex locus/loci to the database.".yellow());
+    println!("{}", "Adds target locus/loci to the database.".yellow());
 
     println!("\n{}", "Usage:".bold());
-    println!("    {} add -d db -r ref.fa -v vars.vcf.gz -l/-L loci [arguments]", super::PROGRAM);
-    println!("    {} add -d db -s seqs.fa=name [seqs2.fa=name2 ...] [arguments]", super::PROGRAM);
+    println!("    {} add -d db -j counts.jf -r ref.fa -v vars.vcf.gz -l/-L loci  [args]", super::PROGRAM);
+    println!("    {} add -d db -j counts.jf -s seqs.fa=name [seqs2.fa=name2 ...] [args]", super::PROGRAM);
+    if !extended {
+        println!("\nThis is a {} help message. Please use {} to see the full help.",
+            "short".red(), "-H/--full-help".green());
+    }
 
     println!("\n{}", "Input arguments:".bold());
-    println!("    {:KEY$} {:VAL$}  Input database directory (initialized with {}).",
-        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline());
+    println!("    {:KEY$} {:VAL$}  Output database directory.",
+        "-d, --database".green(), "DIR".yellow());
+    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see README).",
+        "-j, --jf-counts".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.\n\
@@ -159,63 +168,70 @@ fn print_help() {
         "-s, --seqs".green(), "FILE=STR".yellow(), "filename".underline(), "locus_name".underline(),
         "-r".green(), "-v".green(), "-l".green(), "-L".green(), "must be".red());
 
-    println!("\n{}", "Complex loci coordinates:".bold());
-    println!("    {:KEY$} {:VAL$}  Complex locus coordinates. Multiple loci are allowed.\n\
+    println!("\n{}", "Target loci coordinates:".bold());
+    println!("    {:KEY$} {:VAL$}  Locus/loci coordinates.\n\
         {EMPTY}  Format: 'chrom:start-end=name',\n\
         {EMPTY}  where 'name' is the locus name (must be unique).",
         "-l, --locus".green(), "STR+".yellow());
-    println!("    {:KEY$} {:VAL$}  BED file with complex loci coordinates. May be repeated multiple times.\n\
+    println!("    {:KEY$} {:VAL$}  BED file with loci coordinates. May be repeated multiple times.\n\
         {EMPTY}  Fourth column must contain locus name (all names should be unique).",
         "-L, --loci-bed".green(), "FILE".yellow());
 
-    println!("\n{}", "Allele extraction parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
-        "-g, --genome".green(), "STR".yellow());
-    println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
-        "-e, --expand".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.max_expansion)));
-    println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
-        {EMPTY}  moving windows of size {} bp [{}].",
-        "-w, --window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.moving_window)));
-    println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per allele [{}]\n\
-        {EMPTY}  (relative to the allele length). Variants that have no known\n\
-        {EMPTY}  variation in the input VCF pangenome are ignored.",
-        "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
-    println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
-        "    --leave-out".green(), "STR+".yellow());
+    if extended {
+        println!("\n{}", "Allele extraction parameters:".bold());
+        println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
+            "-g, --genome".green(), "STR".yellow());
+        println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
+            "-e, --expand".green(), "INT".yellow(), "INT".yellow(),
+            super::fmt_def(PrettyU32(defaults.max_expansion)));
+        println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
+            {EMPTY}  moving windows of size {} bp [{}].",
+            "-w, --window".green(), "INT".yellow(), "INT".yellow(),
+            super::fmt_def(PrettyU32(defaults.moving_window)));
+        println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per allele [{}]\n\
+            {EMPTY}  (relative to the allele length). Variants that have no known\n\
+            {EMPTY}  variation in the input VCF pangenome are ignored.",
+            "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
+        println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
+            "    --leave-out".green(), "STR+".yellow());
 
-    println!("\n{}", "Alignment and clustering of alleles:".bold());
-    println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
-        "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
-    println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
-        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_open));
-    println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
-        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
-    println!("    {:KEY$} {:VAL$}  Backbone alignment k-mer size [{}].",
-        "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
-    println!("    {:KEY$} {:VAL$}  Accuracy level of allele alignments (0-9) [{}].\n\
-        {EMPTY}  0: no sequence alignment, 1: fast and inaccurate alignment,\n\
-        {EMPTY}  9: slow and accurate alignment.",
-        "-a, --accuracy".green(), "INT".yellow(), super::fmt_def(defaults.accuracy));
-    println!("    {:KEY$} {:VAL$}  Sequence divergence threshold, used to discard very similar\n\
-        {EMPTY}  alleles [{}]. Use 0 to keep all distinct alleles.",
-        "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
+        println!("\n{}", "Alignment and clustering of alleles:".bold());
+        println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
+            "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
+        println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
+            "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_open));
+        println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
+            "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
+        println!("    {:KEY$} {:VAL$}  Backbone alignment k-mer size [{}].",
+            "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
+        println!("    {:KEY$} {:VAL$}  Accuracy level of allele alignments (0-9) [{}].\n\
+            {EMPTY}  0: no sequence alignment, 1: fast and inaccurate alignment,\n\
+            {EMPTY}  9: slow and accurate alignment.",
+            "-a, --accuracy".green(), "INT".yellow(), super::fmt_def(defaults.accuracy));
+        println!("    {:KEY$} {:VAL$}  Sequence divergence threshold, used to discard very similar\n\
+            {EMPTY}  alleles [{}]. Use 0 to keep all distinct alleles.",
+            "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
+    }
 
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
-        "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
+    if extended {
+        println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
+            "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
+    }
 
     println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
+    println!("    {:KEY$} {:VAL$}  Show {} help message.", "-H, --full-help".green(), "", "extended".red());
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     if argv.is_empty() {
-        print_help();
+        print_help(false);
         std::process::exit(1);
     }
     use lexopt::prelude::*;
@@ -225,6 +241,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     while let Some(arg) = parser.next()? {
         match arg {
             Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Short('j') | Long("jf-counts") => args.jf_counts = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('v') | Long("vcf") => args.variants = Some(parser.value()?.parse()?),
 
@@ -263,7 +280,11 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 std::process::exit(0);
             }
             Short('h') | Long("help") => {
-                print_help();
+                print_help(false);
+                std::process::exit(0);
+            }
+            Short('H') | Long("full-help") | Long("hidden-help") => {
+                print_help(true);
                 std::process::exit(0);
             }
             _ => Err(arg.unexpected())?,
@@ -764,26 +785,17 @@ fn run_with_fasta(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> R
     Ok((succeed, total as u32))
 }
 
-/// Finds exactly one file under `db/jf/*.jf` and creates k-mer getter.
-pub(super) fn load_kmer_getter(db_path: &Path, jellyfish_exe: PathBuf) -> Result<JfKmerGetter, Error> {
-    let mut jf_filenames = ext::sys::filenames_with_ext(&db_path.join(paths::JF_DIR), "jf")?;
-    if jf_filenames.len() != 1 {
-        return Err(Error::InvalidInput(format!("There are {} files {}/jf/*.jf (expected 1)",
-            db_path.display(), jf_filenames.len())));
-    }
-    JfKmerGetter::new(jellyfish_exe, jf_filenames.pop().expect("At least one filename must be present"))
-}
-
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
 
-    let db_path = args.database.as_ref().unwrap();
-    let loci_dir = db_path.join(paths::LOCI_DIR);
+    let db_dir = args.database.as_ref().unwrap();
+    ext::sys::mkdir(&db_dir)?;
+    let loci_dir = db_dir.join(paths::LOCI_DIR);
     ext::sys::mkdir(&loci_dir)?;
 
-    let kmer_getter = load_kmer_getter(db_path, args.jellyfish.clone())?;
+    let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
     let (succeed, total) = if args.sequences.is_empty() {

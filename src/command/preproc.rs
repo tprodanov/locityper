@@ -13,7 +13,7 @@ use std::{
     str::FromStr,
 };
 use colored::Colorize;
-use const_format::{str_repeat, concatcp};
+use const_format::str_repeat;
 use htslib::bam;
 use crate::{
     ext::{
@@ -24,7 +24,7 @@ use crate::{
     err::{Error, validate_param, add_path},
     seq::{
         Interval,
-        kmers::KmerCounts,
+        kmers::{JfKmerGetter, KmerCounts},
         fastx::{self, FastxRead},
         cigar::{self, Cigar},
         aln::{NamedAlignment, Alignment, ReadEnd},
@@ -43,8 +43,8 @@ use super::paths;
 struct Args {
     input: Vec<PathBuf>,
     alns: Option<PathBuf>,
-    database: Option<PathBuf>,
     reference: Option<PathBuf>,
+    jf_counts: Option<PathBuf>,
     output: Option<PathBuf>,
     similar_dataset: Option<PathBuf>,
     bg_region: Option<String>,
@@ -76,8 +76,8 @@ impl Default for Args {
         Self {
             input: Vec::new(),
             alns: None,
-            database: None,
             reference: None,
+            jf_counts: None,
             output: None,
             similar_dataset: None,
             bg_region: None,
@@ -121,13 +121,16 @@ impl Args {
                 log::warn!("Running in single-end mode.");
             }
         }
+        if self.similar_dataset.is_some() {
+            validate_param!(n_input > 0, "Similar dataset (-~) can only be used together with input reads (-i)");
+        }
+        validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         if self.similar_dataset.is_some() {
             validate_param!(n_input > 0, "Read files (-i) required if similar dataset is provided (-~)");
             // No more checks are needed.
             return Ok(self);
         }
-        validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
 
         validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
@@ -172,8 +175,9 @@ fn print_help(extended: bool) {
     println!("{}", "Preprocess WGS dataset.".yellow());
 
     println!("\n{}", "Usage:".bold());
-    println!("    {} preproc -i reads1.fq [reads2.fq] -d db -r reference.fa -o out [arguments]", super::PROGRAM);
-    println!("    {} preproc -a aligned.bam           -d db -r reference.fa -o out [arguments]", super::PROGRAM);
+    println!("    {} preproc -i reads1.fq [reads2.fq] -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
+    println!("    {} preproc -i reads1.fq [reads2.fq] -~ similar_dataset           -o out [args]", super::PROGRAM);
+    println!("    {} preproc -a aligned.bam           -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
@@ -187,10 +191,10 @@ fn print_help(extended: bool) {
         {EMPTY}  Mutually exclusive with {}.\n\
         {EMPTY}  This method is extremely fast, but sometimes {}.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "less accurate".red());
-    println!("    {:KEY$} {:VAL$}  Database directory (initialized with {} & {}).",
-        "-d, --database".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " create").underline(), "add".underline());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
         "-r, --reference".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see README).",
+        "-j, --jf-counts".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  This dataset is similar to already preprocessed dataset.\n\
@@ -298,13 +302,13 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
                 args.alns = Some(parser.value()?.parse()?),
-            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Short('t') | Long("technology") => {
                 args.explicit_technology = true;
                 args.technology = parser.value()?.parse()?;
             }
+            Short('j') | Long("jf-counts") => args.jf_counts = Some(parser.value()?.parse()?),
             Short('~') | Long("like") => args.similar_dataset = Some(parser.value()?.parse()?),
             Short('b') | Long("bg") | Long("bg-region") => args.bg_region = Some(parser.value()?.parse()?),
 
@@ -361,16 +365,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
         }
     }
     Ok(args)
-}
-
-fn create_out_dir(args: &Args) -> Result<PathBuf, Error> {
-    let out_dir = args.output.as_ref().unwrap();
-    ext::sys::mkdir(out_dir)?;
-    let bg_dir = out_dir.join(paths::BG_DIR);
-    if !args.rerun.prepare_dir(&bg_dir)? {
-        std::process::exit(0);
-    }
-    Ok(bg_dir)
 }
 
 /// Returns default background region.
@@ -578,7 +572,7 @@ impl JsonSer for MappingParams {
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj -> technology (as_str), min_mapq (as_u8), subsampling (as_f64), bg_region (as_str));
+        json_get!(obj => technology (as_str), min_mapq (as_u8), subsampling (as_f64), bg_region (as_str));
         let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
         Ok(Self {
             technology, min_mapq, subsampling,
@@ -885,15 +879,15 @@ fn estimate_bg_distrs(
 }
 
 /// Assume that this WGS dataset is similar to another dataset, and use its parameters.
-fn estimate_like(args: &Args, similar_dataset: &Path) -> Result<BgDistr, Error> {
-    let similar_path = similar_dataset.join(paths::BG_DIR).join(paths::BG_DISTR);
+fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
+    let similar_path = like_dir.join(paths::BG_DISTR);
     log::info!("Loading distribution parameters from {}", ext::fmt::path(&similar_path));
-    let similar_distr = BgDistr::load_from(&similar_path)?;
+    let similar_distr = BgDistr::load_from(&similar_path, &like_dir.join(paths::SUCCESS))?;
     let similar_seq_info = similar_distr.seq_info();
     let similar_n_reads = match similar_seq_info.total_reads() {
         Some(count) => count,
         None => return Err(Error::InvalidInput(format!(
-            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(similar_dataset)))),
+            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir)))),
     };
 
     let seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.technology,
@@ -901,14 +895,14 @@ fn estimate_like(args: &Args, similar_dataset: &Path) -> Result<BgDistr, Error> 
     if similar_seq_info.technology() != seq_info.technology() {
         return Err(Error::InvalidInput(format!(
             "Cannot use similar dataset {}: different sequencing technology ({} and {})",
-            ext::fmt::path(similar_dataset), similar_seq_info.technology(), seq_info.technology())));
+            ext::fmt::path(like_dir), similar_seq_info.technology(), seq_info.technology())));
     } else if similar_distr.insert_distr().is_paired_end() != args.is_paired_end() {
         return Err(Error::InvalidInput(format!(
-            "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(similar_dataset))));
+            "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(like_dir))));
     } else if !seq_info.technology().is_read_len_similar(seq_info.mean_read_len(), similar_seq_info.mean_read_len()) {
         return Err(Error::InvalidInput(format!(
             "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",
-            ext::fmt::path(similar_dataset), seq_info.mean_read_len(), similar_seq_info.mean_read_len())));
+            ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len())));
     }
     log::info!("Counting reads in {}", ext::fmt::path(&args.input[0]));
     let total_reads = fastx::count_reads(&args.input[0])?;
@@ -943,12 +937,11 @@ struct BgRegion {
 
 impl BgRegion {
     fn new(args: &Args) -> Result<Self, Error> {
-        let db_path = args.database.as_ref().unwrap();
         let ref_filename = args.reference.as_ref().unwrap();
         let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
         let interval = select_bg_interval(&ref_filename, &ref_contigs, &args.bg_region)?;
 
-        let kmer_getter = super::add::load_kmer_getter(db_path, args.jellyfish.clone())?;
+        let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;
         let sequence = interval.fetch_seq(&mut ref_fasta)?;
         log::info!("Calculating k-mer counts on the background region");
         let kmer_counts = kmer_getter.fetch_one(sequence.clone())?;
@@ -960,21 +953,23 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
-    // `args.output`/bg
-    let out_bg_dir = create_out_dir(&args)?;
+    let out_dir = args.output.as_ref().unwrap();
+    if !args.rerun.prepare_dir(&out_dir)? {
+        std::process::exit(0);
+    }
+    ext::sys::mkdir(out_dir)?;
 
     let bg_distr = if let Some(similar_dataset) = args.similar_dataset.as_ref() {
         estimate_like(&args, similar_dataset)?
     } else {
         let bg_region = BgRegion::new(&args)?;
-
-        estimate_bg_distrs(&args, &out_bg_dir, &bg_region)?
+        estimate_bg_distrs(&args, &out_dir, &bg_region)?
     };
 
-    let distr_filename = out_bg_dir.join(paths::BG_DISTR);
+    let distr_filename = out_dir.join(paths::BG_DISTR);
     let mut distr_file = ext::sys::create_gzip(&distr_filename)?;
     bg_distr.save().write_pretty(&mut distr_file, 4).map_err(add_path!(distr_filename))?;
     log::info!("Success. Total time: {}", ext::fmt::Duration(timer.elapsed()));
-    super::write_success_file(out_bg_dir.join(paths::SUCCESS))?;
+    super::write_success_file(out_dir.join(paths::SUCCESS))?;
     Ok(())
 }

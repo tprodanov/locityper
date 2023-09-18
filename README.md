@@ -58,31 +58,23 @@ General usage
 
 Note that many of all commands below allow to specify the number of threads (`-@ N`, 8 by default).
 
-### Creating a database
+### Preparing input data
 
-First, we create a database, that would later contain information about complex loci.
+#### *k*-mer counts across the reference genome
+
+Several Locityper commands need reference *k*-mer counts,
+calculated using [Jellyfish](https://github.com/gmarcais/Jellyfish/).
+You can use the following code to obtain them (for example for *k = 25*):
 ```bash
-locityper create -d db -r reference.fasta
-```
-During database creation, Locityper collects *k*-mer counts across the reference genome using `jellyfish`.
-
-If you already have a database, you can create a copy of it without any of the complex loci by running
-```bash
-rsync -vaP db/jf new_db
-```
-
-### Adding loci to the database
-
-There are two ways to add loci to the database. First, locus alleles can be directly provided using a FASTA file.
-```bash
-locityper add -d db -s alleles.fasta=name # where `name` is the name of the locus.
+jellyfish count --lower-count 2 --out-counter-len 1 --mer-len 25 --threads 8 --size 3G \
+    --output counts.jf genome.fa
 ```
 
-Alternatively, you can use pangenome VCF file:
-```bash
-locityper add -d db -r reference.fasta -v pangenome.vcf.gz -l chr:start-end=name
-```
-**Pangenome VCF file** can be downloaded from
+#### Pangenome VCF file
+
+Locityper can automatically extract locus alleles from the pangenome reference,
+stored in a VCF file with non-overlapping variants.
+Pangenome VCF file can be downloaded from
 [here](https://github.com/human-pangenomics/hpp_pangenome_resources#minigraph-cactus) (see *Raw VCF*).
 Next, VCF file needs to be transformed such that no variants overlap each other:
 ```bash
@@ -90,15 +82,29 @@ vcfbub -l 0 -i hprc-v1.1-mc-grch38.raw.vcf.gz | bgzip > hprc-v1.1-grch38.vcf.gz
 tabix -p vcf hprc-v1.1-grch38.vcf.gz
 ```
 
+### Creating database with target loci
+
+Database with target loci can be constructed in two ways:
+first, locus alleles can be directly provided using a FASTA file.
+```bash
+locityper add -d db -j counts.jf -s alleles.fasta=name # where `name` is the name of the locus.
+```
+Alternatively, locus alleles can be extracted from the pangenome VCF file:
+```bash
+locityper add -d db -f counts.jf -r reference.fasta -v pangenome.vcf.gz -l chr:start-end=name
+# or
+locityper add -d db -f counts.jf -r reference.fasta -v pangenome.vcf.gz -L loci.bed
+```
+You can freely add more loci to the database using the same commands.
+
 ### Preprocessing WGS dataset
 
 Before locus genotyping can be performed, WGS dataset needs to be preprocessed.
 For that, please use
 ```bash
-locityper preproc -i reads1.fastq [reads2.fastq] -d db -r reference.fasta -o analysis
+locityper preproc -i reads1.fastq [reads2.fastq] -j counts.jf -r reference.fasta -o preproc_out
 ```
-Use can also provide input files in FASTA format.
-Locityper accepts input files compressed with `gzip`, `bgzip` or `lz4`.
+Input files can have FASTA or FASTQ format, and can be uncompressed or compressed with `gzip`, `bgzip` or `lz4`.
 
 During sample preprocessing Locityper examines read alignments to a long *simple* region in the reference genome
 without significant duplications or other structural variantions.
@@ -107,12 +113,11 @@ please use `-b/--bg-region` to provide such region (preferable ≥3 Mb).
 By default, the following regions are used: `chr17:72950001-77450000` *(CHM13)*,
 `chr17:72062001-76562000` *(GRCh38)* and `chr17:70060001-74560000` *(GRCh37)*.
 
-There are two other ways to preprocess WGS dataset:
 If you already have read mappings to the whole genome, you can use them via
 ```bash
-locityper preproc -a aligned.bam -d db -r reference.fasta -o analysis
+locityper preproc -a aligned.bam -d db -r reference.fasta -o preproc_out
 ```
-However, this calculation may be less accurate than from the reads depending on the read mapping.
+However, this calculation may be less accurate depending on the read mapping.
 
 Additionally, you can estimate WGS characteristics using an already preprocessed file.
 > [!WARNING]
@@ -121,18 +126,12 @@ Additionally, you can estimate WGS characteristics using an already preprocessed
 > Preprocessing using existing dataset is significantly faster, but may produce incorrect results
 > if datasets have noticeably different characteristics.
 ```bash
-locityper preproc -i reads1.fastq [reads2.fastq] -o analysis -~ other_analysis
-```
-
-Finally, if you want to analyze a new set of loci, and do not want to keep the same output folder, you
-can copy preprocessed data to a new location with
-```bash
-rsync -vaP analysis1/bg analysis2
+locityper preproc -i reads1.fastq [reads2.fastq] -o preproc_out -~ other_preproc
 ```
 
 ### Genotyping WGS dataset
 
 In order to genotype a dataset, please run
 ```bash
-locityper genotype -i reads1.fastq [reads2.fastq] -d db -o analysis
+locityper genotype -i reads1.fastq [reads2.fastq] -p preproc -d db -o analysis
 ```

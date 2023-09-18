@@ -1,5 +1,4 @@
 pub mod paths;
-mod create;
 mod add;
 mod preproc;
 mod genotype;
@@ -24,7 +23,6 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
         std::process::exit(1);
     }
     match &argv[1] as &str {
-        "c" | "create" => create::run(&argv[2..])?,
         "a" | "add" => add::run(&argv[2..])?,
         "p" | "preproc" | "preprocess" => preproc::run(&argv[2..])?,
         "g" | "genotype" => genotype::run(&argv[2..])?,
@@ -73,16 +71,14 @@ fn print_help() {
     println!("\n{} {} command [arguments]",
         "Usage:".bold(), PROGRAM);
 
-    println!("\n{}", "[ Creating database ]".bold());
-    println!("    {:WIDTH$} Create an empty database",
-        "c, create".red());
-    println!("    {:WIDTH$} Add complex locus/loci to the database",
+    println!("\n{}", "[ Loci database ]".bold());
+    println!("    {:WIDTH$} Add target locus/loci to the database",
         "a, add".red());
 
     println!("\n{}", "[ Analysing WGS data ]".bold());
     println!("    {:WIDTH$} Preprocess WGS dataset",
         "p, preproc".red());
-    println!("    {:WIDTH$} Genotype complex loci",
+    println!("    {:WIDTH$} Genotype target loci",
         "g, genotype".red());
 
     println!("\n{}", "[ General help ]".bold());
