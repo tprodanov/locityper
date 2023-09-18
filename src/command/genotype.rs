@@ -51,7 +51,6 @@ struct Args {
 
     recr_params: recruit::Params,
     matches_frac: Option<f64>,
-    discard_minim: f64,
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
 }
@@ -78,7 +77,6 @@ impl Default for Args {
 
             recr_params: Default::default(),
             matches_frac: None,
-            discard_minim: 0.001,
             assgn_params: Default::default(),
             scheme_params: Default::default(),
         }
@@ -101,8 +99,6 @@ impl Args {
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
         self.recr_params.validate()?;
-        validate_param!(self.discard_minim >= 0.0 && self.discard_minim < 1.0,
-            "Fraction of discarded minimizers ({}) must be within [0, 1)", self.discard_minim);
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -158,8 +154,6 @@ fn print_help(extended: bool) {
             {EMPTY}  Default: {}.",
             "-m, --matches-frac".green(), "FLOAT".yellow(),
             Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
-        println!("    {:KEY$} {:VAL$} Discard top fraction of repetitive minimizers [{}].",
-            "-f, --discard-minim".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.discard_minim));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
             "-c, --chunk-size".green(), "INT".yellow(),
@@ -286,7 +280,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
             Short('m') | Long("matches-frac") | Long("matches-fraction") =>
                 args.matches_frac = Some(parser.value()?.parse()?),
-            Short('f') | Long("discard-minim") => args.discard_minim = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-size") =>
                 args.recr_params.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
 
@@ -551,7 +544,7 @@ fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
         writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
-    let targets = target_builder.finalize(args.discard_minim);
+    let targets = target_builder.finalize();
 
     // Cannot put reader into a box, because `FastxRead` has a type parameter.
     if args.input.len() == 1 && !args.interleaved {
@@ -593,7 +586,7 @@ fn create_mapping_command(
             "-M", n_locs,   // Try as many secondary locations as possible.
             "-N", n_locs,   // Output as many secondary alignments as possible.
             "-S", "0.5",     // Try candidate sites with score >= 0.5 * best score.
-            "-f", &args.discard_minim.to_string(),
+            "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.
             "--eqx",         // Output X/= instead of M operations.
             "-r", &format!("{:.0}", seq_info.mean_read_len()),
@@ -604,7 +597,7 @@ fn create_mapping_command(
             "-a", // Output SAM format,
             "-x", seq_info.technology().minimap_preset(), // Set mapping preset.
             "-N", n_locs,   // Output as many secondary alignments as possible.
-            "-f", &args.discard_minim.to_string(),
+            "-f", "0.001",
             "--eqx",        // Output X/= instead of M operations.
             "-t", &args.threads.to_string()]);
     }
