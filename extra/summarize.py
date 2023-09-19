@@ -3,6 +3,7 @@
 import sys
 import os
 import argparse
+import warnings
 from multiprocessing import Pool
 import itertools
 import numpy as np
@@ -60,28 +61,35 @@ def load_tags(path1, path2):
     return tags, filt_tuples
 
 
-def process(res, liks, dist):
+def process(res, liks, filter_liks, dist):
+    filter_liks = filter_liks.merge(dist, on='genotype').reset_index(drop=True)
+    min_dist = filter_liks.dist.min()
+    closest_gts = list(filter_liks[filter_liks.dist == min_dist].genotype)
+
     liks = liks.groupby('genotype').last().reset_index()
-    merged = liks.merge(dist, on='genotype').reset_index(drop=True)
-    total_gts = merged.shape[0]
-    merged = merged[merged.stage > 0].reset_index(drop=True)
-    merged = merged.sort_values(['dist', 'lik'], ascending=[True, False]).reset_index(drop=True)
-    top_lik_ix = np.argmax(merged.lik)
+    liks = liks.merge(dist, on='genotype').reset_index(drop=True)
+    liks.set_index('genotype', inplace=True)
+    s = '{}\t{}\t{:.10f}\t{:.10f}\t'.format(filter_liks.shape[0], liks.shape[0],
+        pearsonr(liks.lik, liks.dist).statistic, spearmanr(liks.lik, liks.dist).statistic)
 
-    s = '{}\t{}\t{:.10f}\t{:.10f}'.format(total_gts, merged.shape[0],
-        pearsonr(merged.lik, merged.dist).statistic,
-        spearmanr(merged.lik, merged.dist).statistic)
-    s += '\t{}\t{}\t{}\t{}'.format(merged.genotype[0], merged.dist[0], merged.lik[0],
-        (merged.lik > merged.lik[0]).sum() + 1)
-    i = np.argmax(merged.lik)
-    s += '\t{}\t{}\t{}\t{}'.format(merged.genotype[i], merged.dist[i], merged.lik[i], i + 1)
+    closest_gt_liks = [liks.loc[gt].lik if gt in liks.index else np.nan for gt in closest_gts]
+    s += '{}\t{}\t{}\t'.format(min_dist, ';'.join(closest_gts), ';'.join(map('{:.3f}'.format, closest_gt_liks)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        closest_lik = np.nanmin(closest_gt_liks)
+    closest_rank = liks.shape[0] if np.isnan(closest_lik) else (liks.lik > closest_lik).sum() + 1
+    s += f'{closest_rank}\t'
 
-    merged.set_index('genotype', inplace=True)
+    ml_gt = res['genotype']
+    ml_dist = liks.loc[ml_gt].dist
+    ml_dist_rank = (filter_liks.dist < ml_dist).sum() + 1
+    s += '{}\t{}\t{}\t{}'.format(ml_gt, liks.loc[ml_gt].dist, liks.loc[ml_gt].lik, ml_dist_rank)
+
     weighted_dist = 0.0
     weight_sum = 0.0
     for option in res['options']:
         w = option['prob']
-        weighted_dist += merged.loc[option['genotype']].dist * w
+        weighted_dist += liks.loc[option['genotype']].dist * w
         weight_sum += w
     weighted_dist /= weight_sum
 
@@ -95,8 +103,9 @@ def load_and_process(tup, tags, input_fmt, dist_fmt):
     with gzip.open(os.path.join(input_dir, 'res.json.gz'), 'rt') as f:
         res = json.load(f)
     liks = pd.read_csv(os.path.join(input_dir, 'lik.csv.gz'), sep='\t', comment='#')
+    filter_liks = pd.read_csv(os.path.join(input_dir, 'filter.csv.gz'), sep='\t', comment='#')
     dist = pd.read_csv(dist_fmt.format(**d), sep='\t', comment='#')
-    s = process(res, liks, dist)
+    s = process(res, liks, filter_liks, dist)
     return '\t'.join(tup + (s,))
 
 
@@ -121,20 +130,20 @@ def main():
     out.write('# {}\n'.format(' '.join(sys.argv)))
     for tag in tags:
         out.write(tag + '\t')
-    out.write('total_gts\test_gts\tpearsonr\tspearmanr\tclosest_gt\tclosest_gt_dist\tclosest_gt_lik\tclosest_lik_rank'
-        '\tml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\n')
-
+    out.write('total_gts\trem_gts\tpearsonr\tspearmanr\tsmallest_dist\tclosest_gts\tclosest_gt_liks\tclosest_rank\t'
+        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\n')
 
     n = len(tag_tuples)
     threads = min(n, args.threads)
     f = functools.partial(load_and_process, tags=tags, input_fmt=args.input, dist_fmt=args.distances)
+    pbar = tqdm if n > 1 else lambda x, *args, **kwargs: x
 
     if threads > 1:
         with Pool(threads) as pool:
-            for line in tqdm(pool.imap(f, tag_tuples), total=n):
+            for line in pbar(pool.imap(f, tag_tuples), total=n):
                 out.write(line)
     else:
-        for line in tqdm(map(f, tag_tuples), total=n):
+        for line in pbar(map(f, tag_tuples), total=n):
             out.write(line)
 
 
