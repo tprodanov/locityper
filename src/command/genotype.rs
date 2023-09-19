@@ -215,7 +215,10 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
             "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
-            "    --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
+            "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
+        println!("    {:KEY$} {:VAL$}  Normalize depth likelihoods based on sum window weight across\n\
+            {EMPTY}  genotype, raised to this power (0 - no normalization) [{}].",
+            "-N, --depth-norm".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_norm_power));
         println!("        {} {}, {} {}, {} {}, {} {}\n\
             {EMPTY}  Solver parameters (see README).",
             "--greedy".green(), "STR".yellow(),
@@ -321,7 +324,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("min-gts") | Long("min-genotypes") =>
                 args.assgn_params.min_gts = parser.value()?.parse::<PrettyUsize>()?.get(),
             Short('a') | Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
-            Long("tweak") => {
+            Short('t') | Long("tweak") => {
                 let val = parser.value()?;
                 args.assgn_params.tweak = if val == "auto" {
                     None
@@ -329,6 +332,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     Some(val.parse()?)
                 };
             }
+            Short('N') | Long("depth-norm") => args.assgn_params.depth_norm_power = parser.value()?.parse()?,
             Long("greedy") => args.scheme_params.greedy_params.push(parser.value()?.parse()?),
             Long("anneal") => args.scheme_params.anneal_params.push(parser.value()?.parse()?),
             Long("highs") => args.scheme_params.highs_params.push(parser.value()?.parse()?),

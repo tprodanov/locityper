@@ -9,6 +9,7 @@ suppressMessages(library(stringi, quietly = T))
 msg <- function(...) cat(sprintf(...), sep='', file=stderr())
 int_fmt <- scales::label_comma(accuracy = 1)
 float_fmt2 <- scales::label_comma(accuracy = 0.01)
+float_fmt5 <- scales::label_comma(accuracy = 0.00001)
 
 parser <- argparse::ArgumentParser(description = 'Draw read assignment.')
 parser$add_argument('dir', metavar = 'DIR',
@@ -54,13 +55,19 @@ breaks <- c(lik_axis_mult * lik_breaks, depth_breaks)
 labels_left <- c(rep('', length(lik_breaks)), depth_breaks)
 labels_right <- c(lik_breaks, rep('', length(depth_breaks)))
 ylim <- (if (no_lik) { c(0, max_depth) } else { c(lik_axis_mult * min_lik, max_depth) }) * 1.03
+nwindows <- max(as.numeric(wo_summary$window))
 
 # Colors
 
-fill_colors <- rev(c('#355070', '#6D597A', '#B56576', '#E56B6F'))
-main_color <- tail(fill_colors, n = 1)
+fill_colors <- c('#E56B6F', '#B56576', '#6D597A', '#355070')
+main_color <- fill_colors[4]
 max_lik = max(c(min_lik, lik_range[2], -1))
-fill_rescale <- 1 - c(seq(min_lik, max_lik, length.out = length(fill_colors)), 0) / min_lik
+if (max_lik < 0) {
+    fill_rescale <- 1 - c(seq(min_lik, max_lik, length.out = length(fill_colors)), 0) / min_lik
+    fill_colors <- c(fill_colors, main_color)
+} else {
+    fill_rescale <- seq(0, 1, length.out = length(fill_colors))
+}
 
 for (gt_str in args$genotype) {
     msg('    Processing genotype %s\n', gt_str)
@@ -100,13 +107,12 @@ for (gt_str in args$genotype) {
         sprintf('Total reads: %s  (unmapped: %s,  out of bounds: %s).',
             int_fmt(info['reads']), int_fmt(info['unmapped']), int_fmt(info['boundary'])),
         sprintf('log₁₀-likelihood: %s  =  [alignment] %s × %s  +  [depth] %s × %s',
-            float_fmt2(info['lik']), float_fmt2(info['aln_contrib']), float_fmt2(info['aln_lik']),
-            float_fmt2(info['depth_contrib']), float_fmt2(info['depth_lik'])),
+            float_fmt2(info['lik']), float_fmt5(info['aln_contrib']), float_fmt2(info['aln_lik']),
+            float_fmt5(info['depth_contrib']), float_fmt2(info['depth_lik'])),
         sep = '\n')
 
     # Drawing and saving.
     msg('    Drawing read depth for %s to %s\n', gt_str, out_filename)
-    nwindows <- max(sol$window)
     ggplot(sol) +
         # Window weights behind likelihoods.
         geom_rect(aes(xmin = window - 0.5, xmax = window + 0.5,
@@ -130,7 +136,7 @@ for (gt_str in args$genotype) {
         ggtitle(title, subtitle) +
         coord_cartesian(ylim = ylim) +
         scale_x_continuous('Window', expand = expansion(mult = 0.005),
-            breaks = seq(0, nwindows, 100), minor_breaks = seq(0, nwindows, 10)) +
+            limits = c(0.5, nwindows + 0.5), breaks = seq(0, nwindows, 50), minor_breaks = seq(0, nwindows, 10)) +
         scale_y_continuous('Read depth',
             expand = c(0, 0),
             breaks = breaks,
@@ -145,7 +151,7 @@ for (gt_str in args$genotype) {
                 labels = labels_right)
             })) +
         scale_fill_gradientn('log₁₀-likelihood',
-            colors = c(fill_colors, main_color),
+            colors = fill_colors,
             values = fill_rescale,
             limits = c(min_lik, 0),
             breaks = lik_breaks,

@@ -145,6 +145,7 @@ impl GenotypeAlignments {
         &mut self,
         rng: &mut impl Rng,
         distr_cache: &DistrCache,
+        mean_sum_weight: f64,
         params: &super::Params,
     ) {
         let tweak = params.tweak.unwrap();
@@ -169,6 +170,11 @@ impl GenotypeAlignments {
                     self.use_window.push(true);
                 }
             }
+        }
+        if params.depth_norm_power != 0.0 {
+            let sum_weight = self.curr_weights.iter().sum::<f64>();
+            let norm_fct = (mean_sum_weight / sum_weight).powf(params.depth_norm_power).clamp(0.95, 1.0526);
+            self.depth_contrib = (params.lik_skew + 1.0) * norm_fct;
         }
     }
 

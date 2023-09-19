@@ -30,6 +30,9 @@ pub struct Params {
     pub weight_power: f64,
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
+    /// Normalize read depth based on (<mean sum weight> / <sum weight>) ^ depth_norm_power.
+    /// Do not normalize read depth, if this value is 0.
+    pub depth_norm_power: f64,
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
     /// None: half window size.
@@ -64,6 +67,7 @@ impl Default for Params {
             weight_breakpoint: 0.2,
             weight_power: 2.0,
             min_weight: 0.001,
+            depth_norm_power: 0.0,
 
             tweak: None,
             alt_cn: (0.5, 1.5),
@@ -126,6 +130,8 @@ impl Params {
         if self.attempts < 3 {
             log::warn!("At least 3 attempts are recommended");
         }
+        validate_param!(self.depth_norm_power >= 0.0 && self.depth_norm_power.is_finite(),
+            "Depth normalization factor ({}) must be non-negative", self.depth_norm_power);
         validate_param!(self.min_gts > 1,
             "Minimal number of genotypes ({}) must be at least 2", self.min_gts);
         Ok(())

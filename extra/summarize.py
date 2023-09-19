@@ -62,12 +62,16 @@ def load_tags(path1, path2):
 
 
 def process(res, liks, filter_liks, dist):
-    filter_liks = filter_liks.merge(dist, on='genotype').reset_index(drop=True)
+    liks = liks.groupby('genotype').last().reset_index()
+    liks = liks.merge(dist, on='genotype').reset_index(drop=True)
+
+    if filter_liks is None:
+        filter_liks = liks
+    else:
+        filter_liks = filter_liks.merge(dist, on='genotype').reset_index(drop=True)
     min_dist = filter_liks.dist.min()
     closest_gts = list(filter_liks[filter_liks.dist == min_dist].genotype)
 
-    liks = liks.groupby('genotype').last().reset_index()
-    liks = liks.merge(dist, on='genotype').reset_index(drop=True)
     liks.set_index('genotype', inplace=True)
     s = '{}\t{}\t{:.10f}\t{:.10f}\t'.format(filter_liks.shape[0], liks.shape[0],
         pearsonr(liks.lik, liks.dist).statistic, spearmanr(liks.lik, liks.dist).statistic)
@@ -103,7 +107,10 @@ def load_and_process(tup, tags, input_fmt, dist_fmt):
     with gzip.open(os.path.join(input_dir, 'res.json.gz'), 'rt') as f:
         res = json.load(f)
     liks = pd.read_csv(os.path.join(input_dir, 'lik.csv.gz'), sep='\t', comment='#')
-    filter_liks = pd.read_csv(os.path.join(input_dir, 'filter.csv.gz'), sep='\t', comment='#')
+    try:
+        filter_liks = pd.read_csv(os.path.join(input_dir, 'filter.csv.gz'), sep='\t', comment='#')
+    except FileNotFoundError:
+        filter_liks = None
     dist = pd.read_csv(dist_fmt.format(**d), sep='\t', comment='#')
     s = process(res, liks, filter_liks, dist)
     return '\t'.join(tup + (s,))
