@@ -95,7 +95,7 @@ impl GenotypeAlignments {
 
         Self {
             aln_contrib: 1.0 - params.lik_skew,
-            depth_contrib: f64::NAN,
+            depth_contrib: 1.0 + params.lik_skew,
             gt_windows, alns, depth_distrs, curr_weights, use_window, read_ixs, non_trivial_reads,
         }
     }
@@ -145,7 +145,6 @@ impl GenotypeAlignments {
         &mut self,
         rng: &mut impl Rng,
         distr_cache: &DistrCache,
-        mean_sum_weight: f64,
         params: &super::Params,
     ) {
         let tweak = params.tweak.unwrap();
@@ -171,8 +170,6 @@ impl GenotypeAlignments {
                 }
             }
         }
-        let sum_weight = self.curr_weights.iter().sum::<f64>();
-        self.depth_contrib = (params.lik_skew + 1.0) * (mean_sum_weight / sum_weight).clamp(0.9, 1.111);
     }
 
     /// Returns read depth distribution for the window.
