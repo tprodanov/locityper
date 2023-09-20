@@ -452,7 +452,7 @@ fn solve_single_thread(
     mean_weight: f64,
     rng: &mut XoshiroRng,
     likelihoods: &mut Likelihoods,
-    mut summary_writer: GzFile,
+    mut sol_writer: GzFile,
     mut depth_writer: Option<GzFile>,
     mut aln_writer: Option<GzFile>,
 ) -> Result<(), Error>
@@ -488,7 +488,7 @@ fn solve_single_thread(
                     assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                 }
                 assgns.update_counts(&mut counts);
-                assgns.summarize(&mut summary_writer, &ext_prefix).map_err(add_path!(!))?;
+                assgns.summarize(&mut sol_writer, &ext_prefix).map_err(add_path!(!))?;
             }
             if let Some(writer) = aln_writer.as_mut() {
                 write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
@@ -573,19 +573,19 @@ pub fn solve(
         f64::NAN
     };
 
-    let summary_filenames = csv_filenames(&locus_dir.join("summary"), data.threads);
-    let mut summary_writers = open_gzips(&summary_filenames)?;
-    writeln!(summary_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER)
-        .map_err(add_path!(summary_filenames[0]))?;
+    let sol_filenames = csv_filenames(&locus_dir.join("sol"), data.threads);
+    let mut sol_writers = open_gzips(&sol_filenames)?;
+    writeln!(sol_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER)
+        .map_err(add_path!(sol_filenames[0]))?;
     let mut likelihoods = Likelihoods::new(n_gts, rem_ixs);
     let data = Arc::new(data);
     if data.threads == 1 {
         solve_single_thread(&data, mean_weight, rng, &mut likelihoods,
-            summary_writers.pop().unwrap(),
+            sol_writers.pop().unwrap(),
             depth_writers.map(|mut writers| writers.pop().unwrap()),
             aln_writers.map(|mut writers| writers.pop().unwrap()))?;
     } else {
-        let main_worker = MainWorker::new(Arc::clone(&data), mean_weight, rng, summary_writers, depth_writers, aln_writers);
+        let main_worker = MainWorker::new(Arc::clone(&data), mean_weight, rng, sol_writers, depth_writers, aln_writers);
         main_worker.run(rng, &mut likelihoods)?;
     }
     if let Some(filenames) = depth_filenames {
@@ -594,7 +594,7 @@ pub fn solve(
     if let Some(filenames) = aln_filenames {
         merge_files(&filenames)?;
     }
-    merge_files(&summary_filenames)?;
+    merge_files(&sol_filenames)?;
 
     let data = &data;
     let genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes, &data.assgn_params);
@@ -636,7 +636,7 @@ impl MainWorker {
         data: Arc<Data>,
         mean_weight: f64,
         rng: &mut XoshiroRng,
-        summary_writers: Vec<GzFile>,
+        sol_writers: Vec<GzFile>,
         depth_writers: Option<Vec<GzFile>>,
         aln_writers: Option<Vec<GzFile>>,
     ) -> Self
@@ -648,7 +648,7 @@ impl MainWorker {
 
         let mut depth_writers_iter = depth_writers.into_iter().flatten();
         let mut aln_writers_iter = aln_writers.into_iter().flatten();
-        for summary_writer in summary_writers.into_iter() {
+        for sol_writer in sol_writers.into_iter() {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
@@ -656,7 +656,7 @@ impl MainWorker {
                 rng: rng.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
-                summary_writer,
+                sol_writer,
                 depth_writer: depth_writers_iter.next(),
                 aln_writer: aln_writers_iter.next(),
                 mean_weight,
@@ -737,7 +737,7 @@ struct Worker {
     rng: XoshiroRng,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
-    summary_writer: GzFile,
+    sol_writer: GzFile,
     depth_writer: Option<GzFile>,
     aln_writer: Option<GzFile>,
     mean_weight: f64,
@@ -773,7 +773,7 @@ impl Worker {
                         assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                     }
                     assgns.update_counts(&mut counts);
-                    assgns.summarize(&mut self.summary_writer, &ext_prefix).map_err(add_path!(!))?;
+                    assgns.summarize(&mut self.sol_writer, &ext_prefix).map_err(add_path!(!))?;
                 }
                 if let Some(writer) = self.aln_writer.as_mut() {
                     write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
