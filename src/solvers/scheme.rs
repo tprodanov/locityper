@@ -20,6 +20,7 @@ use rand::{
 use crate::{
     ext::{
         self,
+        sys::GzFile,
         vec::F64Ext,
         rand::XoshiroRng,
     },
@@ -237,7 +238,7 @@ fn write_alns(
     for (rp, groupped_alns) in all_alns.reads().iter().enumerate() {
         let hash = groupped_alns.name_hash();
         for curr_windows in gt_alns.possible_read_alns(rp) {
-            write!(f, "{}\t{:X}\t", prefix, hash)?;
+            write!(f, "{}{:X}\t", prefix, hash)?;
             match curr_windows.parent() {
                 None => write!(f, "*\t*\t")?,
                 Some(aln_pair) => {
@@ -451,9 +452,9 @@ fn solve_single_thread(
     mean_weight: f64,
     rng: &mut XoshiroRng,
     likelihoods: &mut Likelihoods,
-    mut lik_writer: impl Write,
-    mut depth_writer: impl Write,
-    mut aln_writer: impl Write,
+    mut summary_writer: GzFile,
+    mut depth_writer: Option<GzFile>,
+    mut aln_writer: Option<GzFile>,
 ) -> Result<(), Error>
 {
     let total_genotypes = data.genotypes.len();
@@ -472,6 +473,7 @@ fn solve_single_thread(
         let mut liks = vec![f64::NAN; usize::from(attempts)];
         for &ix in likelihoods.ixs.iter() {
             let gt = &data.genotypes[ix];
+            let prefix = format!("{}\t{}\t", stage_ix + 1, gt);
             let prior = data.priors[ix];
             let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.all_contig_infos, &data.all_alns,
                 &data.assgn_params);
@@ -481,21 +483,18 @@ fn solve_single_thread(
                 gt_alns.apply_tweak(rng, distr_cache, mean_weight, &data.assgn_params);
                 let assgns = solver.solve(&gt_alns, rng)?;
                 *lik = prior + assgns.likelihood();
-                if data.debug {
-                    let ext_prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
-                    assgns.write_depth(&mut depth_writer, &ext_prefix).map_err(add_path!(!))?;
-                    assgns.update_counts(&mut counts);
+                let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
+                if let Some(writer) = depth_writer.as_mut() {
+                    assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                 }
+                assgns.update_counts(&mut counts);
+                assgns.summarize(&mut summary_writer, &ext_prefix).map_err(add_path!(!))?;
             }
-            let prefix = format!("{}\t{}", stage_ix + 1, gt);
-            if data.debug {
-                write_alns(&mut aln_writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts)
-                    .map_err(add_path!(!))?;
+            if let Some(writer) = aln_writer.as_mut() {
+                write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
             }
             let (lik_mean, lik_var) = F64Ext::mean_variance_or_nan(&liks);
             logger.update(gt.name(), lik_mean);
-            writeln!(lik_writer, "{}\t{:.3}\t{:.3}", prefix, Ln::to_log10(lik_mean), Ln::to_log10(lik_var.sqrt()))
-                .map_err(add_path!(!))?;
             likelihoods.likelihoods[ix] = (lik_mean, lik_var);
             likelihoods.assgn_counts[ix] = Some(counts);
         }
@@ -507,33 +506,22 @@ fn solve_single_thread(
     Ok(())
 }
 
-/// Creates `threads` debug files for writing read assignments, and returns their file names.
-/// If `debug` is false, returns a vector of `threads` sink objects + an empty vector of names.
-fn create_debug_files(
-    prefix: &Path,
-    threads: usize,
-    debug: bool,
-) -> Result<(Vec<Box<dyn Write + Send>>, Vec<PathBuf>), Error>
-{
-    if !debug {
-        return Ok(((0..threads).map(|_| Box::new(io::sink()) as Box<dyn Write + Send>).collect(), vec![]));
-    }
-    let filenames: Vec<_> = (0..threads).map(|i| if i == 0 {
-        ext::sys::path_append(prefix, "csv.gz")
+/// Creates `threads` filenames, one for each thread.
+fn csv_filenames(prefix: &Path, threads: usize) -> Vec<PathBuf> {
+    (0..threads).map(|i| if i == 0 {
+        ext::sys::path_append(prefix, ".csv.gz")
     } else {
-        ext::sys::path_append(prefix, format!("{}.csv.gz", i))
-    }).collect();
-
-    let mut writers = Vec::with_capacity(threads);
-    for filename in filenames.iter() {
-        // Using `for` instead of `collect`, as it becomes hard to cast Box and process Errors at the same time.
-        writers.push(Box::new(ext::sys::create_gzip(filename)?) as Box<dyn Write + Send>);
-    }
-    Ok((writers, filenames))
+        ext::sys::path_append(prefix, format!(".{}.csv.gz", i))
+    }).collect()
 }
 
-/// Merge output files if there is debug output and more than one thread.
-fn merge_dbg_files(filenames: &[PathBuf]) -> Result<(), Error> {
+/// Opens one gzip file for each filename.
+fn open_gzips(filenames: &[PathBuf]) -> Result<Vec<GzFile>, Error> {
+    filenames.iter().map(|path| ext::sys::create_gzip(path)).collect()
+}
+
+/// If there is more than one file, consecutively append all of them to the first file, and keep only the first one.
+fn merge_files(filenames: &[PathBuf]) -> Result<(), Error> {
     if filenames.len() > 1 {
         // By this point, all depth_writers should be already dropped.
         let mut file1 = std::fs::OpenOptions::new().append(true).open(&filenames[0]).map_err(add_path!(filenames[0]))?;
@@ -554,13 +542,21 @@ pub fn solve(
     assert!(n_gts > 0);
     data.threads = min(data.threads, n_gts);
     log::info!("    Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);
-    let (mut depth_writers, depth_filenames) = create_debug_files(
-        &locus_dir.join("depth."), data.threads, data.debug)?;
-    writeln!(depth_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER).map_err(add_path!(!))?;
 
-    let (mut aln_writers, aln_filenames) = create_debug_files(
-        &locus_dir.join("alns."), data.threads, data.debug)?;
-    writeln!(aln_writers[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
+    let mut depth_filenames = None;
+    let mut depth_writers = None;
+    let mut aln_filenames = None;
+    let mut aln_writers = None;
+    if data.debug {
+        depth_filenames = Some(csv_filenames(&locus_dir.join("depth"), data.threads));
+        depth_writers = depth_filenames.as_ref().map(|filenames| open_gzips(filenames)).transpose()?;
+        writeln!(depth_writers.as_mut().unwrap()[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER)
+            .map_err(add_path!(!))?;
+
+        aln_filenames = Some(csv_filenames(&locus_dir.join("alns"), data.threads));
+        aln_writers = aln_filenames.as_ref().map(|filenames| open_gzips(filenames)).transpose()?;
+        writeln!(aln_writers.as_mut().unwrap()[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
+    }
 
     let rem_ixs = if data.scheme.filter && (data.debug || n_gts > data.assgn_params.min_gts) {
         let filt_filename = locus_dir.join("filter.csv.gz");
@@ -577,20 +573,28 @@ pub fn solve(
         f64::NAN
     };
 
-    let lik_filename = locus_dir.join("lik.csv.gz");
-    let mut lik_writer = ext::sys::create_gzip(&lik_filename)?;
-    writeln!(lik_writer, "stage\tgenotype\tlik\tlik_std").map_err(add_path!(lik_filename))?;
+    let summary_filenames = csv_filenames(&locus_dir.join("summary"), data.threads);
+    let mut summary_writers = open_gzips(&summary_filenames)?;
+    writeln!(summary_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER)
+        .map_err(add_path!(summary_filenames[0]))?;
     let mut likelihoods = Likelihoods::new(n_gts, rem_ixs);
     let data = Arc::new(data);
     if data.threads == 1 {
-        solve_single_thread(&data, mean_weight, rng, &mut likelihoods, lik_writer,
-            depth_writers.pop().unwrap(), aln_writers.pop().unwrap())?;
+        solve_single_thread(&data, mean_weight, rng, &mut likelihoods,
+            summary_writers.pop().unwrap(),
+            depth_writers.map(|mut writers| writers.pop().unwrap()),
+            aln_writers.map(|mut writers| writers.pop().unwrap()))?;
     } else {
-        let main_worker = MainWorker::new(Arc::clone(&data), mean_weight, rng, depth_writers, aln_writers);
-        main_worker.run(rng, &mut likelihoods, lik_writer)?;
+        let main_worker = MainWorker::new(Arc::clone(&data), mean_weight, rng, summary_writers, depth_writers, aln_writers);
+        main_worker.run(rng, &mut likelihoods)?;
     }
-    merge_dbg_files(&depth_filenames)?;
-    merge_dbg_files(&aln_filenames)?;
+    if let Some(filenames) = depth_filenames {
+        merge_files(&filenames)?;
+    }
+    if let Some(filenames) = aln_filenames {
+        merge_files(&filenames)?;
+    }
+    merge_files(&summary_filenames)?;
 
     let data = &data;
     let genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes, &data.assgn_params);
@@ -632,17 +636,19 @@ impl MainWorker {
         data: Arc<Data>,
         mean_weight: f64,
         rng: &mut XoshiroRng,
-        depth_writers: Vec<impl Write + Send + 'static>,
-        aln_writers: Vec<impl Write + Send + 'static>,
+        summary_writers: Vec<GzFile>,
+        depth_writers: Option<Vec<GzFile>>,
+        aln_writers: Option<Vec<GzFile>>,
     ) -> Self
     {
         let n_workers = data.threads;
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
-        debug_assert!(n_workers == depth_writers.len() && n_workers == aln_writers.len());
 
-        for (depth_writer, aln_writer) in depth_writers.into_iter().zip(aln_writers.into_iter()) {
+        let mut depth_writers_iter = depth_writers.into_iter().flatten();
+        let mut aln_writers_iter = aln_writers.into_iter().flatten();
+        for summary_writer in summary_writers.into_iter() {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
@@ -650,7 +656,10 @@ impl MainWorker {
                 rng: rng.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
-                depth_writer, aln_writer, mean_weight,
+                summary_writer,
+                depth_writer: depth_writers_iter.next(),
+                aln_writer: aln_writers_iter.next(),
+                mean_weight,
             };
             rng.jump();
             senders.push(task_sender);
@@ -663,7 +672,6 @@ impl MainWorker {
     fn run(self,
         rng: &mut impl Rng,
         likelihoods: &mut Likelihoods,
-        mut lik_writer: impl Write,
     ) -> Result<(), Error>
     {
         let n_workers = self.handles.len();
@@ -705,8 +713,6 @@ impl MainWorker {
                     if *jobs > 0 {
                         let (ix, lik_mean, lik_var, counts) = receiver.recv().expect("Genotyping worker has failed!");
                         logger.update(data.genotypes[ix].name(), lik_mean);
-                        writeln!(lik_writer, "{}\t{}\t{:.3}\t{:.3}", stage_ix + 1, data.genotypes[ix],
-                            Ln::to_log10(lik_mean), Ln::to_log10(lik_var.sqrt())).map_err(add_path!(!))?;
                         likelihoods.likelihoods[ix] = (lik_mean, lik_var);
                         likelihoods.assgn_counts[ix] = Some(counts);
                         *jobs -= 1;
@@ -726,17 +732,18 @@ impl MainWorker {
     }
 }
 
-struct Worker<W, U> {
+struct Worker {
     data: Arc<Data>,
     rng: XoshiroRng,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
-    depth_writer: W,
-    aln_writer: U,
+    summary_writer: GzFile,
+    depth_writer: Option<GzFile>,
+    aln_writer: Option<GzFile>,
     mean_weight: f64,
 }
 
-impl<W: Write, U: Write> Worker<W, U> {
+impl Worker {
     fn run(mut self) -> Result<(), Error> {
         let data = self.data.deref();
         let scheme = data.scheme.deref();
@@ -752,6 +759,7 @@ impl<W: Write, U: Write> Worker<W, U> {
             let mut liks = vec![f64::NAN; usize::from(attempts)];
             for ix in task.into_iter() {
                 let gt = &data.genotypes[ix];
+                let prefix = format!("{}\t{}\t", stage_ix + 1, gt);
                 let prior = data.priors[ix];
                 let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.all_contig_infos, &data.all_alns,
                     &data.assgn_params);
@@ -760,15 +768,15 @@ impl<W: Write, U: Write> Worker<W, U> {
                     gt_alns.apply_tweak(&mut self.rng, distr_cache, self.mean_weight, &data.assgn_params);
                     let assgns = solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = prior + assgns.likelihood();
-                    if data.debug {
-                        let prefix = format!("{}\t{}\t{}", stage_ix + 1, gt, attempt + 1);
-                        assgns.write_depth(&mut self.depth_writer, &prefix).map_err(add_path!(!))?;
-                        assgns.update_counts(&mut counts);
+                    let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
+                    if let Some(writer) = self.depth_writer.as_mut() {
+                        assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                     }
+                    assgns.update_counts(&mut counts);
+                    assgns.summarize(&mut self.summary_writer, &ext_prefix).map_err(add_path!(!))?;
                 }
-                if data.debug {
-                    write_alns(&mut self.aln_writer, &format!("{}\t{}", stage_ix + 1, gt),
-                        &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
+                if let Some(writer) = self.aln_writer.as_mut() {
+                    write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
                 }
                 let (lik_mean, lik_var) = F64Ext::mean_variance_or_nan(&liks);
                 if let Err(_) = self.sender.send((ix, lik_mean, lik_var, counts)) {

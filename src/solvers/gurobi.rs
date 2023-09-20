@@ -53,13 +53,13 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
 
     let mut depth_vars = Vec::new();
     for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
-        if !gt_alns.use_window(w) {
+        let depth_distr = gt_alns.depth_distr(w);
+        if depth_distr.is_trivial() {
             continue;
         }
-        let depth_distr = gt_alns.depth_distr(w);
         let (trivial_reads, non_trivial_reads) = window_depth[w];
         if non_trivial_reads == 0 {
-            objective.add_constant(depth_contrib * depth_distr.ln_pmf(trivial_reads));
+            objective.add_constant(depth_contrib * depth_distr.ln_prob(trivial_reads));
             continue;
         }
 
@@ -71,7 +71,7 @@ fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error
             if depth_inc > 0 {
                 depth_constr0.add_term(-f64::from(depth_inc), var);
             }
-            objective.add_term(depth_contrib * depth_distr.ln_pmf(depth), var);
+            objective.add_term(depth_contrib * depth_distr.ln_prob(depth), var);
         }
         model.add_constr(&format!("D{:x}_base", w), c!( (&depth_vars).grb_sum() == 1 ))?;
         model.add_constr(&format!("D{:x}_eq", w), c!( depth_constr0 == 0 ))?;

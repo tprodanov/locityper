@@ -52,8 +52,10 @@ pub fn load_json(filename: &Path) -> Result<json::JsonValue, Error> {
         format!("Failed parsing {}: invalid JSON format", filename.display())))
 }
 
+pub type GzFile = BufWriter<GzEncoder<File>>;
+
 /// Creates a gzip compressed file.
-pub fn create_gzip(filename: &Path) -> Result<BufWriter<GzEncoder<File>>, Error> {
+pub fn create_gzip(filename: &Path) -> Result<GzFile, Error> {
     let file = File::create(filename).map_err(add_path!(filename))?;
     Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
 }

@@ -3,51 +3,56 @@ use std::{
 };
 use crate::{
     math::{
-        distr::{DistrBox, DiscretePmf, NBinom, LinearCache, BayesCalc},
+        distr::{DiscretePmf, NBinom, LinearCache, BayesCalc},
     },
     bg::{self,
         depth::GC_BINS,
     },
 };
 
-/// Proxy distribution, that produces 1.0 probability for all values.
-#[derive(Clone, Copy, Debug)]
-pub struct TrivialDistr;
-
-impl DiscretePmf for TrivialDistr {
-    fn ln_pmf(&self, _: u32) -> f64 { 0.0 }
-}
-
-/// Wrapper over another distribution, where all probabilities are raised to the power `weight`.
-/// As a consequence, probabilities will not sum up to one.
-#[derive(Clone, Debug)]
-struct WeightedDistr<D> {
-    weight: f64,
-    inner: D,
-}
-
-impl<D: DiscretePmf> WeightedDistr<D> {
-    /// Creates a new weighted distribution.
-    fn new(inner: D, weight: f64) -> Self {
-        assert!(weight >= 0.0 && weight <= 1.0, "Weight ({}) must be in [0, 1].", weight);
-        Self { inner, weight }
-    }
-}
-
-impl<D: DiscretePmf + Clone + Sync> DiscretePmf for WeightedDistr<D> {
-    fn ln_pmf(&self, k: u32) -> f64 {
-        self.inner.ln_pmf(k) * self.weight
-    }
-}
-
 /// Store read depth probabilities for values between 0 and 255 for each GC content.
 const CACHE_SIZE: usize = 256;
 
-/// Read depth distribution for each window.
-type WindowDistr = BayesCalc<NBinom, NBinom, 2>;
-
 /// Cached read depth distribution.
-type CachedDistr = Arc<LinearCache<WindowDistr>>;
+type CachedDistr = Arc<LinearCache<BayesCalc<NBinom, NBinom, 2>>>;
+
+/// Window distribution.
+pub struct WindowDistr {
+    /// Window weight.
+    weight: f64,
+    /// Cached Bayesian calculator. If not provided - weight is too low, all probabilities will be 1.
+    distr: Option<CachedDistr>,
+}
+
+impl WindowDistr {
+    pub const TRIVIAL: Self = Self {
+        weight: 0.0,
+        distr: None,
+    };
+
+    /// Calculates weight ln-probability at read depth `k`.
+    pub fn ln_prob(&self, k: u32) -> f64 {
+        match &self.distr {
+            Some(distr) => self.weight * distr.ln_pmf(k),
+            None => 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn weight(&self) -> f64 {
+        self.weight
+    }
+
+    /// Returns inner Negative Binomial distribution for ploidy 1.
+    pub fn inner_nbinom(&self) -> Option<&NBinom> {
+        self.distr.as_ref().map(|distr| distr.inner().null_distr())
+    }
+
+    /// Returns true if this distribution always produces prob 1.
+    pub fn is_trivial(&self) -> bool {
+        self.distr.is_none()
+    }
+}
 
 /// Collection of cached read depth distributions for each GC-content.
 pub struct DistrCache(Vec<CachedDistr>);
@@ -55,27 +60,25 @@ pub struct DistrCache(Vec<CachedDistr>);
 impl DistrCache {
     pub fn new(bg_distr: &bg::BgDistr, alt_cn: (f64, f64)) -> Self {
         let mul_coef = if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 };
-        let mut cache = Vec::with_capacity(GC_BINS);
+        let mut cached_distrs = Vec::with_capacity(GC_BINS);
         for gc in 0..GC_BINS {
             let cn1_distr = bg_distr.depth().depth_distribution(gc.try_into().unwrap()).mul(mul_coef);
             let sub_distr = cn1_distr.mul(alt_cn.0);
             let super_distr = cn1_distr.mul(alt_cn.1);
             let bayes = LinearCache::new(BayesCalc::new(cn1_distr, [sub_distr, super_distr]), CACHE_SIZE);
-            cache.push(Arc::new(bayes));
+            cached_distrs.push(Arc::new(bayes));
         }
-        Self(cache)
+        Self(cached_distrs)
     }
 
     /// Returns a box to either `NBinom`, `WeightedDistr`, depending on GC-content and the weight of the window.
-    pub fn get_distribution(&self, gc: u8, weight: f64) -> DistrBox {
+    pub fn get_distribution(&self, gc: u8, weight: f64) -> WindowDistr {
         if weight < 1e-7 {
-            Box::new(TrivialDistr)
+            WindowDistr::TRIVIAL
         } else {
-            let regular = Arc::clone(&self.0[usize::from(gc)]);
-            if weight > 0.99999 {
-                Box::new(regular)
-            } else {
-                Box::new(WeightedDistr::new(regular, weight))
+            WindowDistr {
+                weight,
+                distr: Some(Arc::clone(&self.0[usize::from(gc)])),
             }
         }
     }

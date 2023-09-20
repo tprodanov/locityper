@@ -4,16 +4,13 @@ use std::{
 };
 use rand::Rng;
 use crate::{
-    math::{
-        Ln,
-        distr::DistrBox,
-    },
+    math::{Ln, distr::PVal},
     seq::contigs::Genotype,
 };
 use super::{
     locs::AllAlignments,
     windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadGtAlns, ContigInfo, GenotypeWindows},
-    distr_cache::{TrivialDistr, DistrCache},
+    distr_cache::{DistrCache, WindowDistr},
 };
 
 /// All read alignments to a specific genotype.
@@ -22,11 +19,7 @@ pub struct GenotypeAlignments {
     /// plus the number of windows (and shifts) at each window.
     gt_windows: GenotypeWindows,
     /// Read depth distribution at each window (length: `gt_windows.total_windows()`).
-    depth_distrs: Vec<DistrBox>,
-    /// Current window weights.
-    curr_weights: Vec<f64>,
-    /// Is this window weight over the threshold?
-    use_window: Vec<bool>,
+    depth_distrs: Vec<WindowDistr>,
 
     /// Read depth and read alignments contributions (sum to 2).
     depth_contrib: f64,
@@ -41,12 +34,6 @@ pub struct GenotypeAlignments {
     read_ixs: Vec<usize>,
     /// Read pair indices that have > 1 possible read location (length <= n_reads).
     non_trivial_reads: Vec<usize>,
-}
-
-
-#[inline]
-fn trivial_box() -> Box<TrivialDistr> {
-    Box::new(TrivialDistr)
 }
 
 impl GenotypeAlignments {
@@ -84,19 +71,15 @@ impl GenotypeAlignments {
         const _: () = assert!(UNMAPPED_WINDOW == 0 && BOUNDARY_WINDOW == 1 && REG_WINDOW_SHIFT == 2,
             "Constants have changed!");
         let total_windows = gt_windows.total_windows() as usize;
-        let mut curr_weights = Vec::with_capacity(total_windows);
-        let mut use_window = Vec::with_capacity(total_windows);
-        let mut depth_distrs: Vec<DistrBox> = Vec::with_capacity(total_windows);
+        let mut depth_distrs = Vec::with_capacity(total_windows);
         for _ in 0..REG_WINDOW_SHIFT {
-            curr_weights.push(0.0);
-            use_window.push(false);
-            depth_distrs.push(trivial_box());
+            depth_distrs.push(WindowDistr::TRIVIAL);
         }
 
         Self {
             aln_contrib: 1.0 - params.lik_skew,
             depth_contrib: 1.0 + params.lik_skew,
-            gt_windows, alns, depth_distrs, curr_weights, use_window, read_ixs, non_trivial_reads,
+            gt_windows, alns, depth_distrs, read_ixs, non_trivial_reads,
         }
     }
 
@@ -155,24 +138,19 @@ impl GenotypeAlignments {
             self.alns.iter_mut().for_each(|rw| rw.define_windows_random(&self.gt_windows, tweak, rng));
         }
 
-        self.curr_weights.truncate(REG_WINDOW_SHIFT as usize);
-        self.use_window.truncate(REG_WINDOW_SHIFT as usize);
         self.depth_distrs.truncate(REG_WINDOW_SHIFT as usize);
         for contig_info in self.gt_windows.contig_infos() {
             for (wstart, wend) in contig_info.generate_windows(tweak, rng) {
                 let (gc, _uniq_kmers, weight) = contig_info.window_characteristics(wstart, wend);
-                self.curr_weights.push(weight);
                 if weight < params.min_weight {
-                    self.depth_distrs.push(trivial_box());
-                    self.use_window.push(false);
+                    self.depth_distrs.push(WindowDistr::TRIVIAL);
                 } else {
                     self.depth_distrs.push(distr_cache.get_distribution(gc, weight));
-                    self.use_window.push(true);
                 }
             }
         }
         if params.depth_norm_power != 0.0 {
-            let sum_weight = self.curr_weights.iter().sum::<f64>();
+            let sum_weight = self.depth_distrs.iter().map(WindowDistr::weight).sum::<f64>();
             let norm_fct = (mean_sum_weight / sum_weight).powf(params.depth_norm_power).clamp(0.95, 1.0526);
             self.depth_contrib = (params.lik_skew + 1.0) * norm_fct;
         }
@@ -180,12 +158,8 @@ impl GenotypeAlignments {
 
     /// Returns read depth distribution for the window.
     /// WARN: Need to account for `self.depth_contrib()`.
-    pub fn depth_distr(&self, window: usize) -> &DistrBox {
+    pub fn depth_distr(&self, window: usize) -> &WindowDistr {
         &self.depth_distrs[window]
-    }
-
-    pub fn use_window(&self, window: usize) -> bool {
-        self.use_window[window]
     }
 
     /// Returns maximum achievable alignment likelihood (without read depth component).
@@ -275,13 +249,13 @@ impl<'a> ReadAssignment<'a> {
     /// Does not account for read depth contribution.
     fn atomic_depth_lik_diff(&self, window: u32, depth_change: i32) -> f64 {
         let w = window as usize;
-        if depth_change == 0 || !self.parent.use_window[w] {
+        if depth_change == 0 {
             0.0
         } else {
             let distr = &self.parent.depth_distrs[w];
             let old_depth = self.depth[w];
             let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative");
-            distr.ln_pmf(new_depth) - distr.ln_pmf(old_depth)
+            distr.ln_prob(new_depth) - distr.ln_prob(old_depth)
         }
     }
 
@@ -378,7 +352,7 @@ impl<'a> ReadAssignment<'a> {
     pub fn recalc_likelihood(&mut self) {
         self.depth_lik = self.parent.depth_distrs.iter()
             .zip(&self.depth)
-            .map(|(distr, &depth)| distr.ln_pmf(depth))
+            .map(|(distr, &depth)| distr.ln_prob(depth))
             .sum::<f64>();
         self.aln_lik = self.parent.read_ixs.iter().zip(&self.read_assgn)
             .map(|(&start_ix, &assgn)| self.parent.alns[start_ix + assgn as usize].ln_prob())
@@ -387,9 +361,7 @@ impl<'a> ReadAssignment<'a> {
 
     pub(crate) const DEPTH_CSV_HEADER: &'static str = "contig\twindow\tweight\tdepth\tlik";
 
-    /// Write read depth to a CSV file in the following format (tab-separated):
-    /// General lines:  `prefix  contig(1|2)  window  depth     depth_lik`.
-    /// Last line:      `prefix  summary      key=value key=value ...`. (key-value pairs separated by space).
+    /// Write read depth to a CSV file.
     pub fn write_depth(&self, f: &mut impl io::Write, prefix: &str) -> io::Result<()> {
         let gt_windows = &self.parent.gt_windows;
         for i in 0..gt_windows.genotype().ploidy() {
@@ -397,23 +369,47 @@ impl<'a> ReadAssignment<'a> {
             let wshift_end = gt_windows.get_wshift(i + 1) as usize;
             for w in wshift..wshift_end {
                 let depth = self.depth[w];
-                let log10_prob = Ln::to_log10(self.parent.depth_distrs[w].ln_pmf(depth));
-                writeln!(f, "{}\t{}\t{}\t{:.4}\t{}\t{:.3}", prefix, i + 1, w - wshift + 1,
-                    self.parent.curr_weights[w], depth, log10_prob)?;
+                let log10_prob = Ln::to_log10(self.parent.depth_distrs[w].ln_prob(depth));
+                writeln!(f, "{}{}\t{}\t{:.4}\t{}\t{:.3}", prefix, i + 1, w - wshift + 1,
+                    self.parent.depth_distrs[w].weight(), depth, log10_prob)?;
             }
         }
-
-        writeln!(f, "{}\tsummary\treads={} unmapped={} boundary={} aln_lik={:.5} aln_contrib={:.7} \
-            depth_lik={:.5} depth_contrib={:.7} lik={:.5}",
-            prefix, self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
-            Ln::to_log10(self.aln_lik), self.parent.aln_contrib,
-            Ln::to_log10(self.depth_lik), self.parent.depth_contrib, Ln::to_log10(self.likelihood()))
+        Ok(())
     }
 
     pub fn update_counts(&self, counts: &mut [u16]) {
         for (&read_ix, &read_assgn) in self.parent.read_ixs.iter().zip(&self.read_assgn) {
             counts[read_ix + usize::from(read_assgn)] += 1;
         }
+    }
+
+    /// Evaluates goodness of fit.
+    /// Currently, calculates geometric mean across p-values for all windows, scaled by window weights.
+    fn goodness_of_fit(&self) -> f64 {
+        let mut sum_weight = 0.0;
+        let mut sum_ln_pval = 0.0;
+        for (distr, &depth) in self.parent.depth_distrs.iter().zip(&self.depth) {
+            if let Some(nbinom) = distr.inner_nbinom() {
+                sum_weight += distr.weight();
+                sum_ln_pval += nbinom.pvalue(depth).ln();
+            }
+        }
+        if sum_weight == 0.0 {
+            0.0
+        } else {
+            (sum_ln_pval / sum_weight).exp()
+        }
+    }
+
+    pub(crate) const SUMMARY_HEADER: &'static str = "total_reads\tunmapped\tout_of_bounds\t\
+        aln_lik\taln_contrib\tdepth_lik\tdepth_contrib\tlik\tgoodness";
+
+    pub fn summarize(&self, writer: &mut impl io::Write, prefix: &str) -> io::Result<()> {
+        writeln!(writer, "{}{}\t{}\t{}\t{:.7}\t{:.7}\t{:.7}\t{:.7}\t{:.7}\t{:.7}",
+            prefix, self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
+            Ln::to_log10(self.aln_lik), self.parent.aln_contrib,
+            Ln::to_log10(self.depth_lik), self.parent.depth_contrib,
+            Ln::to_log10(self.likelihood()), self.goodness_of_fit())
     }
 }
 

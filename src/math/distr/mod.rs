@@ -23,7 +23,7 @@ pub trait WithMoments {
     fn variance(&self) -> f64;
 }
 
-/// Discrete distribution with CDF, SF and quantile functions.
+/// Discrete distribution with CDF and SF.
 pub trait DiscreteCdf {
     /// Cumulative distribution function: P(X <= k).
     fn cdf(&self, k: u32) -> f64;
@@ -31,6 +31,17 @@ pub trait DiscreteCdf {
     /// Survival function: P(X > k).
     fn sf(&self, k: u32) -> f64 {
         1.0 - self.cdf(k)
+    }
+}
+
+/// Discrete distribution that provides p-values.
+pub trait PVal {
+    fn pvalue(&self, k: u32) -> f64;
+}
+
+impl<T: DiscreteCdf> PVal for T {
+    fn pvalue(&self, k: u32) -> f64 {
+        2.0 * self.cdf(k).min(self.sf(k))
     }
 }
 
@@ -96,25 +107,3 @@ where T: DiscreteCdf + Clone + ?Sized,
 }
 
 impl<T: DiscreteCdf + WithMoments> WithQuantile for T {}
-
-/// Extended trait for distribution, that can be send between threads.
-pub trait ExtDistr : DiscretePmf + Send + Sync {
-    /// Allow to clone boxes of this type.
-    fn clone_box(&self) -> DistrBox;
-}
-
-pub type DistrBox = Box<dyn ExtDistr>;
-
-impl<T> ExtDistr for T
-where T: DiscretePmf + Clone + Send + Sync + 'static
-{
-    fn clone_box(&self) -> DistrBox {
-        Box::new(self.clone())
-    }
-}
-
-impl Clone for DistrBox {
-    fn clone(&self) -> Self {
-        self.deref().clone_box()
-    }
-}

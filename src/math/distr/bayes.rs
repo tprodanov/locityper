@@ -5,19 +5,24 @@ use super::DiscretePmf;
 /// Here, all priors are equal to 1.
 #[derive(Clone)]
 pub struct BayesCalc<T, U, const N: usize> {
-    null_hypoth: T,
+    null_distr: T,
     alternative: [U; N],
 }
 
 impl<T, U, const N: usize> BayesCalc<T, U, N> {
-    pub fn new(null_hypoth: T, alternative: [U; N]) -> Self {
-        Self { null_hypoth, alternative }
+    pub fn new(null_distr: T, alternative: [U; N]) -> Self {
+        Self { null_distr, alternative }
+    }
+
+    /// Returns distribution according to the null hypothesis.
+    pub fn null_distr(&self) -> &T {
+        &self.null_distr
     }
 }
 
 impl<T: DiscretePmf + Clone, U: DiscretePmf + Clone, const N: usize> DiscretePmf for BayesCalc<T, U, N> {
     fn ln_pmf(&self, k: u32) -> f64 {
-        let null_prob = self.null_hypoth.ln_pmf(k);
+        let null_prob = self.null_distr.ln_pmf(k);
         let mut probs = [0.0; N];
         for (prob, distr) in probs.iter_mut().zip(self.alternative.iter()) {
             *prob = distr.ln_pmf(k);

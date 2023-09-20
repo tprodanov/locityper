@@ -660,7 +660,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
         .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;
-    // fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
+    fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
     Ok(())
 }
 

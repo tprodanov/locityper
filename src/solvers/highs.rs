@@ -73,10 +73,10 @@ impl HighsSolver {
 
         let mut depth_constr1 = Vec::new();
         for (w, mut depth_constr0) in window_depth_constrs.into_iter().enumerate() {
-            if !gt_alns.use_window(w) {
+            let depth_distr = gt_alns.depth_distr(w);
+            if depth_distr.is_trivial() {
                 continue;
             }
-            let depth_distr = gt_alns.depth_distr(w);
             let (trivial_reads, non_trivial_reads) = window_depth[w];
             if non_trivial_reads == 0 {
                 // const_term += depth_contrib * depth_distr.ln_pmf(trivial_reads);
@@ -85,7 +85,7 @@ impl HighsSolver {
 
             for depth_inc in 0..=non_trivial_reads {
                 let var = problem.add_integer_column(
-                    depth_contrib * depth_distr.ln_pmf(trivial_reads + depth_inc), 0.0..=1.0);
+                    depth_contrib * depth_distr.ln_prob(trivial_reads + depth_inc), 0.0..=1.0);
                 depth_constr1.push((var, 1.0));
                 if depth_inc > 0 {
                     depth_constr0.push((var, -f64::from(depth_inc)));
