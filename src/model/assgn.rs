@@ -383,25 +383,50 @@ impl<'a> ReadAssignment<'a> {
         }
     }
 
-    /// Calculates the fraction of windows with zero read depth.
-    fn zero_fraction(&self) -> f64 {
+    /// Calculates the fraction of windows with non zero read depth.
+    fn nonzero_fraction(&self) -> f64 {
         let mut sum_weight = 0.0;
-        let mut zero = 0.0;
+        let mut nonzero = 0.0;
         for (distr, &depth) in self.parent.depth_distrs.iter().zip(&self.depth) {
             sum_weight += distr.weight();
-            zero += if depth == 0 { distr.weight() } else { 0.0 };
+            nonzero += if depth != 0 { distr.weight() } else { 0.0 };
         }
-        if sum_weight != 0.0 { zero / sum_weight } else { f64::NAN }
+        if sum_weight != 0.0 { nonzero / sum_weight } else { f64::NAN }
+    }
+
+    /// Fraction of reads where both read ends are mapped and have good edit distance.
+    fn good_alns_fraction(&self, all_alns: &AllAlignments, is_paired_end: bool) -> f64 {
+        let is_single_end = !is_paired_end;
+        let mut sum_weight = 0.0;
+        let mut good_alns = 0.0;
+        for (groupped_alns, (start_ix, &assgn)) in all_alns.reads().iter().zip(
+                self.parent.read_ixs.iter().zip(&self.read_assgn)) {
+            sum_weight += groupped_alns.weight();
+            if let Some(sel_aln) = self.parent.alns[start_ix + usize::from(assgn)].parent() {
+                // Both read ends are mapped and have good edit distance.
+                let good_aln = sel_aln.ix1().map(|i| groupped_alns.ith_aln(i).has_good_dist()).unwrap_or(false)
+                    && sel_aln.ix2().map(|i| groupped_alns.ith_aln(i).has_good_dist()).unwrap_or(is_single_end);
+                    good_alns += if good_aln { groupped_alns.weight() } else { 0.0 };
+            }
+        }
+        if sum_weight != 0.0 { good_alns / sum_weight } else { f64::NAN }
     }
 
     pub(crate) const SUMMARY_HEADER: &'static str = "total_reads\tunmapped\tout_of_bounds\t\
-        aln_lik\tdepth_lik\tlik\tdepth0_frac";
+        aln_lik\tdepth_lik\tlik\tnonzero_depth\tgood_alns";
 
-    pub fn summarize(&self, writer: &mut impl io::Write, prefix: &str) -> io::Result<()> {
-        writeln!(writer, "{}{}\t{}\t{}\t{:.7}\t{:.7}\t{:.7}\t{:.5}",
+    pub fn summarize(
+        &self,
+        writer: &mut impl io::Write,
+        prefix: &str,
+        all_alns: &AllAlignments,
+        is_paired_end: bool
+    ) -> io::Result<()>
+    {
+        writeln!(writer, "{}{}\t{}\t{}\t{:.7}\t{:.7}\t{:.7}\t{:.5}\t{:.5}",
             prefix, self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
             Ln::to_log10(self.aln_lik), Ln::to_log10(self.depth_lik), Ln::to_log10(self.likelihood()),
-            self.zero_fraction())
+            self.nonzero_fraction(), self.good_alns_fraction(all_alns, is_paired_end))
     }
 }
 

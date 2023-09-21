@@ -77,7 +77,6 @@ impl Default for Params {
             filt_thresh: 0.95,
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 20,
-
             out_bams: 3,
         }
     }

@@ -488,7 +488,8 @@ fn solve_single_thread(
                     assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                 }
                 assgns.update_counts(&mut counts);
-                assgns.summarize(&mut sol_writer, &ext_prefix).map_err(add_path!(!))?;
+                assgns.summarize(&mut sol_writer, &ext_prefix, &data.all_alns, data.is_paired_end)
+                    .map_err(add_path!(!))?;
             }
             if let Some(writer) = aln_writer.as_mut() {
                 write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
@@ -772,7 +773,8 @@ impl Worker {
                         assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                     }
                     assgns.update_counts(&mut counts);
-                    assgns.summarize(&mut self.sol_buffer, &ext_prefix).map_err(add_path!(!))?;
+                    assgns.summarize(&mut self.sol_buffer, &ext_prefix, &data.all_alns, data.is_paired_end)
+                        .map_err(add_path!(!))?;
                 }
                 if let Some(writer) = self.aln_writer.as_mut() {
                     write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;

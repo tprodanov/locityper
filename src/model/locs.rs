@@ -216,6 +216,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
             aln.set_ln_prob(aln_prob);
+            aln.set_edit_dist_status(is_good_dist);
             if is_passable_dist {
                 match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
                     Entry::Occupied(entry) => {

@@ -73,7 +73,7 @@ def process(res, sol, filtering, dist):
     closest_gts = list(filtering[filtering.dist == min_dist].genotype)
 
     sol.set_index('genotype', inplace=True)
-    s = '{}\t{}\t{:.10f}\t{:.10f}\t'.format(filtering.shape[0], sol.shape[0],
+    s = '{}\t{}\t{:.5f}\t{:.5f}\t'.format(filtering.shape[0], sol.shape[0],
         pearsonr(sol.lik, sol.dist).statistic, spearmanr(sol.lik, sol.dist).statistic)
 
     closest_gt_liks = [sol.loc[gt].lik if gt in sol.index else np.nan for gt in closest_gts]
@@ -85,9 +85,10 @@ def process(res, sol, filtering, dist):
     s += f'{closest_rank}\t'
 
     ml_gt = res['genotype']
-    ml_dist = sol.loc[ml_gt].dist
+    ml_row = sol.loc[ml_gt]
+    ml_dist = ml_row.dist
     ml_dist_rank = (filtering.dist < ml_dist).sum() + 1
-    s += '{}\t{}\t{}\t{}'.format(ml_gt, sol.loc[ml_gt].dist, sol.loc[ml_gt].lik, ml_dist_rank)
+    s += '{}\t{}\t{}\t{}'.format(ml_gt, ml_row.dist, ml_row.lik, ml_dist_rank)
 
     weighted_dist = 0.0
     weight_sum = 0.0
@@ -97,8 +98,11 @@ def process(res, sol, filtering, dist):
         weight_sum += w
     weighted_dist /= weight_sum
 
-    s += '\t{:.5f}\t{:.5}\t{:.10f}\n'.format(res['quality'], sol.loc[ml_gt].depth0_frac, weighted_dist)
-    return s
+
+    s += '\t{:.5f}\t{:.10f}'.format(res['quality'], weighted_dist)
+    for key in ('nonzero_depth', 'good_alns'):
+        s += '\t{:.5f}'.format(ml_row.get(key, np.nan))
+    return s + '\n'
 
 
 def load_and_process(tup, tags, input_fmt, dist_fmt):
@@ -138,7 +142,7 @@ def main():
     for tag in tags:
         out.write(tag + '\t')
     out.write('total_gts\trem_gts\tpearsonr\tspearmanr\tsmallest_dist\tclosest_gts\tclosest_gt_liks\tclosest_rank\t'
-        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tdepth0_frac\tweighted_dist\n')
+        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\tnonzero_depth\tgood_alns\n')
 
     n = len(tag_tuples)
     threads = min(n, args.threads)
