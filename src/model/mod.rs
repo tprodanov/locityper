@@ -73,7 +73,7 @@ impl Default for Params {
             alt_cn: (0.5, 1.5),
             use_unpaired: false,
 
-            min_gts: 8,
+            min_gts: 100,
             filt_thresh: 0.95,
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 20,
