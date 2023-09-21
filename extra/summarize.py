@@ -62,7 +62,8 @@ def load_tags(path1, path2):
 
 
 def process(res, sol, filtering, dist):
-    sol = sol.groupby('genotype').last().reset_index()
+    max_stage = sol.stage.max()
+    sol = sol[sol.stage == max_stage].groupby('genotype').mean().reset_index()
     sol = sol.merge(dist, on='genotype').reset_index(drop=True)
 
     if filtering is None:
@@ -99,7 +100,7 @@ def process(res, sol, filtering, dist):
     weighted_dist /= weight_sum
 
 
-    s += '\t{:.5f}\t{:.10f}'.format(res['quality'], weighted_dist)
+    s += '\t{:.5f}\t{:.6g}'.format(res['quality'], weighted_dist)
     for key in ('good_depth', 'good_alns'):
         s += '\t{:.5f}'.format(ml_row.get(key, np.nan))
     return s + '\n'
