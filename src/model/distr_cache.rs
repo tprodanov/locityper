@@ -43,9 +43,9 @@ impl WindowDistr {
         self.weight
     }
 
-    /// Returns inner Negative Binomial distribution for ploidy 1.
-    pub fn inner_nbinom(&self) -> Option<&NBinom> {
-        self.distr.as_ref().map(|distr| distr.inner().null_distr())
+    /// Cached Bayesian distribution, if weight is not too low.
+    pub fn inner(&self) -> &Option<CachedDistr> {
+        &self.distr
     }
 
     /// Returns true if this distribution always produces prob 1.

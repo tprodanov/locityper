@@ -4,7 +4,7 @@ use std::{
 };
 use rand::Rng;
 use crate::{
-    math::Ln,
+    math::{Ln, distr::DiscretePmf},
     seq::contigs::Genotype,
 };
 use super::{
@@ -384,14 +384,18 @@ impl<'a> ReadAssignment<'a> {
     }
 
     /// Calculates the fraction of windows with non zero read depth.
-    fn nonzero_fraction(&self) -> f64 {
+    fn good_depth_fraction(&self) -> f64 {
+        // log(0.01).
+        const PROB_THRESH: f64 = -4.605170185988091;
         let mut sum_weight = 0.0;
-        let mut nonzero = 0.0;
+        let mut good_depth = 0.0;
         for (distr, &depth) in self.parent.depth_distrs.iter().zip(&self.depth) {
-            sum_weight += distr.weight();
-            nonzero += if depth != 0 { distr.weight() } else { 0.0 };
+            if let Some(inner_distr) = distr.inner() {
+                sum_weight += distr.weight();
+                good_depth += if inner_distr.ln_pmf(depth) >= PROB_THRESH { distr.weight() } else { 0.0 };
+            }
         }
-        if sum_weight != 0.0 { nonzero / sum_weight } else { f64::NAN }
+        if sum_weight != 0.0 { good_depth / sum_weight } else { f64::NAN }
     }
 
     /// Fraction of reads where both read ends are mapped and have good edit distance.
@@ -413,7 +417,7 @@ impl<'a> ReadAssignment<'a> {
     }
 
     pub(crate) const SUMMARY_HEADER: &'static str = "total_reads\tunmapped\tout_of_bounds\t\
-        aln_lik\tdepth_lik\tlik\tnonzero_depth\tgood_alns";
+        aln_lik\tdepth_lik\tlik\tgood_depth\tgood_alns";
 
     pub fn summarize(
         &self,
@@ -426,7 +430,7 @@ impl<'a> ReadAssignment<'a> {
         writeln!(writer, "{}{}\t{}\t{}\t{:.7}\t{:.7}\t{:.7}\t{:.5}\t{:.5}",
             prefix, self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
             Ln::to_log10(self.aln_lik), Ln::to_log10(self.depth_lik), Ln::to_log10(self.likelihood()),
-            self.nonzero_fraction(), self.good_alns_fraction(all_alns, is_paired_end))
+            self.good_depth_fraction(), self.good_alns_fraction(all_alns, is_paired_end))
     }
 }
 

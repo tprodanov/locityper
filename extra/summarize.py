@@ -100,7 +100,7 @@ def process(res, sol, filtering, dist):
 
 
     s += '\t{:.5f}\t{:.10f}'.format(res['quality'], weighted_dist)
-    for key in ('nonzero_depth', 'good_alns'):
+    for key in ('good_depth', 'good_alns'):
         s += '\t{:.5f}'.format(ml_row.get(key, np.nan))
     return s + '\n'
 
@@ -142,7 +142,7 @@ def main():
     for tag in tags:
         out.write(tag + '\t')
     out.write('total_gts\trem_gts\tpearsonr\tspearmanr\tsmallest_dist\tclosest_gts\tclosest_gt_liks\tclosest_rank\t'
-        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\tnonzero_depth\tgood_alns\n')
+        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\tgood_depth\tgood_alns\n')
 
     n = len(tag_tuples)
     threads = min(n, args.threads)
