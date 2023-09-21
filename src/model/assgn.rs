@@ -4,7 +4,7 @@ use std::{
 };
 use rand::Rng;
 use crate::{
-    math::{Ln, distr::PVal},
+    math::Ln,
     seq::contigs::Genotype,
 };
 use super::{
@@ -383,33 +383,25 @@ impl<'a> ReadAssignment<'a> {
         }
     }
 
-    /// Evaluates goodness of fit.
-    /// Currently, calculates geometric mean across p-values for all windows, scaled by window weights.
-    fn goodness_of_fit(&self) -> f64 {
+    /// Calculates the fraction of windows with zero read depth.
+    fn zero_fraction(&self) -> f64 {
         let mut sum_weight = 0.0;
-        let mut sum_ln_pval = 0.0;
+        let mut zero = 0.0;
         for (distr, &depth) in self.parent.depth_distrs.iter().zip(&self.depth) {
-            if let Some(nbinom) = distr.inner_nbinom() {
-                sum_weight += distr.weight();
-                sum_ln_pval += nbinom.pvalue(depth).ln();
-            }
+            sum_weight += distr.weight();
+            zero += if depth == 0 { distr.weight() } else { 0.0 };
         }
-        if sum_weight == 0.0 {
-            0.0
-        } else {
-            (sum_ln_pval / sum_weight).exp()
-        }
+        if sum_weight != 0.0 { zero / sum_weight } else { f64::NAN }
     }
 
     pub(crate) const SUMMARY_HEADER: &'static str = "total_reads\tunmapped\tout_of_bounds\t\
-        aln_lik\taln_contrib\tdepth_lik\tdepth_contrib\tlik\tgoodness";
+        aln_lik\tdepth_lik\tlik\tdepth0_frac";
 
     pub fn summarize(&self, writer: &mut impl io::Write, prefix: &str) -> io::Result<()> {
-        writeln!(writer, "{}{}\t{}\t{}\t{:.7}\t{:.7}\t{:.7}\t{:.7}\t{:.7}\t{:.7}",
+        writeln!(writer, "{}{}\t{}\t{}\t{:.7}\t{:.7}\t{:.7}\t{:.5}",
             prefix, self.read_assgn.len(), self.depth[UNMAPPED_WINDOW as usize], self.depth[BOUNDARY_WINDOW as usize],
-            Ln::to_log10(self.aln_lik), self.parent.aln_contrib,
-            Ln::to_log10(self.depth_lik), self.parent.depth_contrib,
-            Ln::to_log10(self.likelihood()), self.goodness_of_fit())
+            Ln::to_log10(self.aln_lik), Ln::to_log10(self.depth_lik), Ln::to_log10(self.likelihood()),
+            self.zero_fraction())
     }
 }
 

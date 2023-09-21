@@ -366,7 +366,7 @@ impl Likelihoods {
         self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
         let mut n = self.ixs.len();
         if n < 2 {
-            log::warn!("For some reason, only {} genotypes remaining, quality will be undefined", n);
+            log::warn!("Only {} genotype(s) remaining, quality will be undefined", n);
         }
 
         let mut ln_probs = vec![0.0; n];
@@ -452,7 +452,7 @@ fn solve_single_thread(
     mean_weight: f64,
     rng: &mut XoshiroRng,
     likelihoods: &mut Likelihoods,
-    mut sol_writer: GzFile,
+    mut sol_writer: impl Write,
     mut depth_writer: Option<GzFile>,
     mut aln_writer: Option<GzFile>,
 ) -> Result<(), Error>
@@ -573,20 +573,19 @@ pub fn solve(
         f64::NAN
     };
 
-    let sol_filenames = csv_filenames(&locus_dir.join("sol"), data.threads);
-    let mut sol_writers = open_gzips(&sol_filenames)?;
-    writeln!(sol_writers[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER)
-        .map_err(add_path!(sol_filenames[0]))?;
+    let sol_filename = locus_dir.join("sol.csv.gz");
+    let mut sol_writer = ext::sys::create_gzip(&sol_filename)?;
+    writeln!(sol_writer, "stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER)
+        .map_err(add_path!(sol_filename))?;
     let mut likelihoods = Likelihoods::new(n_gts, rem_ixs);
     let data = Arc::new(data);
     if data.threads == 1 {
-        solve_single_thread(&data, mean_weight, rng, &mut likelihoods,
-            sol_writers.pop().unwrap(),
+        solve_single_thread(&data, mean_weight, rng, &mut likelihoods, sol_writer,
             depth_writers.map(|mut writers| writers.pop().unwrap()),
             aln_writers.map(|mut writers| writers.pop().unwrap()))?;
     } else {
-        let main_worker = MainWorker::new(Arc::clone(&data), mean_weight, rng, sol_writers, depth_writers, aln_writers);
-        main_worker.run(rng, &mut likelihoods)?;
+        let main_worker = MainWorker::new(Arc::clone(&data), mean_weight, rng, depth_writers, aln_writers);
+        main_worker.run(sol_writer, rng, &mut likelihoods)?;
     }
     if let Some(filenames) = depth_filenames {
         merge_files(&filenames)?;
@@ -594,7 +593,6 @@ pub fn solve(
     if let Some(filenames) = aln_filenames {
         merge_files(&filenames)?;
     }
-    merge_files(&sol_filenames)?;
 
     let data = &data;
     let genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes, &data.assgn_params);
@@ -628,7 +626,7 @@ struct MainWorker {
     data: Arc<Data>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
-    handles: Vec<thread::JoinHandle<Result<(), Error>>>,
+    handles: Vec<thread::JoinHandle<Result<Vec<u8>, Error>>>,
 }
 
 impl MainWorker {
@@ -636,7 +634,6 @@ impl MainWorker {
         data: Arc<Data>,
         mean_weight: f64,
         rng: &mut XoshiroRng,
-        sol_writers: Vec<GzFile>,
         depth_writers: Option<Vec<GzFile>>,
         aln_writers: Option<Vec<GzFile>>,
     ) -> Self
@@ -648,7 +645,7 @@ impl MainWorker {
 
         let mut depth_writers_iter = depth_writers.into_iter().flatten();
         let mut aln_writers_iter = aln_writers.into_iter().flatten();
-        for sol_writer in sol_writers.into_iter() {
+        for _ in 0..data.threads {
             let (task_sender, task_receiver) = mpsc::channel();
             let (sol_sender, sol_receiver) = mpsc::channel();
             let worker = Worker {
@@ -656,7 +653,7 @@ impl MainWorker {
                 rng: rng.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
-                sol_writer,
+                sol_buffer: Vec::new(),
                 depth_writer: depth_writers_iter.next(),
                 aln_writer: aln_writers_iter.next(),
                 mean_weight,
@@ -670,6 +667,7 @@ impl MainWorker {
     }
 
     fn run(self,
+        mut sol_writer: impl Write,
         rng: &mut impl Rng,
         likelihoods: &mut Likelihoods,
     ) -> Result<(), Error>
@@ -726,7 +724,8 @@ impl MainWorker {
         }
         std::mem::drop(self.senders);
         for handle in self.handles.into_iter() {
-            handle.join().expect("Process failed for unknown reason")?;
+            let sol_bytes = handle.join().expect("Process failed for unknown reason")?;
+            sol_writer.write_all(&sol_bytes).map_err(add_path!(!))?;
         }
         Ok(())
     }
@@ -737,14 +736,14 @@ struct Worker {
     rng: XoshiroRng,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
-    sol_writer: GzFile,
+    sol_buffer: Vec<u8>,
     depth_writer: Option<GzFile>,
     aln_writer: Option<GzFile>,
     mean_weight: f64,
 }
 
 impl Worker {
-    fn run(mut self) -> Result<(), Error> {
+    fn run(mut self) -> Result<Vec<u8>, Error> {
         let data = self.data.deref();
         let scheme = data.scheme.deref();
         let attempts = data.assgn_params.attempts;
@@ -773,7 +772,7 @@ impl Worker {
                         assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                     }
                     assgns.update_counts(&mut counts);
-                    assgns.summarize(&mut self.sol_writer, &ext_prefix).map_err(add_path!(!))?;
+                    assgns.summarize(&mut self.sol_buffer, &ext_prefix).map_err(add_path!(!))?;
                 }
                 if let Some(writer) = self.aln_writer.as_mut() {
                     write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
@@ -785,7 +784,7 @@ impl Worker {
                 }
             }
         }
-        Ok(())
+        Ok(self.sol_buffer)
     }
 }
 
