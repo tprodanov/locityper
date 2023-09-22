@@ -66,8 +66,8 @@ Several Locityper commands need reference *k*-mer counts,
 calculated using [Jellyfish](https://github.com/gmarcais/Jellyfish/).
 You can use the following code to obtain them (for example for *k = 25*):
 ```bash
-jellyfish count --lower-count 2 --out-counter-len 1 --mer-len 25 --threads 8 --size 3G \
-    --output counts.jf genome.fa
+jellyfish count --canonical --lower-count 2 --out-counter-len 1 --mer-len 25 \
+    --threads 8 --size 3G --output counts.jf genome.fa
 ```
 
 #### Pangenome VCF file

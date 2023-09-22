@@ -83,7 +83,7 @@ for (gt_str in args$genotype) {
     dir.create(dirname(out_filename), showWarnings = FALSE)
 
     gt <- strsplit(gt_str, ',', fixed = T)[[1]]
-    info <- slice_max(sol, -lik, n = 1, with_ties = FALSE)
+    info <- slice_max(sol, lik, n = 1, with_ties = FALSE)
     depth <- filter(depth, stage == info$stage & attempt == info$attempt) |>
         mutate(contig_ext = sprintf('%s-%d', gt[contig], contig))
 

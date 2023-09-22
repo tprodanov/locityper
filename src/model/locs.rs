@@ -17,7 +17,7 @@ use crate::{
     },
     bg::{
         BgDistr,
-        err_prof::ErrorProfile,
+        err_prof::{ErrorProfile, EditDistCache},
         insertsz::InsertDistr,
     },
     algo::{bisect, TwoU32, get_hash},
@@ -106,6 +106,7 @@ struct FilteredReader<'a, R: bam::Read> {
     contigs: Arc<ContigNames>,
     boundary: u32,
     err_prof: &'a ErrorProfile,
+    edit_dist_cache: &'a EditDistCache,
     all_contig_infos: &'a [Arc<ContigInfo>],
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id, alignment start), value: index of the previous position.
@@ -122,6 +123,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         mut reader: R,
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
+        edit_dist_cache: &'a EditDistCache,
         all_contig_infos: &'a [Arc<ContigInfo>],
         boundary: u32,
     ) -> Result<Self, Error> {
@@ -131,7 +133,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
             found_alns: IntMap::default(),
-            reader, record, contigs, err_prof, all_contig_infos, boundary, has_more,
+            reader, record, contigs, err_prof, edit_dist_cache, all_contig_infos, boundary, has_more,
         })
     }
 
@@ -198,7 +200,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let read_prof = aln.count_region_operations_fast(contig_len);
             let aln_prob = self.err_prof.ln_prob(&read_prof);
             let (edit_dist, read_len) = read_prof.edit_and_read_len();
-            let (good_dist, passable_dist) = self.err_prof.allowed_edit_dist(read_len);
+            let (good_dist, passable_dist) = self.edit_dist_cache.get(read_len);
             let is_good_dist = edit_dist <= good_dist;
             // Discard all alignments with edit distance over half of the read length.
             let is_passable_dist = edit_dist <= passable_dist;
@@ -629,6 +631,7 @@ impl AllAlignments {
         reader: impl bam::Read,
         contigs: &Arc<ContigNames>,
         bg_distr: &BgDistr,
+        edit_dist_cache: &EditDistCache,
         all_contig_infos: &[Arc<ContigInfo>],
         params: &super::Params,
         mut dbg_writer: impl Write,
@@ -641,7 +644,7 @@ impl AllAlignments {
 
         writeln!(dbg_writer, "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\
             \tlik\tweight\tread_name").map_err(add_path!(!))?;
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(),
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache,
             all_contig_infos, boundary)?;
 
         let insert_distr = bg_distr.insert_distr();

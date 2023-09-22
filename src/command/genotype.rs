@@ -18,7 +18,10 @@ use crate::{
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
     },
-    bg::{BgDistr, Technology, SequencingInfo},
+    bg::{
+        BgDistr, Technology, SequencingInfo,
+        err_prof::EditDistCache,
+    },
     ext::{self, fmt::PrettyUsize},
     model::{
         Params as AssgnParams,
@@ -701,6 +704,7 @@ fn generate_genotypes(
 fn analyze_locus(
     locus: &LocusData,
     bg_distr: &BgDistr,
+    edit_dist_cache: &EditDistCache,
     scheme: &Arc<Scheme>,
     distr_cache: &Arc<DistrCache>,
     opt_priors: Option<&HashMap<String, f64>>,
@@ -727,9 +731,11 @@ fn analyze_locus(
 
     let all_alns = if args.debug {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
-        AllAlignments::load(bam_reader, contigs, bg_distr, &all_contig_infos, &args.assgn_params, reads_writer)?
+        AllAlignments::load(bam_reader, contigs, bg_distr, edit_dist_cache, &all_contig_infos,
+            &args.assgn_params, reads_writer)?
     } else {
-        AllAlignments::load(bam_reader, contigs, bg_distr, &all_contig_infos, &args.assgn_params, io::sink())?
+        AllAlignments::load(bam_reader, contigs, bg_distr, edit_dist_cache, &all_contig_infos,
+            &args.assgn_params, io::sink())?
     };
     if is_paired_end && args.debug {
         let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
@@ -767,11 +773,15 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     ext::sys::mkdir(out_dir)?;
     let preproc_dir = args.preproc.as_ref().unwrap();
 
-    let mut bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
+    let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     args.recr_params.set_matches_frac(
         args.matches_frac.unwrap_or_else(|| bg_distr.seq_info().technology().default_matches_frac()) as f32)?;
-    bg_distr.set_edit_pvals(args.assgn_params.edit_pvals);
+
+    // Add 1 to good edit distance.
+    const GOOD_DISTANCE_ADD: u32 = 1;
+    let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(), GOOD_DISTANCE_ADD, args.assgn_params.edit_pvals);
+    edit_dist_cache.print_log(bg_distr.seq_info().mean_read_len());
 
     validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
@@ -801,10 +811,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         let rng_clone = rng.clone();
         // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
         rng.long_jump();
-        if let Err(e) = analyze_locus(locus, &bg_distr, &scheme, &distr_cache, locus_priors, rng_clone, &args) {
-            log::error!("Error in locus {}: {}", locus.set.tag(), e.display());
-        } else {
-            successes += 1;
+        match analyze_locus(locus, &bg_distr, &edit_dist_cache, &scheme, &distr_cache, locus_priors, rng_clone, &args) {
+            Err(e) => log::error!("Error in locus {}: {}", locus.set.tag(), e.display()),
+            Ok(()) => successes += 1,
         }
     }
     let nloci = loci.len();

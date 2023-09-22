@@ -7,7 +7,6 @@ pub mod bam;
 use crate::{
     math::Ln,
     err::{Error, validate_param},
-    bg::err_prof,
 };
 
 /// Read depth model parameters.
@@ -62,7 +61,7 @@ impl Default for Params {
             lik_skew: 0.9,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
-            edit_pvals: err_prof::DEF_EDIT_PVAL,
+            edit_pvals: (0.01, 0.001),
 
             weight_breakpoint: 0.2,
             weight_power: 2.0,

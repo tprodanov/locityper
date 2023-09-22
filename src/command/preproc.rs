@@ -33,7 +33,7 @@ use crate::{
     bg::{
         self, BgDistr, Technology, SequencingInfo,
         insertsz::{self, InsertDistr},
-        err_prof::ErrorProfile,
+        err_prof::{ErrorProfile, SingleEditDistCache},
         depth::ReadDepth,
         ser::{JsonSer, json_get},
     },
@@ -768,8 +768,9 @@ fn estimate_bg_from_paired(
             errprof_alns.push(second);
         }
     }
-    let err_prof = ErrorProfile::estimate(&errprof_alns, interval, &windows, seq_info.mean_read_len(),
-        &args.bg_params, opt_out_dir)?;
+    let err_prof = ErrorProfile::estimate(&errprof_alns, interval, &windows, opt_out_dir)?;
+    let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
+    edit_dist_cache.print_log(seq_info.mean_read_len());
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
     let mut depth_alns: Vec<&Alignment> = Vec::with_capacity(errprof_alns.len());
@@ -778,7 +779,7 @@ fn estimate_bg_from_paired(
         let aln2 = chunk[1];
         let (edit1, len1) = aln1.count_region_operations(interval).edit_and_read_len();
         let (edit2, len2) = aln2.count_region_operations(interval).edit_and_read_len();
-        if edit1 <= err_prof.allowed_edit_dist(len1).0 && edit2 <= err_prof.allowed_edit_dist(len2).0 {
+        if edit1 <= edit_dist_cache.get(len1) && edit2 <= edit_dist_cache.get(len2) {
             depth_alns.push(aln1.deref());
             depth_alns.push(aln2.deref());
         }
@@ -800,12 +801,14 @@ fn estimate_bg_from_unpaired(
     let interval = &bg_region.interval;
     let windows = bg::Windows::create(interval, &bg_region.sequence, &bg_region.kmer_counts, &seq_info,
         &args.bg_params.depth, opt_out_dir)?;
-    let err_prof = ErrorProfile::estimate(&alns, interval, &windows, seq_info.mean_read_len(),
-        &args.bg_params, opt_out_dir)?;
+    let err_prof = ErrorProfile::estimate(&alns, interval, &windows, opt_out_dir)?;
+    let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
+    edit_dist_cache.print_log(seq_info.mean_read_len());
+
     let filt_alns: Vec<&Alignment> = alns.iter()
         .filter(|aln| {
             let (edit, len) = aln.count_region_operations(interval).edit_and_read_len();
-            edit <= err_prof.allowed_edit_dist(len).0
+            edit <= edit_dist_cache.get(len)
         })
         .map(Deref::deref)
         .collect();

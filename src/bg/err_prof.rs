@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    cmp::max,
     io::Write,
     ops::{Add, AddAssign},
     cell::RefCell,
@@ -94,8 +95,6 @@ where U: TryInto<T> + Copy,
     }
 }
 
-pub const DEF_EDIT_PVAL: (f64, f64) = (0.01, 0.001);
-
 /// Read error profile.
 /// Basically, each operation is penalized according to its probability in the background data.
 /// This ensures that an alignment with fewer errors receives higher probability than the more errorneous alignment,
@@ -109,12 +108,6 @@ pub struct ErrorProfile {
     oper_probs: OperCounts<f64>,
     /// Distribution of edit distance (n = read length).
     edit_distr: BetaBinomial,
-
-    /// Two CDF levels (`1 - pval`), specifying edit distance thresholds:
-    /// one for good alignments, second for passable.
-    edit_cdf: (f64, f64),
-    /// For each read length, store two maximum allowed edit distances (good and passable).
-    max_edit_dist: RefCell<IntMap<u32, (u32, u32)>>,
 }
 
 impl ErrorProfile {
@@ -124,8 +117,6 @@ impl ErrorProfile {
         alns: &[impl Borrow<NamedAlignment>],
         region: &Interval,
         windows: &super::Windows,
-        mean_read_len: f64,
-        params: &super::Params,
         out_dir: Option<&Path>,
     ) -> Result<Self, Error>
     {
@@ -163,22 +154,7 @@ impl ErrorProfile {
                 .map_err(add_path!(dbg_filename))?;
         }
 
-        let err_prof = Self {
-            oper_probs,
-            edit_distr,
-            max_edit_dist: RefCell::default(),
-            // Set cdf2 = cdf1 so that we do not have to go far.
-            edit_cdf: (1.0 - params.edit_pval, 1.0 - params.edit_pval),
-        };
-
-        let read_len = math::round_signif(mean_read_len, 2).round() as u32;
-        log::info!("    Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
-            err_prof.allowed_edit_dist(read_len).0, read_len, 100.0 * err_prof.edit_cdf.0);
-        Ok(err_prof)
-    }
-
-    pub fn set_edit_pvals(&mut self, (pval1, pval2): (f64, f64)) {
-        self.edit_cdf = (1.0 - pval1, 1.0 - pval2);
+        Ok(Self { oper_probs, edit_distr })
     }
 
     /// Returns ln-probability for operation counts.
@@ -191,14 +167,6 @@ impl ErrorProfile {
             + self.oper_probs.insertions * counts.insertions.try_into().unwrap()
             + self.oper_probs.deletions * counts.deletions.try_into().unwrap()
             + self.oper_probs.clipping * counts.clipping.try_into().unwrap()
-    }
-
-    /// Returns the maximum allowed edit distance for the given read length.
-    /// Values are cached for future use.
-    pub fn allowed_edit_dist(&self, read_len: u32) -> (u32, u32) {
-        let mut cache = self.max_edit_dist.borrow_mut();
-        *cache.entry(read_len).or_insert_with(||
-            self.edit_distr.inv_cdf2(read_len, self.edit_cdf.0, self.edit_cdf.1))
     }
 }
 
@@ -223,8 +191,78 @@ impl JsonSer for ErrorProfile {
         Ok(Self {
             oper_probs: OperCounts { matches, mismatches, insertions, deletions, clipping },
             edit_distr: BetaBinomial::new(alpha, beta),
-            max_edit_dist: RefCell::default(),
-            edit_cdf: (1.0 - DEF_EDIT_PVAL.0, 1.0 - DEF_EDIT_PVAL.1),
         })
+    }
+}
+
+/// For each read length, stores ONE edit distance.
+pub struct SingleEditDistCache {
+    /// Distribution of edit distance (n = read length).
+    edit_distr: BetaBinomial,
+    /// 1 - pvalue.
+    edit_cdf: f64,
+    /// For each read length, store maximum allowed edit distance.
+    cache: RefCell<IntMap<u32, u32>>,
+}
+
+impl SingleEditDistCache {
+    pub fn new(err_prof: &ErrorProfile, pval: f64) -> Self {
+        Self {
+            edit_distr: err_prof.edit_distr.clone(),
+            cache: RefCell::default(),
+            edit_cdf: 1.0 - pval,
+        }
+    }
+
+    pub fn get(&self, read_len: u32) -> u32 {
+        *self.cache.borrow_mut().entry(read_len).or_insert_with(||
+            self.edit_distr.inv_cdf(read_len, self.edit_cdf))
+    }
+
+    pub fn print_log(&self, mean_read_len: f64) {
+        let read_len = math::round_signif(mean_read_len, 2).round() as u32;
+        log::info!("    Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
+            self.get(read_len), read_len, 100.0 * self.edit_cdf);
+    }
+}
+
+/// For each read length, stores two edit distances: good and passable.
+pub struct EditDistCache {
+    /// Distribution of edit distance (n = read length).
+    edit_distr: BetaBinomial,
+    /// 1 - pvalue.
+    edit_cdf: (f64, f64),
+    /// Adds this number to the good distance (to allow for differences between alleles).
+    good_dist_add: u32,
+    /// For each read length, store two maximum allowed edit distances (good and passable).
+    cache: RefCell<IntMap<u32, (u32, u32)>>,
+}
+
+impl EditDistCache {
+    pub fn new(err_prof: &ErrorProfile, good_dist_add: u32, (pval1, pval2): (f64, f64)) -> Self {
+        assert!(pval1 >= pval2);
+        Self {
+            edit_distr: err_prof.edit_distr.clone(),
+            cache: RefCell::default(),
+            good_dist_add,
+            edit_cdf: (1.0 - pval1, 1.0 - pval2),
+        }
+    }
+
+    /// Returns the maximum allowed edit distance for the given read length.
+    /// Values are cached for future use.
+    pub fn get(&self, read_len: u32) -> (u32, u32) {
+        *self.cache.borrow_mut().entry(read_len).or_insert_with(|| {
+            let (mut dist1, dist2) = self.edit_distr.inv_cdf2(read_len, self.edit_cdf.0, self.edit_cdf.1);
+            dist1 += self.good_dist_add;
+            (dist1, max(dist1, dist2))
+        })
+    }
+
+    pub fn print_log(&self, mean_read_len: f64) {
+        let read_len = math::round_signif(mean_read_len, 2).round() as u32;
+        let (dist1, dist2) = self.get(read_len);
+        log::info!("    Edit distances for read length {}: {} (good) and {} (passable)",
+            read_len, dist1, dist2);
     }
 }

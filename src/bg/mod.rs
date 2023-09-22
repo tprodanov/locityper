@@ -18,7 +18,7 @@ use std::{
     path::Path,
 };
 use crate::{
-    math, ext,
+    ext,
     err::{Error, validate_param, add_path},
 };
 use self::ser::json_get;
@@ -40,7 +40,7 @@ impl Default for Params {
         Self {
             depth: Default::default(),
             insert_pval: 0.001,
-            edit_pval: err_prof::DEF_EDIT_PVAL.0,
+            edit_pval: 0.01,
         }
     }
 }
@@ -113,14 +113,6 @@ impl BgDistr {
 
     pub fn error_profile(&self) -> &ErrorProfile {
         &self.err_prof
-    }
-
-    pub fn set_edit_pvals(&mut self, edit_pvals: (f64, f64)) {
-        self.err_prof.set_edit_pvals(edit_pvals);
-        let read_len = math::round_signif(self.seq_info.mean_read_len(), 2).round() as u32;
-        let (good_dist, passable_dist) = self.err_prof.allowed_edit_dist(read_len);
-        log::info!("Edit distances for read length {}: {} (good) and {} (passable)",
-            read_len, good_dist, passable_dist);
     }
 }
 
