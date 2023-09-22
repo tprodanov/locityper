@@ -58,7 +58,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             boundary_size: 200,
-            lik_skew: 0.9,
+            lik_skew: 0.85,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
             edit_pvals: (0.01, 0.001),
