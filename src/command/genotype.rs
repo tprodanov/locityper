@@ -323,7 +323,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("filt-thresh") | Long("filt-threshold") | Long("filter-thresh") =>
                 args.assgn_params.filt_thresh = parser.value()?.parse()?,
             Long("prob-thresh") | Long("prob-threshold") =>
-                args.assgn_params.prob_thresh = parser.value()?.parse()?,
+                args.assgn_params.prob_thresh = Ln::from_log10(parser.value()?.parse()?),
             Long("min-gts") | Long("min-genotypes") =>
                 args.assgn_params.min_gts = parser.value()?.parse::<PrettyUsize>()?.get(),
             Short('a') | Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,

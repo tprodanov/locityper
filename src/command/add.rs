@@ -452,7 +452,7 @@ fn cluster_haplotypes(
         let i = step.cluster1;
         let j = step.cluster2;
         clusters_nwk.push(format!("({}:{dist},{}:{dist})", &clusters_nwk[i], &clusters_nwk[j],
-            dist = 0.5 * step.dissimilarity));
+            dist = crate::math::fmt_signif(0.5 * step.dissimilarity, 5)));
         let size1 = if i < n { 1 } else { steps[i - n].size };
         let size2 = if j < n { 1 } else { steps[j - n].size };
         cluster_repr.push(cluster_repr[if size1 >= size2 { i } else { j }]);
