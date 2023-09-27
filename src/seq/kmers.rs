@@ -36,21 +36,41 @@ pub trait Kmer: From<u8>
     /// Nevertheless, such minimizers would have the highest hash function anyway, and should not go to the output.
     const UNDEF: Self;
 
-    /// Quickly calculate hash function.
-    /// For now, use Murmur3 function, this can change later.
-    fn fast_hash(self) -> Self;
-
-    /// Create a bit-mask for the k-mer of the corresponding size. Cannot be `BITS / 2`.
     fn create_mask(k: u8) -> Self;
 }
 
-impl Kmer for u32 {
-    const ZERO: Self = 0;
+macro_rules! impl_kmer {
+    ($prim:ty) => {
+        impl Kmer for $prim {
+            const ZERO: Self = 0;
 
-    const MAX_KMER_SIZE: u8 = Self::BITS as u8 / 2 - 1;
+            const MAX_KMER_SIZE: u8 = (Self::BITS / 2 - 1) as u8;
 
-    const UNDEF: Self = Self::MAX;
+            const UNDEF: Self = Self::MAX;
 
+            #[inline]
+            fn create_mask(k: u8) -> Self {
+                // if k == 16 { -1_i32 as u32 } else { (1_u32 << 2 * k) - 1 }
+                // Already know that k is not `Self::BITS / 2`.
+                (1 << 2 * k) - 1
+            }
+        }
+    }
+}
+
+impl_kmer!(u8);
+impl_kmer!(u16);
+impl_kmer!(u32);
+impl_kmer!(u64);
+impl_kmer!(u128);
+
+pub trait Minimizer: Kmer {
+    /// Quickly calculate hash function.
+    /// For now, use Murmur3 function, this can change later.
+    fn fast_hash(self) -> Self;
+}
+
+impl Minimizer for u32 {
     /// Murmur3 for uint32.
     #[inline]
     fn fast_hash(mut self) -> u32 {
@@ -63,22 +83,9 @@ impl Kmer for u32 {
         // This corresponds to AA..AA k-mer, which is a very bad minimizer.
         !self
     }
-
-    #[inline]
-    fn create_mask(k: u8) -> Self {
-        // if k == 16 { -1_i32 as u32 } else { (1_u32 << 2 * k) - 1 }
-        // Already know that k is not 16.
-        (1_u32 << 2 * k) - 1
-    }
 }
 
-impl Kmer for u64 {
-    const ZERO: Self = 0;
-
-    const MAX_KMER_SIZE: u8 = Self::BITS as u8 / 2 - 1;
-
-    const UNDEF: Self = Self::MAX;
-
+impl Minimizer for u64 {
     /// fasthash (https://github.com/rurban/smhasher/blob/master/fasthash.cpp) mix function.
     #[inline]
     fn fast_hash(mut self) -> u64 {
@@ -87,33 +94,15 @@ impl Kmer for u64 {
         self ^= self >> 47;
         !self
     }
-
-    #[inline]
-    fn create_mask(k: u8) -> Self {
-        // if k == 32 { -1_i64 as u64 } else { (1_u64 << 2 * k) - 1 }
-        // Already know that k is not 32.
-        (1_u64 << 2 * k) - 1
-    }
 }
 
-impl Kmer for u128 {
-    const ZERO: Self = 0;
-
-    const MAX_KMER_SIZE: u8 = Self::BITS as u8 / 2 - 1;
-
-    const UNDEF: Self = Self::MAX;
-
+impl Minimizer for u128 {
     #[inline]
     fn fast_hash(self) -> Self {
         let [h1, h2] = unsafe { std::mem::transmute::<u128, [u64; 2]>(self) };
         let h1 = h1.fast_hash();
         let h2 = h2.fast_hash();
         unsafe { std::mem::transmute::<[u64; 2], u128>([h1, h2]) }
-    }
-
-    #[inline]
-    fn create_mask(k: u8) -> Self {
-        (1_u128 << 2 * k) - 1
     }
 }
 
@@ -158,7 +147,7 @@ pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, buffer: &mut Vec<K>)
             if CANON {
                 buffer.push(min(fw_kmer & mask, rv_kmer));
             } else {
-                buffer.push(fw_kmer);
+                buffer.push(fw_kmer & mask);
             }
         } else if i + 1 >= k {
             buffer.push(K::UNDEF);
@@ -195,7 +184,7 @@ fn select_minimizer<K: Kmer>(
 
 /// Finds sequence minimizers.
 /// Minimizer is a k-mer with the smallest hash value across `w` consecutive k-mers.
-pub fn minimizers<K: Kmer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
+pub fn minimizers<K: Minimizer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     debug_assert!(w <= MAX_MINIMIZER_W, "Minimizer window ({}) can be at most {}", w, MAX_MINIMIZER_W);
     let mask = K::create_mask(k);
