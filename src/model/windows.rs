@@ -6,11 +6,12 @@ use std::{
 use rand::Rng;
 use crate::{
     seq::{
+        self,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::KmerCounts,
     },
     bg::ReadDepth,
-    err::{Error, add_path},
+    err::{Error, add_path, validate_param},
     ext::vec::IterExt,
 };
 use super::{
@@ -149,8 +150,12 @@ impl ReadGtAlns {
 }
 
 /// Calculate weight function [0, 1] -> [0, 1].
-#[derive(Clone)]
-struct WeightCalculator {
+#[derive(Clone, Debug)]
+pub struct WeightCalculator {
+    /// Value in (0, 1): weight(breakpoint) = 1/2.
+    breakpoint: f64,
+    /// Value > 0: determines how fast do the value change near the breakpoint.
+    power: f64,
     /// Constant factor in the calculation.
     coeff: f64,
     /// power * 2.
@@ -158,27 +163,35 @@ struct WeightCalculator {
 }
 
 impl WeightCalculator {
-    /// Creates new calculator based on two parameters:
-    /// - breakpoint in (0, 1): weight(breakpoint) = 1/2.
-    /// - power > 0: determines how fast do the value change near the breakpoint.
-    ///   The bigger the power, the faster the change.
-    fn new(breakpoint: f64, power: f64) -> Self {
-        assert!(0.0 < breakpoint && breakpoint < 1.0 && power > 0.0);
+    pub fn new(breakpoint: f64, power: f64) -> Result<Self, Error> {
+        validate_param!(0.0 < breakpoint && breakpoint < 1.0,
+            "Weight breakpoint ({}) must be within (0, 1)", breakpoint);
+        validate_param!(power > 0.5 && power <= 50.0, "Weight power ({}) should be within [0.5, 50].", power);
         let double_power = power * 2.0;
-        Self {
+        Ok(Self {
             coeff: ((1.0 - breakpoint) / breakpoint).powf(double_power),
-            double_power,
-        }
+            breakpoint, power, double_power,
+        })
     }
 
     /// See supplementary methods.
-    fn get(&self, x: f64) -> f64 {
+    pub fn get(&self, x: f64) -> f64 {
         if x == 1.0 {
             1.0
         } else {
             let t2 = self.coeff * (x / (1.0 - x)).powf(self.double_power);
             t2 / (t2 + 1.0)
         }
+    }
+
+    /// Weight breakpoint.
+    pub fn breakpoint(&self) -> f64 {
+        self.breakpoint
+    }
+
+    /// Weight power.
+    pub fn power(&self) -> f64 {
+        self.power
     }
 }
 
@@ -195,12 +208,14 @@ pub struct ContigInfo {
 
     /// Structure, that stores start, end and window.
     window_getter: WindowGetter,
-    weight_calc: WeightCalculator,
+    weight_calc: Option<WeightCalculator>,
 
     /// Cumulateve number of G/C across the contig. Size = len(contig) + 1.
     cumul_gc: Vec<u32>,
     /// Cumulative number of unique k-mers across the contig. Size = len(contig) + 1.
     cumul_uniq_kmers: Vec<u32>,
+    /// Linguistic complexity for each moving window.
+    complexities: Vec<f64>,
 
     /// Default window weights (without boundary tweaking).
     default_weights: Vec<f64>,
@@ -213,7 +228,6 @@ impl ContigInfo {
         seq: &[u8],
         kmer_counts: &KmerCounts,
         depth: &ReadDepth,
-        weight_calc: &WeightCalculator,
         params: &super::Params,
         dbg_writer: &mut impl Write,
     ) -> Result<Self, Error>
@@ -240,8 +254,9 @@ impl ContigInfo {
             contig_len, left_padding, right_padding, cumul_gc, cumul_uniq_kmers,
             kmer_size: kmer_counts.k(),
             window_getter: WindowGetter::new(reg_start, reg_end, window),
-            weight_calc: weight_calc.clone(),
-            default_weights: Vec::with_capacity(n_windows as usize)
+            weight_calc: params.weight_calc.clone(),
+            default_weights: Vec::with_capacity(n_windows as usize),
+            complexities: seq::compl::linguistic_complexity_123(seq, window as usize),
         };
 
         for i in 0..n_windows {
@@ -249,7 +264,8 @@ impl ContigInfo {
             let end = start + window;
             let (gc, uniq_frac, weight) = res.window_characteristics(start, end);
             res.default_weights.push(weight);
-            writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}", contig_name, start, end, gc, uniq_frac, weight)
+            writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}\t{:.5}",
+                contig_name, start, end, gc, uniq_frac, res.complexities[start as usize], weight)
                 .map_err(add_path!(!))?;
         }
         Ok(res)
@@ -265,12 +281,11 @@ impl ContigInfo {
     {
         let contigs = set.contigs();
         let seqs = set.seqs();
-        let weight_calc = WeightCalculator::new(params.weight_breakpoint, params.weight_power);
-        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tweight").map_err(add_path!(!))?;
+        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tcomplexity\tweight").map_err(add_path!(!))?;
         let mut all_contig_infos = Vec::with_capacity(seqs.len());
         for (id, seq) in contigs.ids().zip(seqs) {
             all_contig_infos.push(Arc::new(
-                Self::new(id, contigs, seq, set.kmer_counts(), depth, &weight_calc, params, &mut dbg_writer)?));
+                Self::new(id, contigs, seq, set.kmer_counts(), depth, params, &mut dbg_writer)?));
         }
         Ok(all_contig_infos)
     }
@@ -286,7 +301,7 @@ impl ContigInfo {
         let kmer_end = min(self.contig_len - self.kmer_size + 1, padded_end - self.kmer_size / 2);
         let uniq_frac = f64::from(self.cumul_uniq_kmers[kmer_end as usize] - self.cumul_uniq_kmers[kmer_start as usize])
             / f64::from(kmer_end - kmer_start);
-        let weight = self.weight_calc.get(uniq_frac);
+        let weight = self.weight_calc.as_ref().map(|calc| calc.get(uniq_frac)).unwrap_or(1.0);
         (gc.round() as u8, uniq_frac, weight)
     }
 

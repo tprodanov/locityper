@@ -26,7 +26,7 @@ use crate::{
     model::{
         Params as AssgnParams,
         locs::AllAlignments,
-        windows::ContigInfo,
+        windows::{ContigInfo, WeightCalculator},
         distr_cache::DistrCache,
     },
     solvers::scheme::{self, Scheme, SchemeParams},
@@ -184,10 +184,11 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {}\n\
             {EMPTY}  Calculate window weight based on the fraction of unique k-mers [{} {}].\n\
             {EMPTY}  * {} = breakpoint (0, 1). Weight at breakpoint is 1/2,\n\
-            {EMPTY}  * {} = power [0.5, 50]. Regulates sigmoid slope (bigger - steeper).",
-            "    --weight".green(), "FLOAT [FLOAT]".yellow(),
-            super::fmt_def_f64(defaults.assgn_params.weight_breakpoint),
-            super::fmt_def_f64(defaults.assgn_params.weight_power), "FLOAT_1".yellow(), "FLOAT_2".yellow());
+            {EMPTY}  * {} = power [0.5, 50]. Regulates sigmoid slope (bigger - steeper).\n\
+            {EMPTY}  Use {} to disable weights.",
+            "    --weight".green(), "FLOAT FLOAT | off".yellow(),
+            super::fmt_def_f64(crate::model::DEF_WEIGHT_BREAKPOINT), super::fmt_def_f64(crate::model::DEF_WEIGHT_POWER),
+            "FLOAT_1".yellow(), "FLOAT_2".yellow(), "off".yellow());
         println!("    {:KEY$} {:VAL$}  Ignore reads and windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
@@ -259,7 +260,7 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
-fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
+fn parse_args(argv: &[String]) -> Result<Args, Error> {
     if argv.is_empty() {
         print_help(false);
         std::process::exit(1);
@@ -303,13 +304,13 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
             Long("weight") => {
-                let mut values = parser.values()?;
-                args.assgn_params.weight_breakpoint = values.next()
-                    .expect("At least one value must be present").parse()?;
-                args.assgn_params.weight_power = values.next()
-                    .map(|v| v.parse())
-                    .transpose()?
-                    .unwrap_or(2.0);
+                let first = parser.value()?;
+                if first == "off" {
+                    args.assgn_params.weight_calc = None;
+                } else {
+                    args.assgn_params.weight_calc = Some(WeightCalculator::new(
+                        first.parse()?, parser.value()?.parse()?)?);
+                }
             }
             Long("min-weight") => args.assgn_params.min_weight = parser.value()?.parse()?,
             Long("edit-pval") | Long("edit-pvalue") =>

@@ -8,6 +8,10 @@ use crate::{
     math::Ln,
     err::{Error, validate_param},
 };
+use windows::WeightCalculator;
+
+pub const DEF_WEIGHT_BREAKPOINT: f64 = 0.2;
+pub const DEF_WEIGHT_POWER: f64 = 2.0;
 
 /// Read depth model parameters.
 #[derive(Clone, Debug)]
@@ -24,9 +28,8 @@ pub struct Params {
     /// Edit distance p-value thresholds, first for good alignments, second for passable.
     pub edit_pvals: (f64, f64),
 
-    /// See `windows::WeightCalculator` for more details.
-    pub weight_breakpoint: f64,
-    pub weight_power: f64,
+    /// Window weight calculator, if any.
+    pub weight_calc: Option<WeightCalculator>,
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
     /// Normalize read depth based on (<mean sum weight> / <sum weight>) ^ depth_norm_power.
@@ -63,8 +66,7 @@ impl Default for Params {
             unmapped_penalty: Ln::from_log10(-5.0),
             edit_pvals: (0.01, 0.001),
 
-            weight_breakpoint: 0.2,
-            weight_power: 2.0,
+            weight_calc: Some(WeightCalculator::new(DEF_WEIGHT_BREAKPOINT, DEF_WEIGHT_POWER).unwrap()),
             min_weight: 0.001,
             depth_norm_power: 0.0,
 
@@ -107,11 +109,6 @@ impl Params {
         validate_param!(self.edit_pvals.1 <= self.edit_pvals.0,
             "Second p-value threshold ({}) must not be greater than the first threshold ({})",
             self.edit_pvals.1, self.edit_pvals.0);
-
-        validate_param!(0.0 < self.weight_breakpoint && self.weight_breakpoint < 1.0,
-            "Weight breakpoint ({}) must be within (0, 1)", self.weight_breakpoint);
-        validate_param!(0.5 <= self.weight_power && self.weight_power <= 50.0,
-            "Weight power ({}) must be within [0.5, 50]", self.weight_power);
         validate_param!(0.0 <= self.min_weight && self.min_weight <= 0.5,
             "Minimal weight ({}) must be within [0, 0.5].", self.min_weight);
 
