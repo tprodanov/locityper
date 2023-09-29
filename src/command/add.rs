@@ -685,7 +685,7 @@ fn check_sequences(seqs: &[NamedSeq], locus: &str, ref_seq: Option<&[u8]>) -> Re
     let suffix = &seq0[seq0.len() - AFFIX_SIZE..];
     if seqs[1..].iter().map(NamedSeq::seq)
             .any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix) {
-        log::warn!("[{}] There are variants on the boundary of the locus", locus);
+        log::warn!("[{}] Allele sequences differ at the boundary", locus);
     }
 
     if let Some(rseq) = ref_seq {

@@ -66,7 +66,7 @@ Several Locityper commands need reference *k*-mer counts,
 calculated using [Jellyfish](https://github.com/gmarcais/Jellyfish/).
 You can use the following code to obtain them (for example for *k = 25*):
 ```bash
-jellyfish count --canonical --lower-count 2 --out-counter-len 1 --mer-len 25 \
+jellyfish count --canonical --lower-count 2 --out-counter-len 2 --mer-len 25 \
     --threads 8 --size 3G --output counts.jf genome.fa
 ```
 
@@ -85,20 +85,35 @@ tabix -p vcf hprc-v1.1-grch38.vcf.gz
 ### Creating database with target loci
 
 Database with target loci can be constructed in two ways:
-first, locus alleles can be directly provided using a FASTA file.
+first, locus alleles can be extracted **from a pangenome VCF file**:
 ```bash
-locityper add -d db -j counts.jf -s alleles.fasta=name
-# `name` is the name of the locus.
+locityper add -d db -r reference.fa -j counts.jf \
+    -v pangenome.vcf.gz -l locus_name chr:start-end
 ```
-Alternatively, locus alleles can be extracted from the pangenome VCF file:
+Please use the same reference genome that was used for Jellyfish *k*-mer counting.
+Regions can also be supplied using a four-column BED file using `-L` argument.
+Furthermore, `-l/-L` arguments can be used together and can be repeated multiple times:
 ```bash
-locityper add -d db -f counts.jf -r reference.fasta \
-    -v pangenome.vcf.gz -l chr:start-end=name
-# or
-locityper add -d db -f counts.jf -r reference.fasta \
-    -v pangenome.vcf.gz -L loci.bed
+locityper add -d db -r reference.fa -j counts.jf \
+    -v pangenome.vcf.gz -l locus1 chr:start-end \
+    -L loci2.bed -L loci3.bed -l locus4 chr:start-end
 ```
+
+Alternatively, locus alleles can be **directly provided using a FASTA file**.
+```bash
+locityper add -d db -r ref.fa -j counts.jf \
+    -l locus_name chr:start-end alleles.fa
+```
+Note, that you still need to provide region coordinates in the reference genome.
+This is needed to evaluate off-target *k*-mer counts.
+Path to alleles can also be provided in a fifth column of the input BED file (`-L`).
+
 You can freely add more loci to the database using the same commands.
+
+During locus preprocessing, Locityper calculates all pairwise alignment between locus alleles.
+Alignment accuracy is controlled by `-a` argument, with `-a 9` producing the most accurate alignments
+at slow speed, and `-a 1` quickly producing very inaccurate alignments.
+Additionally, you can use `-a 0` to skip alignment step completely.
 
 ### Preprocessing WGS dataset
 
@@ -106,7 +121,7 @@ Before locus genotyping can be performed, WGS dataset needs to be preprocessed.
 For that, please use
 ```bash
 locityper preproc -i reads1.fastq [reads2.fastq] -j counts.jf \
-    -r reference.fasta -o preproc_out
+    -r reference.fa -o preproc_out
 ```
 Input files can have FASTA or FASTQ format, and can be uncompressed or compressed with `gzip`, `bgzip` or `lz4`.
 
@@ -119,7 +134,7 @@ By default, the following regions are used: `chr17:72950001-77450000` *(CHM13)*,
 
 If you already have read mappings to the whole genome, you can use them via
 ```bash
-locityper preproc -a aligned.bam -d db -r reference.fasta -o preproc_out
+locityper preproc -a aligned.bam -d db -r reference.fa -o preproc_out
 ```
 However, this calculation may be less accurate depending on the read mapping.
 
