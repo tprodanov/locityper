@@ -523,7 +523,7 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Ite
         log::warn!("    [{}] {} allele pairs with high divergence, highest {:.5} ({} and {})", tag, count,
             highest, entries[highest_i].name(), entries[highest_j].name());
         if highest > 0.5 && !from_vcf {
-            log::error!("    Please check that all alleles lie on the same strand");
+            log::error!("    Extremely high sequence divergence, please check if allele sequences are accurate");
         }
     }
 }
@@ -650,7 +650,7 @@ fn process_haplotypes(
 }
 
 /// Checks sequences for Ns, minimal size and for equal boundaries.
-fn check_sequences(seqs: &[NamedSeq], locus: &str) -> Result<(), Error> {
+fn check_sequences(seqs: &[NamedSeq], locus: &str, ref_seq: Option<&[u8]>) -> Result<(), Error> {
     if seqs.is_empty() {
         return Err(Error::InvalidData(format!("No sequences available for locus {}", locus)));
     }
@@ -665,13 +665,20 @@ fn check_sequences(seqs: &[NamedSeq], locus: &str) -> Result<(), Error> {
         return Err(Error::InvalidData(format!("Locus alleles contain Ns for locus {}", locus)));
     }
 
-    const AFFIX_SIZE: usize = 2;
+    const AFFIX_SIZE: usize = 5;
     let seq0 = seqs[0].seq();
     let prefix = &seq0[..AFFIX_SIZE];
     let suffix = &seq0[seq0.len() - AFFIX_SIZE..];
     if seqs[1..].iter().map(NamedSeq::seq)
             .any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix) {
         log::warn!("[{}] There are variants on the boundary of the locus", locus);
+    }
+
+    if let Some(rseq) = ref_seq {
+        if &rseq[..AFFIX_SIZE] != prefix || &rseq[rseq.len() - AFFIX_SIZE..] != suffix {
+            log::warn!("[{}] Boundary of the reference sequence does not match other alleles.\n    \
+                Please check if locus boundaries are accurate", locus);
+        }
     }
     Ok(())
 }
@@ -713,7 +720,7 @@ fn add_locus(
     } else {
         unreachable!("Either VCF file or alleles FASTA must be specified")
     };
-    check_sequences(&allele_seqs, locus.name())?;
+    check_sequences(&allele_seqs, locus.name(), if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
     process_haplotypes(locus_dir, locus.name(), allele_seqs, kmer_getter, args)
 }
 

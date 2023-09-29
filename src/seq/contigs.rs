@@ -244,7 +244,8 @@ impl ContigSet {
         let contigs = ContigNames::new(tag,
             named_seqs.iter_mut().map(|entry| (std::mem::replace(entry.name_mut(), String::new()), entry.len())))?;
         let seqs: Vec<_> = named_seqs.into_iter().map(NamedSeq::take_seq).collect();
-        let kmer_counts = KmerCounts::load(ext::sys::open(kmers_filename)?, contigs.lengths())?;
+        let kmer_counts = KmerCounts::load(&mut ext::sys::open(kmers_filename)?).map_err(add_path!(kmers_filename))?;
+        kmer_counts.validate(&contigs)?;
         Ok(Self {
             contigs: Arc::new(contigs),
             seqs, kmer_counts,

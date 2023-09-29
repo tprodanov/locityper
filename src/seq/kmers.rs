@@ -1,14 +1,15 @@
 use std::{
     fmt::Display,
-    io::{self, Write, BufRead},
+    io::{self, BufRead},
     fs,
     path::PathBuf,
     cmp::{min, max, Ord},
     process::{Stdio, Command},
     ops::{Shl, Shr, BitOr, BitAnd},
 };
+use varint_rs::{VarintWriter, VarintReader};
 use crate::{
-    seq,
+    seq::{self, ContigNames, ContigId},
     err::{Error, add_path},
     bg::ser::json_get,
     ext::sys::PipeGuard,
@@ -241,79 +242,35 @@ pub fn minimizers<K: Minimizer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
 }
 
 /// Store k-mer counts as u16.
-pub type KmerCount = u8;
+pub type KmerCount = u16;
 
+/// Parses integer, fails if it is not integer, and returns at most `max_value` (must fit in `KmerCount`).
 #[inline]
-fn parse_count(s: &str) -> Result<KmerCount, std::num::ParseIntError> {
-    s.parse::<u64>().map(|x| KmerCount::try_from(x).unwrap_or(KmerCount::MAX))
+fn parse_count(s: &str, max_value: u64) -> Result<KmerCount, std::num::ParseIntError> {
+    s.parse::<u64>().map(|x| KmerCount::try_from(min(x, max_value)).unwrap())
 }
 
 /// Stores k-mer counts for each input k-mer across a set of sequences.
 pub struct KmerCounts {
     k: u32,
+    /// Maximum value that can appear.
+    /// Will be equal to `KmerCount::MAX` if Jellyfish was run with appropriate counter-len,
+    /// and will be smaller otherwise.
+    max_value: KmerCount,
+    /// k-mer counts for every contig.
+    /// If value == KmerCount::MAX, k-mer count may be too high (cannot be stored in N bytes).
     counts: Vec<Vec<KmerCount>>,
 }
 
 impl KmerCounts {
-    /// Load k-mer counts from a file (see `save` for format).
-    /// Panics if the number of k-mer counts does not match the contig lengths exactly.
-    pub fn load<R: BufRead>(f: R, contig_lengths: &[u32]) -> Result<Self, Error> {
-        assert!(!contig_lengths.is_empty(), "Cannot load k-mer counts for empty contigs set!");
-        let mut lines = f.lines();
-        let first = lines.next().ok_or_else(|| Error::InvalidData("Empty file with k-mer counts!".to_owned()))?
-            .map_err(add_path!(!))?;
-        let k = match first.split_once('=') {
-            Some(("k", v)) => v.parse().map_err(|_| Error::ParsingError(format!("Cannot parse line {}", first)))?,
-            _ => return Err(Error::InvalidData(
-                format!("Incorrect k-mer counts format, first line ({}) must be in format \"k=integer\"", first))),
-        };
-
-        let mut counts = Vec::with_capacity(contig_lengths.len());
-        for &contig_len in contig_lengths.iter() {
-            let curr_counts = lines.next()
-                .ok_or_else(|| Error::InvalidData(
-                    "File with k-mer counts does not contain enough contigs".to_owned()))?.map_err(add_path!(!))?
-                .split(' ')
-                .map(parse_count)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| Error::ParsingError(format!("Cannot parse k-mer counts: {}", e)))?;
-
-            if curr_counts.len() as u32 != contig_len - k + 1 {
-                return Err(Error::InvalidData("Incorrect number of k-mers counts".to_owned()));
-            }
-            counts.push(curr_counts);
-        }
-        match lines.next() {
-            Some(Err(e)) => Err(Error::Io(e, vec![]))?,
-            Some(Ok(s)) if s.is_empty() => Ok(Self { k, counts }),
-            None => Ok(Self { k, counts }),
-            _ => Err(Error::InvalidData("Too many k-mer counts!".to_owned())),
-        }
-    }
-
-    /// Writes k-mer counts into file in the following format (for example), each line - new contig:
-    /// ```
-    /// k=25
-    /// 0 0 0 10 24 35 23 9 0 0 0
-    /// 0 0 0 0 0 0
-    /// ```
-    pub fn save<W: Write>(&self, f: &mut W) -> io::Result<()> {
-        writeln!(f, "k={}", self.k)?;
-        for counts in self.counts.iter() {
-            if !counts.is_empty() {
-                write!(f, "{}", counts[0])?;
-                for count in &counts[1..] {
-                    write!(f, " {}", count)?;
-                }
-            }
-            writeln!(f)?;
-        }
-        Ok(())
-    }
-
     /// Returns k-mer size.
     pub fn k(&self) -> u32 {
         self.k
+    }
+
+    /// Returns the maximum value, that can be stored.
+    pub fn max_value(&self) -> KmerCount {
+        self.max_value
     }
 
     /// Returns all k-mer counts for the corresponding contig.
@@ -337,6 +294,71 @@ impl KmerCounts {
             "Cannot call KmerCounts.take_first when the number of contigs is different than one");
         self.counts.pop().unwrap()
     }
+
+    /// Saves collection into binary format:
+    /// First two bytes: k-mer size and counter length in bytes.
+    /// Next: N = number of contigs as 4-byte varint.
+    /// Next: N times number of k-mers as 4-byte varint and
+    ///     all k-mer counts consecutively in as 8-byte varints (for future compatibility).
+    pub fn save<W>(&self, f: &mut W) -> io::Result<()>
+    where W: VarintWriter<Error = io::Error>,
+    {
+        f.write(u8::try_from(self.k).unwrap())?;
+        assert!(self.max_value.leading_zeros() + self.max_value.count_ones() == KmerCount::BITS,
+            "Invalid maximum value for k-mer counts: {}", self.max_value);
+        f.write(u8::try_from(self.max_value.count_ones() / 8).unwrap())?;
+        f.write_u32_varint(self.counts.len() as u32)?;
+
+        for counts in self.counts.iter() {
+            f.write_u32_varint(counts.len() as u32)?;
+            for &count in counts {
+                f.write_u64_varint(u64::from(count))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Loads k-mer counts from a binary file.
+    pub fn load<R>(f: &mut R) -> io::Result<Self>
+    where R: VarintReader<Error = io::Error>,
+    {
+        let k = u32::from(f.read()?);
+        let byte_len = u32::from(f.read()?);
+        assert!(byte_len <= 8);
+        let max_value = min(u64::from(KmerCount::MAX), if byte_len == 8 { u64::MAX } else { (1 << byte_len * 8) - 1 });
+
+        let n_contigs = f.read_u32_varint()?;
+        let mut counts = Vec::with_capacity(n_contigs as usize);
+
+        for _ in 0..n_contigs {
+            let n_kmers = f.read_u32_varint()?;
+            let curr_counts = (0..n_kmers)
+                .map(|_| f.read_u64_varint().map(|x| min(x, max_value) as KmerCount))
+                .collect::<io::Result<Vec<_>>>()?;
+            counts.push(curr_counts);
+        }
+
+        Ok(Self {
+            k, counts,
+            max_value: max_value as KmerCount,
+        })
+    }
+
+    /// Checks the number of and sizes of contigs.
+    pub fn validate(&self, contigs: &ContigNames) -> Result<(), Error> {
+        if self.counts.len() != contigs.len() {
+            return Err(Error::InvalidData(format!("k-mer counts contain {} contigs, while there should be {} contigs",
+                self.counts.len(), contigs.len())));
+        }
+        for (i, (counts, len)) in self.counts.iter().zip(contigs.lengths()).enumerate() {
+            let expected = (len + 1).saturating_sub(self.k);
+            if expected != counts.len() as u32 {
+                return Err(Error::InvalidData(format!("k-mer counts contain {} k-mers for contig {} (expected {})",
+                    counts.len(), contigs.get_name(ContigId::new(i)), expected)));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Structure, that runs `jellyfish` and queries k-mers per sequence or from the reference file.
@@ -347,19 +369,43 @@ pub struct JfKmerGetter {
     jf_counts: PathBuf,
     /// k-mer size. Extracted from the filename of the jellyfish database.
     k: u32,
+    /// Maximum available k-mer count (limited by `KmerCount::MAX` as well).
+    max_value: u64,
 }
 
 impl JfKmerGetter {
     /// Creates a new jellyfish k-mer getter.
     /// Arguments: `jellyfish` executable and database. Database filename must be in the form `*/<kmer-size>.*`.
     pub fn new(jf_exe: PathBuf, jf_counts: PathBuf) -> Result<Self, Error> {
-        let k = parse_jellyfish_header(&jf_counts)?;
+        let header = parse_jellyfish_header(&jf_counts)?;
+        json_get!(&header => canonical (as_bool), key_len (as_u32), counter_len (as_u32));
+        if !canonical {
+            log::warn!("Jellyfish counts file contains non-canonical k-mer counts. \
+                Consider using canonical counts (jellyfish --canonical)");
+        }
+        if key_len % 2 != 0 {
+            return Err(Error::InvalidData("Cannot parse jellyfish counts file: key length is odd".to_owned()));
+        }
+        let k = key_len / 2;
         if k % 2 != 1 {
             return Err(Error::InvalidData(
                 format!("Jellyfish counts are calculated for an even k size ({}), odd k is required", k)));
         }
         log::info!("Detected jellyfish k-mer size: {}", k);
-        Ok(Self { jf_exe, jf_counts, k })
+        if counter_len > 8 {
+            return Err(Error::InvalidData(
+                format!("Jellyfish was run with {}-byte counters, at most 8-byte counters are allowed", counter_len)));
+        }
+
+        // Calculate maximum k-mer count based on (i) counter length (in bytes) in the counts file,
+        // and (ii) maximum value that can be stored in `KmerCount`.
+        let max_value = if counter_len * 8 >= KmerCount::BITS {
+            KmerCount::MAX as u64
+        } else {
+            (1 << counter_len * 8) - 1
+        };
+
+        Ok(Self { jf_exe, jf_counts, k, max_value })
     }
 
     /// Returns k-mer size.
@@ -398,7 +444,7 @@ impl JfKmerGetter {
                     .ok_or_else(|| Error::ParsingError("Not enough k-mer counts!".to_owned()))?;
                 let count = line.split_once(' ')
                     .map(|tup| tup.1)
-                    .and_then(|s| parse_count(s).ok())
+                    .and_then(|s| parse_count(s, self.max_value).ok())
                     .ok_or_else(||
                         Error::ParsingError(format!("Failed to parse Jellyfish output line '{}'", line)))?;
                 // Assume that each k-mer appears at least 1.
@@ -411,6 +457,7 @@ impl JfKmerGetter {
             Some("") | None => Ok(KmerCounts {
                 counts,
                 k: self.k,
+                max_value: KmerCount::try_from(self.max_value).unwrap(),
             }),
             _ => Err(Error::InvalidData("Too many k-mer counts!".to_owned())),
         }
@@ -423,8 +470,8 @@ impl JfKmerGetter {
     }
 }
 
-/// Based on the jellyfish counts file, extracts k-mer size, and checks if k-mers are canonical.
-fn parse_jellyfish_header(filename: &std::path::Path) -> Result<u32, Error> {
+/// Parses Jellyfish counts file header and returns json object.
+fn parse_jellyfish_header(filename: &std::path::Path) -> Result<json::JsonValue, Error> {
     let mut reader = io::BufReader::new(fs::File::open(filename).map_err(add_path!(filename))?);
     let mut buffer = Vec::new();
     // Skip until JSON starts.
@@ -445,15 +492,6 @@ fn parse_jellyfish_header(filename: &std::path::Path) -> Result<u32, Error> {
     }
     let json_str = std::str::from_utf8(&buffer).map_err(|_|
         Error::InvalidData("Cannot parse jellyfish counts file: Header is not UTF-8".to_owned()))?;
-    let obj = json::parse(json_str).map_err(|_|
-        Error::InvalidData("Cannot parse jellyfish counts file: header contains invalid JSON".to_owned()))?;
-    json_get!(&obj => canonical (as_bool), key_len (as_u32));
-    if !canonical {
-        log::warn!("Jellyfish counts file contains non-canonical k-mer counts. \
-            Consider using canonical counts (jellyfish --canonical)");
-    }
-    if key_len % 2 != 0 {
-        return Err(Error::InvalidData("Cannot parse jellyfish counts file: key length is odd".to_owned()));
-    }
-    Ok(key_len / 2)
+    json::parse(json_str).map_err(|_|
+        Error::InvalidData("Cannot parse jellyfish counts file: header contains invalid JSON".to_owned()))
 }
