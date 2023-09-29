@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 use const_format::formatcp;
 use bio::io::fasta;
 use crate::{
-    err::{Error, add_path},
+    Error,
     ext::fmt::PrettyU32,
 };
 use super::{ContigId, ContigNames};
@@ -20,20 +20,11 @@ use super::{ContigId, ContigNames};
 /// However, here we provide a bit more limiting pattern for contig names.
 const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=@^-]*";
 
-/// Interval pattern without starting ^ and ending $.
-const INTERVAL_INNER: &'static str = formatcp!("({}):([0-9][0-9_,]*)-([0-9][0-9_,]*)", CONTIG_PATTERN);
-
 /// Interval: `contig:start-end`.
-const INTERVAL_PATTERN: &'static str = formatcp!("^{}$", INTERVAL_INNER);
+const INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9][0-9_,]*)-([0-9][0-9_,]*)$", CONTIG_PATTERN);
 
 /// Name of the interval (almost the same as `CONTIG_PATTERN`, but includes `:`).
-const NAME_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*";
-
-/// Optionally named interval: `contig:start-end=name`.
-const NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^{}(={})?$", INTERVAL_INNER, NAME_PATTERN);
-
-/// Non-optionally named interval: `contig:start-end=name`.
-const EXPL_NAMED_INTERVAL_PATTERN: &'static str = formatcp!("^{}=({})$", INTERVAL_INNER, NAME_PATTERN);
+const NAME_PATTERN: &'static str = r"^[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*$";
 
 /// Genomic interval.
 #[derive(Clone)]
@@ -69,6 +60,11 @@ impl Interval {
     pub fn full_contig(contigs: Arc<ContigNames>, contig_id: ContigId) -> Self {
         let end = contigs.get_len(contig_id);
         Self::new(contigs, contig_id, 0, end)
+    }
+
+    /// Creates new interval at the same contig with specified start and end.
+    pub fn create_at_same_contig(&self, start: u32, end: u32) -> Self {
+        Self::new(Arc::clone(&self.contigs), self.contig_id, start, end)
     }
 
     fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
@@ -193,6 +189,13 @@ impl Interval {
         BedFormat(self)
     }
 
+    /// Bound interval end to the length of the contig.
+    pub fn trim(&mut self) {
+        self.end = min(self.end, self.contigs.get_len(self.contig_id));
+        assert!(self.start < self.end, "Contig end ({}) became smaller than start ({}) after trimming",
+            self.end, self.start);
+    }
+
     /// Expand the interval by `left` and `right` bp to the left and to the right.
     /// Limit new start to 0 and new end to the contig length.
     pub fn expand(&self, left: u32, right: u32) -> Self {
@@ -205,14 +208,8 @@ impl Interval {
     }
 
     /// Fetches sequence of the interval from an indexed fasta reader.
-    pub fn fetch_seq<R: Read + Seek>(&self, fasta: &mut fasta::IndexedReader<R>) -> Result<Vec<u8>, Error> {
-        fasta.fetch(self.contig_name(), u64::from(self.start), u64::from(self.end)).map_err(add_path!(!))?;
-        let mut seq = Vec::with_capacity(self.len() as usize);
-        fasta.read(&mut seq).map_err(add_path!(!))?;
-        crate::seq::standardize(&mut seq)
-            .map_err(|nt| Error::InvalidData(format!("Unknown nucleotide `{}` ({}) in {}",
-                char::from(nt), nt, self)))?;
-        Ok(seq)
+    pub fn fetch_seq(&self, fasta: &mut fasta::IndexedReader<impl Read + Seek>) -> Result<Vec<u8>, Error> {
+        super::fetch_seq(fasta, self.contig_name(), u64::from(self.start), u64::from(self.end))
     }
 }
 
@@ -264,7 +261,7 @@ impl<'a> fmt::Display for BedFormat<'a> {
 /// Tests if the locus name is allowed.
 pub fn check_locus_name(name: &str) -> Result<(), Error> {
     lazy_static! {
-        static ref NAME_RE: Regex = Regex::new(formatcp!("^{}$", NAME_PATTERN)).unwrap();
+        static ref NAME_RE: Regex = Regex::new(NAME_PATTERN).unwrap();
     }
     if NAME_RE.is_match(&name) {
         Ok(())
@@ -279,41 +276,14 @@ pub struct NamedInterval {
     interval: Interval,
     /// Name of the interval, must satisfy the `NAME_PATTERN` regular expression.
     name: String,
-    /// True if `name` is was set explicitely (not equal to the interval itself).
-    explicit_name: bool,
 }
 
 impl NamedInterval {
     /// Create a named interval.
     /// If name is not provided, set it to `contig:start-end`.
-    pub fn new(interval: Interval, name: Option<&str>) -> Result<Self, Error> {
-        let explicit_name = name.is_some();
-        let name = name.map(Into::into).unwrap_or_else(|| interval.to_string());
+    pub fn new(name: String, interval: Interval) -> Result<Self, Error> {
         check_locus_name(&name)?;
-        Ok(Self { name, interval, explicit_name })
-    }
-
-    /// Parse interval name from string "contig:start-end[=name]".
-    /// If name is not set, set it to `contig:start-end`.
-    pub fn parse(s: &str, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(NAMED_INTERVAL_PATTERN).unwrap();
-        }
-        let captures = RE.captures(s).ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let interval = Interval::from_captures(s, &captures, contigs)?;
-        let name: Option<&str> = captures.get(4).map(|m| &m.as_str()[1..]);
-        NamedInterval::new(interval, name)
-    }
-
-    /// Parse interval name from string "contig:start-end=name".
-    pub fn parse_explicit(s: &str, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(EXPL_NAMED_INTERVAL_PATTERN).unwrap();
-        }
-        let captures = RE.captures(s).ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
-        let interval = Interval::from_captures(s, &captures, contigs)?;
-        let name = captures.get(4).expect("Interval name must be set").as_str();
-        NamedInterval::new(interval, Some(name))
+        Ok(Self { name, interval })
     }
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
@@ -322,7 +292,8 @@ impl NamedInterval {
     where I: Iterator<Item = &'a str>,
     {
         let interval = Interval::parse_bed(split, contigs)?;
-        Self::new(interval, split.next())
+        let name = split.next().ok_or_else(|| Error::InvalidData("Fourth column must contain locus name".to_owned()))?;
+        Self::new(name.to_owned(), interval)
     }
 
     /// Return interval.
@@ -334,43 +305,21 @@ impl NamedInterval {
     pub fn name(&self) -> &str {
         &self.name
     }
-
-    /// Returns true if the name was explicitely provided.
-    pub fn is_name_explicit(&self) -> bool {
-        self.explicit_name
-    }
-
-    /// Formats this named interval as `chrom  start  end  [name]`, where name is written only if it is explicitely set.
+    /// Formats this named interval as `chrom  start  end  name`.
     pub fn bed_fmt(&self) -> NamedBedFormat<'_> {
         NamedBedFormat(self)
-    }
-
-    /// Creates a new interval with updated start and end.
-    /// Name remains the same if it was set explicitely, otherwise it is created from the new interval positions.
-    pub fn with_new_range(&self, new_start: u32, new_end: u32) -> Self {
-        let new_interval = Interval::new(
-            Arc::clone(self.interval.contigs()), self.interval.contig_id(), new_start, new_end);
-        Self::new(new_interval, if self.explicit_name { Some(&self.name) } else { None }).unwrap()
     }
 }
 
 impl fmt::Debug for NamedInterval {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.explicit_name {
-            write!(f, "{:?}@{}", self.interval, self.name)
-        } else {
-            fmt::Debug::fmt(&self.interval, f)
-        }
+        write!(f, "{:?}={}", self.interval, self.name)
     }
 }
 
 impl fmt::Display for NamedInterval {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.explicit_name {
-            write!(f, "{} ({})", self.name, self.interval)
-        } else {
-            fmt::Display::fmt(&self.interval, f)
-        }
+        write!(f, "{} ({})", self.name, self.interval)
     }
 }
 
@@ -380,9 +329,7 @@ pub struct NamedBedFormat<'a>(&'a NamedInterval);
 impl<'a> fmt::Display for NamedBedFormat<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.0.interval.bed_fmt().fmt(f)?;
-        if self.0.explicit_name {
-            write!(f, "\t{}", self.0.name)?;
-        }
+        write!(f, "\t{}", self.0.name)?;
         Ok(())
     }
 }

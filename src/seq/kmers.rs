@@ -8,9 +8,9 @@ use std::{
     ops::{Shl, Shr, BitOr, BitAnd},
 };
 use crate::{
+    seq,
     err::{Error, add_path},
     bg::ser::json_get,
-    seq::{self, ContigId},
     ext::sys::PipeGuard,
 };
 
@@ -318,8 +318,8 @@ impl KmerCounts {
 
     /// Returns all k-mer counts for the corresponding contig.
     /// Length: contig len - k + 1.
-    pub fn get(&self, contig_id: ContigId) -> &[KmerCount] {
-        &self.counts[contig_id.ix()]
+    pub fn get(&self, ix: usize) -> &[KmerCount] {
+        &self.counts[ix]
     }
 
     /// Returns all k-mer counts for the first contig (must be the only contig).
@@ -358,7 +358,7 @@ impl JfKmerGetter {
             return Err(Error::InvalidData(
                 format!("Jellyfish counts are calculated for an even k size ({}), odd k is required", k)));
         }
-        log::debug!("    Jellyfish k-mer size: {}", k);
+        log::info!("Detected jellyfish k-mer size: {}", k);
         Ok(Self { jf_exe, jf_counts, k })
     }
 
@@ -369,26 +369,25 @@ impl JfKmerGetter {
 
     /// Runs jellyfish to return k-mer counts across all sequences.
     /// Sequences are consumed, as they are passed to another thread.
-    pub fn fetch(&self, seqs: Vec<Vec<u8>>) -> Result<KmerCounts, Error> {
-        let n_kmers: Vec<_> = seqs.iter()
-            .map(|seq| (seq.len() + 1).saturating_sub(self.k as usize)).collect();
+    pub fn fetch(&self, seqs: impl IntoIterator<Item = Vec<u8>> + Send + 'static) -> Result<KmerCounts, Error> {
         let mut child = Command::new(&self.jf_exe)
             .args(&["query", "-s", "/dev/stdin"]).arg(&self.jf_counts)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().map_err(add_path!(self.jf_exe))?;
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
         let pipe_guard = PipeGuard::new(self.jf_exe.clone(), child);
-        let handle = std::thread::spawn(move || -> Result<(), Error> {
-            for seq in seqs.iter() {
-                seq::write_fasta(&mut child_stdin, b"", seq).map_err(add_path!(!))?;
+        let k_usize = self.k as usize;
+        let handle = std::thread::spawn(move || -> Result<Vec<usize>, Error> {
+            let mut n_kmers = Vec::new();
+            for seq in seqs.into_iter() {
+                n_kmers.push((seq.len() + 1).saturating_sub(k_usize));
+                seq::write_fasta(&mut child_stdin, b"", &seq).map_err(add_path!(!))?;
             }
-            Ok(())
+            Ok(n_kmers)
         });
 
         let output = pipe_guard.wait()?;
-        // handle.join() returns Result<Result<(), crate::Error>, Any>.
-        // expect unwraps the outer Err, then ? returns the inner Err, if any.
-        handle.join().expect("Process failed for unknown reason")?;
+        let n_kmers = handle.join().expect("Process failed for unknown reason")?;
 
         let mut jf_lines = std::str::from_utf8(&output.stdout)?.split('\n');
         let mut counts = Vec::with_capacity(n_kmers.len());
@@ -420,7 +419,7 @@ impl JfKmerGetter {
     /// Runs jellyfish and returns k-mer frequencies for all k-mers in the sequence.
     /// Sequence is consumed, as it needs to be passed to another thread.
     pub fn fetch_one(&self, seq: Vec<u8>) -> Result<KmerCounts, Error> {
-        self.fetch(vec![seq])
+        self.fetch([seq])
     }
 }
 

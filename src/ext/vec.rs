@@ -1,6 +1,6 @@
 use std::{
     fmt::{self, Write},
-    ops::{Add, AddAssign, Sub},
+    ops::{AddAssign},
 };
 
 /// Static methods extending slices.
@@ -27,28 +27,6 @@ impl VecExt {
     /// Sort vector/slice using `partial_ord`.
     pub fn sort<T: PartialOrd>(a: &mut [T]) {
         a.sort_unstable_by(|x, y| x.partial_cmp(y).expect("Error in sort: elements are not comparable"));
-    }
-
-    /// For each moving window of size `w`, calculates sum over elements in `a`.
-    /// Returns `a.len() - w + 1` sums.
-    pub fn moving_window_sums<T>(a: &[T], w: usize) -> Vec<T>
-    where T: Add<Output = T> + Sub<Output = T> + Copy,
-    {
-        assert!(w >= 1, "moving_window_sums: window size ({}) must be at least 1.", w);
-        let n = a.len();
-        if n < w {
-            return Vec::new();
-        }
-        let mut sums = Vec::with_capacity(n - w + 1);
-        let mut acc = a[..w].iter().copied().reduce(|acc, e| acc + e).unwrap();
-        sums.push(acc);
-
-        for i in w..n {
-            acc = acc + a[i] - a[i - w];
-            sums.push(acc);
-        }
-        debug_assert_eq!(sums.len(), n - w + 1);
-        sums
     }
 
     /// Finds `q`-th quantile in a sorted array.

@@ -15,6 +15,10 @@ pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames, ContigSet};
 pub use fastx::write_fasta;
 
+use std::io::{Read, Seek};
+use bio::io::fasta;
+use crate::err::{Error, add_path};
+
 /// Make nucleotide sequence standard: only letters A,C,G,T,N.
 pub fn standardize(seq: &mut [u8]) -> Result<(), u8> {
     for nt in seq.iter_mut() {
@@ -124,4 +128,26 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
             | b'n' | b'r' | b'y' | b'k' | b'm' | b's' | b'w' | b'b' | b'd' | b'h' | b'v' => b'N',
         _ => panic!("Unknown nucleotide {} ({})", char::from(nt), nt),
     }).collect()
+}
+
+/// Fetches sequence of the interval from an indexed fasta reader.
+pub fn fetch_seq(
+    fasta: &mut fasta::IndexedReader<impl Read + Seek>,
+    contig: &str,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>, Error> {
+    assert!(start < end, "Cannot fetch sequence for an empty interval {}:{}-{}", contig, start + 1, end);
+    fasta.fetch(contig, start.into(), end.into()).map_err(add_path!(!))?;
+    let len = (end - start) as usize;
+    let mut seq = Vec::with_capacity(len);
+    fasta.read(&mut seq).map_err(add_path!(!))?;
+    if seq.len() != len {
+        return Err(Error::RuntimeError(format!("Fetched sequence of incorrect size ({}) for interval {}:{}-{} ({} bp)",
+        seq.len(), contig, start + 1, end, len)));
+    }
+
+    crate::seq::standardize(&mut seq).map_err(|nt| Error::InvalidData(format!(
+        "Unknown nucleotide `{}` ({}) in {}:{}-{}", char::from(nt), nt, contig, start + 1, end)))?;
+    Ok(seq)
 }

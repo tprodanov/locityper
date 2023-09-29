@@ -4,29 +4,29 @@ use std::{
     str::from_utf8,
 };
 use htslib::bcf::{
-    self,
+    self, Read,
     header::HeaderView,
     record::{Record, GenotypeAllele},
 };
 use crate::{
     Error,
-    seq::self,
+    seq::{self, Interval},
     ext::vec::F64Ext,
     algo::HashSet,
 };
 use super::NamedSeq;
 
 /// Stores one sample in the VCF file.
-pub struct Haplotype {
-    /// Haplotype index for this sample.
+pub struct HaplotypeName {
+    /// HaplotypeName index for this sample.
     hap_ix: usize,
     /// Shift in index across all remaining haplotypes.
     shift_ix: usize,
-    /// Haplotype name.
+    /// HaplotypeName name.
     name: String,
 }
 
-impl Haplotype {
+impl HaplotypeName {
     pub fn hap_ix(&self) -> usize {
         self.hap_ix
     }
@@ -39,7 +39,7 @@ pub struct Sample {
     name: String,
     ploidy: usize,
     /// Sample haplotypes (some may be discarded).
-    haplotypes: Vec<Haplotype>,
+    subnames: Vec<HaplotypeName>,
 }
 
 impl Sample {
@@ -47,13 +47,13 @@ impl Sample {
         self.sample_id
     }
 
-    pub fn haplotypes(&self) -> &[Haplotype] {
-        &self.haplotypes
+    pub fn subnames(&self) -> &[HaplotypeName] {
+        &self.subnames
     }
 }
 
 /// Collection of all haplotypes.
-pub struct AllHaplotypes {
+pub struct HaplotypeNames {
     /// None if reference is skipped.
     ref_name: Option<String>,
     /// All samples.
@@ -62,7 +62,7 @@ pub struct AllHaplotypes {
     total: usize,
 }
 
-impl AllHaplotypes {
+impl HaplotypeNames {
     /// Examines VCF header and the first record to extract sample ploidy.
     /// Samples and haplotypes in `leave_out` are discarded.
     pub fn new(
@@ -102,7 +102,7 @@ impl AllHaplotypes {
             } else if ploidy > 255 {
                 return Err(Error::InvalidData(format!("Sample {} has extremely high ploidy", sample)));
             }
-            let mut haplotypes = Vec::with_capacity(ploidy);
+            let mut subnames = Vec::with_capacity(ploidy);
             for hap_ix in 0..ploidy {
                 let haplotype = if ploidy == 1 { sample.to_owned() } else { format!("{}.{}", sample, hap_ix + 1) };
                 if leave_out.contains(&haplotype) {
@@ -112,7 +112,7 @@ impl AllHaplotypes {
                 if !hap_names.insert(haplotype.clone()) {
                     return Err(Error::InvalidData(format!("Duplicate haplotype name ({})", haplotype)));
                 }
-                haplotypes.push(Haplotype {
+                subnames.push(HaplotypeName {
                     hap_ix,
                     shift_ix: total,
                     name: haplotype,
@@ -121,10 +121,10 @@ impl AllHaplotypes {
             }
             samples.push(Sample {
                 name: sample.to_owned(),
-                sample_id, ploidy, haplotypes,
+                sample_id, ploidy, subnames,
             });
         }
-        log::info!("Total {} haplotypes", total);
+        log::info!("VCF file contains {} haplotypes", total);
         if discarded > 0 {
             log::warn!("Leave out {} haplotypes", discarded);
         }
@@ -148,7 +148,7 @@ impl AllHaplotypes {
 /// NOTE: Can also filter out poorly known variants, as well as variants with bad quality.
 pub fn filter_variants(
     reader: &mut impl bcf::Read,
-    haplotypes: &AllHaplotypes,
+    hap_names: &HaplotypeNames,
 ) -> Result<Vec<Record>, Error>
 {
     let mut vars = Vec::new();
@@ -156,7 +156,7 @@ pub fn filter_variants(
         let var = rec?;
         let gts = var.genotypes()?;
         let mut has_variation = false;
-        for sample in haplotypes.samples.iter() {
+        for sample in hap_names.samples.iter() {
             let gt = gts.get(sample.sample_id);
             if gt.len() != sample.ploidy {
                 return Err(Error::InvalidData(format!("Variant {} in sample {} has ploidy {} (expected {})",
@@ -170,7 +170,7 @@ pub fn filter_variants(
                         format_var(&var, reader.header()), sample.name))),
                 _ => {}
             }
-            has_variation |= sample.haplotypes.iter().any(|haplotype|
+            has_variation |= sample.subnames.iter().any(|haplotype|
                 match gt[haplotype.hap_ix] {
                     GenotypeAllele::Phased(1..) | GenotypeAllele::Unphased(1..) => true,
                     _ => false,
@@ -221,29 +221,32 @@ fn discard_unknown(
 /// Reconstructs sample sequences by adding variants to the reference sequence.
 /// Returns a vector of named sequences.
 pub fn reconstruct_sequences(
-    ref_start: u32,
+    interval: &Interval,
     ref_seq: &[u8],
-    recs: &[Record],
-    haplotypes: &AllHaplotypes,
-    header: &HeaderView,
+    vcf_file: &mut bcf::IndexedReader,
+    hap_names: &HaplotypeNames,
     unknown_frac: f64,
 ) -> Result<Vec<NamedSeq>, Error>
 {
-    let ref_end = ref_start + ref_seq.len() as u32;
-    let capacity = ref_seq.len() * 3 / 2;
+    assert_eq!(interval.len(), ref_seq.len() as u32);
+    let (ref_start, ref_end) = interval.range();
+    let vcf_rid = vcf_file.header().name2rid(interval.contig_name().as_bytes())?;
+    vcf_file.fetch(vcf_rid, u64::from(ref_start), Some(u64::from(ref_end)))?;
+    let recs = filter_variants(vcf_file, hap_names)?;
 
-    let mut seqs = Vec::with_capacity(haplotypes.total);
-    if let Some(ref_name) = haplotypes.ref_name.as_ref() {
+    let mut seqs = Vec::with_capacity(hap_names.total);
+    if let Some(ref_name) = hap_names.ref_name.as_ref() {
         seqs.push(NamedSeq::new(ref_name.to_owned(), ref_seq.to_vec()));
     }
-    for sample in haplotypes.samples.iter() {
-        for haplotype in sample.haplotypes.iter() {
-            seqs.push(NamedSeq::new(haplotype.name.clone(), Vec::with_capacity(capacity)));
+    for sample in hap_names.samples.iter() {
+        for haplotype in sample.subnames.iter() {
+            seqs.push(NamedSeq::new(haplotype.name.clone(), Vec::with_capacity(ref_seq.len() * 3 / 2)));
         }
     }
     // Number of unknown nucleotides for each sequence.
-    let mut unknown_nts = vec![0_u32; haplotypes.total];
+    let mut unknown_nts = vec![0_u32; hap_names.total];
 
+    let header = vcf_file.header();
     let mut ref_pos = ref_start;
     for var in recs.iter() {
         let alleles = var.alleles();
@@ -270,10 +273,10 @@ pub fn reconstruct_sequences(
         let seq_between_vars = &ref_seq[(ref_pos - ref_start) as usize..(var_start - ref_start) as usize];
 
         let gts = var.genotypes()?;
-        for sample in haplotypes.samples.iter() {
+        for sample in hap_names.samples.iter() {
             let gt = gts.get(sample.sample_id);
             assert_eq!(gt.len(), sample.ploidy);
-            for haplotype in sample.haplotypes.iter() {
+            for haplotype in sample.subnames.iter() {
                 let mut_seq = seqs[haplotype.shift_ix].seq_mut();
                 mut_seq.extend_from_slice(seq_between_vars);
                 let allele_ix = match gt[haplotype.hap_ix] {
@@ -292,14 +295,14 @@ pub fn reconstruct_sequences(
     let suffix_size = ref_end - ref_pos;
     if suffix_size > 0 {
         let suffix_seq = &ref_seq[(ref_pos - ref_start) as usize..];
-        for entry in seqs[haplotypes.samples[0].haplotypes[0].shift_ix..].iter_mut() {
+        for entry in seqs[hap_names.samples[0].subnames[0].shift_ix..].iter_mut() {
             entry.seq_mut().extend_from_slice(suffix_seq);
         }
     }
 
     discard_unknown(&mut seqs, &unknown_nts, unknown_frac);
     if seqs.len() < 2 {
-        Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()))
+        Err(Error::InvalidData("Less than two hap_names reconstructed".to_owned()))
     } else {
         Ok(seqs)
     }

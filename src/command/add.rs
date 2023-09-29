@@ -1,7 +1,6 @@
 use std::{
     cmp::{min, max},
     io::{self, BufRead, Read, Seek, Write},
-    fs::File,
     sync::Arc,
     path::{Path, PathBuf},
     time::Instant,
@@ -16,17 +15,17 @@ use colored::Colorize;
 use const_format::str_repeat;
 use crate::{
     err::{Error, validate_param, add_path},
-    algo::{bisect, HashSet},
+    algo::HashSet,
     ext::{
         self,
-        vec::{VecExt, IterExt},
+        vec::IterExt,
         fmt::PrettyU32,
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        panvcf, interv, fastx,
+        panvcf, fastx,
         contigs::GenomeVersion,
-        kmers::JfKmerGetter,
+        kmers::{JfKmerGetter, KmerCount},
         wfa::Penalties,
     },
 };
@@ -36,12 +35,11 @@ use super::paths;
 
 struct Args {
     database: Option<PathBuf>,
-    jf_counts: Option<PathBuf>,
     reference: Option<PathBuf>,
+    jf_counts: Option<PathBuf>,
     variants: Option<PathBuf>,
-    loci: Vec<String>,
+    loci: Vec<(String, String, Option<PathBuf>)>,
     bed_files: Vec<PathBuf>,
-    sequences: Vec<String>,
 
     ref_name: Option<String>,
     leave_out: HashSet<String>,
@@ -69,7 +67,6 @@ impl Default for Args {
             variants: None,
             loci: Vec::new(),
             bed_files: Vec::new(),
-            sequences: Vec::new(),
 
             ref_name: None,
             leave_out: Default::default(),
@@ -101,17 +98,10 @@ impl Args {
     fn validate(mut self) -> Result<Self, Error> {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
-        if self.sequences.is_empty() {
-            validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
-            validate_param!(self.variants.is_some(), "Pangenome VCF file is not provided (see -v/--vcf)");
-            validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
-                "Target loci are not provided (see -l/--locus and -L/--loci-bed)");
-        } else {
-            validate_param!(self.reference.is_none(), "Reference (-r) is mutually exclusive with sequences (-s)");
-            validate_param!(self.variants.is_none(), "VCF file (-v) is mutually exclusive with sequences (-s)");
-            validate_param!(self.loci.is_empty() && self.bed_files.is_empty(),
-                "Loci (-l/-L) are mutually exclusive with sequences (-s)");
-        }
+        validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
+        validate_param!(self.variants.is_some(), "Pangenome VCF file is not provided (see -v/--variants)");
+        validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
+            "Target loci are not provided (see -l/--locus and -L/--loci-bed)");
 
         validate_param!(0.0 <= self.unknown_frac && self.unknown_frac <= 1.0,
             "Unknown fraction ({}) must be within [0, 1]", self.unknown_frac);
@@ -126,10 +116,10 @@ impl Args {
             validate_param!(self.max_divergence == 0.0,
                 "Cannot set non-zero sequence divergence when `aln` feature is disabled");
         }
+        validate_param!(self.moving_window < u32::from(u16::MAX),
+            "Moving window ({}) must fit in two bytes", self.moving_window);
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
-        // Make window size odd.
-        self.moving_window += 1 - self.moving_window % 2;
         self.penalties.validate()?;
         Ok(self)
     }
@@ -143,9 +133,8 @@ fn print_help(extended: bool) {
     let defaults = Args::default();
     println!("{}", "Adds target locus/loci to the database.".yellow());
 
-    println!("\n{}", "Usage:".bold());
-    println!("    {} add -d db -j counts.jf -r ref.fa -v vars.vcf.gz -l/-L loci  [args]", super::PROGRAM);
-    println!("    {} add -d db -j counts.jf -s seqs.fa=name [seqs2.fa=name2 ...] [args]", super::PROGRAM);
+    print!("\n{}", "Usage:".bold());
+    println!(" {} add -d db -r ref.fa -j counts.jf [-v vars.vcf.gz] -l/-L loci [args]", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
@@ -154,34 +143,28 @@ fn print_help(extended: bool) {
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Output database directory.",
         "-d, --database".green(), "DIR".yellow());
-    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see README).",
-        "-j, --jf-counts".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.\n\
-        {EMPTY}  Must be compressed and indexed with {}.",
-        "-v, --vcf".green(), "FILE".yellow(), "tabix".underline());
-    println!("    {:KEY$} {:VAL$}\n\
-        {EMPTY}  Fasta file(s) with locus alleles. Format: {}={}.\n\
-        {EMPTY}  Mutually exclusive with {}, {} and {}/{}.\n\
-        {EMPTY}  All sequences {} on the same strand!",
-        "-s, --seqs".green(), "FILE=STR".yellow(), "filename".underline(), "locus_name".underline(),
-        "-r".green(), "-v".green(), "-l".green(), "-L".green(), "must be".red());
+    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see README).",
+        "-j, --jf-counts".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.",
+        "-v, --variants".green(), "FILE".yellow());
 
-    println!("\n{}", "Target loci coordinates:".bold());
-    println!("    {:KEY$} {:VAL$}  Locus/loci coordinates.\n\
-        {EMPTY}  Format: 'chrom:start-end=name',\n\
-        {EMPTY}  where 'name' is the locus name (must be unique).",
-        "-l, --locus".green(), "STR+".yellow());
-    println!("    {:KEY$} {:VAL$}  BED file with loci coordinates. May be repeated multiple times.\n\
-        {EMPTY}  Fourth column must contain locus name (all names should be unique).",
-        "-L, --loci-bed".green(), "FILE".yellow());
+    println!("\n{} (may be repeated multiple times)", "Target loci:".bold());
+    println!("    {:KEY$} {}\n\
+        {EMPTY}  Locus name and coordinates. If VCF ({}) was not provided,\n\
+        {EMPTY}  FASTA with locus alleles is required as a third argument.",
+        "-l, --locus".green(), "NAME REGION [FILE]".yellow(), "-v".green());
+    println!("    {:KEY$} {:VAL$}  BED file with loci coordinates. Fourth column: locus name.\n\
+        {EMPTY}  If VCF ({}) was not provided, fifth column is required\n\
+        {EMPTY}  with path to locus alleles.",
+        "-L, --loci".green(), "FILE".yellow(), "-v".green());
 
     if extended {
         println!("\n{}", "Allele extraction parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
             "-g, --genome".green(), "STR".yellow());
-        println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp outwards [{}].",
+        println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp [{}].",
             "-e, --expand".green(), "INT".yellow(), "INT".yellow(),
             super::fmt_def(PrettyU32(defaults.max_expansion)));
         println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
@@ -243,13 +226,18 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
             Short('j') | Long("jf-counts") => args.jf_counts = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
-            Short('v') | Long("vcf") => args.variants = Some(parser.value()?.parse()?),
+            Short('v') | Long("vcf") | Long("variants") => args.variants = Some(parser.value()?.parse()?),
 
-            Short('l') | Long("locus") =>
-                args.loci = parser.values()?.map(ValueExt::string).collect::<Result<Vec<_>, _>>()?,
+            Short('l') | Long("locus") => {
+                // There are 2 or 3 values, take first with `value()`.
+                let name = parser.value()?.parse()?;
+                let mut values = parser.values()?;
+                // Collect second value from `values()`, as it requires at least one argument.
+                let region = values.next().expect("First value must be present").parse()?;
+                let path = values.next().map(|val| val.parse()).transpose()?;
+                args.loci.push((name, region, path));
+            }
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
-            Short('s') | Long("seqs") | Long("sequences") =>
-                args.sequences = parser.values()?.map(|s| s.parse()).collect::<Result<_, _>>()?,
 
             Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
             Long("leave-out") | Long("leaveout") => {
@@ -293,29 +281,55 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
-/// Loads named interval from a list of loci and a list of BED files. Names must not repeat.
-fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf]) -> Result<Vec<NamedInterval>, Error> {
+/// Loads named intervals from a list of loci and a list of BED files. Names must not repeat.
+/// Additionally, returns optional FASTA filename for each locus.
+fn load_loci(
+    contigs: &Arc<ContigNames>,
+    loci: &[(String, String, Option<PathBuf>)],
+    bed_files: &[PathBuf],
+    require_seqs: bool,
+) -> Result<Vec<(NamedInterval, Option<PathBuf>)>, Error>
+{
     let mut intervals = Vec::new();
     let mut names = HashSet::default();
-    for locus in loci.iter() {
-        let interval = NamedInterval::parse_explicit(locus, contigs)?;
-        if !names.insert(interval.name().to_string()) {
-            return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
+    for (name, locus, opt_fasta) in loci.iter() {
+        if !names.insert(name.clone()) {
+            return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", name)));
         }
-        intervals.push(interval);
+        let interval = Interval::parse(locus, contigs)?;
+        intervals.push((NamedInterval::new(name.clone(), interval)?, opt_fasta.clone()));
     }
 
     for filename in bed_files.iter() {
         for line in ext::sys::open(filename)?.lines() {
             let line = line.map_err(add_path!(filename))?;
-            let interval = NamedInterval::parse_bed(&mut line.split('\t'), contigs)?;
-            if !interval.is_name_explicit() {
-                return Err(Error::InvalidInput(format!("Interval '{}' has no name", interval)));
-            }
+            let mut split = line.trim_end().split('\t');
+            let interval = NamedInterval::parse_bed(&mut split, contigs)?;
             if !names.insert(interval.name().to_string()) {
                 return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
             }
-            intervals.push(interval);
+            let opt_fasta = split.next()
+                .map(|s| PathBuf::try_from(s).map_err(|_| Error::InvalidInput(format!("Cannot parse filename {}", s))))
+                .transpose()?;
+            intervals.push((interval, opt_fasta));
+        }
+    }
+
+    // Test FASTA filenames.
+    for (locus, opt_fasta) in intervals.iter() {
+        if let Some(filename) = opt_fasta {
+            if !require_seqs {
+                return Err(Error::InvalidInput(format!(
+                    "FASTA file with locus alleles cannot be provided if variants (-v) were specified (see locus {})",
+                    locus.name())));
+            }
+            if !filename.is_file() {
+                return Err(Error::InvalidInput(format!("FASTA file {} does not exist for locus {}",
+                    ext::fmt::path(filename), locus.name())));
+            }
+        } else if require_seqs {
+            return Err(Error::InvalidInput(format!(
+                "FASTA file is required if variants (-v) was not provided (see locus {})", locus.name())));
         }
     }
     Ok(intervals)
@@ -328,28 +342,27 @@ fn load_loci(contigs: &Arc<ContigNames>, loci: &[String], bed_files: &[PathBuf])
 ///
 /// Returns best position, if found.
 fn find_best_boundary<const LEFT: bool>(
-    mov_window: u32,
-    seq_shift: u32,
-    seq: &[u8],
+    start: u32,
+    end: u32,
     vars: &[VcfRecord],
-    kmer_getter: &JfKmerGetter,
-    expand_size: u32,
+    k: u32,
+    kmer_counts: &[KmerCount],
+    args: &Args,
 ) -> Result<Option<u32>, Error>
 {
-    let halfw = mov_window / 2;
-    // New position can only be selected between `start` and `end`, where k-mer counts will be defined.
-    let start = seq_shift + halfw;
-    let end = seq_shift + seq.len() as u32 - halfw;
+    if start == end {
+        if vars.iter().any(|var| var.pos() as u32 <= start && end <= var.end() as u32) {
+            return Ok(None);
+        } else {
+            return Ok(Some(start));
+        }
+    }
 
-    let unique_kmers: Vec<u32> = kmer_getter.fetch_one(seq.to_vec())?
-        .take_first().into_iter()
-        .map(|count| u32::from(count <= 1))
-        .collect();
-    let k = kmer_getter.k();
-    let divisor = f64::from(mov_window + 1 - k);
-    // Initially, set weights to the fraction of unique kmers.
-    let mut weights: Vec<f64> = VecExt::moving_window_sums(&unique_kmers, (mov_window + 1 - k) as usize)
-        .into_iter().map(|count| f64::from(count) / divisor).collect();
+    let cumul_uniq_kmers: Vec<u32> = IterExt::cumul_sums(kmer_counts.iter().map(|&count| u32::from(count <= 1)));
+    let kmers_per_window = args.moving_window + 1 - k;
+    let divisor = f64::from(kmers_per_window);
+    let mut weights: Vec<f64> = cumul_uniq_kmers.iter().zip(&cumul_uniq_kmers[kmers_per_window as usize..])
+        .map(|(&lag_sum, &sum)| f64::from(lag_sum - sum) / divisor).collect();
     assert_eq!(weights.len() as u32, end - start);
 
     // Try to select boundary at least 10 bp from any variant.
@@ -373,25 +386,115 @@ fn find_best_boundary<const LEFT: bool>(
         }
     }
 
-    // `inner_start - expand_size` and `inner_end + expand_size` are penalized by 20%.
+    // Furthest point to the region boundary is penalized by 20%.
     const WEIGHT_DROP: f64 = 0.2;
-    let per_bp_drop = WEIGHT_DROP / f64::from(expand_size);
-    if LEFT {
-        weights.iter_mut().rev().enumerate().for_each(|(i, w)| *w -= *w * per_bp_drop * i as f64);
-    } else {
-        weights.iter_mut().enumerate().for_each(|(i, w)| *w -= *w * per_bp_drop * i as f64);
-    }
-
+    let per_bp_drop = WEIGHT_DROP / f64::from(args.max_expansion);
     let (i, maxval) = if LEFT {
-        // Finds last argmax
+        weights.iter_mut().rev().enumerate().for_each(|(i, w)| *w -= *w * per_bp_drop * i as f64);
+        // Last argmax.
         IterExt::arg_optimal(weights.iter().copied(), |opt, e| opt >= e)
     } else {
+        weights.iter_mut().enumerate().for_each(|(i, w)| *w -= *w * per_bp_drop * i as f64);
+        // First argmax.
         IterExt::arg_optimal(weights.iter().copied(), |opt, e| opt > e)
     };
+
     if maxval == 0.0 {
         Ok(None)
     } else {
         Ok(Some(start + i as u32))
+    }
+}
+
+/// Expands locus boundaries if necessary.
+fn expand_locus(
+    locus: &NamedInterval,
+    fasta_reader: &mut fasta::IndexedReader<impl Read + Seek>,
+    vcf_file: &mut bcf::IndexedReader,
+    hap_names: &panvcf::HaplotypeNames,
+    kmer_getter: &JfKmerGetter,
+    args: &Args,
+) -> Result<NamedInterval, Error>
+{
+    assert!(args.max_expansion > 0, "This function should not be called if expansion is forbidden");
+    let inner_interval = locus.interval();
+    if inner_interval.len() < args.moving_window {
+        return Err(Error::RuntimeError(format!("Locus {} is shorter ({}) than the moving window ({})",
+            locus.name(), inner_interval.len(), args.moving_window)));
+    }
+    let contig_name = inner_interval.contig_name();
+    let contig_len = inner_interval.contigs().get_len(inner_interval.contig_id());
+    let (inner_start, inner_end) = inner_interval.range();
+    // Because we need to calculate the average number of unique k-mers per each moving window,
+    // we set left end further, so that we have the same number of moving windows as the potential position shift.
+    let mut left_start = inner_start.saturating_sub(args.max_expansion);
+    let left_end = inner_start + args.moving_window;
+    let mut left_seq = seq::fetch_seq(fasta_reader, contig_name, left_start.into(), left_end.into())?;
+
+    // Same with the right boundary, we extend right start further left so that we have enough moving windows.
+    let right_start = inner_end.checked_sub(args.moving_window).unwrap();
+    let mut right_end = min(inner_end + args.max_expansion, contig_len);
+    let mut right_seq = seq::fetch_seq(fasta_reader, contig_name, right_start.into(), right_end.into())?;
+
+    // Crop left region at the last N.
+    if let Some(shift) = left_seq.iter().rposition(|&nt| nt == b'N') {
+        left_start += shift as u32 + 1;
+        if left_start > inner_start {
+            return Err(Error::RuntimeError(format!("Unknown sequence at the locus {}", locus.name())));
+        }
+        log::warn!("    [{}] Unknown nucleotide {} bp to the left ({}:{})",
+            locus.name(), inner_start - left_start + 1, contig_name, left_start + 1);
+
+        let old_len = left_seq.len();
+        // Keep only sequence after N.
+        left_seq.copy_within(shift + 1.., 0);
+        left_seq.truncate(old_len - shift - 1);
+        assert_eq!(left_seq.len() as u32, left_end - left_start);
+    }
+    // Crop right region at the first N.
+    if let Some(shift) = right_seq.iter().position(|&nt| nt == b'N') {
+        right_end = right_start + shift as u32;
+        if right_end < inner_end {
+            return Err(Error::RuntimeError(format!("Unknown sequence at the locus {}", locus.name())));
+        }
+        log::warn!("    [{}] Unknown nucleotide {} bp to the right ({}:{})",
+            locus.name(), right_end - inner_end + 1, contig_name, right_end + 1);
+        right_seq.truncate(shift);
+        assert_eq!(right_seq.len() as u32, right_end - right_start);
+    }
+
+    // Fetch variants to the left and right of the boundary.
+    let vcf_rid = vcf_file.header().name2rid(contig_name.as_bytes())?;
+    vcf_file.fetch(vcf_rid, u64::from(left_start), Some(u64::from(inner_start + 1)))?;
+    let left_vars = panvcf::filter_variants(vcf_file, hap_names)?;
+    vcf_file.fetch(vcf_rid, u64::from(inner_end - 1), Some(u64::from(right_end)))?;
+    let right_vars = panvcf::filter_variants(vcf_file, hap_names)?;
+
+    let kmer_counts = kmer_getter.fetch([left_seq, right_seq])?;
+    // Extend region to the left.
+    let new_start = match find_best_boundary::<true>(left_start, inner_start + 1, &left_vars,
+            kmer_getter.k(), kmer_counts.get(0), args)? {
+        Some(pos) => pos,
+        None => return Err(Error::RuntimeError(format!(
+            "Cannot expand locus {} to the left due to a long variant overlapping boundary.\n    \
+            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name()))),
+    };
+
+    // Extend region to the right.
+    let new_end = match find_best_boundary::<false>(inner_end - 1, right_end, &right_vars,
+            kmer_getter.k(), kmer_counts.get(1), args)? {
+        Some(pos) => pos + 1,
+        None => return Err(Error::RuntimeError(format!(
+            "Cannot expand locus {} to the right due to a long variant overlapping boundary.\n    \
+            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name()))),
+    };
+    if new_start != inner_start || new_end != inner_end {
+        let new_interval = inner_interval.create_at_same_contig(new_start, new_end);
+        log::info!("    Extending locus by {} bp left and {} bp right -> {}",
+            inner_start - new_start, new_end - inner_end, new_interval);
+        NamedInterval::new(locus.name().to_owned(), new_interval)
+    } else {
+        Ok(locus.clone())
     }
 }
 
@@ -481,7 +584,7 @@ fn cluster_haplotypes(
 /// Process haplotypes: write FASTA, PAF, kmers files, cluster sequences.
 fn process_haplotypes(
     locus_dir: &Path,
-    #[allow(unused_variables)]
+    #[allow(unused_variables)] // Not used if feature `aln` is disabled.
     tag: &str,
     entries: Vec<NamedSeq>,
     kmer_getter: &JfKmerGetter,
@@ -494,7 +597,7 @@ fn process_haplotypes(
     let divergences: Vec<f64>;
     if args.accuracy > 0 {
         #[cfg(feature = "aln")] {
-            let bam_path = locus_dir.join("all_haplotypes.bam");
+            let bam_path = locus_dir.join("hap_names.bam");
             divergences = dist::pairwise_divergences(&bam_path, &entries,
                 &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
             check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
@@ -522,8 +625,8 @@ fn process_haplotypes(
         log::info!("        Discard {} sequences after clustering", n_entries - n_filtered);
     }
 
-    let filt_fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
-    let mut filt_fasta_writer = ext::sys::create_gzip(&filt_fasta_filename)?;
+    let filt_fasta_readername = locus_dir.join(paths::LOCUS_FASTA);
+    let mut filt_fasta_writer = ext::sys::create_gzip(&filt_fasta_readername)?;
     let locus_fasta = locus_dir.join(paths::LOCUS_FASTA_ALL);
     let mut all_fasta_writer = ext::sys::create_gzip(&locus_fasta)?;
     let mut filt_seqs = Vec::with_capacity(n_filtered);
@@ -546,175 +649,7 @@ fn process_haplotypes(
     Ok(())
 }
 
-/// Checks unknown sequences, and returns max interval that contains `inner_interv` and does not contain Ns.
-/// If `inner_interv` contains Ns as well, returns None.
-fn process_unknown_seq(
-    locus: &str,
-    full_seq: &[u8],
-    full_interv: &Interval,
-    inner_interv: &Interval,
-) -> Option<Interval>
-{
-    let n_runs = seq::n_runs(full_seq);
-    if n_runs.is_empty() {
-        return Some(full_interv.clone());
-    }
-
-    let (full_start, full_end) = full_interv.range();
-    let (inner_start, inner_end) = inner_interv.range();
-    let mut new_start = full_start;
-    let mut new_end = full_end;
-    for (mut start, mut end) in n_runs {
-        start += full_start;
-        end += full_start;
-        if start <= inner_start {
-            if end <= inner_start {
-                new_start = end;
-            } else {
-                return None;
-            }
-        } else if end >= inner_end {
-            if start >= inner_end {
-                new_end = start;
-            } else {
-                return None;
-            }
-        }
-    }
-    if new_start > full_start {
-        log::debug!("    [{}] Unknown sequence {} bp to the left ({}:{})", locus, inner_start - new_start,
-            inner_interv.contig_name(), new_start + 1);
-    }
-    if new_end < full_end {
-        log::debug!("    [{}] Unknown sequence {} bp to the right ({}:{})", locus, new_end - inner_end + 1,
-            inner_interv.contig_name(), new_end + 1);
-    }
-    Some(Interval::new(Arc::clone(full_interv.contigs()), full_interv.contig_id(), new_start, new_end))
-}
-
-/// Add `locus` to the database.
-fn add_locus<R>(
-    loci_dir: &Path,
-    locus: &NamedInterval,
-    fasta_file: &mut fasta::IndexedReader<R>,
-    vcf_file: &mut bcf::IndexedReader,
-    haplotypes: &panvcf::AllHaplotypes,
-    kmer_getter: &JfKmerGetter,
-    args: &Args,
-) -> Result<bool, Error>
-where R: Read + Seek,
-{
-    let locus_dir = loci_dir.join(locus.name());
-    if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
-        return Ok(true);
-    }
-    log::info!("{} {}", "Analyzing".bold(), locus.name().bold());
-    let inner_interv = locus.interval();
-    // Add extra half-window to each sides.
-    let halfw = args.moving_window / 2;
-    let full_interv = inner_interv.expand(args.max_expansion + halfw, args.max_expansion + halfw);
-    let full_seq = full_interv.fetch_seq(fasta_file)?;
-
-    let outer_interv = match process_unknown_seq(locus.name(), &full_seq, &full_interv, &inner_interv) {
-        Some(interv) => interv,
-        None => {
-            log::error!("Cannot add locus {}. Interval {} contains unknown sequence", locus, inner_interv);
-            return Ok(false);
-        }
-    };
-    let outer_seq = &full_seq[
-        (outer_interv.start() - full_interv.start()) as usize..(outer_interv.end() - full_interv.start()) as usize];
-
-    let vcf_rid = vcf_file.header().name2rid(outer_interv.contig_name().as_bytes())?;
-    vcf_file.fetch(vcf_rid, u64::from(outer_interv.start()), Some(u64::from(outer_interv.end())))?;
-    let vcf_recs = panvcf::filter_variants(vcf_file, haplotypes)?;
-
-    // Best locus coordinates (start, end) would be within
-    // outer_start + halfw <= start <= inner_start  <  inner_end <= end <= outer_end - halfw.
-    let (inner_start, inner_end) = inner_interv.range();
-    let left_var_ix = bisect::right_by(&vcf_recs, |var| var.pos().cmp(&i64::from(inner_start + 1)));
-    let right_var_ix = bisect::left_by(&vcf_recs, |var| var.end().cmp(&i64::from(inner_end)));
-
-    // Extend region to the left.
-    let outer_start = outer_interv.start();
-    let new_start = match find_best_boundary::<true>(args.moving_window, outer_start,
-            &outer_seq[..(halfw + inner_start + 1 - outer_start) as usize], &vcf_recs[..left_var_ix],
-            kmer_getter, args.max_expansion)? {
-        Some(pos) => pos,
-        None => {
-            log::error!("Cannot expand locus {} to the left due to a variant overlapping boundary.\n    \
-                Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name());
-            return Ok(false);
-        }
-    };
-
-    // Extend region to the right.
-    let right_shift = inner_end - halfw - 1;
-    let new_end = match find_best_boundary::<false>(args.moving_window, right_shift,
-            &outer_seq[(right_shift - outer_start) as usize..], &vcf_recs[right_var_ix..],
-            kmer_getter, args.max_expansion)? {
-        Some(pos) => pos + 1,
-        None => {
-            log::error!("Cannot expand locus {} to the right due to a variant overlapping boundary.\n    \
-                Try increasing -e/--expand parameter or manually modify region boundaries.", locus.name());
-            return Ok(false);
-        }
-    };
-    let new_locus;
-    if new_start != inner_start || new_end != inner_end {
-        new_locus = locus.with_new_range(new_start, new_end);
-        log::info!("    Extending locus by {} bp left and {} bp right -> {}",
-            inner_start - new_start, new_end - inner_end, new_locus.interval());
-        assert!(new_locus.is_name_explicit());
-    } else {
-        new_locus = locus.clone();
-    }
-    let locus_bed = locus_dir.join(paths::LOCUS_BED);
-    let mut bed_writer = File::create(&locus_bed).map_err(add_path!(locus_bed))?;
-    writeln!(bed_writer, "{}", new_locus.bed_fmt()).map_err(add_path!(locus_bed))?;
-    std::mem::drop(bed_writer);
-
-    log::info!("    Reconstructing haplotypes");
-    let ref_seq = &outer_seq[(new_start - outer_start) as usize..(new_end - outer_start) as usize];
-    let reconstruction = panvcf::reconstruct_sequences(new_start, ref_seq, &vcf_recs, haplotypes,
-        vcf_file.header(), args.unknown_frac);
-    match reconstruction {
-        Ok(seqs) => process_haplotypes(&locus_dir, new_locus.name(), seqs, kmer_getter, &args)?,
-        Err(Error::InvalidData(e)) => {
-            log::error!("Cannot extract locus {} sequences: {}", new_locus, e);
-            return Ok(false);
-        }
-        Err(e) => return Err(e),
-    }
-    Ok(true)
-}
-
-/// Add loci when pangenome is provided as a VCF file.
-/// Returns number of successful and total loci.
-fn run_with_vcf(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> Result<(u32, u32), Error> {
-    let ref_filename = args.reference.as_ref().unwrap();
-    let vcf_filename = args.variants.as_ref().unwrap();
-
-    let (contigs, mut fasta_file) = ContigNames::load_indexed_fasta("reference", &ref_filename)?;
-    let ref_name = args.ref_name.as_ref().map(|s| s as &str)
-        .or_else(|| GenomeVersion::guess(&contigs).map(GenomeVersion::to_str))
-        .ok_or_else(|| Error::RuntimeError("Cannot guess reference genome name, please provide using -g".to_owned()))?;
-
-    let loci = load_loci(&contigs, &args.loci, &args.bed_files)?;
-    let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
-    let haplotypes = panvcf::AllHaplotypes::new(&mut vcf_file, &ref_name, &args.leave_out)?;
-
-    let mut succeed = 0;
-    let mut total = 0;
-    for locus in loci.iter() {
-        if add_locus(loci_dir, locus, &mut fasta_file, &mut vcf_file, &haplotypes, kmer_getter, &args)? {
-            succeed += 1;
-        }
-        total += 1;
-    }
-    Ok((succeed, total))
-}
-
+/// Checks sequences for Ns, minimal size and for equal boundaries.
 fn check_sequences(seqs: &[NamedSeq], locus: &str) -> Result<(), Error> {
     if seqs.is_empty() {
         return Err(Error::InvalidData(format!("No sequences available for locus {}", locus)));
@@ -741,48 +676,45 @@ fn check_sequences(seqs: &[NamedSeq], locus: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn process_locus_from_fasta(
-    locus: &str,
-    fasta_path: &Path,
-    loci_dir: &Path,
+/// Adds locus to the database.
+fn add_locus(
+    mut locus: NamedInterval,
+    alleles_fasta: &Option<PathBuf>,
+    locus_dir: &Path,
+    fasta_reader: &mut fasta::IndexedReader<impl Read + Seek>,
+    vcf_data: &mut Option<(bcf::IndexedReader, panvcf::HaplotypeNames)>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<(), Error>
 {
-    let locus_dir = loci_dir.join(locus);
-    if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
-        return Ok(())
-    }
-    log::info!("{} {}", "Analyzing".bold(), locus.bold());
-    let mut fasta_reader = fastx::Reader::from_path(fasta_path)?;
-    let seqs = fasta_reader.read_all()?;
-    check_sequences(&seqs, locus)?;
-    process_haplotypes(&locus_dir, locus, seqs, kmer_getter, &args)?;
-    Ok(())
-}
-
-/// Add loci based on explicit fasta files.
-/// Returns number of successful and failed loci.
-fn run_with_fasta(loci_dir: &Path, kmer_getter: &JfKmerGetter, args: &Args) -> Result<(u32, u32), Error> {
-    let total = args.sequences.len();
-    // First, parse `args.sequences`, so that we do not fail later.
-    let mut loci = Vec::with_capacity(total);
-    for path_and_name in args.sequences.iter() {
-        let (fasta_path, locus) = path_and_name.split_once('=')
-            .ok_or_else(|| Error::InvalidInput(format!("Sequence argument {:?} must follow format FASTA=LOCUS_NAME",
-                path_and_name)))?;
-        interv::check_locus_name(locus)?;
-        loci.push((locus, fasta_path));
-    }
-
-    let mut succeed = 0;
-    for (locus, fasta_path) in loci.into_iter() {
-        match process_locus_from_fasta(locus, &Path::new(fasta_path), loci_dir, kmer_getter, args) {
-            Ok(()) => succeed += 1,
-            Err(e) => log::error!("Error while analyzing locus {}: {}", locus, e.display()),
+    log::info!("Analyzing {} ({})", locus.name().bold(), locus.interval());
+    // VCF file was provided.
+    if let Some((vcf_file, hap_names)) = vcf_data {
+        if args.max_expansion > 0 {
+            locus = expand_locus(&locus, fasta_reader, vcf_file, hap_names, kmer_getter, args)?;
         }
     }
-    Ok((succeed, total as u32))
+    let ref_seq = locus.interval().fetch_seq(fasta_reader)?;
+    if seq::has_n(&ref_seq) {
+        return Err(Error::RuntimeError(format!("Locus {} sequence contains Ns", locus)));
+    }
+
+    // Write reference coordinates to the BED file.
+    let locus_bed = locus_dir.join(paths::LOCUS_BED);
+    let mut bed_writer = ext::sys::create_file(&locus_bed)?;
+    writeln!(bed_writer, "{}", locus.bed_fmt()).map_err(add_path!(locus_bed))?;
+
+    // Load sequences.
+    let allele_seqs = if let Some((vcf_file, hap_names)) = vcf_data {
+        panvcf::reconstruct_sequences(locus.interval(), &ref_seq, vcf_file, hap_names, args.unknown_frac)?
+    } else if let Some(fasta_filename) = alleles_fasta {
+        let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
+        fasta_reader.read_all()?
+    } else {
+        unreachable!("Either VCF file or alleles FASTA must be specified")
+    };
+    check_sequences(&allele_seqs, locus.name())?;
+    process_haplotypes(locus_dir, locus.name(), allele_seqs, kmer_getter, args)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
@@ -795,21 +727,44 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let loci_dir = db_dir.join(paths::LOCI_DIR);
     ext::sys::mkdir(&loci_dir)?;
 
+    let (contigs, mut fasta_reader) = ContigNames::load_indexed_fasta("REF", args.reference.as_ref().unwrap())?;
+    let loci = load_loci(&contigs, &args.loci, &args.bed_files, args.variants.is_none())?;
+    let mut vcf_data = if let Some(vcf_filename) = &args.variants {
+        let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
+        let ref_name = args.ref_name.as_ref().map(String::clone)
+            .or_else(|| GenomeVersion::guess(&contigs).map(|ver| ver.to_str().to_owned()))
+            .ok_or_else(|| Error::RuntimeError(
+                "Cannot guess reference genome name, please provide using -g".to_owned()))?;
+        let hap_names = panvcf::HaplotypeNames::new(&mut vcf_file, &ref_name, &args.leave_out)?;
+        Some((vcf_file, hap_names))
+    } else {
+        None
+    };
     let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;
     args.moving_window = max(kmer_getter.k(), args.moving_window);
 
-    let (succeed, total) = if args.sequences.is_empty() {
-        run_with_vcf(&loci_dir, &kmer_getter, &args)?
-    } else {
-        run_with_fasta(&loci_dir, &kmer_getter, &args)?
-    };
+    let total = loci.len();
+    let mut failed = 0;
+    for (locus, alleles_fasta) in loci.into_iter() {
+        let locus_dir = loci_dir.join(locus.name());
+        if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
+            continue;
+        }
+        let res = add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader,
+            &mut vcf_data, &kmer_getter, &args);
+        if let Err(e) = res {
+            log::error!("Error while analyzing locus {}: {}", locus, e.display());
+            failed += 1;
+        }
+    }
 
+    let succeed = total - failed;
     if succeed == 0 {
-        log::error!("Failed at {} loci", total);
-    } else if succeed < total {
-        log::warn!("Successfully analysed {} loci, failed at {} loci", succeed, total - succeed);
+        log::error!("Failed to add {} loci", failed);
+    } else if failed > 0 {
+        log::warn!("Successfully added {} loci, failed to add {} loci", succeed, failed);
     } else {
-        log::info!("Successfully analysed {} loci", succeed);
+        log::info!("Successfully added {} loci", succeed);
     }
     log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
