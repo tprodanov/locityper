@@ -259,13 +259,12 @@ pub fn reconstruct_sequences(
         let var_end = var_start + ref_len;
         if var_end <= ref_start {
             continue;
-        }
-        if ref_end <= var_start {
+        } else if ref_end <= var_start {
             break;
-        }
-        assert!(ref_start <= var_start && var_end <= ref_end,
-            "Variant {} overlaps the boundary of the region {}-{}", format_var(var, header), ref_start + 1, ref_end);
-        if var_start < ref_pos {
+        } else if var_start < ref_start || ref_end < var_end {
+            return Err(Error::RuntimeError(format!("Variant {} overlaps the boundary of the region {}-{}",
+                format_var(var, header), ref_start + 1, ref_end)));
+        } else if var_start < ref_pos {
             return Err(Error::InvalidData(format!("Input VCF file contains overlapping variants: see {}. \
                 Consider running `vcfbub -l 0 -i VCF | bgzip > VCF2 && tabix -p vcf VCF2`.",
                 format_var(var, header))));

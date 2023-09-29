@@ -362,7 +362,7 @@ fn find_best_boundary<const LEFT: bool>(
     let kmers_per_window = args.moving_window + 1 - k;
     let divisor = f64::from(kmers_per_window);
     let mut weights: Vec<f64> = cumul_uniq_kmers.iter().zip(&cumul_uniq_kmers[kmers_per_window as usize..])
-        .map(|(&lag_sum, &sum)| f64::from(lag_sum - sum) / divisor).collect();
+        .map(|(&lag_sum, &sum)| f64::from(sum - lag_sum) / divisor).collect();
     assert_eq!(weights.len() as u32, end - start);
 
     // Try to select boundary at least 10 bp from any variant.
@@ -753,7 +753,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         let res = add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader,
             &mut vcf_data, &kmer_getter, &args);
         if let Err(e) = res {
-            log::error!("Error while analyzing locus {}: {}", locus, e.display());
+            log::error!("Error while analyzing locus {}:\n        {}", locus, e.display());
             failed += 1;
         }
     }
