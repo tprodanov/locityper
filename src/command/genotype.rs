@@ -186,9 +186,17 @@ fn print_help(extended: bool) {
             {EMPTY}  * {} = breakpoint (0, 1). Weight at breakpoint is 1/2,\n\
             {EMPTY}  * {} = power [0.5, 50]. Regulates sigmoid slope (bigger - steeper).\n\
             {EMPTY}  Use {} to disable weights.",
-            "    --weight".green(), "FLOAT FLOAT | off".yellow(),
-            super::fmt_def_f64(crate::model::DEF_WEIGHT_BREAKPOINT), super::fmt_def_f64(crate::model::DEF_WEIGHT_POWER),
+            "    --kmers-weight".green(), "FLOAT FLOAT | off".yellow(),
+            super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().breakpoint()),
+            super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().power()),
             "FLOAT_1".yellow(), "FLOAT_2".yellow(), "off".yellow());
+        println!("    {:KEY$} {}\n\
+            {EMPTY}  Calculate window weight based on the linguistic complexity\n\
+            {EMPTY}  of the window sequence [{} {}]. Same format as {}.",
+            "    --compl-weight".green(), "FLOAT FLOAT | off".yellow(),
+            super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().breakpoint()),
+            super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().power()),
+            "--kmers-weight".green());
         println!("    {:KEY$} {:VAL$}  Ignore reads and windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
@@ -303,13 +311,22 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
-            Long("weight") => {
+            Long("kmers-weight") => {
                 let first = parser.value()?;
                 if first == "off" {
-                    args.assgn_params.weight_calc = None;
+                    args.assgn_params.kmers_weight_calc = None;
                 } else {
-                    args.assgn_params.weight_calc = Some(WeightCalculator::new(
-                        first.parse()?, parser.value()?.parse()?)?);
+                    args.assgn_params.kmers_weight_calc = Some(
+                        WeightCalculator::new(first.parse()?, parser.value()?.parse()?)?);
+                }
+            }
+            Long("compl-weight") => {
+                let first = parser.value()?;
+                if first == "off" {
+                    args.assgn_params.compl_weight_calc = None;
+                } else {
+                    args.assgn_params.compl_weight_calc = Some(
+                        WeightCalculator::new(first.parse()?, parser.value()?.parse()?)?);
                 }
             }
             Long("min-weight") => args.assgn_params.min_weight = parser.value()?.parse()?,

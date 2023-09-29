@@ -10,9 +10,6 @@ use crate::{
 };
 use windows::WeightCalculator;
 
-pub const DEF_WEIGHT_BREAKPOINT: f64 = 0.2;
-pub const DEF_WEIGHT_POWER: f64 = 2.0;
-
 /// Read depth model parameters.
 #[derive(Clone, Debug)]
 pub struct Params {
@@ -28,8 +25,11 @@ pub struct Params {
     /// Edit distance p-value thresholds, first for good alignments, second for passable.
     pub edit_pvals: (f64, f64),
 
-    /// Window weight calculator, if any.
-    pub weight_calc: Option<WeightCalculator>,
+    /// Two window weight calculators: one for the fraction of unique k-mers,
+    pub kmers_weight_calc: Option<WeightCalculator>,
+    /// and another for linguistic complexity of the window.
+    pub compl_weight_calc: Option<WeightCalculator>,
+
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
     /// Normalize read depth based on (<mean sum weight> / <sum weight>) ^ depth_norm_power.
@@ -66,7 +66,9 @@ impl Default for Params {
             unmapped_penalty: Ln::from_log10(-5.0),
             edit_pvals: (0.01, 0.001),
 
-            weight_calc: Some(WeightCalculator::new(DEF_WEIGHT_BREAKPOINT, DEF_WEIGHT_POWER).unwrap()),
+            kmers_weight_calc: Some(WeightCalculator::new(0.2, 2.0).unwrap()),
+            compl_weight_calc: Some(WeightCalculator::new(0.5, 2.0).unwrap()),
+
             min_weight: 0.001,
             depth_norm_power: 0.0,
 
