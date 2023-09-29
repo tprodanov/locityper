@@ -99,7 +99,6 @@ impl Args {
         validate_param!(self.database.is_some(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
-        validate_param!(self.variants.is_some(), "Pangenome VCF file is not provided (see -v/--variants)");
         validate_param!(!self.loci.is_empty() || !self.bed_files.is_empty(),
             "Target loci are not provided (see -l/--locus and -L/--loci-bed)");
 
@@ -301,6 +300,7 @@ fn load_loci(
     }
 
     for filename in bed_files.iter() {
+        let dirname = filename.parent();
         for line in ext::sys::open(filename)?.lines() {
             let line = line.map_err(add_path!(filename))?;
             let mut split = line.trim_end().split('\t');
@@ -308,9 +308,14 @@ fn load_loci(
             if !names.insert(interval.name().to_string()) {
                 return Err(Error::InvalidInput(format!("Locus name '{}' appears at least twice", interval.name())));
             }
-            let opt_fasta = split.next()
-                .map(|s| PathBuf::try_from(s).map_err(|_| Error::InvalidInput(format!("Cannot parse filename {}", s))))
-                .transpose()?;
+            let opt_fasta = match split.next() {
+                None => None,
+                Some(s) => {
+                    let path = &Path::new(s);
+                    // Join with parent directory, if any.
+                    Some(dirname.map(|d| d.join(path)).unwrap_or_else(|| path.to_path_buf()))
+                },
+            };
             intervals.push((interval, opt_fasta));
         }
     }
