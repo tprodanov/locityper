@@ -1,7 +1,7 @@
 //! Paths to various directories and files within the database and output directories.
 
 /// k-mer counts are stored in this file.
-pub(super) const KMERS: &'static str = "kmers.lz4";
+pub(super) const KMERS: &'static str = "kmers.bin.lz4";
 
 /// Information about a locus is stored in `database/LOCI_DIR/<locus_name>`.
 pub(super) const LOCI_DIR: &'static str = "loci";

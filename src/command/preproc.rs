@@ -947,7 +947,7 @@ impl BgRegion {
         let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;
         let sequence = interval.fetch_seq(&mut ref_fasta)?;
         log::info!("Calculating k-mer counts on the background region");
-        let kmer_counts = kmer_getter.fetch_one(sequence.clone())?;
+        let kmer_counts = kmer_getter.fetch([sequence.clone()])?;
         Ok(Self { ref_contigs, interval, sequence, kmer_counts })
     }
 }

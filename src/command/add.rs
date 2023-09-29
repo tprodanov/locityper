@@ -583,9 +583,10 @@ fn cluster_haplotypes(
 
 /// Process haplotypes: write FASTA, PAF, kmers files, cluster sequences.
 fn process_haplotypes(
-    locus_dir: &Path,
     #[allow(unused_variables)] // Not used if feature `aln` is disabled.
-    tag: &str,
+    locus: &NamedInterval,
+    locus_dir: &Path,
+    ref_seq: Vec<u8>,
     entries: Vec<NamedSeq>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
@@ -600,7 +601,7 @@ fn process_haplotypes(
             let bam_path = locus_dir.join("hap_names.bam");
             divergences = dist::pairwise_divergences(&bam_path, &entries,
                 &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
-            check_divergencies(tag, &entries, divergences.iter().copied(), args.variants.is_some());
+            check_divergencies(locus.name(), &entries, divergences.iter().copied(), args.variants.is_some());
         } #[cfg(not(feature = "aln"))] {
             panic!("Accuracy > 0, but `aln` feature is disabled");
         }
@@ -641,9 +642,17 @@ fn process_haplotypes(
     std::mem::drop((filt_fasta_writer, all_fasta_writer));
 
     log::info!("    Counting k-mers");
-    let kmer_counts = kmer_getter.fetch(filt_seqs)?;
+    // Calculate k-mer counts for the reference sequence as well.
+    filt_seqs.push(ref_seq.to_vec());
+    let mut kmer_counts = kmer_getter.fetch(filt_seqs.clone())?;
+    let ref_seq = filt_seqs.pop().unwrap();
+    let ref_counts = kmer_counts.pop();
+    let off_target_counts = kmer_counts.off_target_counts(&filt_seqs, &ref_seq, &ref_counts);
+
     let kmers_filename = locus_dir.join(paths::KMERS);
     let mut kmers_writer = ext::sys::create_lz4_slow(&kmers_filename)?;
+    // Consecutively save off-target counts and regular counts (if they will sometimes be useful later).
+    off_target_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
     kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
     super::write_success_file(locus_dir.join(paths::SUCCESS))?;
     Ok(())
@@ -721,7 +730,7 @@ fn add_locus(
         unreachable!("Either VCF file or alleles FASTA must be specified")
     };
     check_sequences(&allele_seqs, locus.name(), if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
-    process_haplotypes(locus_dir, locus.name(), allele_seqs, kmer_getter, args)
+    process_haplotypes(&locus, locus_dir, ref_seq, allele_seqs, kmer_getter, args)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {

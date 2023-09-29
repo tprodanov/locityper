@@ -10,6 +10,7 @@ use std::{
 use varint_rs::{VarintWriter, VarintReader};
 use crate::{
     seq::{self, ContigNames, ContigId},
+    algo::HashMap,
     err::{Error, add_path},
     bg::ser::json_get,
     ext::sys::PipeGuard,
@@ -287,6 +288,11 @@ impl KmerCounts {
         &self.counts[0]
     }
 
+    /// Takes k-mer counts for the last contig out of this collection.
+    pub fn pop(&mut self) -> Vec<KmerCount> {
+        self.counts.pop().expect("No k-mer counts present in the collection")
+    }
+
     /// Returns all k-mer counts for the first contig (must be the only contig).
     /// Length: contig len - k + 1.
     pub fn take_first(mut self) -> Vec<KmerCount> {
@@ -359,6 +365,57 @@ impl KmerCounts {
         }
         Ok(())
     }
+
+    /// Counts off-target k-mers across all contigs.
+    /// This is done by subtracting target k-mers from the whole reference k-mer counts,
+    /// and then for each contig we keep k-mer counts as they are for k-mers that don't appear in the target,
+    /// while we replace other k-mer counts with off-target counts.
+    ///
+    /// If one of the counts is equal to `max_count`, keep it as it is.
+    pub fn off_target_counts(&self, seqs: &[Vec<u8>], target_seq: &[u8], target_counts: &[KmerCount]) -> Self {
+        let k = u8::try_from(self.k).expect("k-mer size is too large");
+        assert!(k <= u128::MAX_KMER_SIZE, "Cannot subtract k-mer counts: k is too high ({})", self.k);
+
+        let mut buffer = Vec::new();
+        kmers::<u128, CANONICAL>(target_seq, k, &mut buffer);
+        assert_eq!(buffer.len(), target_counts.len(), "Unexpected number of subtract k-mers");
+
+        // Value: off-target count.
+        let mut off_target_map = HashMap::default();
+        // Insert max value for the undefined k-mer (with Ns), just in case.
+        off_target_map.insert(u128::UNDEF, self.max_value);
+        let mut have_negative = false;
+        for (&kmer, &count) in buffer.iter().zip(target_counts) {
+            let val = off_target_map.entry(kmer).or_insert(count);
+            if *val != self.max_value {
+                have_negative |= *val == 0;
+                // Decrease off-target count by one.
+                *val = val.saturating_sub(1);
+            }
+        }
+        if have_negative {
+            log::error!("Reference sequence does not match completely with Jellyfish k-mer counts.\n    \
+                Perhaps Jellyfish counts were calculated for another reference?");
+        }
+
+        let mut all_new_counts = Vec::with_capacity(seqs.len());
+        for (seq, old_counts) in seqs.iter().zip(&self.counts) {
+            buffer.clear();
+            kmers::<u128, CANONICAL>(seq, k, &mut buffer);
+            let new_counts: Vec<_> = buffer.iter().zip(old_counts)
+                .map(|(kmer, &old_count)| off_target_map.get(kmer).copied().unwrap_or(old_count))
+                .collect();
+            assert_eq!(old_counts.len(), new_counts.len(), "Unexpected number of k-mers for one of the sequences");
+            all_new_counts.push(new_counts);
+        }
+        assert_eq!(self.counts.len(), all_new_counts.len(),
+            "Number of sequences does not match the number of k-mer counts");
+        Self {
+            k: self.k,
+            max_value: self.max_value,
+            counts: all_new_counts,
+        }
+    }
 }
 
 /// Structure, that runs `jellyfish` and queries k-mers per sequence or from the reference file.
@@ -390,6 +447,9 @@ impl JfKmerGetter {
         if k % 2 != 1 {
             return Err(Error::InvalidData(
                 format!("Jellyfish counts are calculated for an even k size ({}), odd k is required", k)));
+        } else if k > u32::from(u128::MAX_KMER_SIZE) {
+            return Err(Error::InvalidData(format!(
+                "Jellyfish counts are calculated for too big k ({}), at most {} can be used", k, u128::MAX_KMER_SIZE)));
         }
         log::info!("Detected jellyfish k-mer size: {}", k);
         if counter_len > 8 {
@@ -461,12 +521,6 @@ impl JfKmerGetter {
             }),
             _ => Err(Error::InvalidData("Too many k-mer counts!".to_owned())),
         }
-    }
-
-    /// Runs jellyfish and returns k-mer frequencies for all k-mers in the sequence.
-    /// Sequence is consumed, as it needs to be passed to another thread.
-    pub fn fetch_one(&self, seq: Vec<u8>) -> Result<KmerCounts, Error> {
-        self.fetch([seq])
     }
 }
 
