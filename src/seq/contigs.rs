@@ -244,7 +244,10 @@ impl ContigSet {
         let contigs = ContigNames::new(tag,
             named_seqs.iter_mut().map(|entry| (std::mem::replace(entry.name_mut(), String::new()), entry.len())))?;
         let seqs: Vec<_> = named_seqs.into_iter().map(NamedSeq::take_seq).collect();
-        let kmer_counts = KmerCounts::load(&mut ext::sys::open(kmers_filename)?).map_err(add_path!(kmers_filename))?;
+        // k-mer counts file contains both off-target and regular k-mer counts.
+        // For now, we only need off-target counts, so we only read k-mer counts once.
+        let mut kmers_file = ext::sys::open(kmers_filename)?;
+        let kmer_counts = KmerCounts::load(&mut kmers_file).map_err(add_path!(kmers_filename))?;
         kmer_counts.validate(&contigs)?;
         Ok(Self {
             contigs: Arc::new(contigs),

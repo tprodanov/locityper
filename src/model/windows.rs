@@ -248,7 +248,8 @@ impl ContigInfo {
         let left_padding = (neighb_size - window) / 2;
         let right_padding = neighb_size - window - left_padding;
 
-        let cumul_uniq_kmers = IterExt::cumul_sums(kmer_counts.get(contig_id.ix()).iter().map(|&count| count <= 1));
+        // Unique k-mers should have count = 0 because `kmer_counts` only stores off-target matches.
+        let cumul_uniq_kmers = IterExt::cumul_sums(kmer_counts.get(contig_id.ix()).iter().map(|&count| count == 0));
         let cumul_gc = IterExt::cumul_sums(seq.iter().map(|&ch| ch == b'C' || ch == b'G'));
         let mut res = Self {
             contig_len, left_padding, right_padding, cumul_gc, cumul_uniq_kmers,
