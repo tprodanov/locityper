@@ -104,8 +104,6 @@ pub struct Alignment {
     strand: Strand,
     read_end: ReadEnd,
     ln_prob: f64,
-    /// Stores if the edit distance is below a certain threshold (see `locs`).
-    good_edit_dist: bool,
 }
 
 impl Alignment {
@@ -127,7 +125,6 @@ impl Alignment {
             interval,
             strand: Strand::from_record(record),
             cigar, ln_prob, read_end,
-            good_edit_dist: false,
         }
     }
 
@@ -164,14 +161,6 @@ impl Alignment {
     /// Sets ln-probability of the alignment.
     pub fn set_ln_prob(&mut self, ln_prob: f64) {
         self.ln_prob = ln_prob;
-    }
-
-    pub fn has_good_dist(&self) -> bool {
-        self.good_edit_dist
-    }
-
-    pub fn set_edit_dist_status(&mut self, good: bool) {
-        self.good_edit_dist = good;
     }
 
     /// Returns sorted key: first sort by contig id, then by read end.

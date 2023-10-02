@@ -134,7 +134,7 @@ fn count_alignments<const PAIRED: bool>(
     for aln in read_alns {
         let (i, j) = match aln.parent() {
             None => (UNMAPPED, UNMAPPED),
-            Some(aln_pair) => (
+            Some((_, aln_pair)) => (
                 aln_pair.ix1().unwrap_or(UNMAPPED),
                 if PAIRED { aln_pair.ix2().unwrap_or(UNMAPPED) } else { UNMAPPED },
             ),

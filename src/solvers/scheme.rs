@@ -221,7 +221,7 @@ pub struct Data {
     pub is_paired_end: bool,
 }
 
-const ALNS_CSV_HEADER: &'static str = "read_hash\taln1\taln2\tlik\tselected";
+const ALNS_CSV_HEADER: &'static str = "read_hash\tcontig\tpos1\tposs2\tlik\tselected";
 
 /// Write reads and their assignments to a CSV file in the following format (tab-separated):
 /// `prefix  read_hash  aln1  aln2  w1  w2  log10-prob  selected`
@@ -236,18 +236,19 @@ fn write_alns(
     let attempts = f32::from(attempts);
     let mut counts_iter = assgn_counts.iter();
     for (rp, groupped_alns) in all_alns.reads().iter().enumerate() {
-        let hash = groupped_alns.name_hash();
+        let hash = groupped_alns.read_data().name_hash();
         for curr_windows in gt_alns.possible_read_alns(rp) {
             write!(f, "{}{:X}\t", prefix, hash)?;
             match curr_windows.parent() {
-                None => write!(f, "*\t*\t")?,
-                Some(aln_pair) => {
+                None => write!(f, "*\t*\t*\t")?,
+                Some((contig_ix, aln_pair)) => {
+                    write!(f, "{}\t", contig_ix + 1)?;
                     match aln_pair.ix1() {
-                        Some(i) => write!(f, "{}\t", groupped_alns.ith_aln(i).interval())?,
+                        Some(i) => write!(f, "{}\t", groupped_alns.ith_aln(i).interval().start() + 1)?,
                         None => write!(f, "*\t")?,
                     };
                     match aln_pair.ix2() {
-                        Some(i) => write!(f, "{}\t", groupped_alns.ith_aln(i).interval())?,
+                        Some(i) => write!(f, "{}\t", groupped_alns.ith_aln(i).interval().start() + 1)?,
                         None => write!(f, "*\t")?,
                     };
                 }
@@ -488,8 +489,7 @@ fn solve_single_thread(
                     assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                 }
                 assgns.update_counts(&mut counts);
-                assgns.summarize(&mut sol_writer, &ext_prefix, &data.all_alns, data.is_paired_end)
-                    .map_err(add_path!(!))?;
+                assgns.summarize(&mut sol_writer, &ext_prefix).map_err(add_path!(!))?;
             }
             if let Some(writer) = aln_writer.as_mut() {
                 write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;
@@ -773,8 +773,7 @@ impl Worker {
                         assgns.write_depth(writer, &ext_prefix).map_err(add_path!(!))?;
                     }
                     assgns.update_counts(&mut counts);
-                    assgns.summarize(&mut self.sol_buffer, &ext_prefix, &data.all_alns, data.is_paired_end)
-                        .map_err(add_path!(!))?;
+                    assgns.summarize(&mut self.sol_buffer, &ext_prefix).map_err(add_path!(!))?;
                 }
                 if let Some(writer) = self.aln_writer.as_mut() {
                     write_alns(writer, &prefix, &gt_alns, &data.all_alns, &counts, attempts).map_err(add_path!(!))?;

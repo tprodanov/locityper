@@ -749,11 +749,12 @@ fn analyze_locus(
 
     let all_alns = if args.debug {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
-        AllAlignments::load(bam_reader, contigs, bg_distr, edit_dist_cache, &all_contig_infos,
-            &args.assgn_params, reads_writer)?
+        let read_kmer_writer = ext::sys::create_gzip(&locus.out_dir.join("read_kmers.csv.gz"))?;
+        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache,
+            &args.assgn_params, reads_writer, read_kmer_writer)?
     } else {
-        AllAlignments::load(bam_reader, contigs, bg_distr, edit_dist_cache, &all_contig_infos,
-            &args.assgn_params, io::sink())?
+        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache,
+            &args.assgn_params, io::sink(), io::sink())?
     };
     if is_paired_end && args.debug {
         let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");

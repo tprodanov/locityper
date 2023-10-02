@@ -11,7 +11,8 @@ use crate::{
     err::{Error, add_path},
     seq::{
         self,
-        Interval, ContigId, ContigNames,
+        Interval, ContigId, ContigNames, ContigSet,
+        kmers::{self, CANONICAL},
         aln::{Alignment, ReadEnd, Strand},
         cigar::Cigar,
     },
@@ -20,30 +21,11 @@ use crate::{
         err_prof::{ErrorProfile, EditDistCache},
         insertsz::InsertDistr,
     },
-    algo::{bisect, TwoU32, get_hash},
+    algo::{bisect, TwoU32, get_hash, HashSet},
     math::Ln,
-    model::windows::ContigInfo,
 };
 
-struct MateSummary {
-    name_hash: u64,
-    weight: f64,
-    min_prob: f64,
-    any_central: bool,
-    mapped: bool,
-}
-
-impl MateSummary {
-    fn unmapped(name_hash: u64) -> Self {
-        Self {
-            name_hash,
-            weight: 0.0,
-            min_prob: 0.0,
-            any_central: false,
-            mapped: false,
-        }
-    }
-}
+// ------------------------- Read-end and pair-end data, such as sequences and qualities -------------------------
 
 #[derive(Clone)]
 pub struct MateData {
@@ -83,6 +65,7 @@ impl MateData {
 #[derive(Default, Clone)]
 pub struct ReadData {
     name: String,
+    name_hash: u64,
     mates: [Option<MateData>; 2],
 }
 
@@ -91,23 +74,28 @@ impl ReadData {
         &self.name
     }
 
+    pub fn name_hash(&self) -> u64 {
+        self.name_hash
+    }
+
     pub fn mate_data(&self, read_end: ReadEnd) -> &MateData {
         self.mates[read_end.ix()].as_ref().expect("Mate data undefined")
     }
 }
 
-/// BAM reader, which stores the next record within.
-/// Contains `read_mate_alns` method, which consecutively reads all records with the same name
+// ------------------------- BAM file reader, that skips bad alignments -------------------------
+
+/// BAM reader.
+/// Contains `next_alns` method, which consecutively reads all records with the same name
 /// until the next primary alignment.
 struct FilteredReader<'a, R: bam::Read> {
     reader: R,
+    /// Next record is stored but not yet returned.
     record: bam::Record,
     has_more: bool,
     contigs: Arc<ContigNames>,
-    boundary: u32,
     err_prof: &'a ErrorProfile,
     edit_dist_cache: &'a EditDistCache,
-    all_contig_infos: &'a [Arc<ContigInfo>],
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id, alignment start), value: index of the previous position.
     found_alns: IntMap<TwoU32, usize>,
@@ -124,8 +112,6 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
         edit_dist_cache: &'a EditDistCache,
-        all_contig_infos: &'a [Arc<ContigInfo>],
-        boundary: u32,
     ) -> Result<Self, Error> {
         let mut record = bam::Record::new();
         // Reader would return None if there are no more records.
@@ -133,7 +119,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
             found_alns: IntMap::default(),
-            reader, record, contigs, err_prof, edit_dist_cache, all_contig_infos, boundary, has_more,
+            reader, record, contigs, err_prof, edit_dist_cache, has_more,
         })
     }
 
@@ -143,22 +129,27 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     /// which is saved to `self.record`.
     ///
     /// If read is unmapped, or best edit distance is too high, does not add any new alignments.
+    ///
+    /// Returns smallest saved alignment probability (None if unmapped).
     fn next_alns(
         &mut self,
         read_end: ReadEnd,
         alns: &mut Vec<Alignment>,
         read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
-    ) -> Result<MateSummary, Error>
+    ) -> Result<Option<f64>, Error>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name_hash = get_hash(self.record.qname());
         let name = std::str::from_utf8(self.record.qname()).map_err(|_| Error::InvalidInput(
             format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))?;
+
+        // Check if everything is correct.
         if read_end == ReadEnd::First {
             assert!(read_data.name.is_empty());
             read_data.name.push_str(name);
-        } else if name != read_data.name {
+            read_data.name_hash = name_hash;
+        } else if name_hash != read_data.name_hash {
             return Err(Error::InvalidData(format!("Read {} does not have a second read end", name)));
         }
         if self.record.seq().is_empty() {
@@ -168,23 +159,19 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(old_option.is_none(), "Mate data defined twice");
 
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tF\tNA\t-\tNA\tNA\t{}", name_hash, read_end, name)
-                .map_err(add_path!(!))?;
+            writeln!(dbg_writer, "{:X}\t{}\t*\tNA\t-\t{}", name_hash, read_end, name).map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
-            return Ok(MateSummary::unmapped(name_hash));
+            return Ok(None);
         }
 
         let start_len = alns.len();
-        // Is any of the alignments in the central region of a contig?
-        let mut any_central = false;
         // Does any alignment have good edit distance?
         let mut any_good = false;
         let mut min_prob = f64::INFINITY;
-        let mut weight = f64::NAN;
         self.found_alns.clear();
+        let mut primary = true;
         loop {
-            let primary = weight.is_nan();
             let mut cigar = Cigar::from_raw(self.record.raw_cigar());
             if primary {
                 assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
@@ -192,12 +179,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 cigar.hard_to_soft();
             }
             let mut aln = Alignment::new(&self.record, cigar, read_end, Arc::clone(&self.contigs), f64::NAN);
-            let aln_interval = aln.interval();
-            let contig_len = self.contigs.get_len(aln_interval.contig_id());
-            let central = self.boundary < aln_interval.end() && aln_interval.start() < contig_len - self.boundary;
-            any_central |= central;
-
-            let read_prof = aln.count_region_operations_fast(contig_len);
+            let read_prof = aln.count_region_operations_fast(self.contigs.get_len(aln.interval().contig_id()));
             let aln_prob = self.err_prof.ln_prob(&read_prof);
             let (edit_dist, read_len) = read_prof.edit_and_read_len();
             let (good_dist, passable_dist) = self.edit_dist_cache.get(read_len);
@@ -206,19 +188,16 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let is_passable_dist = edit_dist <= passable_dist;
             any_good |= is_good_dist;
 
-            write!(dbg_writer, "{:X}\t{}\t{}\t{}\t{}/{}\t{}\t{:.2}",
-                name_hash, read_end, aln_interval, if central { 'T' } else { 'F' },
+            write!(dbg_writer, "{:X}\t{}\t{}\t{}/{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
                 edit_dist, read_len, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
-                weight = self.all_contig_infos[aln_interval.contig_id().ix()]
-                    .default_window_weight(aln_interval.middle());
-                write!(dbg_writer, "\t{:.5}\t{}", weight, read_data.name).map_err(add_path!(!))?;
+                write!(dbg_writer, "\t{}", read_data.name).map_err(add_path!(!))?;
+                primary = false;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
             aln.set_ln_prob(aln_prob);
-            aln.set_edit_dist_status(is_good_dist);
             if is_passable_dist {
                 match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
                     Entry::Occupied(entry) => {
@@ -247,16 +226,100 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 "Read {} first alignment is not primary", String::from_utf8_lossy(self.record.qname()));
         }
 
-        Ok(if any_good {
-            MateSummary { name_hash, weight, min_prob, any_central, mapped: true }
+        if any_good {
+            Ok(Some(min_prob))
         } else {
             alns.truncate(start_len);
-            MateSummary::unmapped(name_hash)
-        })
+            Ok(None)
+        }
     }
 
     fn has_more(&self) -> bool {
         self.has_more
+    }
+}
+
+// ------------------------- Structures for storing all alignments for one read pair -------------------------
+
+/// All appropriate alignments for one read pair / single read.
+pub struct GrouppedAlignments {
+    /// Read name.
+    read_data: ReadData,
+    /// Probability that both mates are unmapped.
+    unmapped_prob: f64,
+    /// All read alignments.
+    alignments: Vec<Alignment>,
+    /// Read alignments, groupped into pairs.
+    aln_pairs: Vec<PairAlignment>,
+    /// Weight of the read pair.
+    weight: f64,
+}
+
+impl GrouppedAlignments {
+    /// Returns read name.
+    pub fn read_name(&self) -> &str {
+        &self.read_data.name
+    }
+
+    /// Probability that both reads are unmapped for one specific contig (but same for all contigs).
+    pub fn unmapped_prob(&self) -> f64 {
+        self.unmapped_prob
+    }
+
+    /// For a given contig, returns alignment pairs, corresponding to this contig.
+    pub fn contig_aln_pairs(&self, contig_id: ContigId) -> &[PairAlignment] {
+        let i = bisect::left_by(&self.aln_pairs, |paln| paln.contig_id().cmp(&contig_id));
+        let j = bisect::right_boundary(&self.aln_pairs, |paln| contig_id == paln.contig_id(), i, self.aln_pairs.len());
+        &self.aln_pairs[i..j]
+    }
+
+    /// Returns best alignment probability for each contig (must be sorted).
+    pub fn best_for_each_contig<'a>(&'a self, contig_ids: &'a [ContigId]) -> impl Iterator<Item = f64> + 'a {
+        let n = self.aln_pairs.len();
+        let mut j = 0;
+        contig_ids.iter().map(move |&id| {
+            let i = j; // Do this way so that we can immediately return value two lines later.
+            j = bisect::right_boundary(&self.aln_pairs, |aln| aln.contig_id() == id, i, n);
+            if i == j { self.unmapped_prob } else { self.aln_pairs[i].ln_prob() }
+        })
+    }
+
+    /// Return `i`-th alignment of all alignments for the read pair.
+    pub fn ith_aln(&self, i: u32) -> &Alignment {
+        &self.alignments[i as usize]
+    }
+
+    /// Returns the total number of alignment pairs.
+    pub fn alignment_pairs(&self) -> usize {
+        self.aln_pairs.len()
+    }
+
+    /// Returns read information, such as sequences, qualities, and read name.
+    pub fn read_data(&self) -> &ReadData {
+        &self.read_data
+    }
+
+    /// Returns the weight of the read pair.
+    pub fn weight(&self) -> f64 {
+        self.weight
+    }
+
+    fn write_read_pair_info(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
+        for pair in self.aln_pairs.iter() {
+            write!(f, "{:X}\t{}\t", self.read_data.name_hash, contigs.get_name(pair.contig_id))?;
+            if let Some((i, _)) = pair.aln1 {
+                write!(f, "{}\t", self.alignments[i as usize].interval().start() + 1)?;
+            } else {
+                write!(f, "*\t")?;
+            }
+            if let Some((j, _)) = pair.aln2 {
+                write!(f, "{}\t", self.alignments[j as usize].interval().start() + 1)?;
+            } else {
+                write!(f, "*\t")?;
+            }
+            writeln!(f, "{:.4}", Ln::to_log10(pair.ln_prob))?;
+        }
+        Ok(())
     }
 }
 
@@ -329,6 +392,14 @@ impl PairAlignment {
     }
 }
 
+// ---------------------- Loading alignments, groupping them by contigs and organizing into pairs ----------------------
+
+/// Store at most 3 alignments for cases when the read/read pair will not be used later.
+const MAX_UNUSED_ALNS: usize = 2;
+/// Store at most 10 alignments for cases when the read/read pair will not be used later.
+/// NOTE: If we put usize::MAX here, we need to replace `i + max_alns` into `i.saturating_add(max_alns)`.
+const MAX_USED_ALNS: usize = 10;
+
 /// Groups first end alignments `alignments[i..j]` and second end alignments `alignments[j..]` into `aln_pairs`.
 fn identify_contig_pair_alns(
     alignments: &[Alignment],
@@ -387,101 +458,6 @@ fn identify_contig_pair_alns(
     aln_pairs.truncate(start_len + keep_alns);
 }
 
-/// All appropriate alignments for one read pair / single read.
-pub struct GrouppedAlignments {
-    /// Read name.
-    read_data: ReadData,
-    /// Hash of the read name.
-    name_hash: u64,
-    /// Probability that both mates are unmapped.
-    unmapped_prob: f64,
-    /// All read alignments.
-    alignments: Vec<Alignment>,
-    /// Read alignments, groupped into pairs.
-    aln_pairs: Vec<PairAlignment>,
-    /// Weight of the read pair.
-    weight: f64,
-}
-
-impl GrouppedAlignments {
-    /// Returns read name.
-    pub fn read_name(&self) -> &str {
-        &self.read_data.name
-    }
-
-    /// Returns the FNV1a hash of the read name.
-    pub fn name_hash(&self) -> u64 {
-        self.name_hash
-    }
-
-    /// Probability that both reads are unmapped for one specific contig (but same for all contigs).
-    pub fn unmapped_prob(&self) -> f64 {
-        self.unmapped_prob
-    }
-
-    /// For a given contig, returns alignment pairs, corresponding to this contig.
-    pub fn contig_aln_pairs(&self, contig_id: ContigId) -> &[PairAlignment] {
-        let i = bisect::left_by(&self.aln_pairs, |paln| paln.contig_id().cmp(&contig_id));
-        let j = bisect::right_boundary(&self.aln_pairs, |paln| contig_id == paln.contig_id(), i, self.aln_pairs.len());
-        &self.aln_pairs[i..j]
-    }
-
-    /// Returns best alignment probability for each contig (must be sorted).
-    pub fn best_for_each_contig<'a>(&'a self, contig_ids: &'a [ContigId]) -> impl Iterator<Item = f64> + 'a {
-        let n = self.aln_pairs.len();
-        let mut j = 0;
-        contig_ids.iter().map(move |&id| {
-            let i = j; // Do this way so that we can immediately return value two lines later.
-            j = bisect::right_boundary(&self.aln_pairs, |aln| aln.contig_id() == id, i, n);
-            if i == j { self.unmapped_prob } else { self.aln_pairs[i].ln_prob() }
-        })
-    }
-
-    /// Return `i`-th alignment of all alignments for the read pair.
-    pub fn ith_aln(&self, i: u32) -> &Alignment {
-        &self.alignments[i as usize]
-    }
-
-    /// Returns the total number of alignment pairs.
-    pub fn alignment_pairs(&self) -> usize {
-        self.aln_pairs.len()
-    }
-
-    /// Returns read information, such as sequences, qualities, and read name.
-    pub fn read_data(&self) -> &ReadData {
-        &self.read_data
-    }
-
-    /// Returns the weight of the read pair.
-    pub fn weight(&self) -> f64 {
-        self.weight
-    }
-
-    fn write_read_pair_info(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
-        for pair in self.aln_pairs.iter() {
-            write!(f, "{:X}\t{}\t", self.name_hash, contigs.get_name(pair.contig_id))?;
-            if let Some((i, _)) = pair.aln1 {
-                write!(f, "{}\t", self.alignments[i as usize].interval().start() + 1)?;
-            } else {
-                write!(f, "*\t")?;
-            }
-            if let Some((j, _)) = pair.aln2 {
-                write!(f, "{}\t", self.alignments[j as usize].interval().start() + 1)?;
-            } else {
-                write!(f, "*\t")?;
-            }
-            writeln!(f, "{:.4}", Ln::to_log10(pair.ln_prob))?;
-        }
-        Ok(())
-    }
-}
-
-/// Store at most 3 alignments for cases when the read/read pair will not be used later.
-const MAX_UNUSED_ALNS: usize = 2;
-/// Store at most 10 alignments for cases when the read/read pair will not be used later.
-/// NOTE: If we put usize::MAX here, we need to replace `i + max_alns` into `i.saturating_add(max_alns)`.
-const MAX_USED_ALNS: usize = 10;
-
 /// For a paired-end read, combine and pair all mate alignments across all contigs.
 /// Input alignments are sorted first by contig, and then by read end.
 /// Returns None if the read pair is ignored.
@@ -489,18 +465,25 @@ const MAX_USED_ALNS: usize = 10;
 fn identify_paired_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
-    summary1: &MateSummary,
-    summary2: &MateSummary,
+    opt_min_prob1: Option<f64>,
+    opt_min_prob2: Option<f64>,
+    mut weight: f64,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
 ) -> (GrouppedAlignments, bool)
 {
-    // If both mates available: mean weight, otherwise: half weight of the available alignment.
-    let weight = 0.5 * (summary1.weight + summary2.weight);
-    let use_pair = weight >= params.min_weight && (params.use_unpaired || (summary1.mapped && summary2.mapped));
+    let mut use_pair = true;
+    if opt_min_prob2.is_none() || opt_min_prob2.is_none() {
+        weight *= 0.5; // Halve weight if one of the mates is unmapped.
+        use_pair = params.use_unpaired;
+    }
+    use_pair &= weight >= params.min_weight;
     let max_alns = if use_pair { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+    // Will be useful for in some calculations below.
+    let min_prob1 = opt_min_prob1.unwrap_or(0.0);
+    let min_prob2 = opt_min_prob2.unwrap_or(0.0);
 
     // First: by contig (decr.), second: by read end (decr.), third: by aln probability (incr.).
     tmp_alns.sort_unstable_by(|a, b|
@@ -519,8 +502,8 @@ fn identify_paired_end_alignments(
         if curr_contig != aln.contig_id() {
             if i < k {
                 // There are some alignments that need to be saved.
-                identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs,
-                    summary1.min_prob, summary2.min_prob, max_alns, buffer, insert_distr, params);
+                identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, min_prob1, min_prob2, max_alns,
+                    buffer, insert_distr, params);
             }
             curr_contig = aln.contig_id();
             i = k;
@@ -540,11 +523,11 @@ fn identify_paired_end_alignments(
     let k = alignments.len();
     if i < k {
         // There are some alignments that need to be saved.
-        identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs,
-            summary1.min_prob, summary2.min_prob, max_alns, buffer, insert_distr, params);
+        identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, min_prob1, min_prob2, max_alns,
+            buffer, insert_distr, params);
     }
 
-    let both_unmapped = summary1.min_prob + summary2.min_prob
+    let both_unmapped = min_prob1 + min_prob2
         + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty();
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
@@ -554,7 +537,6 @@ fn identify_paired_end_alignments(
     }
     (GrouppedAlignments {
         read_data, weight,
-        name_hash: summary1.name_hash,
         unmapped_prob: weight * (both_unmapped - norm_fct),
         alignments, aln_pairs,
     }, use_pair)
@@ -566,12 +548,12 @@ fn identify_paired_end_alignments(
 fn identify_single_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
-    summary: &MateSummary,
+    min_prob: f64,
+    weight: f64,
     ln_ncontigs: f64,
     params: &super::Params,
 ) -> (GrouppedAlignments, bool)
 {
-    let weight = summary.weight;
     let use_read = weight >= params.min_weight;
     let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
 
@@ -597,7 +579,7 @@ fn identify_single_end_alignments(
         }
     }
 
-    let unmapped_prob = summary.min_prob + params.unmapped_penalty;
+    let unmapped_prob = min_prob + params.unmapped_penalty;
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
@@ -606,10 +588,77 @@ fn identify_single_end_alignments(
     }
     (GrouppedAlignments {
         read_data, weight,
-        name_hash: summary.name_hash,
         unmapped_prob: weight * (unmapped_prob - norm_fct),
         alignments, aln_pairs,
     }, use_read)
+}
+
+// ------------------- Assign weights to reads based on the number of unique non-overlapping k-mers -------------------
+
+struct UniqueKmers {
+    k: u8,
+    unique_kmers: HashSet<u128>,
+    kmers_buf: Vec<u128>,
+}
+
+impl UniqueKmers {
+    /// Stores all k-mers, unique to the current locus.
+    fn new(contig_set: &ContigSet) -> Self {
+        let kmer_counts = contig_set.kmer_counts();
+        let k = u8::try_from(kmer_counts.k()).unwrap();
+        assert!(k > 1);
+        let mut kmers_buf = Vec::new();
+        let mut unique_kmers = HashSet::default();
+        for (seq, counts) in contig_set.seqs().iter().zip(kmer_counts.iter()) {
+            kmers_buf.clear();
+            kmers::kmers::<u128, CANONICAL>(seq, k, &mut kmers_buf);
+            assert_eq!(kmers_buf.len(), counts.len());
+            // Add all k-mers, for which off-target count is 0.
+            unique_kmers.extend(kmers_buf.iter().zip(counts).filter(|(_, &count)| count == 0).map(|(&kmer, _)| kmer));
+        }
+        Self { k, unique_kmers, kmers_buf }
+    }
+
+    /// Count the number of unique k-mers in both read mates and returns read pair weight.
+    fn read_weight(&mut self, read_data: &ReadData, dbg_writer: &mut impl Write) -> io::Result<f64> {
+        let mut paired_count = 0;
+        write!(dbg_writer, "{:X}\t", read_data.name_hash)?;
+        for mate_data in &read_data.mates {
+            if let Some(data) = mate_data {
+                self.kmers_buf.clear();
+                kmers::kmers::<u128, CANONICAL>(&data.sequence, self.k, &mut self.kmers_buf);
+
+                let mut kmers_iter = self.kmers_buf.iter();
+                let mut count = 0;
+                while let Some(kmer) = kmers_iter.next() {
+                    if self.unique_kmers.contains(kmer) {
+                        count += 1;
+                        // Skip several k-mers because we are interested in non-overlapping k-mers.
+                        // NOTE: Should instead use `advance_by(k - 1)`, but it is not yet stable.
+                        kmers_iter.nth(usize::from(self.k) - 2);
+                    }
+                }
+                write!(dbg_writer, "{}\t", count)?;
+                paired_count += count;
+            } else {
+                write!(dbg_writer, "*\t")?;
+            }
+        }
+        let weight = 1.0; // TODO: More sophisticated.
+        writeln!(dbg_writer, "{:.5}", weight)?;
+        Ok(weight)
+    }
+}
+
+// ------------------------- All alignments for all read pairs -------------------------
+
+/// Checks if any of the alignments is within the "central" region: not in the boundary.
+fn in_bounds(alns: &[Alignment], boundary: u32, contigs: &ContigNames) -> bool {
+    alns.iter().any(|aln| {
+        let contig_len = contigs.get_len(aln.interval().contig_id());
+        let aln_middle = aln.interval().middle();
+        boundary <= aln_middle && aln_middle < contig_len - boundary
+    })
 }
 
 /// Paired-end/single-end read alignments, sorted by contig.
@@ -629,23 +678,26 @@ impl AllAlignments {
     /// (ii) there is an alignment that overlaps an inner region of any contig (beyond the boundary region).
     pub fn load(
         reader: impl bam::Read,
-        contigs: &Arc<ContigNames>,
+        contig_set: &ContigSet,
         bg_distr: &BgDistr,
         edit_dist_cache: &EditDistCache,
-        all_contig_infos: &[Arc<ContigInfo>],
         params: &super::Params,
-        mut dbg_writer: impl Write,
+        mut dbg_writer1: impl Write,
+        mut dbg_writer2: impl Write,
     ) -> Result<Self, Error>
     {
         log::info!("    Loading read alignments");
+        let contigs = contig_set.contigs();
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
+        let mut unique_kmers = UniqueKmers::new(contig_set);
 
-        writeln!(dbg_writer, "read_hash\tread_end\tinterval\tcentral\tedit_dist\tedit_status\
-            \tlik\tweight\tread_name").map_err(add_path!(!))?;
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache,
-            all_contig_infos, boundary)?;
+        writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tread_name")
+            .map_err(add_path!(!))?;
+        writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
+
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache)?;
 
         let insert_distr = bg_distr.insert_distr();
         let is_paired_end = insert_distr.is_paired_end();
@@ -664,34 +716,30 @@ impl AllAlignments {
             let mut read_data = ReadData::default();
             total_reads += 1;
             tmp_alns.clear();
-            let summary1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
-            if !hashes.insert(summary1.name_hash) {
-                log::warn!("Read {} produced hash collision ({:X})", read_data.name, summary1.name_hash);
+            let opt_min_prob1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+            if !hashes.insert(read_data.name_hash) {
+                log::warn!("Read {} produced hash collision ({:X})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
-            let mut mapped = summary1.mapped;
-            let mut central = summary1.any_central;
-            let summary2 = if is_paired_end {
-                let summary2 = reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer)?;
-                mapped |= summary2.mapped;
-                central |= summary2.any_central;
-                Some(summary2)
-            } else {
-                None
-            };
-            if !mapped {
+            let opt_min_prob2 = if is_paired_end {
+                reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?
+            } else { None };
+
+            if opt_min_prob1.is_none() && opt_min_prob2.is_none() {
                 unmapped_reads += 1;
                 continue;
-            } else if !central {
+            } else if !in_bounds(&tmp_alns, boundary, contigs) {
                 out_of_bounds_reads += 1;
                 continue;
             }
 
+            let weight = unique_kmers.read_weight(&read_data, &mut dbg_writer2).map_err(add_path!(!))?;
             let (groupped_alns, use_read) = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut tmp_alns, &summary1, summary2.as_ref().unwrap(),
+                identify_paired_end_alignments(read_data, &mut tmp_alns, opt_min_prob1, opt_min_prob2, weight,
                     &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
-                identify_single_end_alignments(read_data, &mut tmp_alns, &summary1, ln_ncontigs, params)
+                identify_single_end_alignments(read_data, &mut tmp_alns, opt_min_prob1.unwrap(), weight,
+                    ln_ncontigs, params)
             };
             if use_read {
                 reads.push(groupped_alns);

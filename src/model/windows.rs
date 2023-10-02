@@ -81,7 +81,7 @@ pub(crate) const REG_WINDOW_SHIFT: u32 = 2;
 
 /// Alignment of a read pair to a genotype.
 pub struct ReadGtAlns {
-    /// Contig index within the genome and the parent pair alignment,
+    /// Contig index within the genotype and the parent pair alignment,
     /// Right: ln-probability, if both mates are considered unmapped.
     parent: Option<(u8, PairAlignment)>,
     /// Ln-probability (copied from the parent, if it is defined).
@@ -108,8 +108,9 @@ impl ReadGtAlns {
         }
     }
 
-    pub fn parent(&self) -> Option<&PairAlignment> {
-        self.parent.as_ref().map(|(_, paln)| paln)
+    /// Contig index within the
+    pub fn parent(&self) -> &Option<(u8, PairAlignment)> {
+        &self.parent
     }
 
     pub fn define_windows_determ(&mut self, mcontigs: &GenotypeWindows) {

@@ -274,6 +274,11 @@ impl KmerCounts {
         self.max_value
     }
 
+    /// Returns iterator over k-mer counts for every contig.
+    pub fn iter(&self) -> std::slice::Iter<'_, Vec<KmerCount>> {
+        self.counts.iter()
+    }
+
     /// Returns all k-mer counts for the corresponding contig.
     /// Length: contig len - k + 1.
     pub fn get(&self, ix: usize) -> &[KmerCount] {
