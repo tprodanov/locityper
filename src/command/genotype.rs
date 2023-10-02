@@ -197,8 +197,11 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().breakpoint()),
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().power()),
             "--kmers-weight".green());
-        println!("    {:KEY$} {:VAL$}  Ignore reads and windows with weight under this value [{}].",
+        println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
+        println!("    {:KEY$} {:VAL$}  Use reads/read pairs that have at least this number\n\
+            {EMPTY}  of non-overlapping k-mers, unique to the target locus [{}].",
+            "    --min-kmers".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.min_unique_kmers));
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
             {EMPTY}  matter more; Positive: read depth matters more.",
             "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
@@ -330,6 +333,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
                 }
             }
             Long("min-weight") => args.assgn_params.min_weight = parser.value()?.parse()?,
+            Long("min-kmers") => args.assgn_params.min_unique_kmers = parser.value()?.parse()?,
             Long("edit-pval") | Long("edit-pvalue") =>
                 args.assgn_params.edit_pvals = (
                     parser.value()?.parse()?,

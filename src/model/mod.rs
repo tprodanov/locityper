@@ -29,6 +29,8 @@ pub struct Params {
     pub kmers_weight_calc: Option<WeightCalculator>,
     /// and another for linguistic complexity of the window.
     pub compl_weight_calc: Option<WeightCalculator>,
+    /// Require at least this number of unique k-mers.
+    pub min_unique_kmers: u16,
 
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
@@ -68,6 +70,7 @@ impl Default for Params {
 
             kmers_weight_calc: Some(WeightCalculator::new(0.2, 2.0).unwrap()),
             compl_weight_calc: Some(WeightCalculator::new(0.5, 2.0).unwrap()),
+            min_unique_kmers: 5,
 
             min_weight: 0.001,
             depth_norm_power: 0.0,

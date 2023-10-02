@@ -1,9 +1,9 @@
 use std::{
     cmp::min,
+    fmt::{self, Write as FmtWrite},
     sync::Arc,
     io::{self, Write},
     collections::hash_map::Entry,
-    fmt,
 };
 use htslib::bam;
 use nohash::{IntSet, IntMap};
@@ -486,23 +486,16 @@ fn identify_contig_pair_alns(
 fn identify_paired_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
+    max_alns: usize,
     opt_min_prob1: Option<f64>,
     opt_min_prob2: Option<f64>,
-    mut weight: f64,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
-) -> (GrouppedAlignments, bool)
+) -> GrouppedAlignments
 {
-    let mut use_pair = true;
-    if opt_min_prob2.is_none() || opt_min_prob2.is_none() {
-        weight *= 0.5; // Halve weight if one of the mates is unmapped.
-        use_pair = params.use_unpaired;
-    }
-    use_pair &= weight >= params.min_weight;
-    let max_alns = if use_pair { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
-    // Will be useful for in some calculations below.
+    let weight = if opt_min_prob1.is_none() || opt_min_prob2.is_none() { 0.5 } else { 1.0 };
     let min_prob1 = opt_min_prob1.unwrap_or(0.0);
     let min_prob2 = opt_min_prob2.unwrap_or(0.0);
 
@@ -556,11 +549,11 @@ fn identify_paired_end_alignments(
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob = weight * (aln.ln_prob - norm_fct);
     }
-    (GrouppedAlignments {
+    GrouppedAlignments {
         read_data, weight,
         unmapped_prob: weight * (both_unmapped - norm_fct),
         alignments, aln_pairs,
-    }, use_pair)
+    }
 }
 
 /// For a single-end read, sort alignment across contigs, discard improbable alignments, and normalize probabilities.
@@ -569,15 +562,12 @@ fn identify_paired_end_alignments(
 fn identify_single_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
+    max_alns: usize,
     min_prob: f64,
-    weight: f64,
     ln_ncontigs: f64,
     params: &super::Params,
-) -> (GrouppedAlignments, bool)
+) -> GrouppedAlignments
 {
-    let use_read = weight >= params.min_weight;
-    let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
-
     let mut alignments = Vec::new();
     let mut aln_pairs = Vec::new();
     // First: by contig (decreasing), then decreasing by ln-probability (increasing).
@@ -600,6 +590,7 @@ fn identify_single_end_alignments(
         }
     }
 
+    let weight = 1.0; // For now, use all reads with equal weights.
     let unmapped_prob = min_prob + params.unmapped_penalty;
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
@@ -607,42 +598,51 @@ fn identify_single_end_alignments(
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob = weight * (aln.ln_prob - norm_fct);
     }
-    (GrouppedAlignments {
+    GrouppedAlignments {
         read_data, weight,
         unmapped_prob: weight * (unmapped_prob - norm_fct),
         alignments, aln_pairs,
-    }, use_read)
+    }
 }
 
-// ------------------- Assign weights to reads based on the number of unique non-overlapping k-mers -------------------
+// ------------------- Checks reads for the number of unique non-overlapping k-mers -------------------
 
 struct UniqueKmers {
     k: u8,
     unique_kmers: HashSet<u128>,
     kmers_buf: Vec<u128>,
+    min_kmers: u16,
 }
 
 impl UniqueKmers {
     /// Stores all k-mers, unique to the current locus.
-    fn new(contig_set: &ContigSet) -> Self {
+    fn new(contig_set: &ContigSet, min_kmers: u16) -> Self {
         let kmer_counts = contig_set.kmer_counts();
         let k = u8::try_from(kmer_counts.k()).unwrap();
         assert!(k > 1);
         let mut kmers_buf = Vec::new();
         let mut unique_kmers = HashSet::default();
+        let mut off_target_kmers = HashSet::default();
         for (seq, counts) in contig_set.seqs().iter().zip(kmer_counts.iter()) {
             kmers_buf.clear();
             kmers::kmers::<u128, CANONICAL>(seq, k, &mut kmers_buf);
             assert_eq!(kmers_buf.len(), counts.len());
-            // Add all k-mers, for which off-target count is 0.
-            unique_kmers.extend(kmers_buf.iter().zip(counts).filter(|(_, &count)| count == 0).map(|(&kmer, _)| kmer));
+            for (&kmer, &count) in kmers_buf.iter().zip(counts) {
+                if count == 0 {
+                    unique_kmers.insert(kmer);
+                } else {
+                    off_target_kmers.insert(kmer);
+                }
+            }
         }
-        Self { k, unique_kmers, kmers_buf }
+        log::debug!("    {} k-mers unique to this locus, {} k-mers appear off target",
+            unique_kmers.len(), off_target_kmers.len());
+        Self { k, unique_kmers, kmers_buf, min_kmers }
     }
 
-    /// Count the number of unique k-mers in both read mates and returns read pair weight.
-    fn get_read_weight(&mut self, read_data: &ReadData, dbg_writer: &mut impl Write) -> io::Result<f64> {
-        let mut paired_count = 0;
+    /// Count the number of unique k-mers in both read mates and returns true if this read/read pair can be used.
+    fn can_use_read(&mut self, read_data: &ReadData, dbg_writer: &mut impl Write) -> io::Result<bool> {
+        let mut paired_count = 0_u16;
         write!(dbg_writer, "{}\t", read_data.name_hash)?;
         for mate_data in &read_data.mates {
             if let Some(data) = mate_data {
@@ -650,10 +650,10 @@ impl UniqueKmers {
                 kmers::kmers::<u128, CANONICAL>(&data.sequence, self.k, &mut self.kmers_buf);
 
                 let mut kmers_iter = self.kmers_buf.iter();
-                let mut count = 0;
+                let mut count = 0_u16;
                 while let Some(kmer) = kmers_iter.next() {
                     if self.unique_kmers.contains(kmer) {
-                        count += 1;
+                        count = count.saturating_add(1);
                         // Skip several k-mers because we are interested in non-overlapping k-mers.
                         // NOTE: Should instead use `advance_by(k - 1)`, but it is not yet stable.
                         kmers_iter.nth(usize::from(self.k) - 2);
@@ -665,9 +665,9 @@ impl UniqueKmers {
                 write!(dbg_writer, "*\t")?;
             }
         }
-        let weight = 1.0; // TODO: More sophisticated.
-        writeln!(dbg_writer, "{:.5}", weight)?;
-        Ok(weight)
+        let use_read = paired_count >= self.min_kmers;
+        writeln!(dbg_writer, "{}", if use_read { 'T' } else { 'F' })?;
+        Ok(use_read)
     }
 }
 
@@ -680,6 +680,28 @@ fn in_bounds(alns: &[Alignment], boundary: u32, contigs: &ContigNames) -> bool {
         let aln_middle = aln.interval().middle();
         boundary <= aln_middle && aln_middle < contig_len - boundary
     })
+}
+
+#[derive(Default)]
+struct ReadCounts {
+    total: u32,
+    out_of_bounds: u32,
+    unmapped: u32,
+    unpaired: u32,
+    few_kmers: u32,
+}
+
+impl ReadCounts {
+    fn to_string(&self, use_reads: usize, is_paired_end: bool, use_unpaired: bool) -> String {
+        let mut s = format!("Total {} read{}s", self.total, if is_paired_end { " pair" } else { "" });
+        write!(s, ": use {} reads", use_reads).unwrap();
+        if self.unpaired > 0 {
+            write!(s, " {}cluding {} unpaired", if use_unpaired { "in" } else { "ex" }, self.unpaired).unwrap();
+        }
+        write!(s, ". Discard {} unmapped, {} out of bounds and {} with few unique k-mers",
+            self.unmapped, self.out_of_bounds, self.few_kmers).unwrap();
+        s
+    }
 }
 
 /// Paired-end/single-end read alignments, sorted by contig.
@@ -712,7 +734,7 @@ impl AllAlignments {
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
-        let mut unique_kmers = UniqueKmers::new(contig_set);
+        let mut unique_kmers = UniqueKmers::new(contig_set, params.min_unique_kmers);
 
         writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tread_name")
             .map_err(add_path!(!))?;
@@ -728,14 +750,12 @@ impl AllAlignments {
         let mut buffer = Vec::with_capacity(16);
         let mut collisions = 0;
 
-        let mut total_reads = 0;
+        let mut counts = ReadCounts::default();
         let mut reads = Vec::new();
         let mut w0_reads = Vec::new();
-        let mut out_of_bounds_reads = 0;
-        let mut unmapped_reads = 0;
         while reader.has_more() {
             let mut read_data = ReadData::default();
-            total_reads += 1;
+            counts.total += 1;
             tmp_alns.clear();
             let opt_min_prob1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
             if !hashes.insert(read_data.name_hash) {
@@ -747,19 +767,29 @@ impl AllAlignments {
             } else { None };
 
             if opt_min_prob1.is_none() && opt_min_prob2.is_none() {
-                unmapped_reads += 1;
+                counts.unmapped += 1;
                 continue;
             } else if !in_bounds(&tmp_alns, boundary, contigs) {
-                out_of_bounds_reads += 1;
+                counts.out_of_bounds += 1;
                 continue;
             }
 
-            let weight = unique_kmers.get_read_weight(&read_data, &mut dbg_writer2).map_err(add_path!(!))?;
-            let (groupped_alns, use_read) = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut tmp_alns, opt_min_prob1, opt_min_prob2, weight,
+            let mut use_read = true;
+            if is_paired_end && (opt_min_prob1.is_none() || opt_min_prob2.is_none()) {
+                use_read = params.use_unpaired;
+                counts.unpaired += 1;
+            }
+            if use_read && !unique_kmers.can_use_read(&read_data, &mut dbg_writer2).map_err(add_path!(!))? {
+                use_read = false;
+                counts.few_kmers += 1;
+            }
+
+            let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+            let groupped_alns = if is_paired_end {
+                identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns, opt_min_prob1, opt_min_prob2,
                     &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
-                identify_single_end_alignments(read_data, &mut tmp_alns, opt_min_prob1.unwrap(), weight,
+                identify_single_end_alignments(read_data, &mut tmp_alns, max_alns, opt_min_prob1.unwrap(),
                     ln_ncontigs, params)
             };
             if use_read {
@@ -768,11 +798,8 @@ impl AllAlignments {
                 w0_reads.push(groupped_alns);
             }
         }
-        log::info!("    Total {} read{},  {} good,  {} low weight{},  {} out of bounds,  {} unmapped",
-            total_reads, if is_paired_end { " pairs" } else { "s" }, reads.len(),
-            w0_reads.len(), if is_paired_end && !params.use_unpaired { "/unpaired" } else { "" },
-            out_of_bounds_reads, unmapped_reads);
-        if collisions > 2 && collisions * 100 > total_reads {
+        log::debug!("    {}", counts.to_string(reads.len(), is_paired_end, params.use_unpaired));
+        if collisions > 2 && collisions * 100 > counts.total {
             return Err(Error::RuntimeError(format!("Too many hash collisions ({})", collisions)));
         }
         Ok(Self { reads, w0_reads })
