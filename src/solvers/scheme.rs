@@ -238,7 +238,7 @@ fn write_alns(
     for (rp, groupped_alns) in all_alns.reads().iter().enumerate() {
         let hash = groupped_alns.read_data().name_hash();
         for curr_windows in gt_alns.possible_read_alns(rp) {
-            write!(f, "{}{:X}\t", prefix, hash)?;
+            write!(f, "{}{}\t", prefix, hash)?;
             match curr_windows.parent() {
                 None => write!(f, "*\t*\t*\t")?,
                 Some((contig_ix, aln_pair)) => {

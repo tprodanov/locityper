@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
     io::{self, Write},
     collections::hash_map::Entry,
+    fmt,
 };
 use htslib::bam;
 use nohash::{IntSet, IntMap};
@@ -26,6 +27,26 @@ use crate::{
 };
 
 // ------------------------- Read-end and pair-end data, such as sequences and qualities -------------------------
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub struct NameHash(u64);
+
+impl fmt::Display for NameHash {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use base64ct::Encoding;
+        // Each base64 letter encodes 6 bits, therefore 64-bit number will take 11 letters.
+        let mut buf = [0_u8; 11];
+        f.write_str(base64ct::Base64UrlUnpadded::encode(&self.0.to_le_bytes(), &mut buf).unwrap())
+    }
+}
+
+impl std::hash::Hash for NameHash {
+    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        hasher.write_u64(self.0)
+    }
+}
+
+impl nohash::IsEnabled for NameHash {}
 
 #[derive(Clone)]
 pub struct MateData {
@@ -65,7 +86,7 @@ impl MateData {
 #[derive(Default, Clone)]
 pub struct ReadData {
     name: String,
-    name_hash: u64,
+    name_hash: NameHash,
     mates: [Option<MateData>; 2],
 }
 
@@ -74,7 +95,7 @@ impl ReadData {
         &self.name
     }
 
-    pub fn name_hash(&self) -> u64 {
+    pub fn name_hash(&self) -> NameHash {
         self.name_hash
     }
 
@@ -140,9 +161,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     ) -> Result<Option<f64>, Error>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
-        let name_hash = get_hash(self.record.qname());
         let name = std::str::from_utf8(self.record.qname()).map_err(|_| Error::InvalidInput(
             format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))?;
+        let name_hash = NameHash(get_hash(self.record.qname()));
 
         // Check if everything is correct.
         if read_end == ReadEnd::First {
@@ -159,7 +180,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(old_option.is_none(), "Mate data defined twice");
 
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{:X}\t{}\t*\tNA\t-\t{}", name_hash, read_end, name).map_err(add_path!(!))?;
+            writeln!(dbg_writer, "{}\t{}\t*\tNA\t-\t{}", name_hash, read_end, name).map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
             return Ok(None);
@@ -188,7 +209,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let is_passable_dist = edit_dist <= passable_dist;
             any_good |= is_good_dist;
 
-            write!(dbg_writer, "{:X}\t{}\t{}\t{}/{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
+            write!(dbg_writer, "{}\t{}\t{}\t{}/{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
                 edit_dist, read_len, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
@@ -306,7 +327,7 @@ impl GrouppedAlignments {
 
     fn write_read_pair_info(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
         for pair in self.aln_pairs.iter() {
-            write!(f, "{:X}\t{}\t", self.read_data.name_hash, contigs.get_name(pair.contig_id))?;
+            write!(f, "{}\t{}\t", self.read_data.name_hash, contigs.get_name(pair.contig_id))?;
             if let Some((i, _)) = pair.aln1 {
                 write!(f, "{}\t", self.alignments[i as usize].interval().start() + 1)?;
             } else {
@@ -620,9 +641,9 @@ impl UniqueKmers {
     }
 
     /// Count the number of unique k-mers in both read mates and returns read pair weight.
-    fn read_weight(&mut self, read_data: &ReadData, dbg_writer: &mut impl Write) -> io::Result<f64> {
+    fn get_read_weight(&mut self, read_data: &ReadData, dbg_writer: &mut impl Write) -> io::Result<f64> {
         let mut paired_count = 0;
-        write!(dbg_writer, "{:X}\t", read_data.name_hash)?;
+        write!(dbg_writer, "{}\t", read_data.name_hash)?;
         for mate_data in &read_data.mates {
             if let Some(data) = mate_data {
                 self.kmers_buf.clear();
@@ -718,7 +739,7 @@ impl AllAlignments {
             tmp_alns.clear();
             let opt_min_prob1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
             if !hashes.insert(read_data.name_hash) {
-                log::warn!("Read {} produced hash collision ({:X})", read_data.name, read_data.name_hash);
+                log::warn!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
             let opt_min_prob2 = if is_paired_end {
@@ -733,7 +754,7 @@ impl AllAlignments {
                 continue;
             }
 
-            let weight = unique_kmers.read_weight(&read_data, &mut dbg_writer2).map_err(add_path!(!))?;
+            let weight = unique_kmers.get_read_weight(&read_data, &mut dbg_writer2).map_err(add_path!(!))?;
             let (groupped_alns, use_read) = if is_paired_end {
                 identify_paired_end_alignments(read_data, &mut tmp_alns, opt_min_prob1, opt_min_prob2, weight,
                     &mut buffer, insert_distr, ln_ncontigs, params)
