@@ -89,7 +89,7 @@ def process(res, sol, filtering, dist):
     ml_row = sol.loc[ml_gt]
     ml_dist = ml_row.dist
     ml_dist_rank = (filtering.dist < ml_dist).sum() + 1
-    s += '{}\t{}\t{}\t{}'.format(ml_gt, ml_row.dist, ml_row.lik, ml_dist_rank)
+    s += '{}\t{:.0f}\t{:.5f}\t{}'.format(ml_gt, ml_row.dist, ml_row.lik, ml_dist_rank)
 
     weighted_dist = 0.0
     weight_sum = 0.0
@@ -99,11 +99,8 @@ def process(res, sol, filtering, dist):
         weight_sum += w
     weighted_dist /= weight_sum
 
-
-    s += '\t{:.5f}\t{:.6g}'.format(res['quality'], weighted_dist)
-    for key in ('good_depth', 'good_alns'):
-        s += '\t{:.5f}'.format(ml_row.get(key, np.nan))
-    return s + '\n'
+    s += '\t{:.5f}\t{:.6g}\n'.format(res['quality'], weighted_dist)
+    return s
 
 
 def load_and_process(tup, tags, input_fmt, dist_fmt):
@@ -143,7 +140,7 @@ def main():
     for tag in tags:
         out.write(tag + '\t')
     out.write('total_gts\trem_gts\tpearsonr\tspearmanr\tsmallest_dist\tclosest_gts\tclosest_gt_liks\tclosest_rank\t'
-        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\tgood_depth\tgood_alns\n')
+        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\n')
 
     n = len(tag_tuples)
     threads = min(n, args.threads)
