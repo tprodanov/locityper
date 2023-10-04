@@ -603,7 +603,7 @@ fn process_haplotypes(
     let divergences: Vec<f64>;
     if args.accuracy > 0 {
         #[cfg(feature = "aln")] {
-            let bam_path = locus_dir.join("hap_names.bam");
+            let bam_path = locus_dir.join("all_haplotypes.bam");
             divergences = dist::pairwise_divergences(&bam_path, &entries,
                 &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
             check_divergencies(locus.name(), &entries, divergences.iter().copied(), args.variants.is_some());

@@ -301,7 +301,7 @@ pub fn reconstruct_sequences(
 
     discard_unknown(&mut seqs, &unknown_nts, unknown_frac);
     if seqs.len() < 2 {
-        Err(Error::InvalidData("Less than two hap_names reconstructed".to_owned()))
+        Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()))
     } else {
         Ok(seqs)
     }
