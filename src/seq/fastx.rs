@@ -5,11 +5,14 @@ use std::{
     path::Path,
     time::{Instant, Duration},
 };
+use htslib::bam::{self, Read as BamRead};
 use crate::{
     ext,
     err::{Error, add_path},
 };
 use super::NamedSeq;
+
+// ------------------------------------------- Helper functions -------------------------------------------
 
 /// Write a single sequence to the FASTA file.
 /// Use this function instead of `bio::fasta::Writer` as the latter
@@ -77,24 +80,56 @@ fn read_line(stream: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<usiz
     }
 }
 
+// ------------------------------------------- Traits -------------------------------------------
+
+/// Single read with name, sequence and qualities.
+pub trait SingleRecord: Clone + Default {
+    fn name(&self) -> &[u8];
+
+    fn seq(&self) -> &[u8];
+
+    /// If qualities are not available, this slice will be empty.
+    fn qual(&self) -> &[u8];
+}
+
+/// Single-end or paired-end record that can be written to a file.
+pub trait WritableRecord: Clone + Default {
+    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()>;
+}
+
+impl<T: SingleRecord> WritableRecord for T {
+    /// Write single record to FASTA/FASTQ file.
+    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
+        if self.qual().is_empty() {
+            write_fasta(f, self.name(), self.seq())
+        } else {
+            write_fastq(f, self.name(), self.seq(), self.qual())
+        }
+    }
+}
+
+impl<T: SingleRecord> WritableRecord for [T; 2] {
+    /// Writes two FASTQ/FASTA records one after another.
+    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
+        self.iter().map(|rec| rec.write_to(f)).collect()
+    }
+}
+
+// ------------------------------------------ Single read and various readers ------------------------------------------
+
 /// FASTA/Q record.
 #[derive(Default, Clone)]
-pub struct Record {
+pub struct FastxRecord {
     /// Name, including description after the space.
     full_name: Vec<u8>,
     seq: Vec<u8>,
     qual: Vec<u8>,
 }
 
-impl Record {
+impl FastxRecord {
     /// Returns true if the record is empty.
     pub fn is_empty(&self) -> bool {
         self.full_name.is_empty()
-    }
-
-    /// Returns the name of the record, including description after space.
-    pub fn full_name(&self) -> &[u8] {
-        &self.full_name
     }
 
     pub fn full_name_str(&self) -> std::borrow::Cow<'_, str> {
@@ -108,91 +143,30 @@ impl Record {
             None => String::from_utf8_lossy(&self.full_name),
         }
     }
+}
 
-    /// Returns record sequence.
-    pub fn seq(&self) -> &[u8] {
+impl SingleRecord for FastxRecord {
+    /// Returns the name of the record, including description after space, if any.
+    fn name(&self) -> &[u8] {
+        &self.full_name
+    }
+
+    // Returns record sequence.
+    fn seq(&self) -> &[u8] {
         &self.seq
     }
 
-    /// Returns record qualities, if available.
-    pub fn qual(&self) -> Option<&[u8]> {
-        if self.qual.is_empty() {
-            None
-        } else {
-            Some(&self.qual)
-        }
-    }
-
-    /// Writes in FASTQ (if qualities are set) or FASTA format.
-    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
-        if self.qual.is_empty() {
-            write_fasta(writer, &self.full_name, &self.seq)
-        } else {
-            write_fastq(writer, &self.full_name, &self.seq, &self.qual)
-        }
+    /// Returns record qualities. If unavailable, returns empty slice.
+    fn qual(&self) -> &[u8] {
+        &self.qual
     }
 }
 
-impl fmt::Debug for Record {
+impl fmt::Debug for FastxRecord {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut v: Vec<u8> = Vec::new();
         self.write_to(&mut v).unwrap();
         f.write_str(&String::from_utf8_lossy(&v))
-    }
-}
-
-/// Extension over a single- or paired-records.
-pub trait RecordGroup : Default + Clone + Send + 'static {
-    const PAIRED: bool;
-
-    /// Returns the first read end.
-    fn first(&self) -> &Record;
-
-    /// Returns the second read end. Panics if called on the single-end reads.
-    fn second(&self) -> &Record;
-
-    /// Writes one or two reads to output in the interleaved mode.
-    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()>;
-}
-
-impl RecordGroup for Record {
-    const PAIRED: bool = false;
-
-    #[inline]
-    fn first(&self) -> &Record {
-        &self
-    }
-
-    #[inline]
-    fn second(&self) -> &Record {
-        panic!("Cannot get second mate from single-end reads")
-    }
-
-    #[inline]
-    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
-        self.write_to(f)
-    }
-}
-
-pub type PairedRecord = [Record; 2];
-
-impl RecordGroup for PairedRecord {
-    const PAIRED: bool = true;
-
-    #[inline]
-    fn first(&self) -> &Record {
-        &self[0]
-    }
-
-    #[inline]
-    fn second(&self) -> &Record {
-        &self[1]
-    }
-
-    #[inline]
-    fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
-        self.first().write_to(f)?;
-        self.second().write_to(f)
     }
 }
 
@@ -217,7 +191,7 @@ impl<R: BufRead> Reader<R> {
         })
     }
 
-    fn fill_fasta_record(&mut self, record: &mut Record) -> io::Result<bool> {
+    fn fill_fasta_record(&mut self, record: &mut FastxRecord) -> io::Result<bool> {
         self.buffer.clear();
         let mut seq_len = 0;
         loop {
@@ -239,7 +213,7 @@ impl<R: BufRead> Reader<R> {
         }
     }
 
-    fn fill_fastq_record(&mut self, record: &mut Record) -> io::Result<bool> {
+    fn fill_fastq_record(&mut self, record: &mut FastxRecord) -> io::Result<bool> {
         // Sequence
         let seq_len = read_line(&mut self.stream, &mut record.seq)?;
         let prev_buf_len = self.buffer.len();
@@ -273,7 +247,7 @@ impl<R: BufRead + Send> Reader<R> {
     pub fn mean_read_len(&mut self, max_records: usize) -> io::Result<f64> {
         let mut count: u64 = 0;
         let mut sum_len: u64 = 0;
-        let mut record = Record::default();
+        let mut record = FastxRecord::default();
         for _ in 0..max_records {
             match self.read_next(&mut record)? {
                 true => {
@@ -291,7 +265,7 @@ impl<R: BufRead + Send> Reader<R> {
     /// Reads all sequences into memory.
     /// Each sequence is standartized and checked for invalid nucleotides.
     pub fn read_all(&mut self) -> Result<Vec<NamedSeq>, Error> {
-        let mut record = Record::default();
+        let mut record = FastxRecord::default();
         let mut records = Vec::new();
         while self.read_next(&mut record).map_err(add_path!(!))? {
             let name = record.name_only().into_owned();
@@ -305,42 +279,9 @@ impl<R: BufRead + Send> Reader<R> {
     }
 }
 
-// Write log messages at most every ten seconds.
-pub const UPDATE_SECS: u64 = 10;
-
-struct SubsampleLogger {
-    timer: Instant,
-    last_msg: Duration,
-    reads: u64,
-}
-
-impl SubsampleLogger {
-    fn new() -> Self {
-        Self {
-            timer: Instant::now(),
-            last_msg: Duration::default(),
-            reads: 0,
-        }
-    }
-
-    #[inline]
-    fn inc(&mut self) {
-        self.reads += 1;
-        if self.reads % 100_000 == 0 {
-            let elapsed = self.timer.elapsed();
-            if (elapsed - self.last_msg).as_secs() >= UPDATE_SECS {
-                self.last_msg = elapsed;
-                let reads_f64 = self.reads as f64;
-                let speed = 1e-3 * f64::from(reads_f64) / elapsed.as_secs_f64();
-                log::debug!("    Processed {:7.1}M reads, {:4.0}k reads/s", 1e-6 * reads_f64, speed);
-            }
-        }
-    }
-}
-
 /// Trait for reading and writing FASTA/Q single-end and paired-end records.
 pub trait FastxRead: Send {
-    type Record: RecordGroup;
+    type Record: WritableRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self, record: &mut Self::Record) -> io::Result<bool>;
@@ -385,10 +326,10 @@ pub trait FastxRead: Send {
 }
 
 impl<R: BufRead + Send> FastxRead for Reader<R> {
-    type Record = Record;
+    type Record = FastxRecord;
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
-    fn read_next(&mut self, record: &mut Record) -> io::Result<bool> {
+    fn read_next(&mut self, record: &mut FastxRecord) -> io::Result<bool> {
         record.full_name.clear();
         record.seq.clear();
         record.qual.clear();
@@ -420,10 +361,10 @@ impl<R: BufRead> PairedEndInterleaved<R> {
 }
 
 impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
-    type Record = PairedRecord;
+    type Record = [FastxRecord; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, paired_record: &mut PairedRecord) -> io::Result<bool> {
+    fn read_next(&mut self, paired_record: &mut Self::Record) -> io::Result<bool> {
         if !self.reader.read_next(&mut paired_record[0])? {
             Ok(false)
         } else if !self.reader.read_next(&mut paired_record[1])? {
@@ -448,10 +389,10 @@ impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
 }
 
 impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> {
-    type Record = PairedRecord;
+    type Record = [FastxRecord; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, paired_record: &mut PairedRecord) -> io::Result<bool> {
+    fn read_next(&mut self, paired_record: &mut Self::Record) -> io::Result<bool> {
         let could_read1 = self.reader1.read_next(&mut paired_record[0])?;
         let could_read2 = self.reader2.read_next(&mut paired_record[1])?;
         match (could_read1, could_read2) {
@@ -459,6 +400,39 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
             (true, true) => Ok(true),
             _ => Err(io::Error::new(io::ErrorKind::InvalidData,
                 "Different number of records in two input files.")),
+        }
+    }
+}
+
+// Write log messages at most every ten seconds.
+pub const UPDATE_SECS: u64 = 10;
+
+struct SubsampleLogger {
+    timer: Instant,
+    last_msg: Duration,
+    reads: u64,
+}
+
+impl SubsampleLogger {
+    fn new() -> Self {
+        Self {
+            timer: Instant::now(),
+            last_msg: Duration::default(),
+            reads: 0,
+        }
+    }
+
+    #[inline]
+    fn inc(&mut self) {
+        self.reads += 1;
+        if self.reads % 100_000 == 0 {
+            let elapsed = self.timer.elapsed();
+            if (elapsed - self.last_msg).as_secs() >= UPDATE_SECS {
+                self.last_msg = elapsed;
+                let reads_f64 = self.reads as f64;
+                let speed = 1e-3 * f64::from(reads_f64) / elapsed.as_secs_f64();
+                log::debug!("    Processed {:7.1}M reads, {:4.0}k reads/s", 1e-6 * reads_f64, speed);
+            }
         }
     }
 }
@@ -504,3 +478,11 @@ pub fn count_reads(path: &Path) -> Result<u64, Error> {
         Ok(0)
     }
 }
+
+// /// Read single-end BAM/CRAM file starting with some contig and continuing until the end.
+// pub struct BamReader {
+//     record: bam::Record,
+//     reader: bam::IndexedReader,
+//     curr_tid: u32,
+//     end_tid: u32,
+// }

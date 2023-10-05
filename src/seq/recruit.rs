@@ -14,7 +14,7 @@ use crate::{
     err::{Error, validate_param},
     seq::{
         kmers::{self, Kmer},
-        fastx::{RecordGroup, FastxRead},
+        fastx::{self, FastxRead},
         fastx::UPDATE_SECS,
     },
 };
@@ -106,6 +106,40 @@ impl Stats {
     }
 }
 
+/// Trait-extension over single/paired reads.
+pub trait RecruitableRecord : fastx::WritableRecord + Send + 'static {
+    fn recruit(&self,
+        targets: &Targets,
+        answer: &mut Answer,
+        rec_minims: &mut Vec<Minimizer>,
+        matches: &mut IntMap<u16, u32>,
+    );
+}
+
+impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> RecruitableRecord for T {
+    #[inline]
+    fn recruit(&self,
+        targets: &Targets,
+        answer: &mut Answer,
+        rec_minims: &mut Vec<Minimizer>,
+        matches: &mut IntMap<u16, u32>,
+    ) {
+        targets.recruit_single_end_record(self.seq(), answer, rec_minims, matches);
+    }
+}
+
+impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> RecruitableRecord for [T; 2] {
+    #[inline]
+    fn recruit(&self,
+        targets: &Targets,
+        answer: &mut Answer,
+        rec_minims: &mut Vec<Minimizer>,
+        matches: &mut IntMap<u16, u32>,
+    ) {
+        targets.recruit_paired_end_record(self[0].seq(), self[1].seq(), answer, rec_minims, matches);
+    }
+}
+
 const CAPACITY: usize = 4;
 /// Key: minimizer, value: vector of loci indices, where the minimizer appears.
 type MinimToLoci = IntMap<Minimizer, SmallVec<[u16; CAPACITY]>>;
@@ -184,14 +218,14 @@ impl Targets {
     /// for which the ratio of loci_matches will be at least `matches_frac`.
     fn recruit_single_end_record(
         &self,
-        record: &impl RecordGroup,
+        seq: &[u8],
         answer: &mut Answer,
         rec_minims: &mut Vec<Minimizer>,
         matches: &mut IntMap<u16, u32>,
     ) {
         matches.clear();
         rec_minims.clear();
-        kmers::minimizers(record.first().seq(), self.params.minimizer_k, self.params.minimizer_w, rec_minims);
+        kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, rec_minims);
         for minimizer in rec_minims.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for &locus_ix in loci_ixs.iter() {
@@ -215,7 +249,8 @@ impl Targets {
     /// for which the ratio of loci_matches will be at least `matches_frac` for both mates.
     fn recruit_paired_end_record(
         &self,
-        record: &impl RecordGroup,
+        seq1: &[u8],
+        seq2: &[u8],
         answer: &mut Answer,
         rec_minims: &mut Vec<Minimizer>,
         matches: &mut IntMap<u16, u32>,
@@ -223,7 +258,7 @@ impl Targets {
         matches.clear();
         // First mate.
         rec_minims.clear();
-        kmers::minimizers(record.first().seq(), self.params.minimizer_k, self.params.minimizer_w, rec_minims);
+        kmers::minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, rec_minims);
         let total1 = rec_minims.len();
         for minimizer in rec_minims.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
@@ -237,7 +272,7 @@ impl Targets {
 
         // Second mate.
         rec_minims.clear();
-        kmers::minimizers(record.second().seq(), self.params.minimizer_k, self.params.minimizer_w, rec_minims);
+        kmers::minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, rec_minims);
         let total2 = rec_minims.len();
         for minimizer in rec_minims.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
@@ -263,10 +298,10 @@ impl Targets {
         }
     }
 
-    fn recruit_single_thread<T: RecordGroup, W: io::Write>(
+    fn recruit_single_thread<T: RecruitableRecord>(
         &self,
         mut reader: impl FastxRead<Record = T>,
-        writers: &mut [W],
+        writers: &mut [impl io::Write],
     ) -> io::Result<()>
     {
         let mut record = T::default();
@@ -276,11 +311,7 @@ impl Targets {
 
         let mut stats = Stats::new();
         while reader.read_next(&mut record)? {
-            if T::PAIRED {
-                self.recruit_paired_end_record(&record, &mut answer, &mut buffer1, &mut buffer2);
-            } else {
-                self.recruit_single_end_record(&record, &mut answer, &mut buffer1, &mut buffer2);
-            }
+            record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
             for &locus_ix in answer.iter() {
                 record.write_to(&mut writers[usize::from(locus_ix)])?;
             }
@@ -294,10 +325,10 @@ impl Targets {
         Ok(())
     }
 
-    fn recruit_multi_thread<T: RecordGroup, W: io::Write>(
+    fn recruit_multi_thread<T: RecruitableRecord>(
         &self,
         reader: impl FastxRead<Record = T>,
-        writers: Vec<W>,
+        writers: Vec<impl io::Write>,
         threads: u16,
     ) -> io::Result<()> {
         let n_workers = usize::from(threads - 1);
@@ -308,7 +339,7 @@ impl Targets {
     }
 
     /// Recruit reads to the targets, possibly in multiple threads.
-    pub fn recruit<T: RecordGroup, W: io::Write>(
+    pub fn recruit<T: RecruitableRecord, W: io::Write>(
         &self,
         reader: impl FastxRead<Record = T>,
         mut writers: Vec<W>,
@@ -350,17 +381,13 @@ impl<T> Worker<T> {
     }
 }
 
-impl<T: RecordGroup> Worker<T> {
+impl<T: RecruitableRecord> Worker<T> {
     fn run(mut self) {
         // Block thread and wait for the shipment.
         while let Ok(mut shipment) = self.receiver.recv() {
             assert!(!shipment.is_empty());
             for (record, answer) in shipment.iter_mut() {
-                if T::PAIRED {
-                    self.targets.recruit_paired_end_record(record, answer, &mut self.buffer1, &mut self.buffer2);
-                } else {
-                    self.targets.recruit_single_end_record(record, answer, &mut self.buffer1, &mut self.buffer2);
-                }
+                record.recruit(&self.targets, answer, &mut self.buffer1, &mut self.buffer2);
             }
             if let Err(_) = self.sender.send(shipment) {
                 log::error!("Read recruitment: main thread stopped before the child thread.");
@@ -400,7 +427,7 @@ struct MainWorker<T, R: FastxRead<Record = T>, W> {
 }
 
 impl<T, R, W> MainWorker<T, R, W>
-where T: RecordGroup,
+where T: RecruitableRecord,
       R: FastxRead<Record = T>,
       W: io::Write,
 {
@@ -534,7 +561,7 @@ where T: RecordGroup,
 /// Fills `shipment` from the reader.
 /// Output shipment may be empty, if the stream has ended.
 fn fill_shipment<T, R>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T>) -> io::Result<()>
-where T: RecordGroup,
+where T: Default,
       R: FastxRead<Record = T>,
 {
     let reader = opt_reader.as_mut().expect("fill_shipment: reader must not be None");
@@ -552,7 +579,7 @@ where T: RecordGroup,
 }
 
 fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> io::Result<Shipment<T>>
-where T: RecordGroup,
+where T: Clone + Default,
       R: FastxRead<Record = T>,
 {
     let mut shipment = vec![Default::default(); chunk_size];
@@ -561,9 +588,8 @@ where T: RecordGroup,
 }
 
 /// Writes recruited records to the output files.
-fn write_shipment<T, W>(writers: &mut [W], shipment: &Shipment<T>, stats: &mut Stats) -> io::Result<()>
-where T: RecordGroup,
-      W: io::Write,
+fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, stats: &mut Stats) -> io::Result<()>
+where T: fastx::WritableRecord,
 {
     stats.processed += shipment.len() as u64;
     for (record, answer) in shipment.iter() {

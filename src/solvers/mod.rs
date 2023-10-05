@@ -34,7 +34,7 @@ pub trait SetParams {
 }
 
 /// General trait for all solvers.
-pub trait Solver : Send + Sync + SetParams + CloneSolver + Display {
+pub trait Solver: Send + Sync + SetParams + CloneSolver + Display {
     /// Distribute reads between several haplotypes in the best way,
     /// when at least one read pair has several possible locations.
     fn solve_nontrivial<'a>(
