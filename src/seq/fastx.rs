@@ -1,13 +1,14 @@
 use std::{
     fmt,
     io::{self, BufRead},
-    cmp::{min, Ordering},
+    cmp::min,
     path::{Path, PathBuf},
     time::{Instant, Duration},
 };
-use htslib::bam::{self, Read as BamRead};
+use htslib::bam;
 use crate::{
     ext,
+    algo::HashSet,
     err::{Error, add_path},
 };
 use super::NamedSeq;
@@ -501,7 +502,7 @@ impl BamRecord {
                 None => return Ok(false),
             }
             // Primary alignment.
-            if (self.inner.flags() & 0x900) == 0 {
+            if (self.flag() & 0x900) == 0 {
                 let seq = self.inner.seq();
                 let l = seq.len();
                 if l == 0 {
@@ -512,6 +513,11 @@ impl BamRecord {
                 return Ok(true);
             }
         }
+    }
+
+    #[inline]
+    fn flag(&self) -> u16 {
+        self.inner.flags()
     }
 }
 
@@ -530,52 +536,119 @@ impl SingleRecord for BamRecord {
     }
 }
 
-/// Read single-end BAM/CRAM file starting with some contig and continuing until the end.
-pub struct BamReader {
+/// Hash reads based on their names.
+impl std::hash::Hash for BamRecord {
+    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        hasher.write(self.inner.qname())
+    }
+}
+
+/// Check only read name because we intentionally want to get other read end from a map.
+impl PartialEq for BamRecord {
+    fn eq(&self, oth: &Self) -> bool {
+        self.inner.qname() == oth.inner.qname()
+    }
+}
+
+impl Eq for BamRecord {}
+
+/// Read single-end BAM/CRAM file across multiple fetches.
+pub struct BamReader<I> {
     reader: bam::IndexedReader,
-    /// Current contig index.
-    /// If `curr_tid == end_tid`, we are currently reading unmapped reads.
-    /// If `curr_tid > end_tid`, we completely finished reading.
-    curr_tid: i32,
-    end_tid: i32,
+    fetch_iter: I,
 }
 
-impl BamReader {
-    pub fn new(reader: bam::IndexedReader, start_tid: u32) -> Result<Self, Error> {
-        let mut res = Self {
-            end_tid: reader.header().target_count() as i32,
-            curr_tid: i32::try_from(start_tid).unwrap(),
-            reader,
-        };
-        // NOTE: Do not remove this asser.t
-        assert!(res.fetch_current_contig()?, "Contig id is too high");
-        Ok(res)
-    }
-
-    /// Fetches current contig or unmapped reads, depending on `curr_tid`.
-    /// Returns false if the reader is completely traversed.
-    fn fetch_current_contig(&mut self) -> Result<bool, Error> {
-        match self.curr_tid.cmp(&self.end_tid) {
-            Ordering::Less => self.reader.fetch(bam::FetchDefinition::CompleteTid(self.curr_tid))?,
-            Ordering::Equal => self.reader.fetch(bam::FetchDefinition::Unmapped)?,
-            Ordering::Greater => return Ok(false)
+impl<'a, I: Iterator<Item = bam::FetchDefinition<'a>> + Send> BamReader<I> {
+    /// Creates bam reader from indexed reader and an iterator over regions.
+    /// WARN: Regions should go in increasing order, otherwise some code may fail in paired-end case.
+    pub fn new(mut reader: bam::IndexedReader, mut fetch_iter: I) -> Result<Self, Error> {
+        if let Some(reg) = fetch_iter.next() {
+            reader.fetch(reg)?;
         }
-        Ok(true)
+        Ok(Self { reader, fetch_iter })
     }
 }
 
-impl FastxRead for BamReader {
+impl<'a, I: Iterator<Item = bam::FetchDefinition<'a>> + Send> FastxRead for BamReader<I> {
     type Record = BamRecord;
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
     fn read_next(&mut self, record: &mut BamRecord) -> Result<bool, Error> {
         while !record.read_from(&mut self.reader)? {
-            // Need to increment contig by one.
-            self.curr_tid += 1;
-            if !self.fetch_current_contig()? {
-                return Ok(false);
+            // Need to fetch the next region.
+            match self.fetch_iter.next() {
+                Some(reg) => self.reader.fetch(reg)?,
+                None => return Ok(false),
             }
         }
         Ok(true)
+    }
+}
+
+pub struct PairedBamReader<I> {
+    reader: BamReader<I>,
+    /// Hash set with records, for which we did not find their mate yet.
+    /// Only read name is checked, so we will get a match when we search for the read mate.
+    read_pairs: HashSet<BamRecord>,
+    discarded: u64,
+}
+
+impl<I> PairedBamReader<I> {
+    pub fn new(reader: BamReader<I>) -> Self {
+        Self {
+            reader,
+            read_pairs: Default::default(),
+            discarded: 0,
+        }
+    }
+}
+
+impl<'a, I: Iterator<Item = bam::FetchDefinition<'a>> + Send> FastxRead for PairedBamReader<I> {
+    type Record = [BamRecord; 2];
+
+    /// Reads records until both read ends are found for some reads, and returns it.
+    /// All unpaired reads are saved in a set until their mate is also found.
+    /// In the end, all unpaired reads are discarded.
+    fn read_next(&mut self, pair: &mut Self::Record) -> Result<bool, Error> {
+        loop {
+            let mut record = BamRecord::default();
+            if !self.reader.read_next(&mut record)? {
+                let discarded = self.discarded + self.read_pairs.len() as u64;
+                if discarded > 0 {
+                    log::warn!("    Discarded {} reads without a pair", discarded);
+                }
+                return Ok(false);
+            }
+
+            if (record.flag() & 0xC0) == 0 {
+                return Err(Error::InvalidData(format!(
+                    "Expected paired-end reads, but read {} is unpaired", record.name_str())));
+            }
+
+            if let Some(mate) = self.read_pairs.take(&record) {
+                // Read mate was found.
+                // 0 for first mate, 1 for second mate.
+                let ix1 = usize::from(record.inner.is_last_in_template());
+                let ix2 = usize::from(mate.inner.is_last_in_template());
+                if ix1 == ix2 {
+                    return Err(Error::InvalidData(format!(
+                        "Found two primary alignments for {}, both: {}-read end", record.name_str(), ix1 + 1)));
+                }
+                pair[ix1] = record;
+                pair[ix2] = mate;
+                return Ok(true);
+            } else {
+                // Read mate was not found
+                // Cast to unsigned integer so that -1 becomes the largest value.
+                let curr_coord = (record.inner.tid() as u32, record.inner.pos() as u64);
+                let mate_coord = (record.inner.mtid() as u32, record.inner.mpos() as u64);
+                // Do not add record if its mate has smaller coordinates.
+                if curr_coord <= mate_coord {
+                    self.read_pairs.insert(record);
+                } else {
+                    self.discarded += 1;
+                }
+            }
+        }
     }
 }
