@@ -435,7 +435,7 @@ fn set_mapping_stdin(
     args: &Args,
     child_stdin: ChildStdin,
     rng: &mut XoshiroRng,
-) -> Result<thread::JoinHandle<Result<u64, io::Error>>, Error>
+) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
 {
     let rate = args.subsampling_rate;
     let mut local_rng = rng.clone();
@@ -657,8 +657,7 @@ fn run_mapping(
     pipe_guard.wait()?;
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     let total_reads = handle.join()
-        .map_err(|e| Error::RuntimeError(format!("Read mapping failed: {:?}", e)))?
-        .map_err(add_path!(!))?;
+        .map_err(|e| Error::RuntimeError(format!("Read mapping failed: {:?}", e)))??;
     seq_info.set_total_reads(total_reads);
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
     fs::remove_file(&tmp_bed).map_err(add_path!(tmp_bed))?;
@@ -731,7 +730,7 @@ fn read_len_from_reads(input: &[PathBuf]) -> Result<f64, Error> {
     let lengths: Vec<f64> = input.iter()
         .map(|path| {
             let mut reader = fastx::Reader::from_path(path)?;
-            reader.mean_read_len(MEAN_LEN_RECORDS / input.len()).map_err(add_path!(path))
+            reader.mean_read_len(MEAN_LEN_RECORDS / input.len())
         })
         .collect::<Result<_, Error>>()?;
     Ok(ext::vec::F64Ext::mean(&lengths))

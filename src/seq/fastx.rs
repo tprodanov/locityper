@@ -1,8 +1,8 @@
 use std::{
     fmt,
     io::{self, BufRead},
-    cmp::min,
-    path::Path,
+    cmp::{min, Ordering},
+    path::{Path, PathBuf},
     time::{Instant, Duration},
 };
 use htslib::bam::{self, Read as BamRead};
@@ -172,35 +172,34 @@ impl fmt::Debug for FastxRecord {
 
 /// Dynamic FASTA/Q reader.
 pub struct Reader<R: BufRead> {
+    filename: PathBuf,
     stream: R,
     buffer: Vec<u8>,
 }
 
 impl Reader<Box<dyn BufRead + Send>> {
     pub fn from_path(path: &Path) -> Result<Self, Error> {
-        Self::new(ext::sys::open(path)?).map_err(add_path!(path))
+        Self::new(ext::sys::open(path)?, path.to_path_buf())
     }
 }
 
 impl<R: BufRead> Reader<R> {
-    pub fn new(mut stream: R) -> io::Result<Self> {
+    pub fn new(mut stream: R, filename: PathBuf) -> Result<Self, Error> {
         let mut buffer = Vec::new();
-        read_line(&mut stream, &mut buffer)?;
-        Ok(Self {
-            stream, buffer,
-        })
+        read_line(&mut stream, &mut buffer).map_err(add_path!(filename))?;
+        Ok(Self { stream, buffer, filename })
     }
 
-    fn fill_fasta_record(&mut self, record: &mut FastxRecord) -> io::Result<bool> {
+    fn fill_fasta_record(&mut self, record: &mut FastxRecord) -> Result<bool, Error> {
         self.buffer.clear();
         let mut seq_len = 0;
         loop {
-            let n = read_line(&mut self.stream, &mut record.seq)?;
+            let n = read_line(&mut self.stream, &mut record.seq).map_err(add_path!(self.filename))?;
             if n == 0 {
                 // File ended.
                 if seq_len == 0 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData,
-                        format!("Fasta record {} has an empty sequence.", record.name_only())));
+                    return Err(Error::InvalidData(format!("Fasta record {} has an empty sequence.",
+                        record.name_only())));
                 }
                 return Ok(true);
             } else if record.seq[seq_len] == b'>' || record.seq[seq_len] == b'@' {
@@ -213,38 +212,38 @@ impl<R: BufRead> Reader<R> {
         }
     }
 
-    fn fill_fastq_record(&mut self, record: &mut FastxRecord) -> io::Result<bool> {
+    fn fill_fastq_record(&mut self, record: &mut FastxRecord) -> Result<bool, Error> {
         // Sequence
-        let seq_len = read_line(&mut self.stream, &mut record.seq)?;
+        let seq_len = read_line(&mut self.stream, &mut record.seq).map_err(add_path!(self.filename))?;
         let prev_buf_len = self.buffer.len();
 
         // +
-        let n = read_line(&mut self.stream, &mut self.buffer)?;
+        let n = read_line(&mut self.stream, &mut self.buffer).map_err(add_path!(self.filename))?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
+            return Err(Error::InvalidData(
                 format!("Fastq record {} is incomplete.", record.name_only())));
         } else if self.buffer[prev_buf_len] != b'+' {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
+            return Err(Error::InvalidData(
                 format!("Fastq record {} has incorrect format.", record.name_only())));
         }
 
         // Qualities
-        let qual_len = read_line(&mut self.stream, &mut record.qual)?;
+        let qual_len = read_line(&mut self.stream, &mut record.qual).map_err(add_path!(self.filename))?;
         if seq_len != qual_len {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
+            return Err(Error::InvalidData(
                 format!("Fastq record {} has non-matching sequence and qualities.", record.name_only())));
         }
 
         // Next record name.
         self.buffer.clear();
-        read_line(&mut self.stream, &mut self.buffer)?;
+        read_line(&mut self.stream, &mut self.buffer).map_err(add_path!(self.filename))?;
         Ok(true)
     }
 }
 
 impl<R: BufRead + Send> Reader<R> {
     /// Calculates mean read length across at most `max_records` entries.
-    pub fn mean_read_len(&mut self, max_records: usize) -> io::Result<f64> {
+    pub fn mean_read_len(&mut self, max_records: usize) -> Result<f64, Error> {
         let mut count: u64 = 0;
         let mut sum_len: u64 = 0;
         let mut record = FastxRecord::default();
@@ -267,7 +266,7 @@ impl<R: BufRead + Send> Reader<R> {
     pub fn read_all(&mut self) -> Result<Vec<NamedSeq>, Error> {
         let mut record = FastxRecord::default();
         let mut records = Vec::new();
-        while self.read_next(&mut record).map_err(add_path!(!))? {
+        while self.read_next(&mut record)? {
             let name = record.name_only().into_owned();
             let mut seq = record.seq().to_owned();
             crate::seq::standardize(&mut seq)
@@ -284,15 +283,15 @@ pub trait FastxRead: Send {
     type Record: WritableRecord;
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, record: &mut Self::Record) -> io::Result<bool>;
+    fn read_next(&mut self, record: &mut Self::Record) -> Result<bool, Error>;
 
     /// Writes the next `count` records to the output stream.
     /// Returns the number of records that were written.
-    fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> io::Result<usize> {
+    fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> Result<usize, Error> {
         let mut record = Self::Record::default();
         for i in 0..count {
             match self.read_next(&mut record)? {
-                true => record.write_to(writer)?,
+                true => record.write_to(writer).map_err(add_path!(!))?,
                 false => return Ok(i),
             }
         }
@@ -300,26 +299,26 @@ pub trait FastxRead: Send {
     }
 
     /// Subsamples the reader with the `rate` and optional `seed`.
-    fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, rng: &mut impl rand::Rng) -> io::Result<u64> {
+    fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, rng: &mut impl rand::Rng) -> Result<u64, Error> {
         assert!(rate > 0.0 && rate < 1.0, "Subsampling rate ({}) must be within (0, 1).", rate);
         let mut record = Self::Record::default();
         let mut logger = SubsampleLogger::new();
         while self.read_next(&mut record)? {
             logger.inc();
             if rng.gen::<f64>() <= rate {
-                record.write_to(writer)?;
+                record.write_to(writer).map_err(add_path!(!))?;
             }
         }
         Ok(logger.reads)
     }
 
     /// Writes input stream to output.
-    fn copy(&mut self, writer: &mut impl io::Write) -> io::Result<u64> {
+    fn copy(&mut self, writer: &mut impl io::Write) -> Result<u64, Error> {
         let mut record = Self::Record::default();
         let mut logger = SubsampleLogger::new();
         while self.read_next(&mut record)? {
             logger.inc();
-            record.write_to(writer)?;
+            record.write_to(writer).map_err(add_path!(!))?;
         }
         Ok(logger.reads)
     }
@@ -329,7 +328,7 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
     type Record = FastxRecord;
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
-    fn read_next(&mut self, record: &mut FastxRecord) -> io::Result<bool> {
+    fn read_next(&mut self, record: &mut FastxRecord) -> Result<bool, Error> {
         record.full_name.clear();
         record.seq.clear();
         record.qual.clear();
@@ -364,12 +363,12 @@ impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
     type Record = [FastxRecord; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, paired_record: &mut Self::Record) -> io::Result<bool> {
+    fn read_next(&mut self, paired_record: &mut Self::Record) -> Result<bool, Error> {
         if !self.reader.read_next(&mut paired_record[0])? {
             Ok(false)
         } else if !self.reader.read_next(&mut paired_record[1])? {
-            Err(io::Error::new(io::ErrorKind::InvalidData,
-                "Odd number of records in an interleaved input file."))
+            Err(Error::InvalidData(format!(
+                "Odd number of records in an interleaved input file {}", ext::fmt::path(&self.reader.filename))))
         } else {
             Ok(true)
         }
@@ -392,14 +391,14 @@ impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> 
     type Record = [FastxRecord; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, paired_record: &mut Self::Record) -> io::Result<bool> {
+    fn read_next(&mut self, paired_record: &mut Self::Record) -> Result<bool, Error> {
         let could_read1 = self.reader1.read_next(&mut paired_record[0])?;
         let could_read2 = self.reader2.read_next(&mut paired_record[1])?;
         match (could_read1, could_read2) {
             (false, false) => Ok(false),
             (true, true) => Ok(true),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData,
-                "Different number of records in two input files.")),
+            _ => Err(Error::InvalidData(format!("Different number of records in input files {} and {}",
+                ext::fmt::path(&self.reader1.filename), ext::fmt::path(&self.reader2.filename)))),
         }
     }
 }
@@ -479,10 +478,104 @@ pub fn count_reads(path: &Path) -> Result<u64, Error> {
     }
 }
 
-// /// Read single-end BAM/CRAM file starting with some contig and continuing until the end.
-// pub struct BamReader {
-//     record: bam::Record,
-//     reader: bam::IndexedReader,
-//     curr_tid: u32,
-//     end_tid: u32,
-// }
+/// Wrapper over bam record, which decodes sequence into vector.
+#[derive(Default, Clone)]
+pub struct BamRecord {
+    inner: bam::Record,
+    seq: Vec<u8>,
+}
+
+impl BamRecord {
+    fn name_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.inner.qname())
+    }
+
+    /// Read until the next primary alignment is encountered, which is then saved and its sequence decoded.
+    /// Returns false if no alignments are available.
+    fn read_from(&mut self, reader: &mut impl bam::Read) -> Result<bool, Error> {
+        self.seq.clear();
+        loop {
+            match reader.read(&mut self.inner) {
+                Some(Err(e)) => return Err(e.into()),
+                Some(Ok(())) => {}
+                None => return Ok(false),
+            }
+            // Primary alignment.
+            if (self.inner.flags() & 0x900) == 0 {
+                let seq = self.inner.seq();
+                let l = seq.len();
+                if l == 0 {
+                    return Err(Error::InvalidData(format!(
+                        "Primary alignment for read {} has no sequence", self.name_str())));
+                }
+                self.seq.extend((0..l).map(|i| seq[i]));
+                return Ok(true);
+            }
+        }
+    }
+}
+
+impl SingleRecord for BamRecord {
+    #[inline]
+    fn name(&self) -> &[u8] {
+        self.inner.qname()
+    }
+
+    fn seq(&self) -> &[u8] {
+        &self.seq
+    }
+
+    fn qual(&self) -> &[u8] {
+        &self.inner.qual()
+    }
+}
+
+/// Read single-end BAM/CRAM file starting with some contig and continuing until the end.
+pub struct BamReader {
+    reader: bam::IndexedReader,
+    /// Current contig index.
+    /// If `curr_tid == end_tid`, we are currently reading unmapped reads.
+    /// If `curr_tid > end_tid`, we completely finished reading.
+    curr_tid: i32,
+    end_tid: i32,
+}
+
+impl BamReader {
+    pub fn new(reader: bam::IndexedReader, start_tid: u32) -> Result<Self, Error> {
+        let mut res = Self {
+            end_tid: reader.header().target_count() as i32,
+            curr_tid: i32::try_from(start_tid).unwrap(),
+            reader,
+        };
+        // NOTE: Do not remove this asser.t
+        assert!(res.fetch_current_contig()?, "Contig id is too high");
+        Ok(res)
+    }
+
+    /// Fetches current contig or unmapped reads, depending on `curr_tid`.
+    /// Returns false if the reader is completely traversed.
+    fn fetch_current_contig(&mut self) -> Result<bool, Error> {
+        match self.curr_tid.cmp(&self.end_tid) {
+            Ordering::Less => self.reader.fetch(bam::FetchDefinition::CompleteTid(self.curr_tid))?,
+            Ordering::Equal => self.reader.fetch(bam::FetchDefinition::Unmapped)?,
+            Ordering::Greater => return Ok(false)
+        }
+        Ok(true)
+    }
+}
+
+impl FastxRead for BamReader {
+    type Record = BamRecord;
+
+    /// Reads the next record, and returns true if the read was successful (false if no more reads available).
+    fn read_next(&mut self, record: &mut BamRecord) -> Result<bool, Error> {
+        while !record.read_from(&mut self.reader)? {
+            // Need to increment contig by one.
+            self.curr_tid += 1;
+            if !self.fetch_current_contig()? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}

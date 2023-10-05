@@ -11,7 +11,7 @@ use const_format::formatcp;
 use nohash::IntMap;
 use smallvec::{smallvec, SmallVec};
 use crate::{
-    err::{Error, validate_param},
+    err::{Error, validate_param, add_path},
     seq::{
         kmers::{self, Kmer},
         fastx::{self, FastxRead},
@@ -302,7 +302,7 @@ impl Targets {
         &self,
         mut reader: impl FastxRead<Record = T>,
         writers: &mut [impl io::Write],
-    ) -> io::Result<()>
+    ) -> Result<(), Error>
     {
         let mut record = T::default();
         let mut answer = Answer::new();
@@ -313,7 +313,7 @@ impl Targets {
         while reader.read_next(&mut record)? {
             record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
             for &locus_ix in answer.iter() {
-                record.write_to(&mut writers[usize::from(locus_ix)])?;
+                record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
             }
             stats.recruited += u64::from(!answer.is_empty());
             stats.processed += 1;
@@ -330,7 +330,7 @@ impl Targets {
         reader: impl FastxRead<Record = T>,
         writers: Vec<impl io::Write>,
         threads: u16,
-    ) -> io::Result<()> {
+    ) -> Result<(), Error> {
         let n_workers = usize::from(threads - 1);
         log::info!("Starting read recruitment with 1 read/write thread, and {} recruitment threads", n_workers);
         let mut main_worker = MainWorker::<T, _, _>::new(self, reader, writers, n_workers, self.params.chunk_size);
@@ -344,7 +344,7 @@ impl Targets {
         reader: impl FastxRead<Record = T>,
         mut writers: Vec<W>,
         threads: u16,
-    ) -> io::Result<()>
+    ) -> Result<(), Error>
     {
         assert_eq!(writers.len(), self.n_loci as usize, "Unexpected number of writers");
         if threads <= 1 {
@@ -455,7 +455,7 @@ where T: RecruitableRecord,
     }
 
     /// Starts the process: provides the first task to each worker.
-    fn start(&mut self) -> io::Result<()> {
+    fn start(&mut self) -> Result<(), Error> {
         for (is_busy, sender) in self.is_busy.iter_mut().zip(&self.senders) {
             let shipment = read_new_shipment(&mut self.reader, self.chunk_size)?;
             if !shipment.is_empty() {
@@ -496,7 +496,7 @@ where T: RecruitableRecord,
         any_action
     }
 
-    fn write_read_iteration(&mut self) -> io::Result<()> {
+    fn write_read_iteration(&mut self) -> Result<(), Error> {
         if self.reader.is_none() {
             return Ok(())
         }
@@ -522,7 +522,7 @@ where T: RecruitableRecord,
 
     /// Main part of the multi-thread recruitment.
     /// Iterates until there are any shipments left to read from the input files.
-    fn run(&mut self) -> io::Result<()> {
+    fn run(&mut self) -> Result<(), Error> {
         self.start()?;
         while self.reader.is_some() || !self.to_send.is_empty() {
             self.write_read_iteration()?;
@@ -536,7 +536,7 @@ where T: RecruitableRecord,
     }
 
     /// Finish the main thread: write all remaining shipments to the output files, and stop worker threads.
-    fn finish(mut self) -> io::Result<()> {
+    fn finish(mut self) -> Result<(), Error> {
         assert!(self.reader.is_none() && self.to_send.is_empty());
         for shipment in self.to_write.into_iter() {
             write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
@@ -560,7 +560,7 @@ where T: RecruitableRecord,
 
 /// Fills `shipment` from the reader.
 /// Output shipment may be empty, if the stream has ended.
-fn fill_shipment<T, R>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T>) -> io::Result<()>
+fn fill_shipment<T, R>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T>) -> Result<(), Error>
 where T: Default,
       R: FastxRead<Record = T>,
 {
@@ -578,7 +578,7 @@ where T: Default,
     Ok(())
 }
 
-fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> io::Result<Shipment<T>>
+fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> Result<Shipment<T>, Error>
 where T: Clone + Default,
       R: FastxRead<Record = T>,
 {
@@ -588,14 +588,14 @@ where T: Clone + Default,
 }
 
 /// Writes recruited records to the output files.
-fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, stats: &mut Stats) -> io::Result<()>
+fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, stats: &mut Stats) -> Result<(), Error>
 where T: fastx::WritableRecord,
 {
     stats.processed += shipment.len() as u64;
     for (record, answer) in shipment.iter() {
         stats.recruited += u64::from(!answer.is_empty());
         for &locus_ix in answer.iter() {
-            record.write_to(&mut writers[usize::from(locus_ix)])?;
+            record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
         }
     }
     Ok(())
