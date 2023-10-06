@@ -764,7 +764,6 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
         .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;
-    fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
     Ok(())
 }
 
@@ -839,6 +838,12 @@ fn analyze_locus(
         AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache,
             &args.assgn_params, io::sink(), io::sink())?
     };
+
+    if locus.reads_filename.exists() {
+        // Alignments are succesfully loaded, now we can remove file with reads.
+        fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
+    }
+
     if is_paired_end && args.debug {
         let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
         let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
