@@ -118,8 +118,9 @@ impl NamedSeq {
     }
 }
 
-pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter().rev().map(|&nt| match nt {
+#[inline]
+pub fn complement_nt(nt: u8) -> u8 {
+    match nt {
         b'A' | b'a' => b'T',
         b'C' | b'c' => b'G',
         b'G' | b'g' => b'C',
@@ -127,7 +128,11 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
         b'N' | b'R' | b'Y' | b'K' | b'M' | b'S' | b'W' | b'B' | b'D' | b'H' | b'V'
             | b'n' | b'r' | b'y' | b'k' | b'm' | b's' | b'w' | b'b' | b'd' | b'h' | b'v' => b'N',
         _ => panic!("Unknown nucleotide {} ({})", char::from(nt), nt),
-    }).collect()
+    }
+}
+
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter().rev().copied().map(complement_nt).collect()
 }
 
 /// Fetches sequence of the interval from an indexed fasta reader.

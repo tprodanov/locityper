@@ -136,9 +136,9 @@ def main():
         help='Target genotype (through comma).')
     parser.add_argument('-o', '--output', metavar='FILE', required=False,
         help='Output CSV file [stdout].')
-    parser.add_argument('-f', '--field', metavar='STR', default='dv',
+    parser.add_argument('-f', '--field', metavar='STR', default='NM',
         help='Take haplotype distance from this field [%(default)s].')
-    parser.add_argument('-a', '--averaging', metavar='STR', default='mean',
+    parser.add_argument('-a', '--averaging', metavar='STR', default='sum',
         help='Averaging function [%(default)s]. '
             'Possible values: `min`, `max`, `sum`, `mean`, or FLOAT: Hölder mean.')
     parser.add_argument('-v', '--verbose', action='store_true',

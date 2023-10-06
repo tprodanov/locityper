@@ -67,6 +67,12 @@ impl Interval {
         Self::new(Arc::clone(&self.contigs), self.contig_id, start, end)
     }
 
+    /// Adds padding to both sides. Left padding is limited by 0, right padding is limited by contig length.
+    pub fn add_padding(&self, padding: u32) -> Self {
+        self.create_at_same_contig(self.start.saturating_sub(padding),
+            min(self.end + padding, self.contigs.get_len(self.contig_id)))
+    }
+
     fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
         let contig_id = contigs.try_get_id(&captures[1])?;
         let start: PrettyU32 = captures[2].parse()
@@ -210,6 +216,23 @@ impl Interval {
     /// Fetches sequence of the interval from an indexed fasta reader.
     pub fn fetch_seq(&self, fasta: &mut fasta::IndexedReader<impl Read + Seek>) -> Result<Vec<u8>, Error> {
         super::fetch_seq(fasta, self.contig_name(), u64::from(self.start), u64::from(self.end))
+    }
+
+    /// Merge overlapping intervals.
+    /// Panics if intervals are unsorted.
+    pub fn merge(intervals: &[Interval], distance: u32) -> Vec<Interval> {
+        let mut merged: Vec<Interval> = Vec::new();
+        for curr in intervals {
+            if let Some(last) = merged.last_mut() {
+                assert!(last as &Interval <= curr, "Cannot merge unsorted intervals");
+                if last.contig_id == curr.contig_id && last.end + distance >= curr.start {
+                    last.end = curr.end;
+                }
+            } else {
+                merged.push(curr.clone());
+            }
+        }
+        merged
     }
 }
 

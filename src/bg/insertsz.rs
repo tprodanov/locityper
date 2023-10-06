@@ -175,6 +175,11 @@ impl InsertDistr {
     pub fn insert_penalty(&self) -> f64 {
         self.mode_prob
     }
+
+    /// Returns insert size distribution. `None` if unpaired.
+    pub fn distr(&self) -> &Option<LinearCache<NBinom>> {
+        &self.distr
+    }
 }
 
 impl JsonSer for InsertDistr {

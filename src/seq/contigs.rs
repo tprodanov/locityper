@@ -5,6 +5,7 @@ use std::{
     path::Path,
 };
 use smallvec::SmallVec;
+use htslib::bam;
 use bio::io::fasta;
 use crate::{
     err::{Error, add_path},
@@ -100,6 +101,14 @@ impl ContigNames {
     /// First argument: overall name of the contig name set.
     pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> Result<Self, Error> {
         Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
+    }
+
+    /// Creates contig names from BAM header.
+    pub fn from_bam_header(tag: impl Into<String>, header: &bam::HeaderView) -> Result<Self, Error> {
+        Self::new(tag, (0..header.target_count()).map(|i| (
+            String::from_utf8(header.tid2name(i).to_vec()).expect("BAM file contains non-UTF8 contig names"),
+            u32::try_from(header.target_len(i).unwrap()).expect("BAM file contains extremely long contig")
+        )))
     }
 
     /// Loads indexed fasta and stored contig names and lengths.

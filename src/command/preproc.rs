@@ -115,9 +115,9 @@ impl Args {
             "Two read files (-i/--input) are provided, however, --interleaved is specified");
         if n_input > 0 {
             let paired_end_allowed = self.technology.paired_end_allowed();
-            validate_param!(self.is_single_end() || paired_end_allowed,
+            validate_param!(!self.is_paired_end() || paired_end_allowed,
                 "Paired end reads are not supported by {}", self.technology.long_name());
-            if self.is_single_end() && paired_end_allowed {
+            if !self.is_paired_end() && paired_end_allowed {
                 log::warn!("Running in single-end mode.");
             }
         }
@@ -157,12 +157,10 @@ impl Args {
         Ok(self)
     }
 
+    /// Returns true/false for input read files and panics for BAM/CRAM files.
     fn is_paired_end(&self) -> bool {
+        assert!(!self.input.is_empty());
         self.input.len() == 2 || self.interleaved
-    }
-
-    fn is_single_end(&self) -> bool {
-        !self.is_paired_end()
     }
 }
 

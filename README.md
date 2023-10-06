@@ -108,8 +108,6 @@ Note, that you still need to provide region coordinates in the reference genome.
 This is needed to evaluate off-target *k*-mer counts.
 Path to alleles can also be provided in a fifth column of the input BED file (`-L`).
 
-You can freely add more loci to the database using the same commands.
-
 If you don't know exact region coordinates, you can align locus alleles to the reference genome with
 ```bash
 minimap2 -cx asm20 genome.fa alleles.fa | \
@@ -123,6 +121,8 @@ During locus preprocessing, Locityper calculates all pairwise alignment between 
 Alignment accuracy is controlled by `-a` argument, with `-a 9` producing the most accurate alignments
 at slow speed, and `-a 1` quickly producing very inaccurate alignments.
 Additionally, you can use `-a 0` to skip alignment step completely.
+
+You can freely add more loci to the database using the same commands.
 
 ### Preprocessing WGS dataset
 

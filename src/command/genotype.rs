@@ -9,12 +9,15 @@ use std::{
 };
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
-use htslib::bam;
+use htslib::bam::{self, Read as BamRead};
 use crate::{
     err::{Error, validate_param, add_path},
-    math::Ln,
+    math::{
+        Ln,
+        distr::WithQuantile,
+    },
     seq::{
-        recruit, fastx, NamedSeq,
+        recruit, fastx, NamedSeq, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
     },
@@ -36,9 +39,12 @@ use super::paths;
 
 struct Args {
     input: Vec<PathBuf>,
+    alns: Option<PathBuf>,
+    reference: Option<PathBuf>,
     preproc: Option<PathBuf>,
     databases: Vec<PathBuf>,
     output: Option<PathBuf>,
+
     subset_loci: HashSet<String>,
     ploidy: u8,
     priors: Option<PathBuf>,
@@ -62,9 +68,12 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             input: Vec::new(),
+            alns: None,
+            reference: None,
             preproc: None,
             databases: Vec::new(),
             output: None,
+
             subset_loci: HashSet::default(),
             ploidy: 2,
             priors: None,
@@ -91,10 +100,23 @@ impl Args {
     fn validate(mut self) -> Result<Self, Error> {
         self.threads = max(self.threads, 1);
         let n_input = self.input.len();
-        validate_param!(n_input > 0, "Read files are not provided (see -i/--input)");
-        validate_param!(n_input != 2 || !self.interleaved,
-            "Two read files (-i/--input) are provided, however, --interleaved is specified");
-        validate_param!(self.ploidy > 0 && self.ploidy <= 11, "Ploidy ({}) must be within [1, 10]", self.ploidy);
+        if n_input > 0 {
+            validate_param!(self.alns.is_none(),
+                "Read files (-i/--input) cannot be used together with alignments (-a/--alignment)");
+            validate_param!(n_input != 2 || !self.interleaved,
+                "Two read files (-i/--input) are provided, however, --interleaved is specified");
+            validate_param!(self.ploidy > 0 && self.ploidy <= 11, "Ploidy ({}) must be within [1, 10]", self.ploidy);
+        } else {
+            match self.alns.as_ref() {
+                Some(filename) => {
+                    let is_cram = filename.extension().map(|ext| ext == "cram").unwrap_or(false);
+                    validate_param!(self.reference.is_some() || !is_cram,
+                        "Input CRAM file requires reference file (see -a/--alignment and -r/--reference)")
+                }
+                None => validate_param!(false,
+                    "Neither reads (-i/--input) nor alignments (-a/--alignment) are provided"),
+            }
+        }
 
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
@@ -106,7 +128,9 @@ impl Args {
         Ok(self)
     }
 
+    /// Returns true/false for input read files and panics for BAM/CRAM files.
     fn is_paired_end(&self) -> bool {
+        assert!(!self.input.is_empty());
         self.input.len() == 2 || self.interleaved
     }
 }
@@ -130,9 +154,15 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
+    println!("    {:KEY$} {:VAL$}  Indexed BAM/CRAM file with read alignments. Reads must be mapped\n\
+        {EMPTY}  to the same reference genome, which was used for database construction.\n\
+        {EMPTY}  Mutually exclusive with {}.",
+        "-a, --alignment".green(), "FILE".yellow(), "-i".green());
+    println!("    {:KEY$} {:VAL$}  Reference FASTA file. Required with input CRAM file ({} alns.cram).",
+        "-r, --reference".green(), "FILE".yellow(), "-a".green());
     println!("    {:KEY$} {:VAL$}  Preprocessed dataset information (see {}).",
         "-p, --preproc".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
-    println!("    {:KEY$} {:VAL$}  Database directory (initialized with {}).\n\
+    println!("    {:KEY$} {:VAL$}  Database directory (see {}).\n\
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
         "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " add").underline());
     println!("    {:KEY$} {:VAL$}  Output directory.",
@@ -228,7 +258,7 @@ fn print_help(extended: bool) {
             "    --min-gts".green(), "INT".yellow(),
             super::fmt_def(PrettyUsize(defaults.assgn_params.min_gts)));
         println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
-            "-a, --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
+            "    --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
             "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
         println!("    {:KEY$} {:VAL$}  Normalize depth likelihoods based on sum window weight across\n\
@@ -284,6 +314,9 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
         match arg {
             Short('i') | Long("input") =>
                 args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
+            Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
+                args.alns = Some(parser.value()?.parse()?),
+            Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('p') | Long("preproc") | Long("preprocessing") => args.preproc = Some(parser.value()?.parse()?),
             Short('d') | Long("db") | Long("database") | Long("databases") => {
                 for val in parser.values()? {
@@ -348,7 +381,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
                 args.assgn_params.prob_thresh = Ln::from_log10(parser.value()?.parse()?),
             Long("min-gts") | Long("min-genotypes") =>
                 args.assgn_params.min_gts = parser.value()?.parse::<PrettyUsize>()?.get(),
-            Short('a') | Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
+            Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
             Short('t') | Long("tweak") => {
                 let val = parser.value()?;
                 args.assgn_params.tweak = if val == "auto" {
@@ -561,8 +594,54 @@ fn load_loci(
     Ok(loci)
 }
 
+/// Prepare fetch regions for a list of regions.
+/// Additionally, add all contigs from
+fn create_fetch_targets(
+    reader: &bam::Reader,
+    bg_distr: &BgDistr,
+    filt_loci: &[&LocusData]
+) -> Result<Vec<Interval>, Error>
+{
+    let padding = if let Some(distr) = bg_distr.insert_distr().distr() {
+        distr.quantile(0.999).ceil().min(10_000.0) as u32 + 100
+    } else {
+        1000
+    };
+
+    let contigs = Arc::new(ContigNames::from_bam_header("bam", reader.header())?);
+    let mut regions = Vec::new();
+    for locus in filt_loci {
+        let bed_filename = locus.db_locus_dir.join(paths::LOCUS_BED);
+        let bed_str = fs::read_to_string(&bed_filename).map_err(add_path!(bed_filename))?;
+        match Interval::parse_bed(&mut bed_str.split('\t'), &contigs) {
+            Ok(interv) => {
+                regions.push(interv.add_padding(padding))
+            }
+            Err(Error::ParsingError(e)) => log::error!(
+                "[{}] Cannot parse locus coordinates: {}, maybe the region is absent from the BAM/CRAM file?",
+                locus.set.tag(), e),
+            Err(e) => log::error!("[{}] Cannot parse locus coordinates: {}", locus.set.tag(), e.display()),
+        }
+    }
+
+    // Recruit reads from all contigs under 10 Mb.
+    const MIN_CONTIG_SIZE: u32 = 10_000_000;
+    for (id, &len) in contigs.ids().zip(contigs.lengths()) {
+        if len < MIN_CONTIG_SIZE {
+            regions.push(Interval::full_contig(Arc::clone(&contigs), id));
+        }
+    }
+
+    const MERGE_DISTANCE: u32 = 1000;
+    regions.sort();
+    let merged = Interval::merge(&regions, MERGE_DISTANCE);
+    log::debug!("    Fetch reads from {} regions (sum length {} bp) + unmapped reads", merged.len(),
+        merged.iter().map(Interval::len).sum::<u32>());
+    Ok(merged)
+}
+
 /// Recruits reads to all loci, where neither reads nor alignments are available.
-fn recruit_reads(loci: &[LocusData], args: &Args) -> Result<(), Error> {
+fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<(), Error> {
     let filt_loci: Vec<&LocusData> = loci.iter()
         .filter(|locus| !locus.reads_filename.exists() && !locus.aln_filename.exists())
         .collect();
@@ -819,7 +898,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     if loci.is_empty() {
         return Ok(());
     }
-    recruit_reads(&loci, &args)?;
+    recruit_reads(&loci, &bg_distr, &args)?;
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, args.assgn_params.alt_cn));
