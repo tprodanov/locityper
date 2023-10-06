@@ -174,6 +174,10 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             return Err(Error::InvalidData(format!("Read {} does not have a second read end", name)));
         }
         if self.record.seq().is_empty() {
+            if self.record.qname().is_empty() {
+                return Err(Error::InvalidData(
+                    "Alignment file contains absolutely empty read (no read name or sequence)".to_owned()));
+            }
             return Err(Error::InvalidData(format!("Read {} does not have read sequence", read_data.name)));
         }
         let old_option = read_data.mates[read_end.ix()].replace(MateData::new(&self.record));

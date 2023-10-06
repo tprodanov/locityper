@@ -110,6 +110,15 @@ Path to alleles can also be provided in a fifth column of the input BED file (`-
 
 You can freely add more loci to the database using the same commands.
 
+If you don't know exact region coordinates, you can align locus alleles to the reference genome with
+```bash
+minimap2 -cx asm20 genome.fa alleles.fa | \
+    awk '{ printf("%s:%d-%d\n",$6,$8+1,$9) }' | \
+    sort | uniq -c | sort -k1,1nr
+```
+This will produce a list of possible reference coordinates ranked by the number of alleles.
+You can then select the most common coordinates / largest region at your discretion.
+
 During locus preprocessing, Locityper calculates all pairwise alignment between locus alleles.
 Alignment accuracy is controlled by `-a` argument, with `-a 9` producing the most accurate alignments
 at slow speed, and `-a 1` quickly producing very inaccurate alignments.
