@@ -4,6 +4,7 @@ use std::{
     cmp::min,
     path::{Path, PathBuf},
     time::{Instant, Duration},
+    process::{Command, Stdio},
 };
 use htslib::bam;
 use crate::{
@@ -23,11 +24,11 @@ use super::NamedSeq;
 /// `name` may include description after a space, if needed.
 pub fn write_fasta(
     writer: &mut impl io::Write,
-    full_name: &[u8],
+    name: &[u8],
     seq: &[u8]
 ) -> io::Result<()> {
     writer.write_all(b">")?;
-    writer.write_all(full_name)?;
+    writer.write_all(name)?;
     writer.write_all(b"\n")?;
 
     const WIDTH: usize = 120;
@@ -46,12 +47,12 @@ pub fn write_fasta(
 /// `name` may include description after a space, if needed.
 pub fn write_fastq(
     writer: &mut impl io::Write,
-    full_name: &[u8],
+    name: &[u8],
     seq: &[u8],
     qual: &[u8],
 ) -> io::Result<()> {
     writer.write_all(b"@")?;
-    writer.write_all(full_name)?;
+    writer.write_all(name)?;
     writer.write_all(b"\n")?;
     writer.write_all(seq)?;
     writer.write_all(b"\n+\n")?;
@@ -82,15 +83,32 @@ fn read_line(stream: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<usiz
     }
 }
 
+/// Qiuckly compare read names, will produce many false positive, but with many reads that is fine.
+fn equal_names_fast(name1: &[u8], name2: &[u8]) -> bool {
+    name1[name1.len() - 1] == name2[name2.len() - 1]
+}
+
 // ------------------------------------------- Traits -------------------------------------------
 
 /// Single-end or paired-end record that can be written to a file.
 pub trait WritableRecord: Clone + Default {
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()>;
+
+    /// Returns sum length and the number of fragments (1 or 2).
+    fn sum_len(&self) -> (u32, u32);
 }
 
 /// Single read sequence.
 pub trait SingleRecord: WritableRecord {
+    /// Returns record name.
+    fn name(&self) -> &[u8];
+
+    /// Safely converts record name to UTF-8.
+    fn name_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(self.name())
+    }
+
+    /// Read sequence.
     fn seq(&self) -> &[u8];
 }
 
@@ -98,6 +116,62 @@ impl<T: SingleRecord + WritableRecord> WritableRecord for [T; 2] {
     /// Writes two FASTQ/FASTA records one after another.
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
         self.iter().map(|rec| rec.write_to(f)).collect()
+    }
+
+    fn sum_len(&self) -> (u32, u32) {
+        let (s1, t1) = self[0].sum_len();
+        let (s2, t2) = self[1].sum_len();
+        (s1 + s2, t1 + t2)
+    }
+}
+
+/// Trait for reading and writing FASTA/Q single-end and paired-end records.
+pub trait FastxRead: Send {
+    type Record: WritableRecord;
+
+    /// Reader filename, needed for better error messages.
+    /// If there are two files, returns the first one.
+    fn filename(&self) -> &Path;
+
+    /// Read next one/two records, and return true if the read was filled (is not empty).
+    fn read_next(&mut self, record: &mut Self::Record) -> Result<bool, Error>;
+
+    /// Writes the next `count` records to the output stream.
+    /// Returns the number of records that were written.
+    fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> Result<usize, Error> {
+        let mut record = Self::Record::default();
+        for i in 0..count {
+            match self.read_next(&mut record)? {
+                true => record.write_to(writer).map_err(add_path!(!))?,
+                false => return Ok(i),
+            }
+        }
+        Ok(count)
+    }
+
+    /// Subsamples the reader with the `rate` and optional `seed`.
+    fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, rng: &mut impl rand::Rng) -> Result<u64, Error> {
+        assert!(rate > 0.0 && rate < 1.0, "Subsampling rate ({}) must be within (0, 1).", rate);
+        let mut record = Self::Record::default();
+        let mut logger = ProcLogger::new();
+        while self.read_next(&mut record)? {
+            logger.inc();
+            if rng.gen::<f64>() <= rate {
+                record.write_to(writer).map_err(add_path!(!))?;
+            }
+        }
+        Ok(logger.reads)
+    }
+
+    /// Writes input stream to output.
+    fn copy(&mut self, writer: &mut impl io::Write) -> Result<u64, Error> {
+        let mut record = Self::Record::default();
+        let mut logger = ProcLogger::new();
+        while self.read_next(&mut record)? {
+            logger.inc();
+            record.write_to(writer).map_err(add_path!(!))?;
+        }
+        Ok(logger.reads)
     }
 }
 
@@ -107,7 +181,7 @@ impl<T: SingleRecord + WritableRecord> WritableRecord for [T; 2] {
 #[derive(Default, Clone)]
 pub struct FastxRecord {
     /// Name, including description after the space.
-    full_name: Vec<u8>,
+    name: Vec<u8>,
     seq: Vec<u8>,
     qual: Vec<u8>,
 }
@@ -115,29 +189,16 @@ pub struct FastxRecord {
 impl FastxRecord {
     /// Returns true if the record is empty.
     pub fn is_empty(&self) -> bool {
-        self.full_name.is_empty()
-    }
-
-    /// Read name including description, if any.
-    pub fn full_name(&self) -> &[u8] {
-        &self.full_name
-    }
-
-    /// Read name including description if lossy UTF-8 format.
-    pub fn full_name_str(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.full_name)
-    }
-
-    /// Returns only the name of the record, without the optional description.
-    pub fn name_only(&self) -> std::borrow::Cow<'_, str> {
-        match self.full_name.iter().position(|&c| c == b' ') {
-            Some(i) => String::from_utf8_lossy(&self.full_name[..i]),
-            None => String::from_utf8_lossy(&self.full_name),
-        }
+        self.name.is_empty()
     }
 }
 
 impl SingleRecord for FastxRecord {
+    /// Returns read sequence
+    fn name(&self) -> &[u8] {
+        &self.name
+    }
+
     // Returns record sequence.
     fn seq(&self) -> &[u8] {
         &self.seq
@@ -148,10 +209,14 @@ impl WritableRecord for FastxRecord {
     /// Write single record to FASTA/FASTQ file.
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
         if self.qual.is_empty() {
-            write_fasta(f, &self.full_name, &self.seq)
+            write_fasta(f, &self.name, &self.seq)
         } else {
-            write_fastq(f, &self.full_name, &self.seq, &self.qual)
+            write_fastq(f, &self.name, &self.seq, &self.qual)
         }
+    }
+
+    fn sum_len(&self) -> (u32, u32) {
+        (self.seq.len() as u32, 1)
     }
 }
 
@@ -192,7 +257,7 @@ impl<R: BufRead> Reader<R> {
                 // File ended.
                 if seq_len == 0 {
                     return Err(Error::InvalidData(format!("Fasta record {} has an empty sequence.",
-                        record.name_only())));
+                        record.name_str())));
                 }
                 return Ok(true);
             } else if record.seq[seq_len] == b'>' || record.seq[seq_len] == b'@' {
@@ -214,17 +279,17 @@ impl<R: BufRead> Reader<R> {
         let n = read_line(&mut self.stream, &mut self.buffer).map_err(add_path!(self.filename))?;
         if n == 0 {
             return Err(Error::InvalidData(
-                format!("Fastq record {} is incomplete.", record.name_only())));
+                format!("Fastq record {} is incomplete", record.name_str())));
         } else if self.buffer[prev_buf_len] != b'+' {
             return Err(Error::InvalidData(
-                format!("Fastq record {} has incorrect format.", record.name_only())));
+                format!("Fastq record {} has incorrect format", record.name_str())));
         }
 
         // Qualities
         let qual_len = read_line(&mut self.stream, &mut record.qual).map_err(add_path!(self.filename))?;
         if seq_len != qual_len {
             return Err(Error::InvalidData(
-                format!("Fastq record {} has non-matching sequence and qualities.", record.name_only())));
+                format!("Fastq record {} has non-matching sequence and qualities", record.name_str())));
         }
 
         // Next record name.
@@ -235,32 +300,14 @@ impl<R: BufRead> Reader<R> {
 }
 
 impl<R: BufRead + Send> Reader<R> {
-    /// Calculates mean read length across at most `max_records` entries.
-    pub fn mean_read_len(&mut self, max_records: usize) -> Result<f64, Error> {
-        let mut count: u64 = 0;
-        let mut sum_len: u64 = 0;
-        let mut record = FastxRecord::default();
-        for _ in 0..max_records {
-            match self.read_next(&mut record)? {
-                true => {
-                    count += 1;
-                    sum_len += record.seq().len() as u64;
-                }
-                false => break,
-            }
-        }
-        Ok(sum_len as f64 / count as f64)
-    }
-}
-
-impl<R: BufRead + Send> Reader<R> {
     /// Reads all sequences into memory.
     /// Each sequence is standartized and checked for invalid nucleotides.
     pub fn read_all(&mut self) -> Result<Vec<NamedSeq>, Error> {
         let mut record = FastxRecord::default();
         let mut records = Vec::new();
         while self.read_next(&mut record)? {
-            let name = record.name_only().into_owned();
+            let name = String::from_utf8(record.name().to_vec())
+                .map_err(|_| Error::InvalidData(format!("Record `{}` has non UTF-8 name", record.name_str())))?;
             let mut seq = record.seq().to_owned();
             crate::seq::standardize(&mut seq)
                 .map_err(|nt| Error::InvalidData(format!("Invalid nucleotide `{}` ({}) for sequence {}",
@@ -271,58 +318,12 @@ impl<R: BufRead + Send> Reader<R> {
     }
 }
 
-/// Trait for reading and writing FASTA/Q single-end and paired-end records.
-pub trait FastxRead: Send {
-    type Record: WritableRecord;
-
-    /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, record: &mut Self::Record) -> Result<bool, Error>;
-
-    /// Writes the next `count` records to the output stream.
-    /// Returns the number of records that were written.
-    fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> Result<usize, Error> {
-        let mut record = Self::Record::default();
-        for i in 0..count {
-            match self.read_next(&mut record)? {
-                true => record.write_to(writer).map_err(add_path!(!))?,
-                false => return Ok(i),
-            }
-        }
-        Ok(count)
-    }
-
-    /// Subsamples the reader with the `rate` and optional `seed`.
-    fn subsample(&mut self, writer: &mut impl io::Write, rate: f64, rng: &mut impl rand::Rng) -> Result<u64, Error> {
-        assert!(rate > 0.0 && rate < 1.0, "Subsampling rate ({}) must be within (0, 1).", rate);
-        let mut record = Self::Record::default();
-        let mut logger = SubsampleLogger::new();
-        while self.read_next(&mut record)? {
-            logger.inc();
-            if rng.gen::<f64>() <= rate {
-                record.write_to(writer).map_err(add_path!(!))?;
-            }
-        }
-        Ok(logger.reads)
-    }
-
-    /// Writes input stream to output.
-    fn copy(&mut self, writer: &mut impl io::Write) -> Result<u64, Error> {
-        let mut record = Self::Record::default();
-        let mut logger = SubsampleLogger::new();
-        while self.read_next(&mut record)? {
-            logger.inc();
-            record.write_to(writer).map_err(add_path!(!))?;
-        }
-        Ok(logger.reads)
-    }
-}
-
 impl<R: BufRead + Send> FastxRead for Reader<R> {
     type Record = FastxRecord;
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
     fn read_next(&mut self, record: &mut FastxRecord) -> Result<bool, Error> {
-        record.full_name.clear();
+        record.name.clear();
         record.seq.clear();
         record.qual.clear();
 
@@ -332,80 +333,110 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
             return Ok(false);
         }
 
-        record.full_name.extend_from_slice(&self.buffer[1..]);
+        // Read only name before any description.
+        let end_ix = self.buffer.iter().position(|&ch| ch == b' ').unwrap_or(self.buffer.len());
+        record.name.extend_from_slice(&self.buffer[1..end_ix]);
         if self.buffer[0] == b'>' {
             self.fill_fasta_record(record)
         } else {
             self.fill_fastq_record(record)
         }
     }
+
+    fn filename(&self) -> &Path {
+        &self.filename
+    }
 }
 
 /// Interleaved paired-end FASTA/Q reader, that stores two buffer records to reduce memory allocations.
-pub struct PairedEndInterleaved<R: BufRead> {
-    reader: Reader<R>,
+pub struct PairedEndInterleaved<T: SingleRecord, R: FastxRead<Record = T>> {
+    reader: R,
 }
 
-impl<R: BufRead> PairedEndInterleaved<R> {
-    pub fn new(reader: Reader<R>) -> Self {
+impl<T: SingleRecord, R: FastxRead<Record = T>> PairedEndInterleaved<T, R> {
+    pub fn new(reader: R) -> Self {
         Self { reader }
     }
 }
 
-impl<R: BufRead + Send> FastxRead for PairedEndInterleaved<R> {
-    type Record = [FastxRecord; 2];
+impl<T: SingleRecord, R: FastxRead<Record = T>> FastxRead for PairedEndInterleaved<T, R> {
+    type Record = [T; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, paired_record: &mut Self::Record) -> Result<bool, Error> {
-        if !self.reader.read_next(&mut paired_record[0])? {
+    fn read_next(&mut self, [record1, record2]: &mut [T; 2]) -> Result<bool, Error> {
+        if !self.reader.read_next(record1)? {
             Ok(false)
-        } else if !self.reader.read_next(&mut paired_record[1])? {
+        } else if !self.reader.read_next(record2)? {
             Err(Error::InvalidData(format!(
-                "Odd number of records in an interleaved input file {}", ext::fmt::path(&self.reader.filename))))
+                "Odd number of records in an interleaved input file {}", ext::fmt::path(&self.reader.filename()))))
         } else {
-            Ok(true)
+            if !equal_names_fast(record1.name(), record2.name()) {
+                Err(Error::InvalidData(format!(
+                    "Interleaved input file {} contains reads in incorrect order (first mate: {}, second mate: {})",
+                    ext::fmt::path(&self.reader.filename()), record1.name_str(), record2.name_str())))
+            } else {
+                Ok(true)
+            }
         }
+    }
+
+    fn filename(&self) -> &Path {
+        self.reader.filename()
     }
 }
 
 /// Two paired-end FASTA/Q readers, that stores two buffer records to reduce memory allocations.
-pub struct PairedEndReaders<R: BufRead, S: BufRead> {
-    reader1: Reader<R>,
-    reader2: Reader<S>,
+pub struct PairedEndReaders<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> {
+    reader1: R,
+    reader2: S,
 }
 
-impl<R: BufRead, S: BufRead> PairedEndReaders<R, S> {
-    pub fn new(reader1: Reader<R>, reader2: Reader<S>) -> Self {
+impl<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> PairedEndReaders<T, R, S> {
+    pub fn new(reader1: R, reader2: S) -> Self {
         Self { reader1, reader2 }
     }
 }
 
-impl<R: BufRead + Send, S: BufRead + Send> FastxRead for PairedEndReaders<R, S> {
-    type Record = [FastxRecord; 2];
+impl<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> FastxRead for PairedEndReaders<T, R, S> {
+    type Record = [T; 2];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
-    fn read_next(&mut self, paired_record: &mut Self::Record) -> Result<bool, Error> {
-        let could_read1 = self.reader1.read_next(&mut paired_record[0])?;
-        let could_read2 = self.reader2.read_next(&mut paired_record[1])?;
+    fn read_next(&mut self, [record1, record2]: &mut [T; 2]) -> Result<bool, Error> {
+        let could_read1 = self.reader1.read_next(record1)?;
+        let could_read2 = self.reader2.read_next(record2)?;
         match (could_read1, could_read2) {
             (false, false) => Ok(false),
-            (true, true) => Ok(true),
+            (true, true) => {
+                if !equal_names_fast(record1.name(), record2.name()) {
+                    Err(Error::InvalidData(format!(
+                        "Input files {} and {} have reads in incorrect order (first mate: {}, second mate: {})",
+                        ext::fmt::path(&self.reader1.filename()), ext::fmt::path(&self.reader2.filename()),
+                        record1.name_str(), record2.name_str())))
+                } else {
+                    Ok(true)
+                }
+            }
             _ => Err(Error::InvalidData(format!("Different number of records in input files {} and {}",
-                ext::fmt::path(&self.reader1.filename), ext::fmt::path(&self.reader2.filename)))),
+                ext::fmt::path(&self.reader1.filename()), ext::fmt::path(&self.reader2.filename())))),
         }
+    }
+
+    /// Returns the first filename.
+    fn filename(&self) -> &Path {
+        self.reader1.filename()
     }
 }
 
 // Write log messages at most every ten seconds.
 pub const UPDATE_SECS: u64 = 10;
 
-struct SubsampleLogger {
+struct ProcLogger {
     timer: Instant,
     last_msg: Duration,
     reads: u64,
 }
 
-impl SubsampleLogger {
+impl ProcLogger {
     fn new() -> Self {
         Self {
             timer: Instant::now(),
@@ -454,7 +485,7 @@ fn count_reads_fastq(mut stream: impl BufRead) -> io::Result<u64> {
 
 /// Count the number of FASTA/FASTQ reads in the stream.
 /// NOTE: Fasta and Fastq reads should not be present in the same file.
-pub fn count_reads(path: &Path) -> Result<u64, Error> {
+pub fn count_reads_fastx(path: &Path) -> Result<u64, Error> {
     let mut stream = ext::sys::open(path)?;
     let mut first_byte = [0_u8; 1];
     if stream.read(&mut first_byte).map_err(add_path!(path))? == 1 {
@@ -469,6 +500,25 @@ pub fn count_reads(path: &Path) -> Result<u64, Error> {
     } else {
         Ok(0)
     }
+}
+
+/// Counts the number of reads in a BAM/CRAM file.
+pub fn count_reads_bam(path: &Path, samtools: &Path, reference: &Option<PathBuf>, threads: u16) -> Result<u64, Error> {
+    let mut command = Command::new(samtools);
+    command.args(&["view",
+        "-c", // Count reads,
+        "-F", "0x900", // Only primary alignments,
+        "-@", &threads.to_string()]);
+    if let Some(filename) = reference {
+        command.arg("-T").arg(filename);
+    }
+    command.arg(path).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn().map_err(add_path!(!))?;
+    let pipe_guard = ext::sys::PipeGuard::new(samtools.to_path_buf(), child);
+    let output = pipe_guard.wait()?;
+    String::from_utf8(output.stdout)
+        .map_err(|_| Error::RuntimeError("Cannot parse samtools output: not UTF-8".to_owned()))?
+        .parse().map_err(|_| Error::RuntimeError("Cannot parse samtools output: not a number".to_owned()))
 }
 
 /// Wrapper over bam record, which decodes sequence into vector.
@@ -518,6 +568,10 @@ impl BamRecord {
 }
 
 impl SingleRecord for BamRecord {
+    fn name(&self) -> &[u8] {
+        self.inner.qname()
+    }
+
     fn seq(&self) -> &[u8] {
         &self.seq
     }
@@ -526,34 +580,44 @@ impl SingleRecord for BamRecord {
 impl WritableRecord for BamRecord {
     /// Write single record to FASTA/FASTQ file.
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
-        let qual = self.inner.qual();
+        let mut qual = self.inner.qual();
         if qual.is_empty() || qual[0] == 255 {
-            write_fasta(f, &self.inner.qname(), &self.seq)
-        } else if self.inner.is_reverse() {
-            write_fastq(f, &self.inner.qname(), &self.seq, &qual)
-        } else {
-            f.write_all(b"@")?;
-            f.write_all(self.inner.qname())?;
-            f.write_all(b"\n")?;
-            f.write_all(&self.seq)?;
-            f.write_all(b"\n+\n")?;
+            return write_fasta(f, &self.inner.qname(), &self.seq);
+        }
 
-            // Will be enough for short reads.
-            const BUF_LEN: usize = 512;
-            let mut buffer = [0_u8; BUF_LEN];
-            let mut qual = qual;
-            // By repeatedly writing to buffer we can (i) avoid multiple `write_all` calls, and (ii) avoid allocation.
+        f.write_all(b"@")?;
+        f.write_all(self.inner.qname())?;
+        f.write_all(b"\n")?;
+        f.write_all(&self.seq)?;
+        f.write_all(b"\n+\n")?;
+
+        // Will be enough for short reads.
+        const BUF_LEN: usize = 512;
+        let mut buffer = [0_u8; BUF_LEN];
+        if !self.inner.is_reverse() {
+            while !qual.is_empty() {
+                for (val, &q) in buffer.iter_mut().zip(qual.iter()) {
+                    *val = q + 33;
+                }
+                let m = min(BUF_LEN, qual.len());
+                f.write_all(&buffer[..m])?;
+                qual = &qual[m..];
+            }
+        } else {
             while !qual.is_empty() {
                 for (val, &q) in buffer.iter_mut().zip(qual.iter().rev()) {
-                    *val = q;
+                    *val = q + 33;
                 }
                 let m = min(BUF_LEN, qual.len());
                 f.write_all(&buffer[..m])?;
                 qual = &qual[..qual.len() - m];
             }
-
-            f.write_all(b"\n")
         }
+        f.write_all(b"\n")
+    }
+
+    fn sum_len(&self) -> (u32, u32) {
+        (self.seq.len() as u32, 1)
     }
 }
 
@@ -573,8 +637,34 @@ impl PartialEq for BamRecord {
 
 impl Eq for BamRecord {}
 
+/// Read BAM/CRAM file directly, without any fetching.
+pub struct DirectBamReader {
+    filename: PathBuf,
+    reader: bam::Reader,
+}
+
+impl DirectBamReader {
+    pub fn new(filename: PathBuf, reader: bam::Reader) -> Self {
+        Self { filename, reader }
+    }
+}
+
+impl FastxRead for DirectBamReader {
+    type Record = BamRecord;
+
+    fn filename(&self) -> &Path {
+        &self.filename
+    }
+
+    /// Reads the next record, and returns true if the read was successful (false if no more reads available).
+    fn read_next(&mut self, record: &mut BamRecord) -> Result<bool, Error> {
+        record.read_from(&mut self.reader, i64::MIN)
+    }
+}
+
 /// Read single-end BAM/CRAM file across multiple fetches.
-pub struct BamReader {
+pub struct IndexedBamReader {
+    filename: PathBuf,
     reader: bam::IndexedReader,
     /// Fetch regions. Contig IDs must be taken from exactly this bam/cram reader.
     /// All unmapped reads are then fetch in any case.
@@ -587,12 +677,12 @@ pub struct BamReader {
     min_start: i64,
 }
 
-impl BamReader {
+impl IndexedBamReader {
     /// Creates bam reader from indexed reader and an iterator over regions.
     /// WARN: Regions should go in increasing order, otherwise some code may fail in paired-end case.
-    pub fn new(reader: bam::IndexedReader, regions: Vec<Interval>) -> Result<Self, Error> {
+    pub fn new(filename: PathBuf, reader: bam::IndexedReader, regions: Vec<Interval>) -> Result<Self, Error> {
         let mut res = Self {
-            reader, regions,
+            filename, reader, regions,
             next_ix: 0,
             min_start: i64::MIN,
         };
@@ -626,7 +716,7 @@ impl BamReader {
     }
 }
 
-impl FastxRead for BamReader {
+impl FastxRead for IndexedBamReader {
     type Record = BamRecord;
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
@@ -639,10 +729,14 @@ impl FastxRead for BamReader {
             }
         }
     }
+
+    fn filename(&self) -> &Path {
+        &self.filename
+    }
 }
 
 pub struct PairedBamReader {
-    reader: BamReader,
+    reader: IndexedBamReader,
     /// Hash set with records, for which we did not find their mate yet.
     /// Only read name is checked, so we will get a match when we search for the read mate.
     read_pairs: HashSet<BamRecord>,
@@ -650,7 +744,7 @@ pub struct PairedBamReader {
 }
 
 impl PairedBamReader {
-    pub fn new(reader: BamReader) -> Self {
+    pub fn new(reader: IndexedBamReader) -> Self {
         Self {
             reader,
             read_pairs: Default::default(),
@@ -708,4 +802,78 @@ impl FastxRead for PairedBamReader {
             }
         }
     }
+
+    fn filename(&self) -> &Path {
+        self.reader.filename()
+    }
 }
+
+/// Calculates average read length across the first `n_records`.
+pub fn mean_read_len<T, R>(reader: &mut R, n_records: usize) -> Result<f64, Error>
+where T: WritableRecord,
+      R: FastxRead<Record = T>,
+{
+    let mut record = Default::default();
+    let mut s: u64 = 0;
+    let mut n: u64 = 0;
+    while reader.read_next(&mut record)? {
+        let (l, t) = record.sum_len();
+        s += u64::from(l);
+        n += u64::from(t);
+        if n >= n_records as u64 {
+            break;
+        }
+    }
+    if n == 0 {
+        Err(Error::InvalidData(format!("Empty input file {}", ext::fmt::path(reader.filename()))))
+    } else {
+        Ok(s as f64 / n as f64)
+    }
+}
+
+/// Based on the input arguments, selects appropriate reader and performs `action(reader)`.
+/// Input arguments must contain:
+/// - `args.input: Vec<PathBuf>` - zero, one or two FASTA/FASTQ filenames,
+/// - `args.alns: Option<PathBuf>` - zero or one BAM/CRAM filename,
+/// - `args.reference: Option<PathBuf>` - zero or one FASTA reference file,
+/// - `args.interleaved: bool` - are the input reads interleaved.
+///
+/// Second argument: either `let {} reader` or `let {mut} reader`, depending on mutability,
+/// Third argument: action on the reader.
+macro_rules! process_readers {
+    ($args:ident; let {$( $mut_:tt )?} $reader:ident; $action:tt) => {
+        {
+            use crate::seq::fastx;
+            if !$args.input.is_empty() {
+                let reader1 = fastx::Reader::from_path(&$args.input[0])?;
+                if $args.input.len() == 1 && !$args.interleaved {
+                    let $($mut_)? $reader = reader1;
+                    #[allow(unused_braces)] $action
+                } else if $args.interleaved {
+                    let $($mut_)? $reader = fastx::PairedEndInterleaved::new(reader1);
+                    #[allow(unused_braces)] $action
+                } else {
+                    let reader2 = fastx::Reader::from_path(&$args.input[1])?;
+                    let $($mut_)? $reader = fastx::PairedEndReaders::new(reader1, reader2);
+                    #[allow(unused_braces)] $action
+                }
+            } else {
+                let bam_filename = $args.alns.clone().expect("Alignment file must be defined");
+                let mut inner_reader = bam::Reader::from_path(&bam_filename)?;
+                if let Some(reference) = &$args.reference {
+                    inner_reader.set_reference(reference)?;
+                }
+                let bam_reader = fastx::DirectBamReader::new(bam_filename, inner_reader);
+                if $args.interleaved {
+                    let $($mut_)? $reader = fastx::PairedEndInterleaved::new(bam_reader);
+                    #[allow(unused_braces)] $action
+                } else {
+                    let $($mut_)? $reader = bam_reader;
+                    #[allow(unused_braces)] $action
+                }
+            }
+        }
+    }
+}
+
+pub(crate) use process_readers;

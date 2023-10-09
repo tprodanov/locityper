@@ -278,7 +278,9 @@ impl SequencingInfo {
                     read_len, technology.long_name());
             } else {
                 return Err(Error::InvalidInput(format!(
-                    "Unusual mean read length ({:.0}) for the {} sequencing technology",
+                    "Unusual mean read length ({:.0}) for the {} sequencing technology.\n\
+                    Please specify technology using `--technology` argument \
+                    (`--technology illumina` overrides this error)",
                     read_len, technology.long_name())));
             }
         }

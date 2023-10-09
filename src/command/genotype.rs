@@ -50,6 +50,7 @@ struct Args {
     priors: Option<PathBuf>,
 
     interleaved: bool,
+    no_index: bool,
     threads: u16,
     rerun: super::Rerun,
     strobealign: PathBuf,
@@ -79,6 +80,7 @@ impl Default for Args {
             priors: None,
 
             interleaved: false,
+            no_index: false,
             threads: 8,
             rerun: super::Rerun::None,
             strobealign: PathBuf::from("strobealign"),
@@ -128,9 +130,14 @@ impl Args {
         Ok(self)
     }
 
-    /// Returns true/false for input read files and panics for BAM/CRAM files.
+    /// Returns true if need to process indexed alignment file.
+    fn has_indexed_alignment(&self) -> bool {
+        self.alns.is_some() && !self.no_index
+    }
+
+    /// Returns true if input reads are paired-end. Panics for indexed alignment file.
     fn is_paired_end(&self) -> bool {
-        assert!(!self.input.is_empty());
+        assert!(!self.has_indexed_alignment());
         self.input.len() == 2 || self.interleaved
     }
 }
@@ -171,6 +178,9 @@ fn print_help(extended: bool) {
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
         "-^, --interleaved".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Use input BAM/CRAM file ({}) without index: try to recruit all reads.\n\
+        {EMPTY}  Single-end and paired-end interleaved ({}) data is allowed.",
+        "    --no-index".green(), super::flag(), "-a".green(), "-^".green());
     if extended {
         println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
             "    --subset-loci".green(), "STR+".yellow());
@@ -398,6 +408,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             Short('O') | Long("out-bams") => args.assgn_params.out_bams = parser.value()?.parse::<PrettyUsize>()?.get(),
 
             Short('^') | Long("interleaved") => args.interleaved = true,
+            Long("no-index") => args.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
@@ -597,7 +608,7 @@ fn load_loci(
 /// Prepare fetch regions for a list of regions.
 /// Additionally, add all contigs from
 fn create_fetch_targets(
-    reader: &bam::Reader,
+    reader: &bam::IndexedReader,
     bg_distr: &BgDistr,
     filt_loci: &[&LocusData]
 ) -> Result<Vec<Interval>, Error>
@@ -669,20 +680,16 @@ fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
     let targets = target_builder.finalize();
-
-    // Cannot put reader into a box, because `FastxRead` has a type parameter.
-    if args.input.len() == 1 && !args.interleaved {
-        let reader = fastx::Reader::from_path(&args.input[0])?;
-        targets.recruit(reader, writers, args.threads)?;
-    } else if args.interleaved {
-        let reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
+    if args.has_indexed_alignment() {
+        let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
+        let bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
+        let fetch_regions = create_fetch_targets(&bam_reader, bg_distr, &filt_loci)?;
+        let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
         targets.recruit(reader, writers, args.threads)?;
     } else {
-        let reader = fastx::PairedEndReaders::new(
-            fastx::Reader::from_path(&args.input[0])?,
-            fastx::Reader::from_path(&args.input[1])?);
-        targets.recruit(reader, writers, args.threads)?;
+        fastx::process_readers!(args; let {} reader; { targets.recruit(reader, writers, args.threads) })?;
     }
+
     for locus in filt_loci.iter() {
         fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)
             .map_err(add_path!(locus.tmp_reads_filename, &locus.reads_filename))?;

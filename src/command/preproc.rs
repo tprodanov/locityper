@@ -55,6 +55,7 @@ struct Args {
     seed: Option<u64>,
 
     interleaved: bool,
+    no_index: bool,
     threads: u16,
     rerun: super::Rerun,
     strobealign: PathBuf,
@@ -88,6 +89,7 @@ impl Default for Args {
             seed: None,
 
             interleaved: false,
+            no_index: false,
             threads: 8,
             rerun: super::Rerun::None,
             debug: false,
@@ -113,17 +115,20 @@ impl Args {
             "Read files (-i) and an alignment file (-a) cannot be provided together");
         validate_param!(n_input != 2 || !self.interleaved,
             "Two read files (-i/--input) are provided, however, --interleaved is specified");
-        if n_input > 0 {
+
+        if !self.has_indexed_alignment() {
             let paired_end_allowed = self.technology.paired_end_allowed();
             validate_param!(!self.is_paired_end() || paired_end_allowed,
                 "Paired end reads are not supported by {}", self.technology.long_name());
             if !self.is_paired_end() && paired_end_allowed {
                 log::warn!("Running in single-end mode.");
             }
+        } else if self.similar_dataset.is_some() {
+            validate_param!(n_input > 0,
+                "Similar dataset (-~) can only be used together with input reads (-i) \
+                or unindexed alignments (-a ... --no-index)");
         }
-        if self.similar_dataset.is_some() {
-            validate_param!(n_input > 0, "Similar dataset (-~) can only be used together with input reads (-i)");
-        }
+
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         if self.similar_dataset.is_some() {
@@ -149,7 +154,7 @@ impl Args {
 
         validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
-        if self.alns.is_some() {
+        if self.has_indexed_alignment() {
             self.subsampling_rate = 1.0;
             self.seed = None;
         }
@@ -157,9 +162,14 @@ impl Args {
         Ok(self)
     }
 
-    /// Returns true/false for input read files and panics for BAM/CRAM files.
+    /// Returns true if need to process indexed alignment file.
+    fn has_indexed_alignment(&self) -> bool {
+        self.alns.is_some() && !self.no_index
+    }
+
+    /// Returns true if input reads are paired-end. Panics for indexed alignment file.
     fn is_paired_end(&self) -> bool {
-        assert!(!self.input.is_empty());
+        assert!(!self.has_indexed_alignment());
         self.input.len() == 2 || self.interleaved
     }
 }
@@ -186,9 +196,8 @@ fn print_help(extended: bool) {
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Reads in indexed BAM/CRAM format, already mapped to the whole genome.\n\
-        {EMPTY}  Mutually exclusive with {}.\n\
-        {EMPTY}  This method is extremely fast, but sometimes {}.",
-        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "less accurate".red());
+        {EMPTY}  Mutually exclusive with {}.",
+        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see README).",
@@ -202,6 +211,9 @@ fn print_help(extended: bool) {
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
         "-^, --interleaved".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Use input full BAM/CRAM file ({}) without index.\n\
+        {EMPTY}  Single-end and paired-end interleaved ({}) data is allowed.",
+        "    --no-index".green(), super::flag(), "-a".green(), "-^".green());
     println!("    {:KEY$} {:VAL$}  Sequencing technology [{}]:\n\
         {EMPTY}  sr  | illumina : short-read sequencing,\n\
         {EMPTY}    hifi         : PacBio HiFi,\n\
@@ -302,7 +314,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.alns = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
-            Short('t') | Long("technology") => {
+            Short('t') | Long("tech") | Long("technology") => {
                 args.explicit_technology = true;
                 args.technology = parser.value()?.parse()?;
             }
@@ -338,6 +350,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
 
             Short('^') | Long("interleaved") => args.interleaved = true,
+            Long("no-index") => args.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Long("debug") => args.debug = true,
@@ -415,19 +428,6 @@ fn select_bg_interval(
         ext::fmt::path(ref_filename))))
 }
 
-// The same code is executed several times. This macro pastes the code where needed.
-macro_rules! create_handle {
-    ($reader:ident, $writer:ident, $rate:ident, $rng:ident) => {
-        Ok(thread::spawn(move || {
-            Ok(if $rate < 1.0 {
-                $reader.subsample(&mut $writer, $rate, &mut $rng)?
-            } else {
-                $reader.copy(&mut $writer)?
-            })
-        }))
-    }
-}
-
 /// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
 fn set_mapping_stdin(
     args: &Args,
@@ -439,19 +439,16 @@ fn set_mapping_stdin(
     let mut local_rng = rng.clone();
     rng.long_jump();
     let mut writer = io::BufWriter::new(child_stdin);
-    // Cannot put reader into a box, because `FastxRead` has a type parameter.
-    if args.input.len() == 1 && !args.interleaved {
-        let mut reader = fastx::Reader::from_path(&args.input[0])?;
-        create_handle!(reader, writer, rate, local_rng)
-    } else if args.interleaved {
-        let mut reader = fastx::PairedEndInterleaved::new(fastx::Reader::from_path(&args.input[0])?);
-        create_handle!(reader, writer, rate, local_rng)
-    } else {
-        let mut reader = fastx::PairedEndReaders::new(
-            fastx::Reader::from_path(&args.input[0])?,
-            fastx::Reader::from_path(&args.input[1])?);
-        create_handle!(reader, writer, rate, local_rng)
-    }
+    let handle = fastx::process_readers!(args; let {mut} reader; {
+        thread::spawn(move || {
+            Ok(if rate < 1.0 {
+                reader.subsample(&mut writer, rate, &mut local_rng)?
+            } else {
+                reader.copy(&mut writer)?
+            })
+        })
+    });
+    Ok(handle)
 }
 
 fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: &Path) -> Command {
@@ -496,18 +493,23 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
 fn first_step_str(args: &Args) -> String {
     let mut s = String::new();
     if args.subsampling_rate == 1.0 {
-        write!(s, "_interleave_").unwrap();
+        s.push_str("_interleave_");
     } else {
         write!(s, "_subsample_ --rate {}", args.subsampling_rate).unwrap();
         if let Some(seed) = args.seed {
             write!(s, " --seed {}", seed).unwrap();
         }
     }
-    write!(s, " -i {}", ext::fmt::path(&args.input[0])).unwrap();
+    s.push_str(" -i ");
+    if let Some(bam_filename) = &args.alns {
+        s.push_str(&ext::fmt::path(bam_filename));
+    } else {
+        s.push_str(&ext::fmt::path(&args.input[0]));
+    }
     if args.input.len() > 1 {
         write!(s, " {}", ext::fmt::path(&args.input[1])).unwrap();
     }
-    write!(s, " | ").unwrap();
+    s.push_str(" | ");
     s
 }
 
@@ -712,7 +714,7 @@ fn load_alns(
     Ok((alns, paired_counts[1] > 0))
 }
 
-const MEAN_LEN_RECORDS: usize = 10000;
+const MEAN_LEN_RECORDS: usize = 5000;
 
 /// Calculate mean read length from existing alignments.
 fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
@@ -723,15 +725,9 @@ fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
 }
 
 /// Calculate mean read length from input reads.
-fn read_len_from_reads(input: &[PathBuf]) -> Result<f64, Error> {
+fn read_len_from_reads(args: &Args) -> Result<f64, Error> {
     log::info!("Calculating mean read length");
-    let lengths: Vec<f64> = input.iter()
-        .map(|path| {
-            let mut reader = fastx::Reader::from_path(path)?;
-            reader.mean_read_len(MEAN_LEN_RECORDS / input.len())
-        })
-        .collect::<Result<_, Error>>()?;
-    Ok(ext::vec::F64Ext::mean(&lengths))
+    fastx::process_readers!(args; let {mut} reader; { fastx::mean_read_len(&mut reader, MEAN_LEN_RECORDS) })
 }
 
 fn estimate_bg_from_paired(
@@ -827,7 +823,8 @@ fn estimate_bg_distrs(
     let alns: Vec<NamedAlignment>;
     let mut seq_info: SequencingInfo;
 
-    if let Some(alns_filename) = args.alns.as_ref() {
+    if args.has_indexed_alignment() {
+        let alns_filename = args.alns.as_ref().unwrap();
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
         bam_reader.set_reference(&ref_filename)?;
@@ -844,7 +841,7 @@ fn estimate_bg_distrs(
         }
         seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.technology, args.explicit_technology)?;
     } else {
-        seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.technology,
+        seq_info = SequencingInfo::new(read_len_from_reads(args)?, args.technology,
             args.explicit_technology)?;
         log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
 
@@ -890,7 +887,7 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
             "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir)))),
     };
 
-    let seq_info = SequencingInfo::new(read_len_from_reads(&args.input)?, args.technology,
+    let seq_info = SequencingInfo::new(read_len_from_reads(args)?, args.technology,
         args.explicit_technology)?;
     if similar_seq_info.technology() != seq_info.technology() {
         return Err(Error::InvalidInput(format!(
@@ -904,8 +901,16 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
             "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",
             ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len())));
     }
-    log::info!("Counting reads in {}", ext::fmt::path(&args.input[0]));
-    let total_reads = fastx::count_reads(&args.input[0])?;
+    let mut total_reads = if let Some(bam_filename) = args.alns.as_ref() {
+        log::info!("Counting reads in {}", ext::fmt::path(bam_filename));
+        fastx::count_reads_bam(bam_filename, &args.samtools, &args.reference, args.threads)?
+    } else {
+        log::info!("Counting reads in {}", ext::fmt::path(&args.input[0]));
+        fastx::count_reads_fastx(&args.input[0])?
+    };
+    if args.interleaved {
+        total_reads /= 2;
+    }
     log::debug!("    In total, {} reads", total_reads);
 
     let mut new_distr = similar_distr.clone();
