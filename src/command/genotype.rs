@@ -637,13 +637,12 @@ fn create_fetch_targets(
     }
 
     // Recruit reads from all contigs under 10 Mb.
-    const MIN_CONTIG_SIZE: u32 = 10_000_000;
+    const MAX_CONTIG_SIZE: u32 = 10_000_000;
     for (id, &len) in contigs.ids().zip(contigs.lengths()) {
-        if len < MIN_CONTIG_SIZE {
+        if len < MAX_CONTIG_SIZE {
             regions.push(Interval::full_contig(Arc::clone(&contigs), id));
         }
     }
-    log::debug!("Total {} regions (sum length {} bp)", regions.len(), regions.iter().map(Interval::len).sum::<u32>());
 
     const MERGE_DISTANCE: u32 = 1000;
     regions.sort();
@@ -685,14 +684,16 @@ fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<
     if args.has_indexed_alignment() {
         let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
         let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
-        if let Some(ref_filename) = &args.reference {
-            bam_reader.set_reference(ref_filename)?;
-        }
+        fastx::set_reference(&bam_filename, &mut bam_reader, &args.reference, None)?;
         let fetch_regions = create_fetch_targets(&bam_reader, bg_distr, &filt_loci)?;
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
-        targets.recruit(reader, writers, args.threads)?;
+        if bg_distr.insert_distr().is_paired_end() {
+            targets.recruit(fastx::PairedBamReader::new(reader), writers, args.threads)?;
+        } else {
+            targets.recruit(reader, writers, args.threads)?;
+        }
     } else {
-        fastx::process_readers!(args; let {} reader; { targets.recruit(reader, writers, args.threads) })?;
+        fastx::process_readers!(args, None; let {} reader; { targets.recruit(reader, writers, args.threads) })?;
     }
 
     for locus in filt_loci.iter() {

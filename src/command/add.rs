@@ -749,6 +749,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     ext::sys::mkdir(&loci_dir)?;
 
     let (contigs, mut fasta_reader) = ContigNames::load_indexed_fasta("REF", args.reference.as_ref().unwrap())?;
+    let contigs = Arc::new(contigs);
     let loci = load_loci(&contigs, &args.loci, &args.bed_files, args.variants.is_none())?;
     let mut vcf_data = if let Some(vcf_filename) = &args.variants {
         let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;

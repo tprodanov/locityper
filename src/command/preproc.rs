@@ -426,6 +426,7 @@ fn select_bg_interval(
 /// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
 fn set_mapping_stdin(
     args: &Args,
+    contigs: &ContigNames,
     child_stdin: ChildStdin,
     rng: &mut XoshiroRng,
 ) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
@@ -434,7 +435,7 @@ fn set_mapping_stdin(
     let mut local_rng = rng.clone();
     rng.long_jump();
     let mut writer = io::BufWriter::new(child_stdin);
-    let handle = fastx::process_readers!(args; let {mut} reader; {
+    let handle = fastx::process_readers!(args, Some(contigs); let {mut} reader; {
         thread::spawn(move || {
             Ok(if rate < 1.0 {
                 reader.subsample(&mut writer, rate, &mut local_rng)?
@@ -610,11 +611,11 @@ fn run_mapping(
     ref_filename: &Path,
     out_dir: &Path,
     out_bam: &Path,
-    bg_region: &Interval,
+    bg_region: &BgRegion,
     rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
-    if !need_mapping(args, out_dir, out_bam, bg_region)? {
+    if !need_mapping(args, out_dir, out_bam, &bg_region.interval)? {
         return Ok(());
     }
 
@@ -625,11 +626,11 @@ fn run_mapping(
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
-    let handle = set_mapping_stdin(args, mapping_stdin.unwrap(), rng)?;
+    let handle = set_mapping_stdin(args, &bg_region.ref_contigs, mapping_stdin.unwrap(), rng)?;
 
     let tmp_bed = out_dir.join("tmp.bed");
     let mut bed_file = ext::sys::create_file(&tmp_bed)?;
-    writeln!(bed_file, "{}", bg_region.bed_fmt()).map_err(add_path!(tmp_bed))?;
+    writeln!(bed_file, "{}", bg_region.interval .bed_fmt()).map_err(add_path!(tmp_bed))?;
     std::mem::drop(bed_file);
 
     let tmp_bam = out_dir.join("tmp.bam");
@@ -720,9 +721,9 @@ fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
 }
 
 /// Calculate mean read length from input reads.
-fn read_len_from_reads(args: &Args) -> Result<f64, Error> {
+fn read_len_from_reads(args: &Args, contigs: Option<&ContigNames>) -> Result<f64, Error> {
     log::info!("Calculating mean read length");
-    fastx::process_readers!(args; let {mut} reader; { fastx::mean_read_len(&mut reader, MEAN_LEN_RECORDS) })
+    fastx::process_readers!(args, contigs; let {mut} reader; { fastx::mean_read_len(&mut reader, MEAN_LEN_RECORDS) })
 }
 
 fn estimate_bg_from_paired(
@@ -822,7 +823,8 @@ fn estimate_bg_distrs(
         let alns_filename = args.alns.as_ref().unwrap();
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
-        bam_reader.set_reference(&ref_filename)?;
+        fastx::set_reference(alns_filename, &mut bam_reader, &args.reference, Some(&bg_region.ref_contigs))?;
+
         let interval = &bg_region.interval;
         let interval_start = interval.start();
         let ref_seq = &bg_region.sequence;
@@ -836,14 +838,14 @@ fn estimate_bg_distrs(
         }
         seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.technology, args.explicit_technology)?;
     } else {
-        seq_info = SequencingInfo::new(read_len_from_reads(args)?, args.technology,
-            args.explicit_technology)?;
+        seq_info = SequencingInfo::new(read_len_from_reads(args, Some(&bg_region.ref_contigs))?,
+            args.technology, args.explicit_technology)?;
         log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
 
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference");
         let mut rng = init_rng(args.seed);
-        run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, &bg_region.interval, &mut rng)?;
+        run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, bg_region, &mut rng)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
@@ -882,8 +884,7 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
             "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir)))),
     };
 
-    let seq_info = SequencingInfo::new(read_len_from_reads(args)?, args.technology,
-        args.explicit_technology)?;
+    let seq_info = SequencingInfo::new(read_len_from_reads(args, None)?, args.technology, args.explicit_technology)?;
     if similar_seq_info.technology() != seq_info.technology() {
         return Err(Error::InvalidInput(format!(
             "Cannot use similar dataset {}: different sequencing technology ({} and {})",
@@ -939,6 +940,7 @@ impl BgRegion {
     fn new(args: &Args) -> Result<Self, Error> {
         let ref_filename = args.reference.as_ref().unwrap();
         let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
+        let ref_contigs = Arc::new(ref_contigs);
         let interval = select_bg_interval(&ref_filename, &ref_contigs, &args.bg_region)?;
 
         let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;

@@ -115,13 +115,13 @@ impl ContigNames {
     pub fn load_indexed_fasta(
         tag: impl Into<String>,
         filename: &Path,
-    ) -> Result<(Arc<Self>, fasta::IndexedReader<File>), Error>
+    ) -> Result<(Self, fasta::IndexedReader<File>), Error>
     {
         let fasta = fasta::IndexedReader::from_file(&filename)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
             .map_err(add_path!(filename))?;
         let contigs = ContigNames::from_index(tag, &fasta.index)?;
-        Ok((Arc::new(contigs), fasta))
+        Ok((contigs, fasta))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -154,9 +154,13 @@ impl ContigNames {
     }
 
     /// Returns contig id, if it is available.
-    pub fn try_get_id(&self, name: &str) -> Result<ContigId, Error> {
+    pub fn try_get_id(&self, name: &str) -> Option<ContigId> {
         self.name_to_id.get(name).copied()
-            .ok_or_else(|| Error::ParsingError(format!("Unknown contig {:?}", name)))
+    }
+
+    /// Returns true if the contig exists.
+    pub fn exists(&self, name: &str) -> bool {
+        self.name_to_id.contains_key(name)
     }
 
     /// Returns iterator over all contig IDs.
@@ -215,12 +219,12 @@ impl GenomeVersion {
     /// Based on the length of the first chromosome, tries to identify reference version.
     pub fn guess(contigs: &ContigNames) -> Option<Self> {
         let chr1_len = contigs.try_get_id("chr1")
-            .or_else(|_| contigs.try_get_id("1"))
-            .map(|id| contigs.get_len(id));
+            .or_else(|| contigs.try_get_id("1"))
+            .map(|id| contigs.get_len(id))?;
         match chr1_len {
-            Ok(248_387_328) => Some(Self::Chm13),
-            Ok(248_956_422) => Some(Self::GRCh38),
-            Ok(249_250_621) => Some(Self::GRCh37),
+            248_387_328 => Some(Self::Chm13),
+            248_956_422 => Some(Self::GRCh38),
+            249_250_621 => Some(Self::GRCh37),
             _ => None,
         }
     }
@@ -340,7 +344,8 @@ impl Genotype {
 
     /// Parses genotype (contig names through comma).
     pub fn parse(s: &str, contigs: &ContigNames) -> Result<Self, Error> {
-        let ids = s.split(',').map(|name| contigs.try_get_id(name))
+        let ids = s.split(',').map(|name| contigs.try_get_id(name)
+            .ok_or_else(|| Error::ParsingError(format!("Unknown contig {:?}", name))))
             .collect::<Result<GtStorage, Error>>()?;
         assert!(!ids.is_empty(), "Empty genotypes are not allowed");
         Ok(Self {

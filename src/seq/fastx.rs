@@ -1,6 +1,7 @@
 use std::{
     fmt,
     ffi::OsStr,
+    borrow::Cow,
     io::{self, BufRead},
     cmp::min,
     path::{Path, PathBuf},
@@ -10,7 +11,7 @@ use std::{
 use htslib::bam;
 use crate::{
     ext,
-    seq::{self, Interval},
+    seq::{self, Interval, ContigNames},
     algo::HashSet,
     err::{Error, add_path},
 };
@@ -106,7 +107,7 @@ pub trait SingleRecord: WritableRecord {
     fn name(&self) -> &[u8];
 
     /// Safely converts record name to UTF-8.
-    fn name_str(&self) -> std::borrow::Cow<'_, str> {
+    fn name_str(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(self.name())
     }
 
@@ -532,7 +533,7 @@ pub struct BamRecord {
 }
 
 impl BamRecord {
-    fn name_str(&self) -> std::borrow::Cow<'_, str> {
+    fn name_str(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.inner.qname())
     }
 
@@ -762,10 +763,9 @@ impl FastxRead for PairedBamReader {
     /// Reads records until both read ends are found for some reads, and returns it.
     /// All unpaired reads are saved in a set until their mate is also found.
     /// In the end, all unpaired reads are discarded.
-    fn read_next(&mut self, pair: &mut Self::Record) -> Result<bool, Error> {
-        let record = &mut pair[0];
+    fn read_next(&mut self, [rec1, rec2]: &mut Self::Record) -> Result<bool, Error> {
         loop {
-            if !self.reader.read_next(record)? {
+            if !self.reader.read_next(rec1)? {
                 let discarded = self.discarded + self.read_pairs.len() as u64;
                 if discarded > 0 {
                     log::warn!("    Discarded {} reads without a pair", discarded);
@@ -773,32 +773,31 @@ impl FastxRead for PairedBamReader {
                 return Ok(false);
             }
 
-            if (record.flag() & 0xC0) == 0 {
+            if (rec1.flag() & 0xC0) == 0 {
                 return Err(Error::InvalidData(format!(
-                    "Expected paired-end reads, but read {} is unpaired", record.name_str())));
+                    "Expected paired-end reads, but read {} is unpaired", rec1.name_str())));
             }
 
-            if let Some(mate) = self.read_pairs.take(&record) {
+            if let Some(mate) = self.read_pairs.take(rec1) {
                 // Read mate was found.
-                let rec_first = record.inner.is_first_in_template();
+                let rec_first = rec1.inner.is_first_in_template();
                 if rec_first == mate.inner.is_first_in_template() {
                     return Err(Error::InvalidData(format!(
-                        "Found two primary alignments for {} for the same read end", record.name_str())));
+                        "Found two primary alignments for {} for the same read end", rec1.name_str())));
                 }
-                pair[1] = mate;
+                *rec2 = mate;
                 if !rec_first {
-                    // `record` is taken from `pair[0]`, so now we need to swap first and second.
-                    pair.swap(0, 1);
+                    std::mem::swap(rec1, rec2);
                 }
                 return Ok(true);
             } else {
                 // Read mate was not found.
                 // Cast to unsigned integer so that -1 becomes the largest value.
-                let curr_coord = (record.inner.tid() as u32, record.inner.pos() as u64);
-                let mate_coord = (record.inner.mtid() as u32, record.inner.mpos() as u64);
+                let curr_coord = (rec1.inner.tid() as u32, rec1.inner.pos() as u64);
+                let mate_coord = (rec1.inner.mtid() as u32, rec1.inner.mpos() as u64);
                 // Do not add record if its mate has smaller coordinates.
                 if curr_coord <= mate_coord {
-                    self.read_pairs.insert(record.clone());
+                    self.read_pairs.insert(rec1.clone());
                 } else {
                     self.discarded += 1;
                 }
@@ -834,17 +833,86 @@ where T: WritableRecord,
     }
 }
 
+pub trait ExtendedHtslibReader: bam::Read {
+    fn set_reference(&mut self, ref_filename: &Path) -> Result<(), htslib::errors::Error>;
+}
+
+impl ExtendedHtslibReader for bam::Reader {
+    fn set_reference(&mut self, ref_filename: &Path) -> Result<(), htslib::errors::Error> {
+        self.set_reference(ref_filename)
+    }
+}
+
+impl ExtendedHtslibReader for bam::IndexedReader {
+    fn set_reference(&mut self, ref_filename: &Path) -> Result<(), htslib::errors::Error> {
+        self.set_reference(ref_filename)
+    }
+}
+
 /// If input file is CRAM, sets its reference. All contigs from the CRAM must match reference.
-pub fn set_cram_reference(aln_filename: &Path, ref_filename: &Option<PathBuf>) -> Result<(), Error> {
-    let ext = aln_filename.extension();
-    if ext == Some(OsStr::new("bam")) || ext == Some(OsStr::new("BAM")) {
+pub fn set_reference(
+    aln_filename: &Path,
+    aln_reader: &mut impl ExtendedHtslibReader,
+    ref_filename: &Option<PathBuf>,
+    contigs: Option<&ContigNames>,
+) -> Result<(), Error>
+{
+    // Possible, that there are no contigs in the BAM/CRAM file: all reads are just stored for compression purposes (?).
+    if aln_reader.header().target_count() == 0 {
         return Ok(());
     }
-    if ext != Some(OsStr::new("cram")) || ext == Some(OsStr::new("CRAM")) {
+
+    let ext = aln_filename.extension();
+    if ext == Some(OsStr::new("bam")) || ext == Some(OsStr::new("BAM"))
+            || ext == Some(OsStr::new("sam")) || ext == Some(OsStr::new("SAM")) {
+        return Ok(());
+    } else if ext != Some(OsStr::new("cram")) || ext == Some(OsStr::new("CRAM")) {
         log::warn!("Cannot determine alignment file format {}, assuming CRAM", ext::fmt::path(aln_filename));
     }
-    unimplemented!();
-    Ok(())
+
+    let ref_filename = match ref_filename {
+        Some(val) => val,
+        None => return Err(Error::InvalidInput("Cannot analyze CRAM file without a reference FASTA".to_owned())),
+    };
+    let contigs = match contigs {
+        Some(val) => Cow::Borrowed(val),
+        None =>  Cow::Owned(ContigNames::load_indexed_fasta("REF", ref_filename)?.0),
+    };
+    aln_reader.set_reference(ref_filename)?;
+
+    let mut missing = 0;
+    let mut incorrect_len = 0;
+    let header = aln_reader.header();
+    for (tid, contig) in header.target_names().into_iter().enumerate() {
+        let contig = std::str::from_utf8(contig)
+            .map_err(|_| Error::InvalidData(format!("Alignments {} contain non-UTF8 contig {:?}",
+            ext::fmt::path(aln_filename), String::from_utf8_lossy(contig))))?;
+        if let Some(contig_id) = contigs.try_get_id(&contig) {
+            let in_ref_len = u64::from(contigs.get_len(contig_id));
+            let in_bam_len = header.target_len(tid as u32).expect("Unknown contig length");
+            if in_ref_len != in_bam_len {
+                if incorrect_len == 0 {
+                    log::error!("Reference {} does not match alignments {}: contig {:?} lengths differ ({} and {})",
+                        ext::fmt::path(ref_filename), ext::fmt::path(aln_filename), contig, in_ref_len, in_bam_len);
+                }
+                incorrect_len += 1;
+            }
+        } else {
+            if missing == 0 {
+                log::error!("Reference {} does not match alignments {}: missing contig {:?}",
+                    ext::fmt::path(ref_filename), ext::fmt::path(aln_filename), contig);
+            }
+            missing += 1;
+        }
+    }
+
+    if missing > 0 || incorrect_len > 0 {
+        Err(Error::InvalidInput(format!(
+            "Reference does not match alignments: {} missing contigs and {} contigs with incorrect length",
+            missing, incorrect_len)))
+    } else {
+        Ok(())
+    }
 }
 
 /// Based on the input arguments, selects appropriate reader and performs `action(reader)`.
@@ -853,11 +921,12 @@ pub fn set_cram_reference(aln_filename: &Path, ref_filename: &Option<PathBuf>) -
 /// - `args.alns: Option<PathBuf>` - zero or one BAM/CRAM filename,
 /// - `args.reference: Option<PathBuf>` - zero or one FASTA reference file,
 /// - `args.interleaved: bool` - are the input reads interleaved.
+/// Next: `contigs: Option<&ContigNames>`.
 ///
-/// Second argument: either `let {} reader` or `let {mut} reader`, depending on mutability,
-/// Third argument: action on the reader.
+/// After semicolon argument: either `let {} reader` or `let {mut} reader`, depending on mutability,
+/// Last argument: action on the reader.
 macro_rules! process_readers {
-    ($args:ident; let {$( $mut_:tt )?} $reader:ident; $action:tt) => {
+    ($args:ident, $contigs:expr; let {$( $mut_:tt )?} $reader:ident; $action:tt) => {
         {
             use crate::seq::fastx;
             if !$args.input.is_empty() {
@@ -876,9 +945,7 @@ macro_rules! process_readers {
             } else {
                 let bam_filename = $args.alns.clone().expect("Alignment file must be defined");
                 let mut inner_reader = bam::Reader::from_path(&bam_filename)?;
-                if let Some(reference) = &$args.reference {
-                    inner_reader.set_reference(reference)?;
-                }
+                fastx::set_reference(&bam_filename, &mut inner_reader, &$args.reference, $contigs)?;
                 let bam_reader = fastx::DirectBamReader::new(bam_filename, inner_reader);
                 if $args.interleaved {
                     let $($mut_)? $reader = fastx::PairedEndInterleaved::new(bam_reader);
