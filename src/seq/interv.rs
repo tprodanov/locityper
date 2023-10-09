@@ -227,6 +227,8 @@ impl Interval {
                 assert!(last as &Interval <= curr, "Cannot merge unsorted intervals");
                 if last.contig_id == curr.contig_id && last.end + distance >= curr.start {
                     last.end = curr.end;
+                } else {
+                    merged.push(curr.clone());
                 }
             } else {
                 merged.push(curr.clone());

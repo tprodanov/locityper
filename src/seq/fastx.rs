@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    ffi::OsStr,
     io::{self, BufRead},
     cmp::min,
     path::{Path, PathBuf},
@@ -84,6 +85,7 @@ fn read_line(stream: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<usiz
 }
 
 /// Qiuckly compare read names, will produce many false positive, but with many reads that is fine.
+#[inline]
 fn equal_names_fast(name1: &[u8], name2: &[u8]) -> bool {
     name1[name1.len() - 1] == name2[name2.len() - 1]
 }
@@ -516,9 +518,10 @@ pub fn count_reads_bam(path: &Path, samtools: &Path, reference: &Option<PathBuf>
     let child = command.spawn().map_err(add_path!(!))?;
     let pipe_guard = ext::sys::PipeGuard::new(samtools.to_path_buf(), child);
     let output = pipe_guard.wait()?;
-    String::from_utf8(output.stdout)
-        .map_err(|_| Error::RuntimeError("Cannot parse samtools output: not UTF-8".to_owned()))?
-        .parse().map_err(|_| Error::RuntimeError("Cannot parse samtools output: not a number".to_owned()))
+    let s = std::str::from_utf8(&output.stdout).map_err(|_| Error::RuntimeError(format!(
+        "Samtools output is not UTF-8: {:?}", String::from_utf8_lossy(&output.stdout))))?;
+    s.trim().parse().map_err(|_| Error::RuntimeError(format!(
+        "Cannot parse samtools output: {:?} is not a number", s.trim())))
 }
 
 /// Wrapper over bam record, which decodes sequence into vector.
@@ -829,6 +832,19 @@ where T: WritableRecord,
     } else {
         Ok(s as f64 / n as f64)
     }
+}
+
+/// If input file is CRAM, sets its reference. All contigs from the CRAM must match reference.
+pub fn set_cram_reference(aln_filename: &Path, ref_filename: &Option<PathBuf>) -> Result<(), Error> {
+    let ext = aln_filename.extension();
+    if ext == Some(OsStr::new("bam")) || ext == Some(OsStr::new("BAM")) {
+        return Ok(());
+    }
+    if ext != Some(OsStr::new("cram")) || ext == Some(OsStr::new("CRAM")) {
+        log::warn!("Cannot determine alignment file format {}, assuming CRAM", ext::fmt::path(aln_filename));
+    }
+    unimplemented!();
+    Ok(())
 }
 
 /// Based on the input arguments, selects appropriate reader and performs `action(reader)`.

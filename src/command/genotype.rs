@@ -150,8 +150,9 @@ fn print_help(extended: bool) {
     let defaults = Args::default();
     println!("{}", "Genotype complex loci.".yellow());
 
-    println!("\n{} {} genotype -i reads1.fq [reads2.fq] -p preproc -d db -o out [args]",
-        "Usage:".bold(), super::PROGRAM);
+    println!("\n{}", "Usage:".bold());
+    println!("    {} genotype -i reads1.fq [reads2.fq]  -p preproc -d db -o out [args]", super::PROGRAM);
+    println!("    {} genotype -a reads.bam [--no-index] -p preproc -d db -o out [args]", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
@@ -642,12 +643,13 @@ fn create_fetch_targets(
             regions.push(Interval::full_contig(Arc::clone(&contigs), id));
         }
     }
+    log::debug!("Total {} regions (sum length {} bp)", regions.len(), regions.iter().map(Interval::len).sum::<u32>());
 
     const MERGE_DISTANCE: u32 = 1000;
     regions.sort();
     let merged = Interval::merge(&regions, MERGE_DISTANCE);
-    log::debug!("    Fetch reads from {} regions (sum length {} bp) + unmapped reads", merged.len(),
-        merged.iter().map(Interval::len).sum::<u32>());
+    log::debug!("    Fetch reads from {} regions (sum length {:.1} Mp) + unmapped reads", merged.len(),
+        1e-6 * f64::from(merged.iter().map(Interval::len).sum::<u32>()));
     Ok(merged)
 }
 
@@ -682,7 +684,10 @@ fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<
     let targets = target_builder.finalize();
     if args.has_indexed_alignment() {
         let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
-        let bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
+        let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
+        if let Some(ref_filename) = &args.reference {
+            bam_reader.set_reference(ref_filename)?;
+        }
         let fetch_regions = create_fetch_targets(&bam_reader, bg_distr, &filt_loci)?;
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
         targets.recruit(reader, writers, args.threads)?;
@@ -897,7 +902,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(), GOOD_DISTANCE_ADD, args.assgn_params.edit_pvals);
     edit_dist_cache.print_log(bg_distr.seq_info().mean_read_len());
 
-    validate_param!(bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
+    validate_param!(args.has_indexed_alignment() || bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
     if bg_distr.seq_info().technology() == Technology::Illumina {
         args.strobealign = ext::sys::find_exe(args.strobealign)?;

@@ -123,20 +123,15 @@ impl Args {
             if !self.is_paired_end() && paired_end_allowed {
                 log::warn!("Running in single-end mode.");
             }
-        } else if self.similar_dataset.is_some() {
-            validate_param!(n_input > 0,
+        } else {
+            validate_param!(self.similar_dataset.is_none(),
                 "Similar dataset (-~) can only be used together with input reads (-i) \
                 or unindexed alignments (-a ... --no-index)");
         }
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
-        validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
-        if self.similar_dataset.is_some() {
-            validate_param!(n_input > 0, "Read files (-i) required if similar dataset is provided (-~)");
-            // No more checks are needed.
-            return Ok(self);
-        }
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
+        validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
         validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
             "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
@@ -183,9 +178,9 @@ fn print_help(extended: bool) {
     println!("{}", "Preprocess WGS dataset.".yellow());
 
     println!("\n{}", "Usage:".bold());
-    println!("    {} preproc -i reads1.fq [reads2.fq] -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
-    println!("    {} preproc -i reads1.fq [reads2.fq] -~ similar_dataset           -o out [args]", super::PROGRAM);
-    println!("    {} preproc -a aligned.bam           -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
+    println!("    {} preproc -i reads1.fq [reads2.fq]  -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
+    println!("    {} preproc -a reads.bam [--no-index] -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
+    println!("    {} preproc -i/-a <input> -~ similar  -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
@@ -911,7 +906,7 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
     if args.interleaved {
         total_reads /= 2;
     }
-    log::debug!("    In total, {} reads", total_reads);
+    log::debug!("    Input contains {} reads", total_reads);
 
     let mut new_distr = similar_distr.clone();
     new_distr.set_seq_info(seq_info);
