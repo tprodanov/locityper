@@ -510,7 +510,7 @@ pub fn count_reads_bam(path: &Path, samtools: &Path, reference: &Option<PathBuf>
     let mut command = Command::new(samtools);
     command.args(&["view",
         "-c", // Count reads,
-        "-F", "0x900", // Only primary alignments,
+        "-F", "0x980", // Discard secondary, supplemenary alignments + discard second read ends,
         "-@", &threads.to_string()]);
     if let Some(filename) = reference {
         command.arg("-T").arg(filename);
