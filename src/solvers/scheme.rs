@@ -66,26 +66,23 @@ fn truncate_ixs(
     ixs: &mut Vec<usize>,
     scores: &[f64],
     genotypes: &[Genotype],
-    filt_thresh: f64,
+    filt_diff: f64,
     min_size: usize,
     threads: usize,
 ) {
     ixs.sort_unstable_by(|&i, &j| scores[j].total_cmp(&scores[i]));
     let n = ixs.len();
 
-    // ~ 10^-5.
-    const MIN_DIST: f64 = 11.51;
     let best = scores[ixs[0]];
     let worst = scores[ixs[n - 1]];
     log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
         genotypes[ixs[n - 1]], Ln::to_log10(worst), genotypes[ixs[0]], Ln::to_log10(best));
-    if min_size >= n || worst >= best - MIN_DIST {
-        log::debug!("        Keep {}/{} genotypes (100.0%)", n, n);
+    let mut thresh = best - filt_diff;
+    if min_size >= n || worst >= thresh {
+        log::debug!("        Keep {n}/{n} genotypes (100.0%)");
         return;
     }
 
-    let range = best - worst;
-    let mut thresh = (worst + range * filt_thresh).min(best - MIN_DIST);
     let mut m = ixs.partition_point(|&i| scores[i] >= thresh);
     if m < min_size {
         thresh = scores[ixs[min_size - 1]];
@@ -96,7 +93,7 @@ fn truncate_ixs(
     m = m.max(threads).min(n);
     ixs.truncate(m);
     log::debug!("        Keep {}/{} genotypes ({:.1}%), threshold: {:.0} ({:.1}%)",
-        m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / range);
+        m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / (best - worst));
 }
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
@@ -130,7 +127,7 @@ fn prefilter_genotypes(
         writeln!(writer, "{}\t{:.3}", gt, Ln::to_log10(score))?;
         scores.push(score);
     }
-    truncate_ixs(&mut ixs, &scores, genotypes, params.filt_thresh, params.min_gts, threads);
+    truncate_ixs(&mut ixs, &scores, genotypes, params.filt_diff, params.min_gts, threads);
     Ok(ixs)
 }
 

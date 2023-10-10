@@ -48,8 +48,8 @@ pub struct Params {
 
     /// Minimal number of genotypes after each step of solving.
     pub min_gts: usize,
-    /// Discard low likelihood genotypes based on this threshold (`min + filt_thresh * (max - min)`).
-    pub filt_thresh: f64,
+    /// Discard low likelihood genotypes with alignment likelihood smaller than `best - filt_diff`.
+    pub filt_diff: f64,
     /// Discard genotypes with low probability to be best (after each step).
     pub prob_thresh: f64,
     /// Number of attempts with different tweak sizes.
@@ -80,7 +80,7 @@ impl Default for Params {
             use_unpaired: false,
 
             min_gts: 100,
-            filt_thresh: 0.95,
+            filt_diff: Ln::from_log10(50.0),
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 20,
             out_bams: 3,
@@ -122,8 +122,8 @@ impl Params {
         validate_param!(self.alt_cn.1 > 1.0,
             "Alternative copy number #2 ({}) must be over 1.", self.alt_cn.1);
 
-        validate_param!(0.0 <= self.filt_thresh && self.filt_thresh <= 1.0,
-            "Filtering threshold ({}) must be within [0, 1]", self.filt_thresh);
+        validate_param!(self.filt_diff >= 0.0,
+            "Filtering likelihood difference ({}) must be non-negative (log10-space)", Ln::to_log10(self.filt_diff));
         validate_param!(self.prob_thresh < 0.0,
             "Probability threshold ({}) must be negative (log10-space)", Ln::to_log10(self.prob_thresh));
         validate_param!(self.attempts > 0, "Number of attempts must be positive");

@@ -258,9 +258,10 @@ fn print_help(extended: bool) {
             {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
             "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
             "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
-        println!("    {:KEY$} {:VAL$}  Score threshold for genotype pre-filtering [{}].\n\
-            {EMPTY}  Values range from 0 (use all) to 1 (use best-score genotypes).",
-            "    --filt-thresh".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.filt_thresh));
+        println!("    {:KEY$} {:VAL$}  During pre-filtering, discard genotypes that have 10^{}\n\
+            {EMPTY}  worse alignment probability than the best genotype [{}].",
+            "    --filt-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.filt_diff)));
         println!("    {:KEY$} {:VAL$}  After each step, discard genotypes that have\n\
             {EMPTY}  smaller probability than 10^{} to be best [{}].",
             "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
@@ -386,8 +387,8 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             Long("use-unpaired") => args.assgn_params.use_unpaired = true,
 
             Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
-            Long("filt-thresh") | Long("filt-threshold") | Long("filter-thresh") =>
-                args.assgn_params.filt_thresh = parser.value()?.parse()?,
+            Long("filt-diff") | Long("filt-difference") | Long("filter-diff") =>
+                args.assgn_params.filt_diff = Ln::from_log10(parser.value()?.parse()?),
             Long("prob-thresh") | Long("prob-threshold") =>
                 args.assgn_params.prob_thresh = Ln::from_log10(parser.value()?.parse()?),
             Long("min-gts") | Long("min-genotypes") =>

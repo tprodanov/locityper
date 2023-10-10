@@ -88,7 +88,11 @@ fn read_line(stream: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<usiz
 /// Qiuckly compare read names, will produce many false positive, but with many reads that is fine.
 #[inline]
 fn equal_names_fast(name1: &[u8], name2: &[u8]) -> bool {
-    name1[name1.len() - 1] == name2[name2.len() - 1]
+    let n = name1.len();
+    let m = name2.len();
+    // Sometimes, last two symbols are `/1`, `/2`, so they will not match.
+    // Here, we just compare last symbol before that.
+    n == m && (n <= 3 || name1[n - 3] == name2[n - 3])
 }
 
 // ------------------------------------------- Traits -------------------------------------------
@@ -375,7 +379,7 @@ impl<T: SingleRecord, R: FastxRead<Record = T>> FastxRead for PairedEndInterleav
         } else {
             if !equal_names_fast(record1.name(), record2.name()) {
                 Err(Error::InvalidData(format!(
-                    "Interleaved input file {} contains reads in incorrect order (first mate: {}, second mate: {})",
+                    "Interleaved input file {} contains non matching first and second mate ({} and {})",
                     ext::fmt::path(&self.reader.filename()), record1.name_str(), record2.name_str())))
             } else {
                 Ok(true)
@@ -412,7 +416,7 @@ impl<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> FastxR
             (true, true) => {
                 if !equal_names_fast(record1.name(), record2.name()) {
                     Err(Error::InvalidData(format!(
-                        "Input files {} and {} have reads in incorrect order (first mate: {}, second mate: {})",
+                        "Input files {} and {} have non matching first and second mates ({} and {})",
                         ext::fmt::path(&self.reader1.filename()), ext::fmt::path(&self.reader2.filename()),
                         record1.name_str(), record2.name_str())))
                 } else {
