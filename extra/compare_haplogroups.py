@@ -28,11 +28,8 @@ def add_columns(inp, out, group_fields, groups):
         else:
             s = line.strip()
             fields = s.split('\t')
-            true_field = fields.index('closest_gts')
-            pred_field = fields.index('ml_gt')
-            s += '\t{}\t{}\n'.format(
-                '\t'.join(map('true_{}'.format, group_fields)),
-                '\t'.join(map('pred_{}'.format, group_fields)))
+            gt_field = fields.index('genotype')
+            s += '\t{}\n'.format('\t'.join(map('{}'.format, group_fields)))
             out.write(s)
             break
 
@@ -40,16 +37,7 @@ def add_columns(inp, out, group_fields, groups):
     for line in inp:
         s = line.strip()
         split = s.split('\t')
-        true_gts = split[true_field].split(';')
-        pred_gt = split[pred_field]
-
-        true_groups = [set() for _ in range(n)]
-        for gt in true_gts:
-            for true_group, curr_group in zip(true_groups, get_gt_groups(gt, groups)):
-                true_group.add(curr_group)
-        for true_group in true_groups:
-            s += '\t{}'.format(';'.join(true_group))
-        s += '\t' + '\t'.join(get_gt_groups(pred_gt, groups))
+        s += '\t' + '\t'.join(get_gt_groups(split[gt_field], groups))
         out.write(s + '\n')
 
 

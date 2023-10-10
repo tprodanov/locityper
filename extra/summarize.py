@@ -61,46 +61,62 @@ def load_tags(path1, path2):
     return tags, filt_tuples
 
 
-def process(res, sol, filtering, dist):
+def process(prefix, res, sol, filt, dist):
     max_stage = sol.stage.max()
-    sol = sol[sol.stage == max_stage].groupby('genotype').mean().reset_index()
-    sol = sol.merge(dist, on='genotype').reset_index(drop=True)
+    sol = sol[sol.stage == max_stage].groupby('genotype').mean()
 
-    if filtering is None:
-        filtering = sol
+    if filt is not None:
+        filt.set_index('genotype', inplace=True)
+        filt_gts = list(filt.index)
+        highest_score = filt.score.max()
     else:
-        filtering = filtering.merge(dist, on='genotype').reset_index(drop=True)
-    min_dist = filtering.dist.min()
-    closest_gts = list(filtering[filtering.dist == min_dist].genotype)
+        filt_gts = list(sol.index)
 
-    sol.set_index('genotype', inplace=True)
-    s = '{}\t{}\t{:.5f}\t{:.5f}\t'.format(filtering.shape[0], sol.shape[0],
-        pearsonr(sol.lik, sol.dist).statistic, spearmanr(sol.lik, sol.dist).statistic)
-
-    closest_gt_liks = [sol.loc[gt].lik if gt in sol.index else np.nan for gt in closest_gts]
-    s += '{}\t{}\t{}\t'.format(min_dist, ';'.join(closest_gts), ';'.join(map('{:.3f}'.format, closest_gt_liks)))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        closest_lik = np.nanmin(closest_gt_liks)
-    closest_rank = sol.shape[0] if np.isnan(closest_lik) else (sol.lik > closest_lik).sum() + 1
-    s += f'{closest_rank}\t'
-
-    ml_gt = res['genotype']
-    ml_row = sol.loc[ml_gt]
-    ml_dist = ml_row.dist
-    ml_dist_rank = (filtering.dist < ml_dist).sum() + 1
-    s += '{}\t{:.0f}\t{:.5f}\t{}'.format(ml_gt, ml_row.dist, ml_row.lik, ml_dist_rank)
+    true_gts = dist[dist.dist == 0].genotype
+    dist.set_index('genotype', inplace=True)
 
     weighted_dist = 0.0
     weight_sum = 0.0
+    gt_probs = {}
     for option in res['options']:
+        gt = option['genotype']
         w = option['prob']
-        weighted_dist += sol.loc[option['genotype']].dist * w
+        weighted_dist += dist.loc[gt].dist * w
         weight_sum += w
+        gt_probs[gt] = option['log10_prob']
     weighted_dist /= weight_sum
 
-    s += '\t{:.5f}\t{:.6g}\n'.format(res['quality'], weighted_dist)
-    return s
+    min_dist = dist.loc[filt_gts].dist.min()
+    x = sol.lik
+    y = dist.loc[sol.index].dist
+    weighted_dist = '{:.10f}'.format(weighted_dist).rstrip('0').rstrip('.')
+    s1 = '{}{}\t{}\t{}\t{:.5f}\t{:.5f}\t{}\n'.format(
+        prefix, filt.shape[0] if filt is not None else sol.shape[0], sol.shape[0], min_dist,
+        pearsonr(x, y).statistic, spearmanr(x, y).statistic, weighted_dist)
+
+    highest_lik = sol.lik.max()
+    interesting_gts = set(true_gts)
+    interesting_gts.update(dist.index[dist.dist == min_dist])
+    interesting_gts.update(gt_probs.keys())
+    s2 = ''
+    # gt\tdist\tdist_rank\tfilt_score\tscore_rank\tlik\tlik_rank\tprob
+    for gt in interesting_gts:
+        d = dist.loc[gt].dist
+        s2 += '{}{}\t{}\t{}\t'.format(prefix, gt, d, 1 + np.sum(dist.dist < d))
+        if filt is not None and gt in filt.index:
+            score = filt.loc[gt].score
+            s2 += '{:.5f}\t{:.5f}\t{}\t'.format(score, score - highest_score, 1 + np.sum(filt.score > score))
+        else:
+            s2 += 'nan\tnan\tnan\t'
+
+        if gt in sol.index:
+            lik = sol.loc[gt].lik
+            s2 += '{:.5f}\t{:.5f}\t{}\t'.format(lik, lik - highest_lik, 1 + np.sum(sol.lik > lik))
+        else:
+            s2 += 'nan\tnan\tnan\t'
+
+        s2 += '{}\n'.format(gt_probs.get(gt, np.nan))
+    return s1, s2
 
 
 def load_and_process(tup, tags, input_fmt, dist_fmt):
@@ -114,8 +130,8 @@ def load_and_process(tup, tags, input_fmt, dist_fmt):
     except FileNotFoundError:
         filtering = None
     dist = pd.read_csv(dist_fmt.format(**d), sep='\t', comment='#')
-    s = process(res, sol, filtering, dist)
-    return '\t'.join(tup + (s,))
+    prefix = ''.join(map('{}\t'.format, tup))
+    return process(prefix, res, sol, filtering, dist)
 
 
 def main():
@@ -127,20 +143,22 @@ def main():
             'Input directories must contain `lik.csv.gz` and `res.json.gz` files.')
     parser.add_argument('-d', '--distances', metavar='STR',  required=True,
         help='Path to distances. Tags within `{tag}` are automatically found.')
-    parser.add_argument('-o', '--output', metavar='FILE',  required=True,
-        help='Output CSV file.')
+    parser.add_argument('-o', '--output', metavar='DIR',  required=True,
+        help='Output directory.')
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
         help='Number of threads [%(default)s].')
     args = parser.parse_args()
 
     tags, tag_tuples = load_tags(args.input, args.distances)
+    prefix = ''.join(map('{}\t'.format, tags))
 
-    out = open_stream(args.output, 'w')
-    out.write('# {}\n'.format(' '.join(sys.argv)))
-    for tag in tags:
-        out.write(tag + '\t')
-    out.write('total_gts\trem_gts\tpearsonr\tspearmanr\tsmallest_dist\tclosest_gts\tclosest_gt_liks\tclosest_rank\t'
-        'ml_gt\tml_gt_dist\tml_gt_lik\tml_dist_rank\tgt_qual\tweighted_dist\n')
+    out_summary = open_stream(os.path.join(args.output, 'summary.csv.gz'), 'w')
+    out_summary.write('# {}\n'.format(' '.join(sys.argv)))
+    out_summary.write(f'{prefix}total_gts\tafter_filt_gts\tmin_dist\tpearsonr\tspearmanr\tweighted_dist\n')
+
+    out_gts = open_stream(os.path.join(args.output, 'gts.csv.gz'), 'w')
+    out_gts.write('# {}\n'.format(' '.join(sys.argv)))
+    out_gts.write(f'{prefix}genotype\tdist\tdist_rank\tfilt_score\tscore_diff\tscore_rank\tlik\tlik_diff\tlik_rank\tprob\n')
 
     n = len(tag_tuples)
     threads = min(n, args.threads)
@@ -149,11 +167,13 @@ def main():
 
     if threads > 1:
         with Pool(threads) as pool:
-            for line in pbar(pool.imap(f, tag_tuples), total=n):
-                out.write(line)
+            for s1, s2 in pbar(pool.imap(f, tag_tuples), total=n):
+                out_summary.write(s1)
+                out_gts.write(s2)
     else:
-        for line in pbar(map(f, tag_tuples), total=n):
-            out.write(line)
+        for s1, s2 in pbar(map(f, tag_tuples), total=n):
+            out_summary.write(s1)
+            out_gts.write(s2)
 
 
 if __name__ == '__main__':
