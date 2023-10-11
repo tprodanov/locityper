@@ -328,7 +328,7 @@ fn load_loci(
                     "FASTA file with locus alleles cannot be provided if variants (-v) were specified (see locus {})",
                     locus.name())));
             }
-            if !filename.is_file() {
+            if !filename.exists() || filename.is_dir() {
                 return Err(Error::InvalidInput(format!("FASTA file {} does not exist for locus {}",
                     ext::fmt::path(filename), locus.name())));
             }

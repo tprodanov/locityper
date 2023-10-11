@@ -109,7 +109,9 @@ pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> Result<Vec<Path
     for entry in fs::read_dir(dir).map_err(add_path!(dir))? {
         let entry = entry.map_err(add_path!(!))?;
         let path = entry.path();
-        if entry.file_type().map_err(add_path!(path))?.is_file() && path.extension() == Some(ext.as_ref()) {
+        // Both file and symlinks are ok.
+        let file_type = entry.file_type().map_err(add_path!(path))?;
+        if (file_type.is_file() || file_type.is_symlink()) && path.extension() == Some(ext.as_ref()) {
             res.push(path);
         }
     }

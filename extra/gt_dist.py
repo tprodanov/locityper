@@ -55,7 +55,7 @@ class Contigs:
 
 
 def _load_distances(f, get_info, targets, verbose):
-    targets = { target: i for i, target in enumerate(targets) }
+    targets_dict = { target: i for i, target in enumerate(targets) }
     contigs = Contigs()
     uns_distances = []
 
@@ -66,20 +66,20 @@ def _load_distances(f, get_info, targets, verbose):
         # Second contig is reference, therefore goes first.
         contigs.add_if_needed(contig2)
         contigs.add_if_needed(contig1)
-        if contig1 in targets or contig2 in targets:
+        if contig1 in targets_dict or contig2 in targets_dict:
             uns_distances.append((contig1, contig2, dist))
             if verbose:
                 sys.stderr.write(f'    {contig1} {contig2} -> {dist:.10f}\n')
     if not uns_distances:
-        sys.stderr.write(f'    ERROR: Target genotype not found\n')
+        sys.stderr.write('    ERROR: Target genotype {} not found\n'.format(','.join(targets)))
         exit(1)
 
     n = len(targets)
     m = len(contigs)
     distances = np.zeros((n, m))
     for contig1, contig2, dist in uns_distances:
-        i = targets.get(contig1)
-        j = targets.get(contig2)
+        i = targets_dict.get(contig1)
+        j = targets_dict.get(contig2)
         if i is not None:
             distances[i, contigs.order[contig2]] = dist
         if j is not None:

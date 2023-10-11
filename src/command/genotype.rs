@@ -568,7 +568,8 @@ fn load_loci(
 
         for entry in fs::read_dir(&db_path).map_err(add_path!(db_path))? {
             let entry = entry.map_err(add_path!(!))?;
-            if !entry.file_type().map_err(add_path!(entry.path()))?.is_dir() {
+            let file_type = entry.file_type().map_err(add_path!(entry.path()))?;
+            if file_type.is_dir() || file_type.is_symlink() {
                 continue;
             }
 
