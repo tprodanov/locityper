@@ -80,7 +80,7 @@ impl Default for Params {
             use_unpaired: false,
 
             min_gts: 100,
-            filt_diff: Ln::from_log10(50.0),
+            filt_diff: Ln::from_log10(100.0),
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 20,
             out_bams: 3,
