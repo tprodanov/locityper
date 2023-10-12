@@ -724,7 +724,7 @@ fn create_mapping_command(
             "--no-progress",
             "-M", n_locs,   // Try as many secondary locations as possible.
             "-N", n_locs,   // Output as many secondary alignments as possible.
-            "-S", "0.5",     // Try candidate sites with score >= 0.5 * best score.
+            "-S", "0.8",     // Try candidate sites with score >= 0.5 * best score.
             "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.
             "--eqx",         // Output X/= instead of M operations.
@@ -755,7 +755,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
     let in_fasta = locus.db_locus_dir.join(paths::LOCUS_FASTA);
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
     // Output at most this number of alignments per read.
-    let n_locs = min(30000, locus.set.len() * 30).to_string();
+    let n_locs = min(25000, locus.set.len() * 4).to_string();
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, bg_distr.seq_info(), &n_locs, args);
     let mapping_exe = PathBuf::from(mapping_cmd.get_program().to_owned());

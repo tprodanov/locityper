@@ -221,7 +221,7 @@ impl Technology {
     /// Returns minimizer matching fraction for different technologies.
     pub fn default_matches_frac(self) -> f64 {
         match self {
-            Self::Illumina => 0.5,
+            Self::Illumina => 0.7,
             Self::HiFi => 0.2,
             Self::PacBio | Self::Nanopore => 0.1,
         }
