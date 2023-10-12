@@ -697,12 +697,17 @@ struct ReadCounts {
 
 impl ReadCounts {
     fn to_string(&self, use_reads: usize, is_paired_end: bool, use_unpaired: bool) -> String {
-        let mut s = format!("Total {} read{}s", self.total, if is_paired_end { " pair" } else { "" });
-        write!(s, ": use {} reads", use_reads).unwrap();
-        if self.unpaired > 0 {
-            write!(s, " {}cluding {} unpaired", if use_unpaired { "in" } else { "ex" }, self.unpaired).unwrap();
+        let mut s = format!("Use {} read{}s", use_reads, if is_paired_end { " pair" } else { "" });
+        if is_paired_end {
+            if use_unpaired {
+                write!(s, " (of them {} unpaired). Discard ", self.unpaired).unwrap();
+            } else {
+                write!(s, ". Discard {} unpaired, ", self.unpaired).unwrap();
+            }
+        } else {
+            s.push_str(". Discard ");
         }
-        write!(s, ". Discard {} unmapped, {} out of bounds and {} with few unique k-mers",
+        write!(s, "{} unmapped, {} out of bounds and {} with few unique k-mers",
             self.unmapped, self.out_of_bounds, self.few_kmers).unwrap();
         s
     }

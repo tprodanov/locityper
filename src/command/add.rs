@@ -664,19 +664,19 @@ fn process_haplotypes(
 }
 
 /// Checks sequences for Ns, minimal size and for equal boundaries.
-fn check_sequences(seqs: &[NamedSeq], locus: &str, ref_seq: Option<&[u8]>) -> Result<(), Error> {
+fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u8]>) -> Result<(), Error> {
     if seqs.is_empty() {
-        return Err(Error::InvalidData(format!("No sequences available for locus {}", locus)));
+        return Err(Error::InvalidData(format!("No sequences available for locus {}", locus.name())));
     }
     let min_size = seqs.iter().map(|s| s.len()).min().unwrap();
     if min_size < 1000 {
         return Err(Error::InvalidData(format!("Locus alleles are too short for locus {} (shortest: {} bp)",
             locus, min_size)));
     } else if min_size < 10000 {
-        log::warn!("[{}] Locus alleles may be too short (shortest: {} bp)", locus, min_size);
+        log::warn!("[{}] Locus alleles may be too short (shortest: {} bp)", locus.name(), min_size);
     }
     if seqs.iter().any(|entry| seq::has_n(entry.seq())) {
-        return Err(Error::InvalidData(format!("Locus alleles contain Ns for locus {}", locus)));
+        return Err(Error::InvalidData(format!("Locus alleles contain Ns for locus {}", locus.name())));
     }
 
     const AFFIX_SIZE: usize = 5;
@@ -685,13 +685,21 @@ fn check_sequences(seqs: &[NamedSeq], locus: &str, ref_seq: Option<&[u8]>) -> Re
     let suffix = &seq0[seq0.len() - AFFIX_SIZE..];
     if seqs[1..].iter().map(NamedSeq::seq)
             .any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix) {
-        log::warn!("[{}] Allele sequences differ at the boundary", locus);
+        log::warn!("[{}] Allele sequences differ at the boundary", locus.name());
     }
 
     if let Some(rseq) = ref_seq {
-        if &rseq[..AFFIX_SIZE] != prefix || &rseq[rseq.len() - AFFIX_SIZE..] != suffix {
-            log::warn!("[{}] Boundary of the reference sequence does not match other alleles.\n    \
-                Please check if locus boundaries are accurate", locus);
+        let prefix = &rseq[..AFFIX_SIZE];
+        let suffix = &rseq[rseq.len() - AFFIX_SIZE..];
+        let d = seqs.iter().map(NamedSeq::seq)
+            .filter(|seq| &seq[..AFFIX_SIZE] != prefix || &seq[seq.len() - AFFIX_SIZE..] != suffix).count();
+        let n = seqs.len();
+        if d > 0 {
+            log::log!(
+                if d == n { log::Level::Error } else { log::Level::Warn },
+                "[{}] {} of the alleles ({}/{}) do not match the reference sequence at {}", locus.name(),
+                if d == n { "All" } else if d >= n / 2 { "Most" } else { "Some" },
+                d, n, locus.interval());
         }
     }
     Ok(())
@@ -734,7 +742,7 @@ fn add_locus(
     } else {
         unreachable!("Either VCF file or alleles FASTA must be specified")
     };
-    check_sequences(&allele_seqs, locus.name(), if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
+    check_sequences(&allele_seqs, &locus, if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
     process_haplotypes(&locus, locus_dir, ref_seq, allele_seqs, kmer_getter, args)
 }
 
