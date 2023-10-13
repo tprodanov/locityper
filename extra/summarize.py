@@ -50,15 +50,17 @@ def load_tags(path1, path2):
     if not_found:
         sys.stderr.write(f'Skipped {not_found} directories\n')
 
-    filt_tuples = []
+    sel_tuples = []
+    disc_tuples = []
     for tup in all_tuples:
         d = dict(zip(tags, tup))
         if os.path.exists(path2.format(**d)):
-            filt_tuples.append(tup)
+            sel_tuples.append(tup)
+        else:
+            disc_tuples.append(tup)
 
-    sys.stderr.write('Found {} tag combinations. Discarded {} of them\n'.format(
-        len(all_tuples), len(all_tuples) - len(filt_tuples)))
-    return tags, filt_tuples
+    sys.stderr.write(f'Found {len(all_tuples)} tag combinations. Discarded {len(disc_tuples)} of them\n')
+    return tags, sel_tuples, disc_tuples
 
 
 def process(prefix, res, sol, filt, dist):
@@ -143,22 +145,30 @@ def main():
             'Input directories must contain `lik.csv.gz` and `res.json.gz` files.')
     parser.add_argument('-d', '--distances', metavar='STR',  required=True,
         help='Path to distances. Tags within `{tag}` are automatically found.')
-    parser.add_argument('-o', '--output', metavar='DIR',  required=True,
-        help='Output directory.')
+    parser.add_argument('-o', '--output', metavar='STR',  required=True,
+        help='Output prefix.')
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
         help='Number of threads [%(default)s].')
     args = parser.parse_args()
 
-    tags, tag_tuples = load_tags(args.input, args.distances)
-    prefix = ''.join(map('{}\t'.format, tags))
+    path_prefix = args.output + ('/' if os.path.isdir(args.output) else '.')
+    tags, tag_tuples, disc_tuples = load_tags(args.input, args.distances)
+    tags_prefix = ''.join(map('{}\t'.format, tags))
 
-    out_summary = open_stream(os.path.join(args.output, 'summary.csv.gz'), 'w')
+    if disc_tuples:
+        with open_stream(f'{path_prefix}missing.csv.gz', 'w') as out:
+            out.write('\t'.join(tags) + '\n')
+            for tup in disc_tuples:
+                out.write('\t'.join(tup) + '\n')
+
+    out_summary = open_stream(f'{path_prefix}summary.csv.gz', 'w')
     out_summary.write('# {}\n'.format(' '.join(sys.argv)))
-    out_summary.write(f'{prefix}total_gts\tafter_filt_gts\tmin_dist\tpearsonr\tspearmanr\tweighted_dist\n')
+    out_summary.write(f'{tags_prefix}total_gts\tafter_filt_gts\tmin_dist\tpearsonr\tspearmanr\tweighted_dist\n')
 
-    out_gts = open_stream(os.path.join(args.output, 'gts.csv.gz'), 'w')
+    out_gts = open_stream(f'{path_prefix}gts.csv.gz', 'w')
     out_gts.write('# {}\n'.format(' '.join(sys.argv)))
-    out_gts.write(f'{prefix}genotype\tdist\tdist_rank\tfilt_score\tscore_diff\tscore_rank\tlik\tlik_diff\tlik_rank\tprob\n')
+    out_gts.write(f'{tags_prefix}genotype\tdist\tdist_rank\tfilt_score\tscore_diff\t'
+        'score_rank\tlik\tlik_diff\tlik_rank\tprob\n')
 
     n = len(tag_tuples)
     threads = min(n, args.threads)
