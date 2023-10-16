@@ -727,10 +727,14 @@ fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>
         filt_alleles.push(allele);
     }
     let discarded = left_out.len();
-    if discarded > 5 {
-        log::warn!("    Leave out {} haplotypes ({}, ...)", discarded, left_out[..5].join(", "));
-    } else if discarded > 0 {
+    if discarded > 0 {
+        if left_out.len() > 5 {
+            left_out.truncate(5);
+            left_out.push("...".to_owned());
+        }
         log::warn!("    Leave out {} haplotypes ({})", discarded, left_out.join(", "));
+    } else {
+        log::warn!("Zero matches between leave-out and FASTA alleles");
     }
     filt_alleles
 }

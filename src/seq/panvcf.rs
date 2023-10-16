@@ -72,10 +72,11 @@ impl HaplotypeNames {
     ) -> Result<Self, Error>
     {
         let mut discarded = 0;
+        let mut left_out = Vec::new();
         let mut total = 0;
         let mut hap_names = HashSet::default();
         let ref_name = if leave_out.contains(ref_name) {
-            discarded += 1;
+            left_out.push(ref_name.to_owned());
             None
         } else {
             total += 1;
@@ -94,6 +95,7 @@ impl HaplotypeNames {
 
             let ploidy = genotypes.get(sample_id).len();
             if leave_out.contains(sample) {
+                left_out.push(format!("{} x{}", sample, ploidy));
                 discarded += ploidy;
                 continue;
             }
@@ -106,6 +108,7 @@ impl HaplotypeNames {
             for hap_ix in 0..ploidy {
                 let haplotype = if ploidy == 1 { sample.to_owned() } else { format!("{}.{}", sample, hap_ix + 1) };
                 if leave_out.contains(&haplotype) {
+                    left_out.push(haplotype);
                     discarded += 1;
                     continue;
                 }
@@ -126,7 +129,13 @@ impl HaplotypeNames {
         }
         log::info!("VCF file contains {} haplotypes", total);
         if discarded > 0 {
-            log::warn!("Leave out {} haplotypes", discarded);
+            if left_out.len() > 5 {
+                left_out.truncate(5);
+                left_out.push("...".to_owned());
+            }
+            log::warn!("    Leave out {} haplotypes ({})", discarded, left_out.join(", "));
+        } else if !leave_out.is_empty() {
+            log::warn!("Zero matches between leave-out and VCF samples");
         }
         if samples.is_empty() {
             return Err(Error::InvalidData("Loaded zero haplotypes".to_owned()));
