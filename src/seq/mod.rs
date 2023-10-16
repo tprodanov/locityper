@@ -102,12 +102,12 @@ impl NamedSeq {
         &mut self.seq
     }
 
-    /// Destroys the structure and returns both name and sequence.
-    pub fn take_both(self) -> (String, Vec<u8>) {
-        (self.name, self.seq)
+    /// Consumes this object and returns name.
+    pub fn take_name(self) -> String {
+        self.name
     }
 
-    /// Consumes this object and returns owned sequence.
+    /// Consumes this object and returns sequence.
     pub fn take_seq(self) -> Vec<u8> {
         self.seq
     }

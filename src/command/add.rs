@@ -705,6 +705,36 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
     Ok(())
 }
 
+/// Discard alleles, whose names are in `leave_out`.
+/// Additionally, discard sequences `name[._-][0-9]` where `name` is in `leave_out`.
+fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>) -> Vec<NamedSeq> {
+    if leave_out.is_empty() {
+        return alleles;
+    }
+    let mut filt_alleles = Vec::with_capacity(alleles.len());
+    let mut left_out = Vec::new();
+    for allele in alleles.into_iter() {
+        let name = allele.name();
+        let bytes = name.as_bytes();
+        let n = bytes.len();
+        if leave_out.contains(name) ||
+                (n > 2 && leave_out.contains(&std::str::from_utf8(&bytes[..n - 2]).unwrap() as &str)
+                && b'0' <= bytes[n - 1] && bytes[n - 1] <= b'9'
+                && (bytes[n - 2] == b'.' || bytes[n - 2] == b'_' || bytes[n - 2] == b'-')) {
+            left_out.push(allele.take_name());
+            continue;
+        }
+        filt_alleles.push(allele);
+    }
+    let discarded = left_out.len();
+    if discarded > 5 {
+        log::warn!("    Leave out {} haplotypes ({}, ...)", discarded, left_out[..5].join(", "));
+    } else if discarded > 0 {
+        log::warn!("    Leave out {} haplotypes ({})", discarded, left_out.join(", "));
+    }
+    filt_alleles
+}
+
 /// Adds locus to the database.
 fn add_locus(
     mut locus: NamedInterval,
@@ -738,7 +768,9 @@ fn add_locus(
         panvcf::reconstruct_sequences(locus.interval(), &ref_seq, vcf_file, hap_names, args.unknown_frac)?
     } else if let Some(fasta_filename) = alleles_fasta {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
-        fasta_reader.read_all()?
+        let alleles = fasta_reader.read_all()?;
+        log::info!("FASTA file contains {} haplotypes", alleles.len());
+        discard_leave_out_alleles(alleles, &args.leave_out)
     } else {
         unreachable!("Either VCF file or alleles FASTA must be specified")
     };
