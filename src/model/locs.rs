@@ -783,12 +783,14 @@ impl AllAlignments {
                 continue;
             }
 
-            let mut use_read = true;
             if is_paired_end && (opt_min_prob1.is_none() || opt_min_prob2.is_none()) {
-                use_read = params.use_unpaired;
                 counts.unpaired += 1;
+                if !params.use_unpaired {
+                    continue;
+                }
             }
-            if use_read && !unique_kmers.can_use_read(&read_data, &mut dbg_writer2).map_err(add_path!(!))? {
+            let mut use_read = true;
+            if !unique_kmers.can_use_read(&read_data, &mut dbg_writer2).map_err(add_path!(!))? {
                 use_read = false;
                 counts.few_kmers += 1;
             }
