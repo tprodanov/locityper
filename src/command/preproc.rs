@@ -766,9 +766,10 @@ fn estimate_bg_from_paired(
     for chunk in errprof_alns.chunks_exact(2) {
         let aln1 = chunk[0];
         let aln2 = chunk[1];
-        let (edit1, len1) = aln1.count_region_operations(interval).edit_and_read_len();
-        let (edit2, len2) = aln2.count_region_operations(interval).edit_and_read_len();
-        if edit1 <= edit_dist_cache.get(len1) && edit2 <= edit_dist_cache.get(len2) {
+        let dist1 = aln1.count_region_operations(interval).edit_distance();
+        let dist2 = aln2.count_region_operations(interval).edit_distance();
+        if dist1.edit() <= edit_dist_cache.get(dist1.read_len())
+                && dist2.edit() <= edit_dist_cache.get(dist2.read_len()) {
             depth_alns.push(aln1.deref());
             depth_alns.push(aln2.deref());
         }
@@ -796,8 +797,8 @@ fn estimate_bg_from_unpaired(
 
     let filt_alns: Vec<&Alignment> = alns.iter()
         .filter(|aln| {
-            let (edit, len) = aln.count_region_operations(interval).edit_and_read_len();
-            edit <= edit_dist_cache.get(len)
+            let dist = aln.count_region_operations(interval).edit_distance();
+            dist.edit() <= edit_dist_cache.get(dist.read_len())
         })
         .map(Deref::deref)
         .collect();

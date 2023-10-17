@@ -2,7 +2,7 @@ use std::{
     fmt,
     cmp::max,
     io::Write,
-    ops::{Add, AddAssign},
+    ops::AddAssign,
     cell::RefCell,
     borrow::Borrow,
     path::Path,
@@ -16,9 +16,42 @@ use crate::{
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
-    algo::TwoU32,
     ext,
 };
+
+/// Edit distance and read length.
+/// Both values can be limited by the length of region of interest.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct EditDist {
+    edit: u32,
+    read_len: u32,
+}
+
+impl EditDist {
+    #[inline]
+    pub fn edit(&self) -> u32 {
+        self.edit
+    }
+
+    #[inline]
+    pub fn read_len(&self) -> u32 {
+        self.read_len
+    }
+}
+
+impl fmt::Display for EditDist {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "{}/{}", self.edit, self.read_len)
+    }
+}
+
+impl std::hash::Hash for EditDist {
+    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        hasher.write_u64((u64::from(self.edit) << 32) | u64::from(self.read_len))
+    }
+}
+
+impl nohash::IsEnabled for EditDist {}
 
 /// Counts of five operation types (=, X, I, D, S).
 #[derive(Clone, Default, Debug)]
@@ -30,11 +63,14 @@ pub struct OperCounts<T> {
     pub clipping: T,
 }
 
-impl<T: Add<Output = T> + Copy> OperCounts<T> {
-    /// Returns pair (edit distance, read length).
-    pub fn edit_and_read_len(&self) -> (T, T) {
+impl OperCounts<u32> {
+    /// Returns edit distance and read length.
+    pub fn edit_distance(&self) -> EditDist {
         let common = self.mismatches + self.insertions + self.clipping;
-        (common + self.deletions, common + self.matches)
+        EditDist {
+            edit: common + self.deletions,
+            read_len: common + self.matches,
+        }
     }
 }
 
@@ -122,8 +158,8 @@ impl ErrorProfile {
     {
         log::info!("Estimating read error profiles from {} reads", alns.len());
         let mut total_counts = OperCounts::<u64>::default();
-        // HashMap, values: (edit_dist, read_len), keys: number of appearances.
-        let mut edit_distances = IntMap::<TwoU32, u64>::default();
+        // HashMap, keys: (edit_dist, read_len), values: number of appearances.
+        let mut edit_distances = IntMap::<EditDist, u64>::default();
         for aln in alns.iter() {
             let aln = aln.borrow();
             if !windows.keep_window(aln.interval().middle()) {
@@ -131,15 +167,14 @@ impl ErrorProfile {
             }
             let counts = aln.count_region_operations(region);
             total_counts += &counts;
-            let (edit_dist, read_len) = counts.edit_and_read_len();
-            edit_distances.entry(TwoU32(edit_dist, read_len))
+            edit_distances.entry(counts.edit_distance())
                 .and_modify(|counter| *counter += 1)
                 .or_insert(1);
         }
 
         let oper_probs = total_counts.to_ln_probs();
         let edit_distances: Vec<_> = edit_distances.into_iter()
-            .map(|(TwoU32(k, n), count)| (k, n, count as f64))
+            .map(|(EditDist { edit, read_len }, count)| (edit, read_len, count as f64))
             .collect();
         let edit_distr = BetaBinomial::max_lik_estimate(&edit_distances);
 

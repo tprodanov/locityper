@@ -55,6 +55,7 @@ pub struct MateData {
     opp_sequence: OnceCell<Vec<u8>>,
     qualities: Vec<u8>,
     opp_qualities: OnceCell<Vec<u8>>,
+    unique_kmers: u16,
 }
 
 impl MateData {
@@ -66,6 +67,7 @@ impl MateData {
             // Need to do this as otherwise htslib will panic.
             qualities: if record.qual().is_empty() { vec![255; record.seq().len()] } else { record.qual().to_vec() },
             opp_qualities: OnceCell::new(),
+            unique_kmers: 0,
         }
     }
 
@@ -79,6 +81,11 @@ impl MateData {
                 self.opp_qualities.get_or_init(|| self.qualities.iter().rev().copied().collect()),
             )
         }
+    }
+
+    /// Returns the number of unique k-mers in the read.
+    pub fn unique_kmers(&self) -> u16 {
+        self.unique_kmers
     }
 }
 
@@ -206,15 +213,15 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let mut aln = Alignment::new(&self.record, cigar, read_end, Arc::clone(&self.contigs), f64::NAN);
             let read_prof = aln.count_region_operations_fast(self.contigs.get_len(aln.interval().contig_id()));
             let aln_prob = self.err_prof.ln_prob(&read_prof);
-            let (edit_dist, read_len) = read_prof.edit_and_read_len();
-            let (good_dist, passable_dist) = self.edit_dist_cache.get(read_len);
-            let is_good_dist = edit_dist <= good_dist;
+            let dist = read_prof.edit_distance();
+            let (good_dist, passable_dist) = self.edit_dist_cache.get(dist.read_len());
+            let is_good_dist = dist.edit() <= good_dist;
             // Discard all alignments with edit distance over half of the read length.
-            let is_passable_dist = edit_dist <= passable_dist;
+            let is_passable_dist = dist.edit() <= passable_dist;
             any_good |= is_good_dist;
 
-            write!(dbg_writer, "{}\t{}\t{}\t{}/{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
-                edit_dist, read_len, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
+            write!(dbg_writer, "{}\t{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
+                dist, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
                 write!(dbg_writer, "\t{}", read_data.name).map_err(add_path!(!))?;
@@ -223,6 +230,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
             aln.set_ln_prob(aln_prob);
+            aln.set_distance(dist);
             if is_passable_dist {
                 match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
                     Entry::Occupied(entry) => {
@@ -276,8 +284,6 @@ pub struct GrouppedAlignments {
     alignments: Vec<Alignment>,
     /// Read alignments, groupped into pairs.
     aln_pairs: Vec<PairAlignment>,
-    /// Weight of the read pair.
-    weight: f64,
 }
 
 impl GrouppedAlignments {
@@ -322,11 +328,6 @@ impl GrouppedAlignments {
     /// Returns read information, such as sequences, qualities, and read name.
     pub fn read_data(&self) -> &ReadData {
         &self.read_data
-    }
-
-    /// Returns the weight of the read pair.
-    pub fn weight(&self) -> f64 {
-        self.weight
     }
 
     fn write_read_pair_info(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
@@ -491,18 +492,14 @@ fn identify_paired_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
     max_alns: usize,
-    opt_min_prob1: Option<f64>,
-    opt_min_prob2: Option<f64>,
+    min_prob1: f64,
+    min_prob2: f64,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
-    let weight = if opt_min_prob1.is_none() || opt_min_prob2.is_none() { 0.5 } else { 1.0 };
-    let min_prob1 = opt_min_prob1.unwrap_or(0.0);
-    let min_prob2 = opt_min_prob2.unwrap_or(0.0);
-
     // First: by contig (decr.), second: by read end (decr.), third: by aln probability (incr.).
     tmp_alns.sort_unstable_by(|a, b|
         (b.contig_id(), b.read_end(), a.ln_prob()).partial_cmp(&(a.contig_id(), a.read_end(), b.ln_prob())).unwrap());
@@ -551,11 +548,11 @@ fn identify_paired_end_alignments(
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
     for aln in aln_pairs.iter_mut() {
-        aln.ln_prob = weight * (aln.ln_prob - norm_fct);
+        aln.ln_prob = aln.ln_prob - norm_fct; // weight * (aln.ln_prob - norm_fct);
     }
     GrouppedAlignments {
-        read_data, weight,
-        unmapped_prob: weight * (both_unmapped - norm_fct),
+        read_data,
+        unmapped_prob: both_unmapped - norm_fct, // weight * (both_unmapped - norm_fct),
         alignments, aln_pairs,
     }
 }
@@ -594,17 +591,16 @@ fn identify_single_end_alignments(
         }
     }
 
-    let weight = 1.0; // For now, use all reads with equal weights.
     let unmapped_prob = min_prob + params.unmapped_penalty;
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
     for aln in aln_pairs.iter_mut() {
-        aln.ln_prob = weight * (aln.ln_prob - norm_fct);
+        aln.ln_prob = aln.ln_prob - norm_fct; // weight * (aln.ln_prob - norm_fct);
     }
     GrouppedAlignments {
-        read_data, weight,
-        unmapped_prob: weight * (unmapped_prob - norm_fct),
+        read_data,
+        unmapped_prob: unmapped_prob - norm_fct, // weight * (unmapped_prob - norm_fct),
         alignments, aln_pairs,
     }
 }
@@ -645,11 +641,11 @@ impl UniqueKmers {
     }
 
     /// Count the number of unique k-mers in both read mates and returns true if this read/read pair can be used.
-    fn can_use_read(&mut self, read_data: &ReadData, dbg_writer: &mut impl Write) -> io::Result<bool> {
+    fn can_use_read(&mut self, read_data: &mut ReadData, dbg_writer: &mut impl Write) -> io::Result<bool> {
         let mut paired_count = 0_u16;
         write!(dbg_writer, "{}\t", read_data.name_hash)?;
-        for mate_data in &read_data.mates {
-            if let Some(data) = mate_data {
+        for mate_data in read_data.mates.iter_mut() {
+            if let Some(data) = mate_data.as_mut() {
                 self.kmers_buf.clear();
                 kmers::kmers::<u128, CANONICAL>(&data.sequence, self.k, &mut self.kmers_buf);
 
@@ -664,6 +660,7 @@ impl UniqueKmers {
                     }
                 }
                 write!(dbg_writer, "{}\t", count)?;
+                data.unique_kmers = count;
                 paired_count += count;
             } else {
                 write!(dbg_writer, "*\t")?;
@@ -696,16 +693,10 @@ struct ReadCounts {
 }
 
 impl ReadCounts {
-    fn to_string(&self, use_reads: usize, is_paired_end: bool, use_unpaired: bool) -> String {
-        let mut s = format!("Use {} read{}s", use_reads, if is_paired_end { " pair" } else { "" });
+    fn to_string(&self, use_reads: usize, is_paired_end: bool) -> String {
+        let mut s = format!("Use {} read{}s. Discard ", use_reads, if is_paired_end { " pair" } else { "" });
         if is_paired_end {
-            if use_unpaired {
-                write!(s, " (of them {} unpaired). Discard ", self.unpaired).unwrap();
-            } else {
-                write!(s, ". Discard {} unpaired, ", self.unpaired).unwrap();
-            }
-        } else {
-            s.push_str(". Discard ");
+            write!(s, "{} unpaired, ", self.unpaired).unwrap();
         }
         write!(s, "{} unmapped, {} out of bounds and {} with few unique k-mers",
             self.unmapped, self.out_of_bounds, self.few_kmers).unwrap();
@@ -716,10 +707,9 @@ impl ReadCounts {
 /// Paired-end/single-end read alignments, sorted by contig.
 pub struct AllAlignments {
     /// Each element: one read pair.
-    /// This vector stores reads with non-0 weight.
     reads: Vec<GrouppedAlignments>,
-    /// This vector stores reads with 0 (or close to 0) weight.
-    w0_reads: Vec<GrouppedAlignments>,
+    /// This vector stores unused reads (but which passed necessary thresholds).
+    unused_reads: Vec<GrouppedAlignments>,
 }
 
 impl AllAlignments {
@@ -747,7 +737,7 @@ impl AllAlignments {
 
         writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tread_name")
             .map_err(add_path!(!))?;
-        writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
+        writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tuse").map_err(add_path!(!))?;
 
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache)?;
 
@@ -761,7 +751,7 @@ impl AllAlignments {
 
         let mut counts = ReadCounts::default();
         let mut reads = Vec::new();
-        let mut w0_reads = Vec::new();
+        let mut unused_reads = Vec::new();
         while reader.has_more() {
             let mut read_data = ReadData::default();
             counts.total += 1;
@@ -778,27 +768,20 @@ impl AllAlignments {
             if opt_min_prob1.is_none() && opt_min_prob2.is_none() {
                 counts.unmapped += 1;
                 continue;
+            } else if is_paired_end && (opt_min_prob1.is_none() || opt_min_prob2.is_none()) {
+                counts.unpaired += 1;
+                continue;
             } else if !in_bounds(&tmp_alns, boundary, contigs) {
                 counts.out_of_bounds += 1;
                 continue;
             }
 
-            if is_paired_end && (opt_min_prob1.is_none() || opt_min_prob2.is_none()) {
-                counts.unpaired += 1;
-                if !params.use_unpaired {
-                    continue;
-                }
-            }
-            let mut use_read = true;
-            if !unique_kmers.can_use_read(&read_data, &mut dbg_writer2).map_err(add_path!(!))? {
-                use_read = false;
-                counts.few_kmers += 1;
-            }
-
+            let use_read = unique_kmers.can_use_read(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
+            counts.few_kmers += u32::from(!use_read);
             let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns, opt_min_prob1, opt_min_prob2,
-                    &mut buffer, insert_distr, ln_ncontigs, params)
+                identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns,
+                    opt_min_prob1.unwrap(), opt_min_prob2.unwrap(), &mut buffer, insert_distr, ln_ncontigs, params)
             } else {
                 identify_single_end_alignments(read_data, &mut tmp_alns, max_alns, opt_min_prob1.unwrap(),
                     ln_ncontigs, params)
@@ -806,24 +789,24 @@ impl AllAlignments {
             if use_read {
                 reads.push(groupped_alns);
             } else {
-                w0_reads.push(groupped_alns);
+                unused_reads.push(groupped_alns);
             }
         }
-        log::debug!("    {}", counts.to_string(reads.len(), is_paired_end, params.use_unpaired));
+        log::debug!("    {}", counts.to_string(reads.len(), is_paired_end));
         if collisions > 2 && collisions * 100 > counts.total {
             return Err(Error::RuntimeError(format!("Too many hash collisions ({})", collisions)));
         }
-        Ok(Self { reads, w0_reads })
+        Ok(Self { reads, unused_reads })
     }
 
-    /// Reads that have non-0 weight.
+    /// Reads that are used in the model.
     pub fn reads(&self) -> &[GrouppedAlignments] {
         &self.reads
     }
 
-    /// Reads that have 0 or close to 0 weight.
-    pub fn w0_reads(&self) -> &[GrouppedAlignments] {
-        &self.w0_reads
+    /// Reads that are not used.
+    pub fn unused_reads(&self) -> &[GrouppedAlignments] {
+        &self.unused_reads
     }
 
     /// Returns matrix `contig_id -> read pair -> best aln prob`.
@@ -839,13 +822,18 @@ impl AllAlignments {
     }
 
     /// Writes debug information about all read pairs.
-    pub fn write_read_pair_info(&self, mut f: impl Write, contigs: &ContigNames, include_w0: bool) -> io::Result<()> {
+    pub fn write_read_pair_info<const INCLUDE_UNUSED: bool>(
+        &self,
+        mut f: impl Write,
+        contigs: &ContigNames,
+    ) -> io::Result<()>
+    {
         writeln!(f, "read_hash\tcontig\tpos1\tpos2\tlik")?;
         for read in self.reads.iter() {
             read.write_read_pair_info(&mut f, contigs)?;
         }
-        if include_w0 {
-            for read in self.w0_reads.iter() {
+        if INCLUDE_UNUSED {
+            for read in self.unused_reads.iter() {
                 read.write_read_pair_info(&mut f, contigs)?;
             }
         }

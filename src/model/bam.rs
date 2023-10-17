@@ -91,7 +91,7 @@ fn create_record(
     read_data: &ReadData,
     read_end: ReadEnd,
     cigar_buffer: &mut bam::record::CigarString,
-) -> bam::Record
+) -> htslib::errors::Result<bam::Record>
 {
     let mut record = bam::Record::new();
     record.set_header(header);
@@ -112,15 +112,27 @@ fn create_record(
         (None, Strand::Forward)
     };
 
-    let (seq, qual) = read_data.mate_data(read_end).get_seq_and_qual(strand);
+    let mate_data = read_data.mate_data(read_end);
+    let (seq, qual) = mate_data.get_seq_and_qual(strand);
     record.set(read_data.name().as_bytes(), cigar_view, seq, qual);
-    record
+
+    if let Some(aln) = opt_aln {
+        if let Some(dist) = aln.distance() {
+            record.push_aux(EDIT_TAG, bam::record::Aux::U32(dist.edit()))?;
+        }
+        record.push_aux(ALN_LIK_TAG, bam::record::Aux::Double(aln.ln_prob()))?;
+    }
+    record.push_aux(UNIQ_KMERS_TAG, bam::record::Aux::U16(mate_data.unique_kmers()))?;
+    Ok(record)
 }
 
 const UNMAPPED: u32 = u32::MAX;
 
+const EDIT_TAG: &'static [u8; 2] = b"NM";
 const PROB_TAG: &'static [u8; 2] = b"pr";
-const WEIGHT_TAG: &'static [u8; 2] = b"wt";
+const USED_TAG: &'static [u8; 2] = b"us";
+const UNIQ_KMERS_TAG: &'static [u8; 2] = b"uk";
+const ALN_LIK_TAG: &'static [u8; 2] = b"al";
 
 /// For each alignment pair, sums corresponding `assign_counts`.
 /// Alignment pair may appear several times if the same contig appears multiple times in the genotype.
@@ -208,22 +220,21 @@ fn generate_paired_end_records(
 {
     count_alignments::<true>(read_alns, assgn_counts, buffer1, buffer2);
     let read_data = groupped_alns.read_data();
-    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for &(TwoU32(i, j), count) in buffer2.iter() {
         let opt_aln1 = if i == UNMAPPED { None } else { Some(groupped_alns.ith_aln(i)) };
         let opt_aln2 = if j == UNMAPPED { None } else { Some(groupped_alns.ith_aln(j)) };
         let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data,
-            ReadEnd::First, buffer3);
+            ReadEnd::First, buffer3)?;
         let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data,
-            ReadEnd::Second, buffer3);
+            ReadEnd::Second, buffer3)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record1.set_mapq(mapq);
         record2.set_mapq(mapq);
         record1.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
         record2.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
-        record1.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
-        record2.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
+        record1.push_aux(USED_TAG, bam::record::Aux::Char(b'T'))?;
+        record2.push_aux(USED_TAG, bam::record::Aux::Char(b'T'))?;
         if secondary {
             record1.set_secondary();
             record2.set_secondary();
@@ -237,7 +248,7 @@ fn generate_paired_end_records(
 }
 
 /// Generate BAM record for one paired-end read that was not used in the read assignment.
-fn generate_w0_paired_end_records(
+fn generate_unused_paired_end_records(
     groupped_alns: &GrouppedAlignments,
     aln_pairs: &[&PairAlignment],
     header: &Rc<bam::HeaderView>,
@@ -247,21 +258,20 @@ fn generate_w0_paired_end_records(
 ) -> htslib::errors::Result<()>
 {
     let read_data = groupped_alns.read_data();
-    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for pair in aln_pairs {
         let opt_aln1 = pair.ix1().map(|i| groupped_alns.ith_aln(i));
         let opt_aln2 = pair.ix2().map(|j| groupped_alns.ith_aln(j));
-        let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data, ReadEnd::First, buffer);
-        let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data, ReadEnd::Second, buffer);
-        record1.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
-        record2.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
+        let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data, ReadEnd::First, buffer)?;
+        let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data, ReadEnd::Second, buffer)?;
         if secondary {
             record1.set_secondary();
             record2.set_secondary();
         }
         secondary = true;
         connect_pair(&mut record1, &mut record2, calc_insert_size(opt_aln1, opt_aln2));
+        record1.push_aux(USED_TAG, bam::record::Aux::Char(b'F'))?;
+        record2.push_aux(USED_TAG, bam::record::Aux::Char(b'F'))?;
         records.push(record1);
         records.push(record2);
     }
@@ -284,15 +294,14 @@ fn generate_single_end_records(
 {
     count_alignments::<false>(read_alns, assgn_counts, buffer1, buffer2);
     let read_data = groupped_alns.read_data();
-    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for &(TwoU32(i, _), count) in buffer2.iter() {
         let opt_aln = if i == UNMAPPED { None } else { Some(groupped_alns.ith_aln(i)) };
-        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data, ReadEnd::First, buffer3);
+        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data, ReadEnd::First, buffer3)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record.set_mapq(mapq);
         record.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
-        record.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
+        record.push_aux(USED_TAG, bam::record::Aux::Char(b'T'))?;
         if secondary {
             record.set_secondary();
         }
@@ -303,7 +312,7 @@ fn generate_single_end_records(
 }
 
 /// Generate BAM record for one single-end read that was not used in the read assignment.
-fn generate_w0_single_end_records(
+fn generate_unused_single_end_records(
     groupped_alns: &GrouppedAlignments,
     aln_pairs: &[&PairAlignment],
     header: &Rc<bam::HeaderView>,
@@ -313,16 +322,15 @@ fn generate_w0_single_end_records(
 ) -> htslib::errors::Result<()>
 {
     let read_data = groupped_alns.read_data();
-    let weight = groupped_alns.weight() as f32;
     let mut secondary = false;
     for pair in aln_pairs {
         let opt_aln = pair.ix1().map(|i| groupped_alns.ith_aln(i));
-        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data, ReadEnd::First, buffer);
+        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data, ReadEnd::First, buffer)?;
         if secondary {
             record.set_secondary();
         }
         secondary = true;
-        record.push_aux(WEIGHT_TAG, bam::record::Aux::Float(weight))?;
+        record.push_aux(USED_TAG, bam::record::Aux::Char(b'F'))?;
         records.push(record);
     }
     Ok(())
@@ -360,18 +368,18 @@ pub fn write_bam(
     assert!(counts_iter.next().is_none(), "Too many assignment counts");
 
     let mut aln_pairs: Vec<&PairAlignment> = Vec::new();
-    // Reads with 0 weight, which were not ussed for the analysis.
-    for groupped_alns in data.all_alns.w0_reads() {
+    // Reads unused in the analysis.
+    for groupped_alns in data.all_alns.unused_reads() {
         aln_pairs.clear();
         for &id in unique_ids.iter() {
             aln_pairs.extend(groupped_alns.contig_aln_pairs(id).iter());
         }
         aln_pairs.sort_unstable_by(|a, b| b.ln_prob().total_cmp(&a.ln_prob()));
         if data.is_paired_end {
-            generate_w0_paired_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, &mut records,
+            generate_unused_paired_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, &mut records,
                 &mut buffer3)?;
         } else {
-            generate_w0_single_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, &mut records,
+            generate_unused_single_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, &mut records,
                 &mut buffer3)?;
         }
     }

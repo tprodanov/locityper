@@ -250,8 +250,6 @@ fn print_help(extended: bool) {
             {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
             "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
             super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
-        println!("    {:KEY$} {:VAL$}  Use unpaired reads.",
-            "    --use-unpaired".green(), super::flag());
 
         println!("\n{}", "Locus genotyping:".bold());
         println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
@@ -384,7 +382,6 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
                     parser.value()?.parse()?,
                     parser.value()?.parse()?,
                 ),
-            Long("use-unpaired") => args.assgn_params.use_unpaired = true,
 
             Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
             Long("filt-diff") | Long("filt-difference") | Long("filter-diff") =>
@@ -862,7 +859,7 @@ fn analyze_locus(
     if is_paired_end && args.debug {
         let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
         let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
-        all_alns.write_read_pair_info(pairs_writer, contigs, false).map_err(add_path!(read_pairs_filename))?;
+        all_alns.write_read_pair_info::<false>(pairs_writer, contigs).map_err(add_path!(read_pairs_filename))?;
     }
 
     let contig_ids: Vec<ContigId> = contigs.ids().collect();

@@ -43,8 +43,6 @@ pub struct Params {
     pub tweak: Option<u32>,
     /// Alternative hypotheses copy number values (main hypothesis is 1).
     pub alt_cn: (f64, f64),
-    /// Use paired-end reads that do not have a mapped mate within any contig.
-    pub use_unpaired: bool,
 
     /// Minimal number of genotypes after each step of solving.
     pub min_gts: usize,
@@ -77,7 +75,6 @@ impl Default for Params {
 
             tweak: None,
             alt_cn: (0.5, 1.5),
-            use_unpaired: false,
 
             min_gts: 100,
             filt_diff: Ln::from_log10(100.0),

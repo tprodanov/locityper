@@ -7,7 +7,10 @@ use std::{
 };
 use htslib::bam::Record;
 use crate::{
-    bg::{InsertDistr, err_prof::OperCounts},
+    bg::{
+        InsertDistr,
+        err_prof::{OperCounts, EditDist},
+    },
     seq::{
         Interval, ContigId, ContigNames,
         cigar::{Cigar, Operation},
@@ -104,6 +107,8 @@ pub struct Alignment {
     strand: Strand,
     read_end: ReadEnd,
     ln_prob: f64,
+    /// Edit distance in the region of interest, if was calculated.
+    dist: Option<EditDist>,
 }
 
 impl Alignment {
@@ -122,9 +127,9 @@ impl Alignment {
         let start = u32::try_from(record.pos()).unwrap();
         let interval = Interval::new(contigs, contig_id, start, start + cigar.ref_len());
         Self {
-            interval,
             strand: Strand::from_record(record),
-            cigar, ln_prob, read_end,
+            dist: None,
+            interval, cigar, ln_prob, read_end,
         }
     }
 
@@ -161,6 +166,14 @@ impl Alignment {
     /// Sets ln-probability of the alignment.
     pub fn set_ln_prob(&mut self, ln_prob: f64) {
         self.ln_prob = ln_prob;
+    }
+
+    pub fn distance(&self) -> Option<EditDist> {
+        self.dist
+    }
+
+    pub fn set_distance(&mut self, dist: EditDist) {
+        self.dist = Some(dist);
     }
 
     /// Returns sorted key: first sort by contig id, then by read end.
