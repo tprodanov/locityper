@@ -66,12 +66,18 @@ impl ContigNames {
     /// Create contig names from an iterator over pairs (name, length).
     /// Names must not repeat.
     /// First argument: overall name of the contig set.
-    pub fn new(tag: impl Into<String>, it: impl Iterator<Item = (String, u32)>) -> Result<Self, Error> {
+    pub fn new<T: TryInto<u32> + std::fmt::Display + Copy>(
+        tag: impl Into<String>,
+        mut it: impl Iterator<Item = Result<(String, T), Error>>
+    ) -> Result<Self, Error>
+    {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
         let mut name_to_id = HashMap::default();
 
-        for (name, length) in it {
+        while let Some((name, length)) = it.next().transpose()? {
+            let length: u32 = length.try_into()
+                .map_err(|_| Error::InvalidData(format!("Contig {} is too long ({} bp)", name, length)))?;
             let contig_id = ContigId::new(names.len());
             if let Some(prev_id) = name_to_id.insert(name.clone(), contig_id) {
                 panic!("Contig {} appears twice in the contig list ({} and {})!", name, prev_id, contig_id);
@@ -100,15 +106,17 @@ impl ContigNames {
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
     pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> Result<Self, Error> {
-        Self::new(tag, index.sequences().into_iter().map(|seq| (seq.name, u32::try_from(seq.len).unwrap())))
+        Self::new(tag, index.sequences().into_iter().map(|seq| Ok((seq.name, seq.len))))
     }
 
     /// Creates contig names from BAM header.
     pub fn from_bam_header(tag: impl Into<String>, header: &bam::HeaderView) -> Result<Self, Error> {
-        Self::new(tag, (0..header.target_count()).map(|i| (
-            String::from_utf8(header.tid2name(i).to_vec()).expect("BAM file contains non-UTF8 contig names"),
-            u32::try_from(header.target_len(i).unwrap()).expect("BAM file contains extremely long contig")
-        )))
+        Self::new(tag, (0..header.target_count()).map(|i| {
+            let byte_name = header.tid2name(i);
+            let name = String::from_utf8(byte_name.to_vec())
+                .map_err(|_| Error::Utf8("contig name", byte_name.to_vec()))?;
+            Ok((name, header.target_len(i).unwrap()))
+        }))
     }
 
     /// Loads indexed fasta and stored contig names and lengths.
@@ -255,7 +263,7 @@ impl ContigSet {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let mut named_seqs = fasta_reader.read_all()?;
         let contigs = ContigNames::new(tag,
-            named_seqs.iter_mut().map(|entry| (std::mem::replace(entry.name_mut(), String::new()), entry.len())))?;
+            named_seqs.iter_mut().map(|entry| Ok((std::mem::replace(entry.name_mut(), String::new()), entry.len()))))?;
         let seqs: Vec<_> = named_seqs.into_iter().map(NamedSeq::take_seq).collect();
         // k-mer counts file contains both off-target and regular k-mer counts.
         // For now, we only need off-target counts, so we only read k-mer counts once.

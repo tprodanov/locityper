@@ -314,7 +314,7 @@ impl<R: BufRead + Send> Reader<R> {
         let mut records = Vec::new();
         while self.read_next(&mut record)? {
             let name = String::from_utf8(record.name().to_vec())
-                .map_err(|_| Error::InvalidData(format!("Record `{}` has non UTF-8 name", record.name_str())))?;
+                .map_err(|_| Error::Utf8("read name", record.name().to_vec()))?;
             let mut seq = record.seq().to_owned();
             crate::seq::standardize(&mut seq)
                 .map_err(|nt| Error::InvalidData(format!("Invalid nucleotide `{}` ({}) for sequence {}",
@@ -523,8 +523,11 @@ pub fn count_reads_bam(path: &Path, samtools: &Path, reference: &Option<PathBuf>
     let child = command.spawn().map_err(add_path!(!))?;
     let pipe_guard = ext::sys::PipeGuard::new(samtools.to_path_buf(), child);
     let output = pipe_guard.wait()?;
-    let s = std::str::from_utf8(&output.stdout).map_err(|_| Error::RuntimeError(format!(
-        "Samtools output is not UTF-8: {:?}", String::from_utf8_lossy(&output.stdout))))?;
+    // Use match instead of `map_err` to suppress brrow checked error.
+    let s = match std::str::from_utf8(&output.stdout) {
+        Ok(val) => val,
+        Err(_) => return Err(Error::Utf8("samtools output", output.stdout)),
+    };
     s.trim().parse().map_err(|_| Error::RuntimeError(format!(
         "Cannot parse samtools output: {:?} is not a number", s.trim())))
 }
@@ -889,8 +892,7 @@ pub fn set_reference(
     let header = aln_reader.header();
     for (tid, contig) in header.target_names().into_iter().enumerate() {
         let contig = std::str::from_utf8(contig)
-            .map_err(|_| Error::InvalidData(format!("Alignments {} contain non-UTF8 contig {:?}",
-            ext::fmt::path(aln_filename), String::from_utf8_lossy(contig))))?;
+            .map_err(|_| Error::Utf8("contig name", contig.to_vec()))?;
         if let Some(contig_id) = contigs.try_get_id(&contig) {
             let in_ref_len = u64::from(contigs.get_len(contig_id));
             let in_bam_len = header.target_len(tid as u32).expect("Unknown contig length");

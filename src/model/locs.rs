@@ -168,8 +168,8 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     ) -> Result<Option<f64>, Error>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
-        let name = std::str::from_utf8(self.record.qname()).map_err(|_| Error::InvalidInput(
-            format!("Read name is not UTF-8: {:?}", String::from_utf8_lossy(self.record.qname()))))?;
+        let name = std::str::from_utf8(self.record.qname())
+            .map_err(|_| Error::Utf8("read name", self.record.qname().to_vec()))?;
         let name_hash = NameHash(get_hash(self.record.qname()));
 
         // Check if everything is correct.

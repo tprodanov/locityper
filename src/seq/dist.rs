@@ -7,10 +7,15 @@ use std::{
     ops::{Index, IndexMut},
 };
 use smallvec::SmallVec;
-use htslib::bam;
+use htslib::bam::{
+    self,
+    Read as BamRead,
+    record::Aux,
+};
 use crate::{
+    ext,
     seq::{
-        NamedSeq,
+        NamedSeq, ContigNames, ContigId,
         wfa::{Aligner, Penalties},
         cigar::{Cigar, CigarItem, Operation},
     },
@@ -32,6 +37,14 @@ impl TriangleMatrix<()> {
 }
 
 impl<T> TriangleMatrix<T> {
+    /// Returns 0-based index (i,j) in the regular matrix n×n based on linear index k.
+    pub fn from_linear_index(&self, k: usize) -> (usize, usize) {
+        assert!(k < self.data.len());
+        let under_root = (8 * self.data.len()).checked_sub(8 * k + 7).unwrap();
+        let i = self.side.checked_sub(2 + (0.5 * (under_root as f64).sqrt() - 0.5).floor() as usize).unwrap();
+        let j = (k + i * (i + 3) / 2 + 1).checked_sub(self.side * i).unwrap();
+        (i, j)
+    }
 
     #[inline]
     fn expected_len(side: usize) -> usize {
@@ -91,11 +104,11 @@ impl<T> TriangleMatrix<T> {
     }
 }
 
-impl<T: Default + Clone> TriangleMatrix<T> {
-    pub fn new(side: usize) -> Self {
+impl<T: Clone> TriangleMatrix<T> {
+    pub fn new(side: usize, val: T) -> Self {
         Self {
             side,
-            data: vec![T::default(); Self::expected_len(side)],
+            data: vec![val; Self::expected_len(side)],
         }
     }
 }
@@ -361,7 +374,7 @@ fn write_all(
 
     let n = entries.len();
     let mut pairwise_records = vec![None; n * n];
-    let mut divergences = TriangleMatrix::new(n);
+    let mut divergences = TriangleMatrix::new(n, 0.0);
     let header_view = Rc::new(bam::HeaderView::from_header(&header));
     for (i, refer) in entries.iter().enumerate() {
         let rlen = refer.len();
@@ -394,4 +407,48 @@ fn write_all(
         writer.write(&record.expect("Alignment record is not set"))?;
     }
     Ok(divergences)
+}
+
+/// Loads edit distances between all contigs based on a BAM file.
+/// All contigs must be present in the BAM file.
+pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> Result<TriangleMatrix<u32>, Error> {
+    let path = path.as_ref();
+    let mut reader = bam::Reader::from_path(&path)?;
+    let mut record = bam::Record::new();
+    let mut matrix = TriangleMatrix::new(contigs.len(), u32::MAX);
+    while reader.read(&mut record).transpose()?.is_some() {
+        let qname = std::str::from_utf8(record.qname())
+            .map_err(|_| Error::Utf8("contig name", record.qname().to_vec()))?;
+        let i = match contigs.try_get_id(&qname) {
+            Some(val) => val.ix(),
+            None => continue,
+        };
+        let rname = reader.header().tid2name(record.tid() as u32);
+        let rname = std::str::from_utf8(rname).map_err(|_| Error::Utf8("contig name", rname.to_vec()))?;
+        let j = match contigs.try_get_id(&rname) {
+            Some(val) => val.ix(),
+            None => continue,
+        };
+        if i >= j {
+            continue;
+        }
+        let edit_dist: u32 = match record.aux(b"NM").map_err(|_| Error::InvalidData(format!(
+                "BAM file {} does not contain NM field", ext::fmt::path(&path))))? {
+            Aux::I8(val) => val.try_into().unwrap(),
+            Aux::U8(val) => val.into(),
+            Aux::I16(val) => val.try_into().unwrap(),
+            Aux::U16(val) => val.into(),
+            Aux::I32(val) => val.try_into().unwrap(),
+            Aux::U32(val) => val,
+            _ => return Err(Error::InvalidData(format!("Invalid value for NM field in {}", ext::fmt::path(&path)))),
+        };
+        matrix[(i, j)] = edit_dist;
+    }
+    if let Some(k) = matrix.iter().position(|&val| val == u32::MAX) {
+        let (i, j) = matrix.from_linear_index(k);
+        Err(Error::InvalidData(format!("BAM file {} does not contain alignment between contigs {} and {}",
+            ext::fmt::path(&path), contigs.get_name(ContigId::new(i)), contigs.get_name(ContigId::new(j)))))
+    } else {
+        Ok(matrix)
+    }
 }

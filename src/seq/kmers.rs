@@ -500,7 +500,11 @@ impl JfKmerGetter {
         let output = pipe_guard.wait()?;
         let n_kmers = handle.join().expect("Process failed for unknown reason")?;
 
-        let mut jf_lines = std::str::from_utf8(&output.stdout)?.split('\n');
+        let mut jf_lines = match std::str::from_utf8(&output.stdout) {
+            Ok(val) => val.split('\n'),
+            Err(_) => return Err(Error::Utf8("Jellyfish output",
+                output.stdout[..output.stdout.len().min(500)].to_vec())),
+        };
         let mut counts = Vec::with_capacity(n_kmers.len());
         for n in n_kmers.into_iter() {
             let mut curr_counts = Vec::with_capacity(n as usize);
@@ -549,8 +553,7 @@ fn parse_jellyfish_header(filename: &std::path::Path) -> Result<json::JsonValue,
         depth += buffer[prev_len..].iter().filter(|&&ch| ch == b'{').count() - 1;
         prev_len = buffer.len();
     }
-    let json_str = std::str::from_utf8(&buffer).map_err(|_|
-        Error::InvalidData("Cannot parse jellyfish counts file: Header is not UTF-8".to_owned()))?;
+    let json_str = std::str::from_utf8(&buffer).map_err(|_| Error::Utf8("Jellyfish header", buffer.clone()))?;
     json::parse(json_str).map_err(|_|
         Error::InvalidData("Cannot parse jellyfish counts file: header contains invalid JSON".to_owned()))
 }

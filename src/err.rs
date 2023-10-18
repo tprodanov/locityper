@@ -25,6 +25,8 @@ pub enum Error {
     ParsingError(String),
     RuntimeError(String),
     JsonLoad(String),
+    /// Non-UTF8 encountered. First field: what is the object (for example, `read name`), second: failed byte string.
+    Utf8(&'static str, Vec<u8>)
 }
 
 #[cfg(feature = "gurobi")]
@@ -43,12 +45,6 @@ impl From<lexopt::Error> for Error {
 impl From<htslib::errors::Error> for Error {
     fn from(e: htslib::errors::Error) -> Self {
         Self::Htslib(e)
-    }
-}
-
-impl From<std::str::Utf8Error> for Error {
-    fn from(_: std::str::Utf8Error) -> Self {
-        Self::ParsingError("Failed to parse a string: not a valid UTF-8".to_owned())
     }
 }
 
@@ -92,6 +88,8 @@ impl Error {
             Self::ParsingError(e) => write!(s, "{}: {}", "Parsing error".red(), e).unwrap(),
             Self::RuntimeError(e) => write!(s, "{}: {}", "Runtime error".red(), e).unwrap(),
             Self::JsonLoad(e) => write!(s, "{}: {}", "Could not load JSON".red(), e).unwrap(),
+            Self::Utf8(desc, bytes) => write!(s, "{}: {} cannot be decoded ({}, {:?})",
+                "UTF-8 error".red(), desc, String::from_utf8_lossy(bytes), bytes).unwrap(),
         };
         s
     }

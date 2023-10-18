@@ -1,8 +1,5 @@
 //! Functions related to the pangenome VCF file.
 
-use std::{
-    str::from_utf8,
-};
 use htslib::bcf::{
     self, Read,
     header::HeaderView,
@@ -89,9 +86,7 @@ impl HaplotypeNames {
             .ok_or_else(|| Error::InvalidData("Input VCF file does not contain any records".to_owned()))??;
         let genotypes = record.genotypes()?;
         for (sample_id, sample) in reader.header().samples().into_iter().enumerate() {
-            let sample = std::str::from_utf8(sample).map_err(|_|
-                Error::InvalidData(format!("Input VCF file contains non-UTF8 sample names ({:?})",
-                String::from_utf8_lossy(sample))))?;
+            let sample = std::str::from_utf8(sample).map_err(|_| Error::Utf8("VCF sample name", sample.to_vec()))?;
 
             let ploidy = genotypes.get(sample_id).len();
             if leave_out.contains(sample) {
@@ -196,7 +191,7 @@ pub fn filter_variants(
 fn format_var(var: &Record, header: &HeaderView) -> String {
     let chrom = var.rid()
         .and_then(|rid| header.rid2name(rid).ok())
-        .and_then(|bytes| from_utf8(bytes).ok())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .unwrap_or("??");
     format!("{}:{}", chrom, var.pos() + 1)
 }
