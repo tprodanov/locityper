@@ -1,6 +1,6 @@
 use std::{
     thread,
-    cmp::Ordering,
+    cmp::{min, Ordering},
     path::Path,
     sync::Arc,
     rc::Rc,
@@ -15,7 +15,8 @@ use htslib::bam::{
 use crate::{
     ext,
     seq::{
-        NamedSeq, ContigNames, ContigId,
+        NamedSeq,
+        contigs::{ContigNames, ContigId, Genotype},
         wfa::{Aligner, Penalties},
         cigar::{Cigar, CigarItem, Operation},
     },
@@ -95,7 +96,7 @@ impl<T> TriangleMatrix<T> {
     }
 
     /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`, and `None` when `i == j`.
-    pub fn get_symmetric(&self, (i, j): (usize, usize)) -> Option<&T> {
+    pub fn get_symmetric(&self, i: usize, j: usize) -> Option<&T> {
         match i.cmp(&j) {
             Ordering::Less => Some(self.index((i, j))),
             Ordering::Equal => None,
@@ -451,4 +452,16 @@ pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> Res
     } else {
         Ok(matrix)
     }
+}
+
+/// Calculates distance between two genotypes as minimum sum distance between permutations of contigs within genotypes.
+pub fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMatrix<u32>) -> u32 {
+    let mut min_dist = u32::MAX;
+    ext::vec::gen_permutations(gt1.ids(), |perm_ids1| {
+        let dist: u32 = perm_ids1.iter().zip(gt2.ids())
+            .map(|(i, j)| distances.get_symmetric(i.ix(), j.ix()).copied().unwrap_or(0))
+            .sum();
+        min_dist = min(min_dist, dist);
+    });
+    min_dist
 }

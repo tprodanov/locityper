@@ -28,6 +28,7 @@ use crate::{
     err::{Error, validate_param, add_path},
     seq::{
         contigs::{ContigNames, Genotype},
+        dist::{self, TriangleMatrix},
         fastx::UPDATE_SECS,
     },
     model::{
@@ -203,6 +204,7 @@ pub struct Data {
     /// Solving scheme.
     pub scheme: Arc<Scheme>,
     pub contigs: Arc<ContigNames>,
+    pub contig_distances: Option<TriangleMatrix<u32>>,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
     pub all_contig_infos: Vec<Arc<ContigInfo>>,
@@ -355,6 +357,7 @@ impl Likelihoods {
         tag: String,
         genotypes: &[Genotype],
         params: &AssgnParams,
+        contig_distances: &Option<TriangleMatrix<u32>>,
     ) -> Genotyping {
         // ln(1e-5).
         const THRESH: f64 = -11.512925464970229;
@@ -369,13 +372,21 @@ impl Likelihoods {
 
         let mut ln_probs = vec![0.0; n];
         let mut out_genotypes = Vec::with_capacity(n);
+        let mut distances = Vec::with_capacity(n);
         let mut assgn_counts = Vec::with_capacity(n);
         let mut mean_sds = Vec::with_capacity(n);
         let mut i = 0;
         // Use while instead of for, as upper bound can change.
         while i < n {
             let (mean_i, var_i) = self.likelihoods[self.ixs[i]];
-            out_genotypes.push(genotypes[self.ixs[i]].clone());
+            let gt = genotypes[self.ixs[i]].clone();
+            match (out_genotypes.first(), &contig_distances) {
+                (Some(top_gt), Some(dist_matrix)) =>
+                    distances.push(Some(dist::genotype_distance(top_gt, &gt, dist_matrix))),
+                _ => distances.push(None),
+            }
+            out_genotypes.push(gt);
+
             assgn_counts.push(self.assgn_counts[self.ixs[i]].take().expect("Assignment counts undefined"));
             mean_sds.push((mean_i, var_i.sqrt()));
             for j in i + 1..n {
@@ -396,7 +407,7 @@ impl Likelihoods {
         let quality = Phred::from_ln_prob(Ln::sum(&ln_probs[1..]));
         Genotyping {
             genotypes: out_genotypes,
-            assgn_counts, tag, mean_sds, ln_probs, quality,
+            distances, assgn_counts, tag, mean_sds, ln_probs, quality,
         }
     }
 }
@@ -413,6 +424,8 @@ pub struct Genotyping {
     mean_sds: Vec<(f64, f64)>,
     /// Normalized ln-probabilities for each genotype.
     ln_probs: Vec<f64>,
+    /// Distances between the top genotype and i-th genotype.
+    distances: Vec<Option<u32>>,
     /// Quality of the top genotype.
     quality: f64,
 }
@@ -427,13 +440,17 @@ impl Genotyping {
 
     pub fn to_json(&self) -> json::JsonValue {
         let options: Vec<_> = self.genotypes.iter().enumerate().map(|(i, gt)| {
-            json::object! {
+            let mut obj = json::object! {
                 genotype: gt.name(),
                 lik_mean: Ln::to_log10(self.mean_sds[i].0),
                 lik_sd: Ln::to_log10(self.mean_sds[i].1),
                 prob: self.ln_probs[i].exp(),
                 log10_prob: Ln::to_log10(self.ln_probs[i]),
+            };
+            if let Some(d) = self.distances[i] {
+                obj.insert::<u32>("distance", d.into()).unwrap();
             }
+            obj
         }).collect();
         json::object! {
             locus: &self.tag as &str,
@@ -593,7 +610,8 @@ pub fn solve(
     }
 
     let data = &data;
-    let genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes, &data.assgn_params);
+    let genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes,
+        &data.assgn_params, &data.contig_distances);
     genotyping.print_log();
     let json_filename = locus_dir.join("res.json.gz");
     let mut json_writer = ext::sys::create_gzip(&json_filename)?;

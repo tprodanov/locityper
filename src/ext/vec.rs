@@ -306,3 +306,36 @@ where T: Copy,
         recursive_combinations_with_repl(v, &mut buffer, 0, 0, size, &mut action);
     }
 }
+
+/// Use Heap's algorithm to generate all permutations. For each permutation, `action` is called.
+pub fn gen_permutations<T, F>(v: &[T], mut action: F)
+where T: Copy,
+      F: FnMut(&[T]),
+{
+    let n = v.len();
+    if n == 0 {
+        // Do nothing.
+    } else if n == 1 {
+        action(v);
+    } else if n == 2 {
+        action(v);
+        action(unsafe { &[*v.get_unchecked(1), *v.get_unchecked(0)] });
+    } else {
+        let mut buffer = v.to_vec();
+        let mut c = vec![0; n];
+        let mut i = 1;
+        while i < n {
+            let ci = unsafe { c.get_unchecked_mut(i) };
+            if *ci < i {
+                // 0 if i is even, *ci if i is odd.
+                buffer.swap(i, *ci * (i % 2));
+                action(&buffer);
+                *ci += 1;
+                i = 1;
+            } else {
+                *ci = 0;
+                i += 1;
+            }
+        }
+    }
+}

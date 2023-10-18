@@ -17,7 +17,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        recruit, fastx, NamedSeq, Interval,
+        recruit, fastx, dist, NamedSeq, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
     },
@@ -868,9 +868,17 @@ fn analyze_locus(
         return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
     }
 
+    let haplotype_alns_filename = locus.db_locus_dir.join(super::paths::LOCUS_ALNS_BAM);
+    let contig_distances = if haplotype_alns_filename.exists() {
+        Some(dist::load_edit_distances(haplotype_alns_filename, &contigs)?)
+    } else {
+        None
+    };
+
     let data = scheme::Data {
         scheme: Arc::clone(scheme),
         contigs: Arc::clone(contigs),
+        contig_distances,
         distr_cache: Arc::clone(distr_cache),
         assgn_params: args.assgn_params.clone(),
         debug: args.debug,

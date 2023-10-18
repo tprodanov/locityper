@@ -598,7 +598,7 @@ fn process_haplotypes(
     let divergences: TriangleMatrix<f64>;
     if args.accuracy > 0 {
         #[cfg(feature = "aln")] {
-            let bam_path = locus_dir.join("all_haplotypes.bam");
+            let bam_path = locus_dir.join(super::paths::LOCUS_ALNS_BAM);
             divergences = dist::pairwise_divergences(&bam_path, &entries,
                 &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
             check_divergencies(locus.name(), &entries, &divergences, args.variants.is_some());
