@@ -407,8 +407,36 @@ impl Likelihoods {
         let quality = Phred::from_ln_prob(Ln::sum(&ln_probs[1..]));
         Genotyping {
             genotypes: out_genotypes,
+            warnings: Vec::new(),
             distances, assgn_counts, tag, mean_sds, ln_probs, quality,
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum GenotypingWarning {
+    /// Two predicted genotypes are very far apart.
+    FarApart,
+}
+
+impl GenotypingWarning {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Self::FarApart => "gts_far_apart",
+        }
+    }
+
+    pub fn from_string(s: &str) -> Result<Self, Error> {
+        match s {
+            "gts_far_apart" => Ok(Self::FarApart),
+            _ => Err(Error::ParsingError(format!("Unknown warning {:?}", s))),
+        }
+    }
+}
+
+impl Into<json::JsonValue> for GenotypingWarning {
+    fn into(self) -> json::JsonValue {
+        json::JsonValue::String(self.to_str().to_string())
     }
 }
 
@@ -428,6 +456,8 @@ pub struct Genotyping {
     distances: Vec<Option<u32>>,
     /// Quality of the top genotype.
     quality: f64,
+    /// Warnings, issued for this sample and this locus.
+    warnings: Vec<GenotypingWarning>,
 }
 
 impl Genotyping {
@@ -436,6 +466,23 @@ impl Genotyping {
         log::info!("    Best genotype for {}: {},  likelihood = {:.2} ± {:.2}, quality = {:.1}, confidence = {:.4}%",
             self.tag, self.genotypes[0], Ln::to_log10(mean), Ln::to_log10(sd),
             self.quality, 100.0 * self.ln_probs[0].exp());
+    }
+
+    pub fn issue_warnings(&mut self) {
+        self.warnings.clear();
+        // ln(0.1)
+        const LN_01: f64 = -2.3025850929940455;
+        const DIST_THRESH: u32 = 100;
+        for (i, (&ln_prob, &dist)) in self.ln_probs.iter().zip(&self.distances).enumerate() {
+            if let Some(d) = dist {
+                if ln_prob >= LN_01 && d > DIST_THRESH {
+                    self.warnings.push(GenotypingWarning::FarApart);
+                    log::warn!("Genotypes {} and {} are both probable ({:.5} and {:.5}), \
+                        but have high edit distance between each other ({})",
+                        self.genotypes[0], self.genotypes[i], self.ln_probs[0].exp(), self.ln_probs[i].exp(), d);
+                }
+            }
+        }
     }
 
     pub fn to_json(&self) -> json::JsonValue {
@@ -452,12 +499,16 @@ impl Genotyping {
             }
             obj
         }).collect();
-        json::object! {
+        let mut res = json::object! {
             locus: &self.tag as &str,
             genotype: self.genotypes[0].name(),
             quality: self.quality,
             options: options,
+        };
+        if !self.warnings.is_empty() {
+            res.insert::<&[GenotypingWarning]>("warnings", &self.warnings).unwrap();
         }
+        res
     }
 }
 
@@ -610,9 +661,10 @@ pub fn solve(
     }
 
     let data = &data;
-    let genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes,
+    let mut genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes,
         &data.assgn_params, &data.contig_distances);
     genotyping.print_log();
+    genotyping.issue_warnings();
     let json_filename = locus_dir.join("res.json.gz");
     let mut json_writer = ext::sys::create_gzip(&json_filename)?;
     genotyping.to_json().write_pretty(&mut json_writer, 4).map_err(add_path!(json_filename))?;
