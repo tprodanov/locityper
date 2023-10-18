@@ -29,8 +29,7 @@ use crate::{
         wfa::Penalties,
     },
 };
-#[cfg(feature = "aln")]
-use crate::seq::dist;
+use crate::seq::dist::{self, TriangleMatrix};
 use super::paths;
 
 struct Args {
@@ -505,22 +504,18 @@ fn expand_locus(
 
 /// Check divergencies and warns if they are too high.
 #[cfg(feature = "aln")]
-fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Iterator<Item = f64>, from_vcf: bool) {
-    let n = entries.len();
+fn check_divergencies(tag: &str, entries: &[NamedSeq], divergences: &TriangleMatrix<f64>, from_vcf: bool) {
     let mut count = 0;
     let mut highest = 0.0;
     let mut highest_i = 0;
     let mut highest_j = 0;
-    for i in 0..n {
-        for j in i + 1..n {
-            let diverg = divergences.next().unwrap();
-            if diverg >= 0.2 {
-                count += 1;
-                if diverg > highest {
-                    highest = diverg;
-                    highest_i = i;
-                    highest_j = j;
-                }
+    for ((i, j), &diverg) in TriangleMatrix::indices(divergences.side()).zip(divergences.iter()) {
+        if diverg >= 0.2 {
+            count += 1;
+            if diverg > highest {
+                highest = diverg;
+                highest_i = i;
+                highest_j = j;
             }
         }
     }
@@ -541,14 +536,14 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], mut divergences: impl Ite
 fn cluster_haplotypes(
     mut nwk_writer: impl Write,
     entries: &[NamedSeq],
-    mut divergences: Vec<f64>,
+    divergences: TriangleMatrix<f64>,
     thresh: f64,
 ) -> io::Result<Vec<bool>> {
     let n = entries.len();
     let total_clusters = 2 * n - 1;
     // Use Complete method, meaning that we track maximal distance between two points between two clusters.
     // This is done to cut as little as needed.
-    let dendrogram = kodama::linkage(&mut divergences, n, kodama::Method::Complete);
+    let dendrogram = kodama::linkage(&mut divergences.take_linear(), n, kodama::Method::Complete);
     let mut clusters_nwk = Vec::with_capacity(total_clusters);
     // Cluster representatives.
     let mut cluster_repr = Vec::with_capacity(total_clusters);
@@ -600,23 +595,21 @@ fn process_haplotypes(
     let n_entries = entries.len();
     log::info!("    Writing {} haplotypes to {}/", n_entries, ext::fmt::path(locus_dir));
     log::info!("    Calculating haplotype divergence");
-    let divergences: Vec<f64>;
+    let divergences: TriangleMatrix<f64>;
     if args.accuracy > 0 {
         #[cfg(feature = "aln")] {
             let bam_path = locus_dir.join("all_haplotypes.bam");
             divergences = dist::pairwise_divergences(&bam_path, &entries,
                 &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
-            check_divergencies(locus.name(), &entries, divergences.iter().copied(), args.variants.is_some());
+            check_divergencies(locus.name(), &entries, &divergences, args.variants.is_some());
         } #[cfg(not(feature = "aln"))] {
             panic!("Accuracy > 0, but `aln` feature is disabled");
         }
     } else {
         // Need this so that `entries` are not consumed by `move` closure.
         let entries_ref = &entries;
-        divergences = (0..n_entries)
-            .flat_map(|i| (i + 1..n_entries)
-                .map(move |j| if entries_ref[i].seq() == entries_ref[j].seq() { 0.0 } else { 1.0 }))
-            .collect();
+        divergences = TriangleMatrix::create(n_entries,
+            move |(i, j)| if entries_ref[i].seq() == entries_ref[j].seq() { 0.0 } else { 1.0 });
     }
 
     log::info!("    Clustering haploypes");

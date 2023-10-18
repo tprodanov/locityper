@@ -1,8 +1,10 @@
 use std::{
     thread,
+    cmp::Ordering,
     path::Path,
     sync::Arc,
     rc::Rc,
+    ops::{Index, IndexMut},
 };
 use smallvec::SmallVec;
 use htslib::bam;
@@ -15,6 +17,104 @@ use crate::{
     Error,
     algo::HashMap,
 };
+
+/// Upper triangle matrix, excluding diagonal (i < j).
+pub struct TriangleMatrix<T> {
+    side: usize,
+    data: Vec<T>,
+}
+
+impl TriangleMatrix<()> {
+    /// Returns iterator over all pairs `(i, j)` such that `0 <= i < j < side`.
+    pub fn indices(side: usize) -> impl Iterator<Item = (usize, usize)> {
+        (0..side - 1).flat_map(move |i| (i + 1..side).map(move |j| (i, j)))
+    }
+}
+
+impl<T> TriangleMatrix<T> {
+
+    #[inline]
+    fn expected_len(side: usize) -> usize {
+        side.saturating_sub(1) * side / 2
+    }
+
+    #[inline]
+    fn to_linear_index(&self, i: usize, j: usize) -> usize {
+        assert!(i < j && j < self.side, "Incorrect indices ({}, {}) to triangle matrix", i, j);
+        (2 * self.side - 3 - i) * i / 2 + j - 1
+    }
+
+    /// Creates triangle matrix from linear storage (must have correct order: sorted first by row, then by column).
+    pub fn from_linear(side: usize, data: Vec<T>) -> Self {
+        assert_eq!(data.len(), Self::expected_len(side), "Incorrect triangle matrix size");
+        Self { side, data }
+    }
+
+    /// Creates triangle matrix by running `f(i, j)` for corresponding indices.
+    pub fn create(side: usize, f: impl FnMut((usize, usize)) -> T) -> Self {
+        Self {
+            side,
+            data: TriangleMatrix::indices(side).map(f).collect(),
+        }
+    }
+
+    /// Total number of elements in the triangle matrix.
+    pub fn linear_len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn linear_data(&self) -> &[T] {
+        &self.data
+    }
+
+    pub fn take_linear(self) -> Vec<T> {
+        self.data
+    }
+
+    /// Size of the matrix side.
+    pub fn side(&self) -> usize {
+        self.side
+    }
+
+    /// Linear iterator over elements (first by row, second by column).
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.data.iter()
+    }
+
+    /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`, and `None` when `i == j`.
+    pub fn get_symmetric(&self, (i, j): (usize, usize)) -> Option<&T> {
+        match i.cmp(&j) {
+            Ordering::Less => Some(self.index((i, j))),
+            Ordering::Equal => None,
+            Ordering::Greater => Some(self.index((j, i))),
+        }
+    }
+}
+
+impl<T: Default + Clone> TriangleMatrix<T> {
+    pub fn new(side: usize) -> Self {
+        Self {
+            side,
+            data: vec![T::default(); Self::expected_len(side)],
+        }
+    }
+}
+
+impl<T> Index<(usize, usize)> for TriangleMatrix<T> {
+    type Output = T;
+
+    #[inline]
+    fn index(&self, (i, j): (usize, usize)) -> &T {
+        self.data.index(self.to_linear_index(i, j))
+    }
+}
+
+impl<T> IndexMut<(usize, usize)> for TriangleMatrix<T> {
+    #[inline]
+    fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut T {
+        self.data.index_mut(self.to_linear_index(i, j))
+    }
+}
 
 const CAPACITY: usize = 4;
 type KmerCache<'a> = HashMap<&'a [u8], SmallVec<[u32; CAPACITY]>>;
@@ -125,7 +225,7 @@ pub fn pairwise_divergences(
     k: usize,
     accuracy: u8,
     threads: u16,
-) -> Result<Vec<f64>, Error> {
+) -> Result<TriangleMatrix<f64>, Error> {
     let caches: Vec<_> = entries.iter().map(|entry| cache_kmers(entry.seq(), k)).collect();
     let alns = if threads == 1 {
         log::debug!("        Aligning sequences in 1 thread");
@@ -138,7 +238,7 @@ pub fn pairwise_divergences(
                 alns.push(align(&aligner, entry1.seq(), entry2.seq(), &kmer_matches, k)?);
             }
         }
-        alns
+        TriangleMatrix::from_linear(n, alns)
     } else {
         divergences_multithread(entries, &caches, penalties, k, accuracy, threads)?
     };
@@ -152,12 +252,11 @@ fn divergences_multithread(
     k: usize,
     accuracy: u8,
     threads: u16,
-) -> Result<Vec<(Cigar, i32)>, Error> {
+) -> Result<TriangleMatrix<(Cigar, i32)>, Error> {
     let threads = usize::from(threads);
     log::debug!("        Aligning sequences in {} threads", threads);
-    let n = entries.len() as u32;
-    let pairs: Arc<Vec<(u32, u32)>> = Arc::new(
-        (0..n - 1).flat_map(|i| (i + 1..n).map(move |j| (i, j))).collect());
+    let n = entries.len();
+    let pairs: Arc<Vec<(u32, u32)>> = Arc::new(TriangleMatrix::indices(n).map(|(i, j)| (i as u32, j as u32)).collect());
     let n_pairs = pairs.len();
     let mut handles = Vec::with_capacity(threads);
 
@@ -166,11 +265,11 @@ fn divergences_multithread(
     let all_kmer_matches = Arc::new(pairs.iter()
         .map(|&(i, j)| find_kmer_matches(&caches[i as usize], &caches[j as usize])).collect::<Vec<_>>());
     let mut start = 0;
-    for i in 0..threads {
+    for worker_ix in 0..threads {
         if start == n_pairs {
             break;
         }
-        let rem_workers = threads - i;
+        let rem_workers = threads - worker_ix;
         // Ceiling division.
         let end = start + ((n_pairs - start) + rem_workers - 1) / rem_workers;
         // Closure with cloned data.
@@ -197,7 +296,7 @@ fn divergences_multithread(
     for res in results.into_iter() {
         alns.extend(res?.into_iter());
     }
-    Ok(alns)
+    Ok(TriangleMatrix::from_linear(n, alns))
 }
 
 fn create_bam_header(entries: &[NamedSeq], k: usize, accuracy: u8) -> bam::header::Header {
@@ -251,10 +350,10 @@ fn create_record(
 fn write_all(
     bam_path: &Path,
     entries: &[NamedSeq],
-    alns: Vec<(Cigar, i32)>,
+    alns: TriangleMatrix<(Cigar, i32)>,
     k: usize,
     accuracy: u8,
-) -> Result<Vec<f64>, Error> {
+) -> Result<TriangleMatrix<f64>, Error> {
     let header = create_bam_header(entries, k, accuracy);
     let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
     writer.set_compression_level(bam::CompressionLevel::Maximum)?;
@@ -262,16 +361,15 @@ fn write_all(
 
     let n = entries.len();
     let mut pairwise_records = vec![None; n * n];
-    let mut divergences = Vec::new();
+    let mut divergences = TriangleMatrix::new(n);
     let header_view = Rc::new(bam::HeaderView::from_header(&header));
-    let mut alns_iter = alns.into_iter();
     for (i, refer) in entries.iter().enumerate() {
         let rlen = refer.len();
         fill_cigar_buffer(&mut cigar_buffer, std::iter::once(CigarItem::new(Operation::Equal, rlen)));
         pairwise_records[i * n + i] = Some(create_record(&header_view, refer, i, &cigar_buffer, 0, 0, 0.0));
 
         for (j, query) in (i + 1..).zip(&entries[i + 1..]) {
-            let (cigar, score) = alns_iter.next().expect("Too few pairwse alignments");
+            let (cigar, score) = &alns[(i, j)];
             if query.len() != cigar.query_len() || rlen != cigar.ref_len() {
                 return Err(Error::RuntimeError(format!(
                     "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
@@ -281,17 +379,16 @@ fn write_all(
             let (nmatches, total_size) = cigar.frac_matches();
             let edit_dist = total_size - nmatches;
             let divergence = f64::from(edit_dist) / f64::from(total_size);
-            divergences.push(divergence);
+            divergences[(i, j)] = divergence;
             fill_cigar_buffer(&mut cigar_buffer, cigar.iter().copied());
             pairwise_records[i * n + j] = Some(
-                create_record(&header_view, query, i, &cigar_buffer, edit_dist, score, divergence));
+                create_record(&header_view, query, i, &cigar_buffer, edit_dist, *score, divergence));
 
             fill_cigar_buffer(&mut cigar_buffer, cigar.iter().map(CigarItem::invert));
             pairwise_records[j * n + i] = Some(
-                create_record(&header_view, refer, j, &cigar_buffer, edit_dist, score, divergence));
+                create_record(&header_view, refer, j, &cigar_buffer, edit_dist, *score, divergence));
         }
     }
-    assert!(alns_iter.next().is_none(), "Too many pairwise alignments");
 
     for record in pairwise_records.into_iter() {
         writer.write(&record.expect("Alignment record is not set"))?;
