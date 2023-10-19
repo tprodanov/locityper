@@ -60,7 +60,8 @@ struct Args {
     debug: bool,
 
     recr_params: recruit::Params,
-    matches_frac: Option<f64>,
+    minim_rel_thresh: Option<f64>,
+    minim_abs_thresh: u32,
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
 }
@@ -90,7 +91,8 @@ impl Default for Args {
             debug: false,
 
             recr_params: Default::default(),
-            matches_frac: None,
+            minim_rel_thresh: None,
+            minim_abs_thresh: 50,
             assgn_params: Default::default(),
             scheme_params: Default::default(),
         }
@@ -125,7 +127,7 @@ impl Args {
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
-        self.recr_params.validate()?;
+        // self.recr_params.validate()?; Validate recruitment parameters later.
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -196,11 +198,13 @@ fn print_help(extended: bool) {
             "-M, --minimizer".green(), "INT INT".yellow(),
             "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
             super::fmt_def(defaults.recr_params.minimizer_k), super::fmt_def(defaults.recr_params.minimizer_w));
-        println!("    {:KEY$} {:VAL$}  Recruit single-end reads or read pairs with at least this fraction\n\
-            {EMPTY}  of minimizers matching one of the targets.\n\
-            {EMPTY}  Default: {}.",
-            "-m, --matches-frac".green(), "FLOAT".yellow(),
-            Technology::describe_values(|tech| super::fmt_def_f64(tech.default_matches_frac())));
+        println!("    {:KEY$} {}\n\
+            {EMPTY}  Absolute [{}] and relative thresholds on the number\n\
+            {EMPTY}  of matching minimizers. Default relative thresholds:\n\
+            {EMPTY}  [{}].",
+            "-m, --minim-thresh".green(), "INT FLOAT".yellow(),
+            super::fmt_def(defaults.minim_abs_thresh),
+            Technology::describe_values(|tech| super::fmt_def_f64(tech.default_minim_rel_thresh())));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
             "-c, --chunk-size".green(), "INT".yellow(),
@@ -346,8 +350,10 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
                 args.recr_params.minimizer_w = parser.value()?.parse()?;
             }
             Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
-            Short('m') | Long("matches-frac") | Long("matches-fraction") =>
-                args.matches_frac = Some(parser.value()?.parse()?),
+            Short('m') | Long("minim-thresh") => {
+                args.minim_abs_thresh = parser.value()?.parse()?;
+                args.minim_rel_thresh = Some(parser.value()?.parse()?);
+            }
             Short('c') | Long("chunk") | Long("chunk-size") =>
                 args.recr_params.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
 
@@ -902,8 +908,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
-    args.recr_params.set_matches_frac(
-        args.matches_frac.unwrap_or_else(|| bg_distr.seq_info().technology().default_matches_frac()) as f32)?;
+    args.recr_params.set_thresholds(args.minim_abs_thresh,
+        args.minim_rel_thresh.unwrap_or_else(|| bg_distr.seq_info().technology().default_minim_rel_thresh()));
+    args.recr_params.validate(bg_distr.insert_distr().is_paired_end())?;
 
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;

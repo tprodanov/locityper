@@ -2,7 +2,6 @@
 
 use std::{
     io, thread,
-    cmp::max,
     collections::hash_map::Entry,
     time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
@@ -28,8 +27,10 @@ pub struct Params {
     /// Default: 15 and 10.
     pub minimizer_k: u8,
     pub minimizer_w: u8,
-    /// Recruit reads that have at least this number of matching minimizers with one of the targets. Default: 2.
-    pub matches_frac: f32,
+    /// For a read with `a/b` minimizers matching target, recruit the read when
+    /// `a >= min(abs_thresh, rel_thresh * b)`.
+    abs_thresh: f64,
+    rel_thresh: f64,
     /// Pass reads between threads in chunks of this size. Default: 10000.
     pub chunk_size: usize,
 }
@@ -39,29 +40,42 @@ impl Default for Params {
         Self {
             minimizer_k: 11,
             minimizer_w: 5,
-            matches_frac: 0.5,
             chunk_size: 10000,
+            // Set impossible values, so that they have to be set implicitely later.
+            abs_thresh: f64::NAN,
+            rel_thresh: f64::NAN,
         }
     }
 }
 
 impl Params {
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self, is_paired_end: bool) -> Result<(), Error> {
         validate_param!(0 < self.minimizer_k && self.minimizer_k <= Minimizer::MAX_KMER_SIZE,
             "Minimizer kmer-size must be within [1, {}]", Minimizer::MAX_KMER_SIZE);
         validate_param!(1 < self.minimizer_w && self.minimizer_w <= kmers::MAX_MINIMIZER_W,
             "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
-        validate_param!(self.matches_frac > 0.0 && self.matches_frac <= 1.0,
-            "Matches ratio ({:.5}) cannot be zero, and cannot be over 1", self.matches_frac);
         validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
+
+        validate_param!(self.rel_thresh.is_normal() && self.rel_thresh > 0.0 && self.rel_thresh <= 1.0,
+            "Fractional minimizer threshold ({}) must be in (0, 1]", self.rel_thresh);
+        validate_param!(self.abs_thresh.is_normal() && self.abs_thresh >= 1.0,
+            "Integer minimizer threshold must be positive");
+        let max_val = if is_paired_end { f64::from(u16::MAX) } else { f64::from(u32::MAX) };
+        validate_param!(self.abs_thresh <= max_val,
+            "Integer minimizer threshold ({:.0}) is too large (max {} single-end reads, {} paired-end reads)",
+            self.abs_thresh, u32::MAX, u16::MAX);
         Ok(())
     }
 
-    pub fn set_matches_frac(&mut self, matches_frac: f32) -> Result<(), Error> {
-        validate_param!(matches_frac > 0.0 && matches_frac <= 1.0,
-            "Matches ratio ({:.5}) cannot be zero, and cannot be over 1", matches_frac);
-        self.matches_frac = matches_frac;
-        Ok(())
+    pub fn set_thresholds(&mut self, abs_thresh: u32, rel_thresh: f64) {
+        self.abs_thresh = f64::from(abs_thresh);
+        self.rel_thresh = rel_thresh;
+    }
+
+    /// Returns the threshold number of matching minimizers given the total number of minimizers.
+    #[inline]
+    fn matches_threshold(&self, total_minimizers: usize) -> u32 {
+        (total_minimizers as f64 * self.rel_thresh).ceil().clamp(1.0, self.abs_thresh) as u32
     }
 }
 
@@ -214,8 +228,6 @@ pub struct Targets {
 
 impl Targets {
     /// Record one single-end read to one or more loci.
-    /// The read is recruited to all loci,
-    /// for which the ratio of loci_matches will be at least `matches_frac`.
     fn recruit_single_end_record(
         &self,
         seq: &[u8],
@@ -235,8 +247,7 @@ impl Targets {
         }
 
         answer.clear();
-        const FLOAT_U32_MAX: f32 = u32::MAX as f32;
-        let thresh = max(1, (rec_minims.len() as f32 * self.params.matches_frac).ceil().min(FLOAT_U32_MAX) as u32);
+        let thresh = self.params.matches_threshold(rec_minims.len());
         for (&locus_ix, &count) in matches.iter() {
             if count >= thresh {
                 answer.push(locus_ix);
@@ -245,8 +256,7 @@ impl Targets {
     }
 
     /// Record one paired-end read to one or more loci.
-    /// The read is recruited to all loci,
-    /// for which the ratio of loci_matches will be at least `matches_frac` for both mates.
+    /// The read is recruited when both read mates satisfy the recruitment thresholods.
     fn recruit_paired_end_record(
         &self,
         seq1: &[u8],
@@ -287,9 +297,8 @@ impl Targets {
         }
 
         answer.clear();
-        const FLOAT_U16_MAX: f32 = u16::MAX as f32;
-        let thresh1 = max(1, (total1 as f32 * self.params.matches_frac).ceil().min(FLOAT_U16_MAX) as u16);
-        let thresh2 = max(1, (total2 as f32 * self.params.matches_frac).ceil().min(FLOAT_U16_MAX) as u16);
+        let thresh1: u16 = self.params.matches_threshold(total1).try_into().unwrap();
+        let thresh2: u16 = self.params.matches_threshold(total2).try_into().unwrap();
         for (&locus_ix, &count) in matches.iter() {
             let [count1, count2] = unsafe { std::mem::transmute::<u32, [u16; 2]>(count) };
             if count1 >= thresh1 && count2 >= thresh2 {

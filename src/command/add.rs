@@ -77,7 +77,7 @@ impl Default for Args {
             unknown_frac: 0.0001,
 
             #[cfg(feature = "aln")]
-            accuracy: 2,
+            accuracy: 5,
             #[cfg(not(feature = "aln"))]
             accuracy: 0,
 
