@@ -201,18 +201,18 @@ fn print_help(extended: bool) {
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
             {EMPTY}  across {} consecutive k-mers [{} {}].",
-            "-M, --minimizer".green(), "INT INT".yellow(),
+            "-m, --minimizer".green(), "INT INT".yellow(),
             "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
             super::fmt_def(defaults.recr_params.minimizer_k), super::fmt_def(defaults.recr_params.minimizer_w));
         println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
             {EMPTY}  Default: {}.",
-            "-m, --minim-matches".green(), "FLOAT".yellow(),
+            "-M, --m-matches".green(), "FLOAT".yellow(),
             Technology::describe_values(|tech| super::fmt_def_f64(tech.default_minim_matches().into())));
-        println!("    {} {}  Split long reads into groups of approx {} minimizers [{}] and recruit\n\
-            {EMPTY}  the read if {} groups [{}] match the reference (see {}).",
-            "-g, --minim-groups".green(), "INT INT".yellow(),
+        println!("    {}   {}  Split long reads into groups of ~ {} minimizers [{}] and recruit\n\
+            {EMPTY}  the read if {} groups [{}] match the reference.",
+            "-g, --m-groups".green(), "INT INT".yellow(),
             "INT_1".yellow(), super::fmt_def(defaults.minim_group_size),
-            "INT_2".yellow(), super::fmt_def(defaults.minim_matching_groups), "-m".green());
+            "INT_2".yellow(), super::fmt_def(defaults.minim_matching_groups));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
             "-c, --chunk-size".green(), "INT".yellow(),
@@ -353,12 +353,13 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
 
-            Short('M') | Long("minimizer") | Long("minimizers") => {
+            Short('m') | Long("minimizer") | Long("minimizers") => {
                 args.recr_params.minimizer_k = parser.value()?.parse()?;
                 args.recr_params.minimizer_w = parser.value()?.parse()?;
             }
-            Short('m') | Long("minim-matches") => args.minim_matches = Some(parser.value()?.parse()?),
-            Short('g') | Long("minim-groups") => {
+            Short('M') | Long("m-matches") | Long("minim-matches") =>
+                args.minim_matches = Some(parser.value()?.parse()?),
+            Short('g') | Long("m-groups") | Long("minim-groups") => {
                 args.minim_group_size = parser.value()?.parse()?;
                 args.minim_matching_groups = parser.value()?.parse()?;
             }

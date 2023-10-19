@@ -114,7 +114,7 @@ impl Stats {
     fn print_log_always(&mut self, elapsed: Duration) {
         let processed = self.processed as f64;
         let speed = 1e-3 * processed / elapsed.as_secs_f64();
-        log::debug!("    Recruited {:11} /{:8.2}M reads, {:4.0}k reads/s", self.recruited, 1e-6 * processed, speed);
+        log::debug!("    Recruited {:11} /{:8}k reads, {:5.1}k reads/s", self.recruited, 1e-3 * processed, speed);
         self.last_msg = elapsed;
     }
 
