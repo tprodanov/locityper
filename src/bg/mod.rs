@@ -219,11 +219,11 @@ impl Technology {
     }
 
     /// Returns minimizer matching fraction for different technologies.
-    pub fn default_minim_rel_thresh(self) -> f64 {
+    pub fn default_minim_matches(self) -> f32 {
         match self {
             Self::Illumina => 0.7,
-            Self::HiFi => 0.5,
-            Self::PacBio | Self::Nanopore => 0.2,
+            Self::HiFi => 0.7,
+            Self::PacBio | Self::Nanopore => 0.5,
         }
     }
 

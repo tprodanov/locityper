@@ -60,8 +60,11 @@ struct Args {
     debug: bool,
 
     recr_params: recruit::Params,
-    minim_rel_thresh: Option<f64>,
-    minim_abs_thresh: u32,
+    minim_matches: Option<f32>,
+    /// Take consecutive `minim_group_size` minimizers and recruit long read
+    /// if it at least `minim_matching_groups` matched.
+    minim_group_size: u16,
+    minim_matching_groups: u16,
     recr_threshs: Option<recruit::RecrThresholds>,
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
@@ -92,8 +95,9 @@ impl Default for Args {
             debug: false,
 
             recr_params: Default::default(),
-            minim_rel_thresh: None,
-            minim_abs_thresh: 50,
+            minim_matches: None,
+            minim_group_size: 20,
+            minim_matching_groups: 2,
             recr_threshs: None,
             assgn_params: Default::default(),
             scheme_params: Default::default(),
@@ -200,13 +204,15 @@ fn print_help(extended: bool) {
             "-M, --minimizer".green(), "INT INT".yellow(),
             "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
             super::fmt_def(defaults.recr_params.minimizer_k), super::fmt_def(defaults.recr_params.minimizer_w));
-        println!("    {:KEY$} {}\n\
-            {EMPTY}  Absolute [{}] and relative thresholds on the number\n\
-            {EMPTY}  of matching minimizers. Default relative thresholds:\n\
-            {EMPTY}  [{}].",
-            "-m, --minim-thresh".green(), "INT FLOAT".yellow(),
-            super::fmt_def(defaults.minim_abs_thresh),
-            Technology::describe_values(|tech| super::fmt_def_f64(tech.default_minim_rel_thresh())));
+        println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
+            {EMPTY}  Default: {}.",
+            "-m, --minim-matches".green(), "FLOAT".yellow(),
+            Technology::describe_values(|tech| super::fmt_def_f64(tech.default_minim_matches().into())));
+        println!("    {} {}  Split long reads into groups of approx {} minimizers [{}] and recruit\n\
+            {EMPTY}  the read if {} groups [{}] match the reference (see {}).",
+            "-g, --minim-groups".green(), "INT INT".yellow(),
+            "INT_1".yellow(), super::fmt_def(defaults.minim_group_size),
+            "INT_2".yellow(), super::fmt_def(defaults.minim_matching_groups), "-m".green());
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
             "-c, --chunk-size".green(), "INT".yellow(),
@@ -351,10 +357,10 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
                 args.recr_params.minimizer_k = parser.value()?.parse()?;
                 args.recr_params.minimizer_w = parser.value()?.parse()?;
             }
-            Short('w') | Long("recr-window") => args.recr_params.minimizer_w = parser.value()?.parse()?,
-            Short('m') | Long("minim-thresh") => {
-                args.minim_abs_thresh = parser.value()?.parse()?;
-                args.minim_rel_thresh = Some(parser.value()?.parse()?);
+            Short('m') | Long("minim-matches") => args.minim_matches = Some(parser.value()?.parse()?),
+            Short('g') | Long("minim-groups") => {
+                args.minim_group_size = parser.value()?.parse()?;
+                args.minim_matching_groups = parser.value()?.parse()?;
             }
             Short('c') | Long("chunk") | Long("chunk-size") =>
                 args.recr_params.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
@@ -910,9 +916,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
-    args.recr_threshs = Some(recruit::RecrThresholds::new(args.minim_abs_thresh,
-        args.minim_rel_thresh.unwrap_or_else(|| bg_distr.seq_info().technology().default_minim_rel_thresh()),
-        bg_distr.insert_distr().is_paired_end())?);
+    args.recr_threshs = Some(recruit::RecrThresholds::new(
+        args.minim_matches.unwrap_or_else(|| bg_distr.seq_info().technology().default_minim_matches()),
+        args.minim_group_size, args.minim_matching_groups)?);
 
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;

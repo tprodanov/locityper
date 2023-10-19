@@ -22,6 +22,7 @@ use crate::{
     },
     Error,
     algo::HashMap,
+    math::RoundDiv,
 };
 
 /// Upper triangle matrix, excluding diagonal (i < j).
@@ -284,8 +285,7 @@ fn divergences_multithread(
             break;
         }
         let rem_workers = threads - worker_ix;
-        // Ceiling division.
-        let end = start + ((n_pairs - start) + rem_workers - 1) / rem_workers;
+        let end = start + (n_pairs - start).fast_ceil_div(rem_workers);
         // Closure with cloned data.
         {
             let pairs = Arc::clone(&pairs);

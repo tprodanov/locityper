@@ -24,7 +24,7 @@ use crate::{
         vec::F64Ext,
         rand::XoshiroRng,
     },
-    math::{self, Ln, Phred},
+    math::{self, Ln, Phred, RoundDiv},
     err::{Error, validate_param, add_path},
     seq::{
         contigs::{ContigNames, Genotype},
@@ -765,8 +765,7 @@ impl MainWorker {
                     break;
                 }
                 let rem_workers = n_workers - i;
-                // Ceiling division.
-                let curr_jobs = ((m - start) + rem_workers - 1) / rem_workers;
+                let curr_jobs = (m - start).fast_ceil_div(rem_workers);
                 let task = likelihoods.ixs[start..start + curr_jobs].to_vec();
                 sender.send((stage_ix, task)).expect("Genotyping worker has failed!");
                 start += curr_jobs;

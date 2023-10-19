@@ -172,3 +172,33 @@ pub fn unpaired_onesided_t_test<const EQ_VAR: bool>(mean1: f64, var1: f64, mean2
     let t_distr = StudentsT::new(0.0, 1.0, freedom).expect("Could not create Student's t distribution");
     t_distr.cdf(t_stat)
 }
+
+/// Rounding divisions.
+pub trait RoundDiv {
+    /// Correct division, without overflows.
+    fn correct_ceil_div(self, rhs: Self) -> Self;
+
+    /// Fast ceiling division. Can give incorrect results due to overflowing.
+    fn fast_ceil_div(self, rhs: Self) -> Self;
+
+    /// Fast rounding division. Can give incorrect results due to overflowing.
+    fn fast_round_div(self, rhs: Self) -> Self;
+}
+
+impl<T: num_traits::PrimInt + num_traits::Unsigned> RoundDiv for T {
+    #[inline]
+    fn correct_ceil_div(self, rhs: Self) -> Self {
+        let d = self / rhs;
+        if self % rhs == Self::zero() { d } else { d + Self::one() }
+    }
+
+    #[inline]
+    fn fast_ceil_div(self, rhs: Self) -> Self {
+        (self + rhs - Self::one()) / rhs
+    }
+
+    #[inline]
+    fn fast_round_div(self, rhs: Self) -> Self {
+        (self + (rhs >> 1)) / rhs
+    }
+}
