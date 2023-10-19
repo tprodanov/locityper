@@ -20,6 +20,50 @@ use crate::{
 
 pub type Minimizer = u64;
 
+const CACHED_THRESHOLDS: usize = 1024;
+
+#[inline]
+fn get_threshold_inner(abs_thresh: f64, rel_thresh: f64, total_minimizers: usize) -> u32 {
+    (total_minimizers as f64 * rel_thresh).ceil().clamp(1.0, abs_thresh) as u32
+}
+
+/// For a read with `a/b` minimizers matching target, recruit the read when
+/// `a >= min(abs_thresh, rel_thresh * b)`.
+#[derive(Clone)]
+pub struct RecrThresholds {
+    abs_thresh: f64,
+    rel_thresh: f64,
+    /// Stores minimal number of matching minimizers based on the total number of minimizers in a read.
+    cached: [u32; CACHED_THRESHOLDS],
+}
+
+impl RecrThresholds {
+    /// Creates new thresholds, additionally caching `CACHED_THRESHOLDS` values.
+    pub fn new(abs_thresh: u32, rel_thresh: f64, is_paired_end: bool) -> Result<Self, Error> {
+        validate_param!(rel_thresh > 0.0 && rel_thresh <= 1.0,
+            "Relative minimizer threshold ({}) must be in (0, 1]", rel_thresh);
+        validate_param!(abs_thresh != 0, "Absolute minimizer threshold must be positive");
+        let max_val = if is_paired_end { u32::from(u16::MAX) } else { u32::MAX };
+        validate_param!(abs_thresh <= max_val,
+            "Absolute minimizer threshold ({}) is too large (max {} single-end reads, {} paired-end reads)",
+            abs_thresh, u32::MAX, u16::MAX);
+
+        let abs_thresh = f64::from(abs_thresh);
+        let mut cached = [0; CACHED_THRESHOLDS];
+        for (i, c) in cached.iter_mut().enumerate() {
+            *c = get_threshold_inner(abs_thresh, rel_thresh, i);
+        }
+        Ok(Self { abs_thresh, rel_thresh, cached })
+    }
+
+    /// Returns the threshold number of matching minimizers given the total number of minimizers.
+    #[inline]
+    pub fn get(&self, total_minimizers: usize) -> u32 {
+        self.cached.get(total_minimizers).copied()
+            .unwrap_or_else(|| get_threshold_inner(self.abs_thresh, self.rel_thresh, total_minimizers))
+    }
+}
+
 #[derive(Clone)]
 pub struct Params {
     /// Recruit reads using k-mers of size `minimizer_k` that have the minimial hash across `minimizer_w`
@@ -27,10 +71,6 @@ pub struct Params {
     /// Default: 15 and 10.
     pub minimizer_k: u8,
     pub minimizer_w: u8,
-    /// For a read with `a/b` minimizers matching target, recruit the read when
-    /// `a >= min(abs_thresh, rel_thresh * b)`.
-    abs_thresh: f64,
-    rel_thresh: f64,
     /// Pass reads between threads in chunks of this size. Default: 10000.
     pub chunk_size: usize,
 }
@@ -41,41 +81,18 @@ impl Default for Params {
             minimizer_k: 11,
             minimizer_w: 5,
             chunk_size: 10000,
-            // Set impossible values, so that they have to be set implicitely later.
-            abs_thresh: f64::NAN,
-            rel_thresh: f64::NAN,
         }
     }
 }
 
 impl Params {
-    pub fn validate(&self, is_paired_end: bool) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Error> {
         validate_param!(0 < self.minimizer_k && self.minimizer_k <= Minimizer::MAX_KMER_SIZE,
             "Minimizer kmer-size must be within [1, {}]", Minimizer::MAX_KMER_SIZE);
         validate_param!(1 < self.minimizer_w && self.minimizer_w <= kmers::MAX_MINIMIZER_W,
             "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
         validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
-
-        validate_param!(self.rel_thresh.is_normal() && self.rel_thresh > 0.0 && self.rel_thresh <= 1.0,
-            "Fractional minimizer threshold ({}) must be in (0, 1]", self.rel_thresh);
-        validate_param!(self.abs_thresh.is_normal() && self.abs_thresh >= 1.0,
-            "Integer minimizer threshold must be positive");
-        let max_val = if is_paired_end { f64::from(u16::MAX) } else { f64::from(u32::MAX) };
-        validate_param!(self.abs_thresh <= max_val,
-            "Integer minimizer threshold ({:.0}) is too large (max {} single-end reads, {} paired-end reads)",
-            self.abs_thresh, u32::MAX, u16::MAX);
         Ok(())
-    }
-
-    pub fn set_thresholds(&mut self, abs_thresh: u32, rel_thresh: f64) {
-        self.abs_thresh = f64::from(abs_thresh);
-        self.rel_thresh = rel_thresh;
-    }
-
-    /// Returns the threshold number of matching minimizers given the total number of minimizers.
-    #[inline]
-    fn matches_threshold(&self, total_minimizers: usize) -> u32 {
-        (total_minimizers as f64 * self.rel_thresh).ceil().clamp(1.0, self.abs_thresh) as u32
     }
 }
 
@@ -204,15 +221,15 @@ impl TargetBuilder {
 
     /// Finalize targets construction.
     /// Remove top `discard_minim` fraction of minimizers.
-    pub fn finalize(self) -> Targets {
+    pub fn finalize(self, threshs: RecrThresholds) -> Targets {
         let n_loci = self.locus_ix;
         let total_minims = self.minim_to_loci.len();
         log::info!("Collected {} minimizers across {} loci and {} sequences", total_minims, n_loci, self.total_seqs);
         assert!(total_minims > 0, "No minimizers for recruitment");
         Targets {
             params: self.params,
-            n_loci,
             minim_to_loci: self.minim_to_loci,
+            threshs, n_loci,
         }
     }
 }
@@ -221,6 +238,7 @@ impl TargetBuilder {
 #[derive(Clone)]
 pub struct Targets {
     params: Params,
+    threshs: RecrThresholds,
     n_loci: u16,
     /// Minimizers appearing across the targets.
     minim_to_loci: MinimToLoci,
@@ -247,7 +265,7 @@ impl Targets {
         }
 
         answer.clear();
-        let thresh = self.params.matches_threshold(rec_minims.len());
+        let thresh = self.threshs.get(rec_minims.len());
         for (&locus_ix, &count) in matches.iter() {
             if count >= thresh {
                 answer.push(locus_ix);
@@ -297,8 +315,8 @@ impl Targets {
         }
 
         answer.clear();
-        let thresh1: u16 = self.params.matches_threshold(total1).try_into().unwrap();
-        let thresh2: u16 = self.params.matches_threshold(total2).try_into().unwrap();
+        let thresh1 = self.threshs.get(total1) as u16;
+        let thresh2 = self.threshs.get(total2) as u16;
         for (&locus_ix, &count) in matches.iter() {
             let [count1, count2] = unsafe { std::mem::transmute::<u32, [u16; 2]>(count) };
             if count1 >= thresh1 && count2 >= thresh2 {

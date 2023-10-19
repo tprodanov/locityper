@@ -62,6 +62,7 @@ struct Args {
     recr_params: recruit::Params,
     minim_rel_thresh: Option<f64>,
     minim_abs_thresh: u32,
+    recr_threshs: Option<recruit::RecrThresholds>,
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
 }
@@ -93,6 +94,7 @@ impl Default for Args {
             recr_params: Default::default(),
             minim_rel_thresh: None,
             minim_abs_thresh: 50,
+            recr_threshs: None,
             assgn_params: Default::default(),
             scheme_params: Default::default(),
         }
@@ -127,7 +129,7 @@ impl Args {
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
-        // self.recr_params.validate()?; Validate recruitment parameters later.
+        self.recr_params.validate()?;
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -685,7 +687,7 @@ fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<
         writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
-    let targets = target_builder.finalize();
+    let targets = target_builder.finalize(args.recr_threshs.clone().unwrap());
     if args.has_indexed_alignment() {
         let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
         let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
@@ -908,9 +910,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
-    args.recr_params.set_thresholds(args.minim_abs_thresh,
-        args.minim_rel_thresh.unwrap_or_else(|| bg_distr.seq_info().technology().default_minim_rel_thresh()));
-    args.recr_params.validate(bg_distr.insert_distr().is_paired_end())?;
+    args.recr_threshs = Some(recruit::RecrThresholds::new(args.minim_abs_thresh,
+        args.minim_rel_thresh.unwrap_or_else(|| bg_distr.seq_info().technology().default_minim_rel_thresh()),
+        bg_distr.insert_distr().is_paired_end())?);
 
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;
