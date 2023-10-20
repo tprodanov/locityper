@@ -22,65 +22,45 @@ use crate::{
 
 pub type Minimizer = u64;
 
-/// Combine minimizers into groups of `group_size`.
-/// Group matches reference if `matches_frac` of its minimers match reference.
-/// Recruit a read if it has at least `matching_groups` groups that match reference.
 #[derive(Clone)]
-pub struct RecrThresholds {
+pub struct Params {
+    /// Recruit reads using k-mers of size `minimizer_k` that have the minimial hash across `minimizer_w`
+    /// consecutive k-mers.
+    minimizer_k: u8,
+    minimizer_w: u8,
+    /// Combine minimizers into groups of `group_size`.
+    /// Group matches reference if `matches_frac` of its minimers match reference.
+    /// Recruit a read if it has at least `matching_groups` groups that match reference.
     matches_frac: f32,
     group_size: u16,
     matching_groups: u16,
 }
 
-impl RecrThresholds {
-    /// Creates new thresholds, additionally caching `CACHED_THRESHOLDS` values.
-    pub fn new(matches_frac: f32, group_size: u16, matching_groups: u16) -> Result<Self, Error> {
+impl Params {
+    pub fn new(
+        (minimizer_k, minimizer_w): (u8, u8),
+        matches_frac: f32,
+        (group_size, matching_groups): (u16, u16)
+    ) -> Result<Self, Error>
+    {
+        validate_param!(0 < minimizer_k && minimizer_k <= Minimizer::MAX_KMER_SIZE,
+            "Minimizer kmer-size must be within [1, {}]", Minimizer::MAX_KMER_SIZE);
+        validate_param!(1 < minimizer_w && minimizer_w <= kmers::MAX_MINIMIZER_W,
+            "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
         validate_param!(matches_frac > 0.0 && matches_frac <= 1.0,
             "Minimizer matches fraction ({}) must be in (0, 1]", matches_frac);
         validate_param!(group_size >= 5 && group_size <= u16::MAX / 2,
             "Cannot combine minimizers into groups of {}, allowed values in [{}, {}]",
             group_size, 5, u16::MAX / 2);
         validate_param!(matching_groups != 0, "Number of matching groups must be positive");
-        Ok(Self { matches_frac, group_size, matching_groups })
+        Ok(Self { minimizer_k, minimizer_w, matches_frac, group_size, matching_groups })
     }
 
     /// Returns the threshold number of matching minimizers given the total number of minimizers.
     #[inline]
-    pub fn get(&self, total_minimizers: u16) -> u16 {
+    pub fn get_threshold(&self, total_minimizers: u16) -> u16 {
         const MAX: f32 = 65535.0; // u16::MAX
         (f32::from(total_minimizers) * self.matches_frac).ceil().clamp(1.0, MAX) as u16
-    }
-}
-
-#[derive(Clone)]
-pub struct Params {
-    /// Recruit reads using k-mers of size `minimizer_k` that have the minimial hash across `minimizer_w`
-    /// consecutive k-mers.
-    /// Default: 15 and 10.
-    pub minimizer_k: u8,
-    pub minimizer_w: u8,
-    /// Pass reads between threads in chunks of this size. Default: 10000.
-    pub chunk_size: usize,
-}
-
-impl Default for Params {
-    fn default() -> Self {
-        Self {
-            minimizer_k: 11,
-            minimizer_w: 5,
-            chunk_size: 10000,
-        }
-    }
-}
-
-impl Params {
-    pub fn validate(&self) -> Result<(), Error> {
-        validate_param!(0 < self.minimizer_k && self.minimizer_k <= Minimizer::MAX_KMER_SIZE,
-            "Minimizer kmer-size must be within [1, {}]", Minimizer::MAX_KMER_SIZE);
-        validate_param!(1 < self.minimizer_w && self.minimizer_w <= kmers::MAX_MINIMIZER_W,
-            "Minimizer window-size must be within [2, {}]", kmers::MAX_MINIMIZER_W);
-        validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
-        Ok(())
     }
 }
 
@@ -153,7 +133,7 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
     ) {
         buffers.minimizers.clear();
         kmers::minimizers(self.seq(), targets.params.minimizer_k, targets.params.minimizer_w, &mut buffers.minimizers);
-        if buffers.minimizers.len() <= usize::from(targets.threshs.group_size) {
+        if buffers.minimizers.len() <= usize::from(targets.params.group_size) {
             targets.recruit_short_single_end_record(answer, &buffers.minimizers, &mut buffers.single_matches1);
         } else {
             targets.recruit_long_single_end_record(answer, &buffers.minimizers,
@@ -224,7 +204,7 @@ impl TargetBuilder {
 
     /// Finalize targets construction.
     /// Remove top `discard_minim` fraction of minimizers.
-    pub fn finalize(self, threshs: RecrThresholds) -> Targets {
+    pub fn finalize(self) -> Targets {
         let n_loci = self.locus_ix;
         let total_minims = self.minim_to_loci.len();
         log::info!("Collected {} minimizers across {} loci and {} sequences", total_minims, n_loci, self.total_seqs);
@@ -232,7 +212,7 @@ impl TargetBuilder {
         Targets {
             params: self.params,
             minim_to_loci: self.minim_to_loci,
-            threshs, n_loci,
+            n_loci,
         }
     }
 }
@@ -241,7 +221,6 @@ impl TargetBuilder {
 #[derive(Clone)]
 pub struct Targets {
     params: Params,
-    threshs: RecrThresholds,
     n_loci: u16,
     /// Minimizers appearing across the targets.
     minim_to_loci: MinimToLoci,
@@ -267,7 +246,7 @@ impl Targets {
 
         answer.clear();
         let total = u16::try_from(minimizers.len()).expect("Short read has too many minimizers");
-        let thresh = self.threshs.get(total);
+        let thresh = self.params.get_threshold(total);
         for (&locus_ix, &count) in matches.iter() {
             if count >= thresh {
                 answer.push(locus_ix);
@@ -288,7 +267,7 @@ impl Targets {
         // ⌈n / [n / w]⌉.
         // This provides chunks sizes around group_size (but not necessarily <= group_size).
         // May have division by zero if `total_minimizers <= group_size / 2`.
-        let n_chunks = total_minimizers.fast_round_div(usize::from(self.threshs.group_size));
+        let n_chunks = total_minimizers.fast_round_div(usize::from(self.params.group_size));
         let chunk_size = total_minimizers.fast_ceil_div(n_chunks);
         matches2.clear();
         for chunk in minimizers.chunks(chunk_size) {
@@ -300,7 +279,7 @@ impl Targets {
                     }
                 }
             }
-            let thresh = self.threshs.get(u16::try_from(chunk.len()).unwrap());
+            let thresh = self.params.get_threshold(u16::try_from(chunk.len()).unwrap());
             for (&locus_ix, &count) in matches1.iter() {
                 if count >= thresh {
                     matches2.entry(locus_ix).and_modify(|x| *x += 1).or_insert(1);
@@ -309,7 +288,7 @@ impl Targets {
         }
 
         answer.clear();
-        let thresh_groups = u16::try_from(min(n_chunks, usize::from(self.threshs.matching_groups))).unwrap();
+        let thresh_groups = u16::try_from(min(n_chunks, usize::from(self.params.matching_groups))).unwrap();
         for (&locus_ix, &count) in matches2.iter() {
             if count >= thresh_groups {
                 answer.push(locus_ix);
@@ -356,8 +335,8 @@ impl Targets {
         }
 
         answer.clear();
-        let thresh1 = self.threshs.get(total1) as u16;
-        let thresh2 = self.threshs.get(total2) as u16;
+        let thresh1 = self.params.get_threshold(total1) as u16;
+        let thresh2 = self.params.get_threshold(total2) as u16;
         for (&locus_ix, &(count1, count2)) in matches.iter() {
             if count1 >= thresh1 && count2 >= thresh2 {
                 answer.push(locus_ix);
@@ -396,10 +375,11 @@ impl Targets {
         reader: impl FastxRead<Record = T>,
         writers: Vec<impl io::Write>,
         threads: u16,
+        chunk_size: usize,
     ) -> Result<(), Error> {
         let n_workers = usize::from(threads - 1);
         log::info!("Starting read recruitment with 1 read/write thread, and {} recruitment threads", n_workers);
-        let mut main_worker = MainWorker::<T, _, _>::new(self, reader, writers, n_workers, self.params.chunk_size);
+        let mut main_worker = MainWorker::<T, _, _>::new(self, reader, writers, n_workers, chunk_size);
         main_worker.run()?;
         main_worker.finish()
     }
@@ -410,13 +390,14 @@ impl Targets {
         reader: impl FastxRead<Record = T>,
         mut writers: Vec<W>,
         threads: u16,
+        chunk_size: usize,
     ) -> Result<(), Error>
     {
         assert_eq!(writers.len(), self.n_loci as usize, "Unexpected number of writers");
         if threads <= 1 {
             self.recruit_single_thread(reader, &mut writers)
         } else {
-            self.recruit_multi_thread(reader, writers, threads)
+            self.recruit_multi_thread(reader, writers, threads, chunk_size)
         }
     }
 }

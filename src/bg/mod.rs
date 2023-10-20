@@ -221,9 +221,16 @@ impl Technology {
     /// Returns minimizer matching fraction for different technologies.
     pub fn default_minim_matches(self) -> f32 {
         match self {
-            Self::Illumina => 0.7,
-            Self::HiFi => 0.7,
+            Self::Illumina | Self::HiFi => 0.7,
             Self::PacBio | Self::Nanopore => 0.5,
+        }
+    }
+
+    /// Returns default k-mer size and minimizer window size.
+    pub fn default_minim_size(self) -> (u8, u8) {
+        match self {
+            Self::Illumina => (11, 5),
+            Self::HiFi | Self::PacBio | Self::Nanopore => (15, 5),
         }
     }
 

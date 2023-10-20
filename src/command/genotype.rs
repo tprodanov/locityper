@@ -59,13 +59,11 @@ struct Args {
     seed: Option<u64>,
     debug: bool,
 
-    recr_params: recruit::Params,
+    minimizer_kw: Option<(u8, u8)>,
     minim_matches: Option<f32>,
-    /// Take consecutive `minim_group_size` minimizers and recruit long read
-    /// if it at least `minim_matching_groups` matched.
-    minim_group_size: u16,
-    minim_matching_groups: u16,
-    recr_threshs: Option<recruit::RecrThresholds>,
+    minim_groups: (u16, u16),
+    chunk_size: usize,
+
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
 }
@@ -94,11 +92,11 @@ impl Default for Args {
             seed: None,
             debug: false,
 
-            recr_params: Default::default(),
+            minimizer_kw: None,
             minim_matches: None,
-            minim_group_size: 20,
-            minim_matching_groups: 2,
-            recr_threshs: None,
+            minim_groups: (30, 10),
+            chunk_size: 10000,
+
             assgn_params: Default::default(),
             scheme_params: Default::default(),
         }
@@ -133,7 +131,7 @@ impl Args {
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         self.samtools = ext::sys::find_exe(self.samtools)?;
 
-        self.recr_params.validate()?;
+        validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -200,10 +198,14 @@ fn print_help(extended: bool) {
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
-            {EMPTY}  across {} consecutive k-mers [{} {}].",
+            {EMPTY}  across {} consecutive k-mers.\n\
+            {EMPTY}  Default: {}.",
             "-m, --minimizer".green(), "INT INT".yellow(),
             "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
-            super::fmt_def(defaults.recr_params.minimizer_k), super::fmt_def(defaults.recr_params.minimizer_w));
+            Technology::describe_values(|tech| {
+                let (k, w) = tech.default_minim_size();
+                super::fmt_def(format!("{} {}", k, w))
+            }));
         println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
             {EMPTY}  Default: {}.",
             "-M, --m-matches".green(), "FLOAT".yellow(),
@@ -211,12 +213,12 @@ fn print_help(extended: bool) {
         println!("    {}   {}  Split long reads into groups of ~ {} minimizers [{}] and recruit\n\
             {EMPTY}  the read if {} groups [{}] match the reference.",
             "-g, --m-groups".green(), "INT INT".yellow(),
-            "INT_1".yellow(), super::fmt_def(defaults.minim_group_size),
-            "INT_2".yellow(), super::fmt_def(defaults.minim_matching_groups));
+            "INT_1".yellow(), super::fmt_def(defaults.minim_groups.0),
+            "INT_2".yellow(), super::fmt_def(defaults.minim_groups.1));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
             "-c, --chunk-size".green(), "INT".yellow(),
-            super::fmt_def(PrettyUsize(defaults.recr_params.chunk_size)));
+            super::fmt_def(PrettyUsize(defaults.chunk_size)));
 
         println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
@@ -353,18 +355,14 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
 
-            Short('m') | Long("minimizer") | Long("minimizers") => {
-                args.recr_params.minimizer_k = parser.value()?.parse()?;
-                args.recr_params.minimizer_w = parser.value()?.parse()?;
-            }
+            Short('m') | Long("minimizer") | Long("minimizers") =>
+                args.minimizer_kw = Some((parser.value()?.parse()?, parser.value()?.parse()?)),
             Short('M') | Long("m-matches") | Long("minim-matches") =>
                 args.minim_matches = Some(parser.value()?.parse()?),
-            Short('g') | Long("m-groups") | Long("minim-groups") => {
-                args.minim_group_size = parser.value()?.parse()?;
-                args.minim_matching_groups = parser.value()?.parse()?;
-            }
+            Short('g') | Long("m-groups") | Long("minim-groups") =>
+                args.minim_groups = (parser.value()?.parse()?, parser.value()?.parse()?),
             Short('c') | Long("chunk") | Long("chunk-size") =>
-                args.recr_params.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
+                args.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
 
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
             Short('A') | Long("alt-cn") =>
@@ -667,7 +665,13 @@ fn create_fetch_targets(
 }
 
 /// Recruits reads to all loci, where neither reads nor alignments are available.
-fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<(), Error> {
+fn recruit_reads(
+    loci: &[LocusData],
+    bg_distr: &BgDistr,
+    args: &Args,
+    recr_params: recruit::Params,
+) -> Result<(), Error>
+{
     let filt_loci: Vec<&LocusData> = loci.iter()
         .filter(|locus| !locus.reads_filename.exists() && !locus.aln_filename.exists())
         .collect();
@@ -681,7 +685,7 @@ fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<
     }
 
     log::info!("Generating recruitment targets");
-    let mut target_builder = recruit::TargetBuilder::new(args.recr_params.clone());
+    let mut target_builder = recruit::TargetBuilder::new(recr_params);
     let mut writers = Vec::with_capacity(n_filt_loci);
 
     for locus in filt_loci.iter() {
@@ -694,7 +698,7 @@ fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<
         writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
-    let targets = target_builder.finalize(args.recr_threshs.clone().unwrap());
+    let targets = target_builder.finalize();
     if args.has_indexed_alignment() {
         let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
         let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
@@ -702,12 +706,14 @@ fn recruit_reads(loci: &[LocusData], bg_distr: &BgDistr, args: &Args) -> Result<
         let fetch_regions = create_fetch_targets(&bam_reader, bg_distr, &filt_loci)?;
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
         if bg_distr.insert_distr().is_paired_end() {
-            targets.recruit(fastx::PairedBamReader::new(reader), writers, args.threads)?;
+            targets.recruit(fastx::PairedBamReader::new(reader), writers, args.threads, args.chunk_size)?;
         } else {
-            targets.recruit(reader, writers, args.threads)?;
+            targets.recruit(reader, writers, args.threads, args.chunk_size)?;
         }
     } else {
-        fastx::process_readers!(args, None; let {} reader; { targets.recruit(reader, writers, args.threads) })?;
+        fastx::process_readers!(args, None; let {} reader; {
+            targets.recruit(reader, writers, args.threads, args.chunk_size)
+        })?;
     }
 
     for locus in filt_loci.iter() {
@@ -917,9 +923,11 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
-    args.recr_threshs = Some(recruit::RecrThresholds::new(
-        args.minim_matches.unwrap_or_else(|| bg_distr.seq_info().technology().default_minim_matches()),
-        args.minim_group_size, args.minim_matching_groups)?);
+    let tech = bg_distr.seq_info().technology();
+    let recr_params = recruit::Params::new(
+        args.minimizer_kw.unwrap_or_else(|| tech.default_minim_size()),
+        args.minim_matches.unwrap_or_else(|| tech.default_minim_matches()),
+        args.minim_groups)?;
 
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;
@@ -928,7 +936,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
 
     validate_param!(args.has_indexed_alignment() || bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
-    if bg_distr.seq_info().technology() == Technology::Illumina {
+    if tech == Technology::Illumina {
         args.strobealign = ext::sys::find_exe(args.strobealign)?;
     } else {
         args.minimap = ext::sys::find_exe(args.minimap)?;
@@ -939,7 +947,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     if loci.is_empty() {
         return Ok(());
     }
-    recruit_reads(&loci, &bg_distr, &args)?;
+    recruit_reads(&loci, &bg_distr, &args, recr_params)?;
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, args.assgn_params.alt_cn));
