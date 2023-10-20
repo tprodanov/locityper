@@ -125,15 +125,22 @@ impl Stats {
     }
 }
 
-type MatchesBuffer = IntMap<u16, (u16, u16)>;
+/// Structure that store various reusable structures.
+#[derive(Default)]
+#[doc(hidden)]
+pub struct Buffers {
+    minimizers: Vec<Minimizer>,
+    single_matches1: IntMap<u16, u16>,
+    single_matches2: IntMap<u16, u16>,
+    double_matches: IntMap<u16, (u16, u16)>,
+}
 
 /// Trait-extension over single/paired reads.
 pub trait RecruitableRecord : fastx::WritableRecord + Send + 'static {
     fn recruit(&self,
         targets: &Targets,
         answer: &mut Answer,
-        rec_minims: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        buffers: &mut Buffers,
     );
 }
 
@@ -142,16 +149,15 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
     fn recruit(&self,
         targets: &Targets,
         answer: &mut Answer,
-        rec_minims: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        buffers: &mut Buffers,
     ) {
-        matches.clear();
-        rec_minims.clear();
-        kmers::minimizers(self.seq(), targets.params.minimizer_k, targets.params.minimizer_w, rec_minims);
-        if rec_minims.len() <= usize::from(targets.threshs.group_size) {
-            targets.recruit_short_single_end_record(answer, rec_minims, matches);
+        buffers.minimizers.clear();
+        kmers::minimizers(self.seq(), targets.params.minimizer_k, targets.params.minimizer_w, &mut buffers.minimizers);
+        if buffers.minimizers.len() <= usize::from(targets.threshs.group_size) {
+            targets.recruit_short_single_end_record(answer, &buffers.minimizers, &mut buffers.single_matches1);
         } else {
-            targets.recruit_long_single_end_record(answer, rec_minims, matches);
+            targets.recruit_long_single_end_record(answer, &buffers.minimizers,
+                &mut buffers.single_matches1, &mut buffers.single_matches2);
         }
     }
 }
@@ -161,10 +167,10 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
     fn recruit(&self,
         targets: &Targets,
         answer: &mut Answer,
-        rec_minims: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        buffers: &mut Buffers,
     ) {
-        targets.recruit_paired_end_record(self[0].seq(), self[1].seq(), answer, rec_minims, matches);
+        targets.recruit_paired_end_record(self[0].seq(), self[1].seq(), answer,
+            &mut buffers.minimizers, &mut buffers.double_matches);
     }
 }
 
@@ -247,22 +253,22 @@ impl Targets {
     fn recruit_short_single_end_record(
         &self,
         answer: &mut Answer,
-        rec_minims: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        minimizers: &Vec<Minimizer>,
+        matches: &mut IntMap<u16, u16>,
     ) {
         matches.clear();
-        for minimizer in rec_minims.iter() {
+        for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for &locus_ix in loci_ixs.iter() {
-                    matches.entry(locus_ix).or_default().1 += 1;
+                    matches.entry(locus_ix).and_modify(|x| *x += 1).or_insert(1);
                 }
             }
         }
 
         answer.clear();
-        let total = u16::try_from(rec_minims.len()).expect("Short read has too many minimizers");
+        let total = u16::try_from(minimizers.len()).expect("Short read has too many minimizers");
         let thresh = self.threshs.get(total);
-        for (&locus_ix, &(_, count)) in matches.iter() {
+        for (&locus_ix, &count) in matches.iter() {
             if count >= thresh {
                 answer.push(locus_ix);
             }
@@ -274,36 +280,38 @@ impl Targets {
     fn recruit_long_single_end_record(
         &self,
         answer: &mut Answer,
-        rec_minims: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        minimizers: &Vec<Minimizer>,
+        matches1: &mut IntMap<u16, u16>,
+        matches2: &mut IntMap<u16, u16>,
     ) {
-        let total_minimizers = rec_minims.len();
+        let total_minimizers = minimizers.len();
         // ⌈n / [n / w]⌉.
         // This provides chunks sizes around group_size (but not necessarily <= group_size).
         // May have division by zero if `total_minimizers <= group_size / 2`.
         let n_chunks = total_minimizers.fast_round_div(usize::from(self.threshs.group_size));
         let chunk_size = total_minimizers.fast_ceil_div(n_chunks);
-        for chunk in rec_minims.chunks(chunk_size) {
+        matches2.clear();
+        for chunk in minimizers.chunks(chunk_size) {
+            matches1.clear();
             for minimizer in chunk.iter() {
                 if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                     for &locus_ix in loci_ixs.iter() {
-                        matches.entry(locus_ix).or_default().1 += 1;
+                        matches1.entry(locus_ix).and_modify(|x| *x += 1).or_insert(1);
                     }
                 }
             }
             let thresh = self.threshs.get(u16::try_from(chunk.len()).unwrap());
-            for (matching_groups, count) in matches.values_mut() {
-                if *count >= thresh {
-                    *matching_groups = matching_groups.saturating_add(1);
+            for (&locus_ix, &count) in matches1.iter() {
+                if count >= thresh {
+                    matches2.entry(locus_ix).and_modify(|x| *x += 1).or_insert(1);
                 }
-                *count = 0;
             }
         }
 
         answer.clear();
         let thresh_groups = u16::try_from(min(n_chunks, usize::from(self.threshs.matching_groups))).unwrap();
-        for (&locus_ix, &(matching_groups, _)) in matches.iter() {
-            if matching_groups >= thresh_groups {
+        for (&locus_ix, &count) in matches2.iter() {
+            if count >= thresh_groups {
                 answer.push(locus_ix);
             }
         }
@@ -316,15 +324,15 @@ impl Targets {
         seq1: &[u8],
         seq2: &[u8],
         answer: &mut Answer,
-        rec_minims: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        minimizers: &mut Vec<Minimizer>,
+        matches: &mut IntMap<u16, (u16, u16)>,
     ) {
         matches.clear();
         // First mate.
-        rec_minims.clear();
-        kmers::minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, rec_minims);
-        let total1 = u16::try_from(rec_minims.len()).expect("Paired end read has too many minimizers");
-        for minimizer in rec_minims.iter() {
+        minimizers.clear();
+        kmers::minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, minimizers);
+        let total1 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
+        for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for &locus_ix in loci_ixs.iter() {
                     matches.entry(locus_ix).or_default().0 += 1;
@@ -333,10 +341,10 @@ impl Targets {
         }
 
         // Second mate.
-        rec_minims.clear();
-        kmers::minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, rec_minims);
-        let total2 = u16::try_from(rec_minims.len()).expect("Paired end read has too many minimizers");
-        for minimizer in rec_minims.iter() {
+        minimizers.clear();
+        kmers::minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, minimizers);
+        let total2 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
+        for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for locus_ix in loci_ixs.iter() {
                     // No reason to insert new loci if they did not match the first read end.
@@ -365,12 +373,11 @@ impl Targets {
     {
         let mut record = T::default();
         let mut answer = Answer::new();
-        let mut buffer1 = Vec::new();
-        let mut buffer2 = IntMap::default();
+        let mut buffers = Buffers::default();
 
         let mut stats = Stats::new();
         while reader.read_next(&mut record)? {
-            record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
+            record.recruit(self, &mut answer, &mut buffers);
             for &locus_ix in answer.iter() {
                 record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
             }
@@ -422,8 +429,7 @@ type Shipment<T> = Vec<(T, Answer)>;
 
 struct Worker<T> {
     targets: Targets,
-    buffer1: Vec<Minimizer>,
-    buffer2: MatchesBuffer,
+    buffers: Buffers,
     /// Receives records that need to be recruited.
     receiver: Receiver<Shipment<T>>,
     /// Sends already recruited reads back to the main thread.
@@ -433,8 +439,7 @@ struct Worker<T> {
 impl<T> Worker<T> {
     fn new(targets: Targets, receiver: Receiver<Shipment<T>>, sender: Sender<Shipment<T>>) -> Self {
         Self {
-            buffer1: Vec::new(),
-            buffer2: IntMap::default(),
+            buffers: Buffers::default(),
             targets, receiver, sender,
         }
     }
@@ -446,7 +451,7 @@ impl<T: RecruitableRecord> Worker<T> {
         while let Ok(mut shipment) = self.receiver.recv() {
             assert!(!shipment.is_empty());
             for (record, answer) in shipment.iter_mut() {
-                record.recruit(&self.targets, answer, &mut self.buffer1, &mut self.buffer2);
+                record.recruit(&self.targets, answer, &mut self.buffers);
             }
             if let Err(_) = self.sender.send(shipment) {
                 log::error!("Read recruitment: main thread stopped before the child thread.");
