@@ -217,19 +217,15 @@ pub enum DebugLvl {
     Full,
 }
 
-impl From<Option<u8>> for DebugLvl {
-    fn from(val: Option<u8>) -> Self {
+impl From<u8> for DebugLvl {
+    fn from(val: u8) -> Self {
         match val {
-            Some(0) => Self::None,
-            Some(1) => Self::Some,
-            Some(2) => Self::Full,
-            Some(x) => {
-                log::warn!("Debug level is too big ({}), setting it to 2", x);
+            0 => Self::None,
+            1 => Self::Some,
+            2 => Self::Full,
+            _ => {
+                log::warn!("Debug level is too big ({}), setting it to 2", val);
                 Self::Full
-            }
-            None => {
-                log::debug!("No debug level specified, setting it to 1");
-                Self::Some
             }
         }
     }

@@ -424,7 +424,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
-            Long("debug") => args.debug = DebugLvl::from(parser.value().ok().map(|s| s.parse()).transpose()?),
+            Long("debug") => args.debug = DebugLvl::from(parser.value()?.parse::<u8>()?),
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
