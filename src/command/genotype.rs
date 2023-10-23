@@ -35,7 +35,7 @@ use crate::{
     solvers::scheme::{self, Scheme, SchemeParams},
     algo::{HashSet, HashMap},
 };
-use super::paths;
+use super::{paths, DebugLvl};
 
 struct Args {
     input: Vec<PathBuf>,
@@ -57,7 +57,7 @@ struct Args {
     minimap: PathBuf,
     samtools: PathBuf,
     seed: Option<u64>,
-    debug: bool,
+    debug: DebugLvl,
 
     minimizer_kw: Option<(u8, u8)>,
     minim_matches: Option<f32>,
@@ -90,7 +90,7 @@ impl Default for Args {
             minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
             seed: None,
-            debug: false,
+            debug: DebugLvl::None,
 
             minimizer_kw: None,
             minim_matches: None,
@@ -308,8 +308,8 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
         {EMPTY}  input and program version.",
         "-s, --seed".green(), "INT".yellow());
-    println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
-        "    --debug".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Save debug CSV files: 0 = none, 1 = some, 2 = all.",
+        "    --debug".green(), "[INT]".yellow());
     if extended {
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
@@ -424,7 +424,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
-            Long("debug") => args.debug = true,
+            Long("debug") => args.debug = DebugLvl::from(parser.value().ok().map(|s| s.parse()).transpose()?),
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
@@ -854,7 +854,7 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let all_contig_infos = if args.debug {
+    let all_contig_infos = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
         ContigInfo::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, windows_writer)?
@@ -862,7 +862,7 @@ fn analyze_locus(
         ContigInfo::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink())?
     };
 
-    let all_alns = if args.debug {
+    let all_alns = if args.debug >= DebugLvl::Full {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         let read_kmer_writer = ext::sys::create_gzip(&locus.out_dir.join("read_kmers.csv.gz"))?;
         AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache,
@@ -877,7 +877,7 @@ fn analyze_locus(
         fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
     }
 
-    if is_paired_end && args.debug {
+    if is_paired_end && args.debug >= DebugLvl::Full {
         let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
         let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
         all_alns.write_read_pair_info::<false>(pairs_writer, contigs).map_err(add_path!(read_pairs_filename))?;

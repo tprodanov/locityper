@@ -209,6 +209,32 @@ fn greet() {
     }
 }
 
+/// How many debug CSV files to save.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DebugLvl {
+    None,
+    Some,
+    Full,
+}
+
+impl From<Option<u8>> for DebugLvl {
+    fn from(val: Option<u8>) -> Self {
+        match val {
+            Some(0) => Self::None,
+            Some(1) => Self::Some,
+            Some(2) => Self::Full,
+            Some(x) => {
+                log::warn!("Debug level is too big ({}), setting it to 2", x);
+                Self::Full
+            }
+            None => {
+                log::debug!("No debug level specified, setting it to 1");
+                Self::Some
+            }
+        }
+    }
+}
+
 // /// Writes command line arguments, current version and time.
 // fn write_command(filename: impl AsRef<Path>) -> Result<(), Error> {
 //     let mut s = String::new();

@@ -39,6 +39,7 @@ use crate::{
         windows::ContigInfo,
         distr_cache::DistrCache,
     },
+    command::DebugLvl,
 };
 use super::Solver;
 
@@ -215,7 +216,7 @@ pub struct Data {
     pub priors: Vec<f64>,
 
     pub assgn_params: AssgnParams,
-    pub debug: bool,
+    pub debug: DebugLvl,
     pub threads: usize,
     pub is_paired_end: bool,
 }
@@ -613,18 +614,20 @@ pub fn solve(
     let mut depth_writers = None;
     let mut aln_filenames = None;
     let mut aln_writers = None;
-    if data.debug {
+    if data.debug >= DebugLvl::Some {
         depth_filenames = Some(csv_filenames(&locus_dir.join("depth"), data.threads));
         depth_writers = depth_filenames.as_ref().map(|filenames| open_gzips(filenames)).transpose()?;
         writeln!(depth_writers.as_mut().unwrap()[0], "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER)
             .map_err(add_path!(!))?;
+    }
 
+    if data.debug >= DebugLvl::Full {
         aln_filenames = Some(csv_filenames(&locus_dir.join("alns"), data.threads));
         aln_writers = aln_filenames.as_ref().map(|filenames| open_gzips(filenames)).transpose()?;
         writeln!(aln_writers.as_mut().unwrap()[0], "stage\tgenotype\t{}", ALNS_CSV_HEADER).map_err(add_path!(!))?;
     }
 
-    let rem_ixs = if data.scheme.filter && (data.debug || n_gts > data.assgn_params.min_gts) {
+    let rem_ixs = if data.scheme.filter && (data.debug >= DebugLvl::Some || n_gts > data.assgn_params.min_gts) {
         let filt_filename = locus_dir.join("filter.csv.gz");
         let mut filt_writer = ext::sys::create_gzip(&filt_filename)?;
         writeln!(filt_writer, "genotype\tscore").map_err(add_path!(filt_filename))?;

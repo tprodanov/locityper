@@ -273,8 +273,8 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
         {EMPTY}  input and program version.",
         "-s, --seed".green(), "INT".yellow());
-    println!("    {:KEY$} {:VAL$}  Create more files with debug information.",
-        "    --debug".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Save debug CSV files.",
+        "    --debug".green(), "INT".yellow());
     if extended {
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
