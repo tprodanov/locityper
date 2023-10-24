@@ -40,11 +40,9 @@ pub struct Params {
     /// consecutive k-mers.
     minimizer_k: u8,
     minimizer_w: u8,
-
     /// Recruit the read if it has at has at least `match_frac` matching k-mers
     /// on a stretch of `min(match_length, read_length)`.
     match_frac: f64,
-    match_length: u32,
 
     /// Approximate number of minimizers in a stretch of `match_length`.
     stretch_minims: u32,
@@ -93,7 +91,7 @@ impl Params {
         assert!(stretch_score > 0.0);
         let stretch_score = stretch_score.ceil() as u32;
         log::debug!("    Frac {:.3}, Stretch minimizers: {}, score: {}", match_frac, stretch_minims, stretch_score);
-        Ok(Self { minimizer_k, minimizer_w, match_frac, match_length, stretch_minims, stretch_score, thresholds })
+        Ok(Self { minimizer_k, minimizer_w, match_frac, stretch_minims, stretch_score, thresholds })
     }
 
     /// Returns true if the read has enough matching minimizers to be recruited.
@@ -228,9 +226,10 @@ impl TargetBuilder {
     }
 
     /// Add set of locus alleles.
-    pub fn add<'a>(&mut self, contig_set: &ContigSet) -> () {
+    pub fn add(&mut self, contig_set: &ContigSet) -> () {
         let locus_ix = u16::try_from(self.locus_minimizers.len())
             .expect(const_format::formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
+        // log::debug!("Add locus #{:2} {}", locus_ix, contig_set.tag());
         let kmer_counts = contig_set.kmer_counts();
         let base_k = kmer_counts.k();
         let shift = if u32::from(self.params.minimizer_k) <= base_k {
@@ -241,12 +240,15 @@ impl TargetBuilder {
 
         let mut locus_minimizers = IntMap::default();
         for (seq, counts) in contig_set.seqs().iter().zip(kmer_counts.iter()) {
+            // log::debug!("New sequence");
             let n_counts = counts.len();
             self.buffer.clear();
             kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, &mut self.buffer);
             for &(pos, minimizer) in self.buffer.iter() {
                 let pos = pos as usize;
                 let is_usable = if u32::from(self.params.minimizer_k) <= base_k {
+                    // log::debug!("    {:016X} {:5}", minimizer,
+                    //     counts[min(pos.saturating_sub(shift), n_counts - 1)]);
                     // Check Jellyfish k-mer that is centered around k-mer at `pos`.
                     counts[min(pos.saturating_sub(shift), n_counts - 1)] <= THRESH_KMER_COUNT
                 } else {
@@ -462,10 +464,10 @@ impl Targets {
             let (usable1, unusable1, usable2, unusable2) = unsafe {
                 std::mem::transmute::<u64, (u16, u16, u16, u16)>(counts)
             };
-            log::debug!("    [{:2}]  {:2},{:2}/{:2} vs {:2}  ---  {:2},{:2}/{:2} vs {:2}  ---  {}",
-                locus_ix, usable1, unusable1, total1,
+            log::debug!("    [{:2}]  {:2}/{:2} (+{:2}) vs {:2}  ---  {:2}/{:2} (+{:2}) vs {:2}  ---  {}",
+                locus_ix, usable1, total1 - unusable1, unusable1,
                 self.params.thresholds[usize::from(total1 - unusable1)],
-                usable2, unusable2, total2,
+                          usable2, total2 - unusable2, unusable2,
                 self.params.thresholds[usize::from(total2 - unusable2)],
                 self.params.short_read_passes(usable1, unusable1, total1)
                     && self.params.short_read_passes(usable2, unusable2, total2)

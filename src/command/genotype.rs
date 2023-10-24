@@ -25,7 +25,10 @@ use crate::{
         BgDistr, Technology, SequencingInfo,
         err_prof::EditDistCache,
     },
-    ext::{self, fmt::PrettyUsize},
+    ext::{
+        self,
+        fmt::{PrettyU32, PrettyU64, PrettyUsize},
+    },
     model::{
         Params as AssgnParams,
         locs::AllAlignments,
@@ -60,9 +63,9 @@ struct Args {
     debug: DebugLvl,
 
     minimizer_kw: Option<(u8, u8)>,
-    minim_matches: Option<f64>,
-    minim_groups: (u16, u16),
-    chunk_size: usize,
+    match_frac: Option<f64>,
+    match_len: u32,
+    chunk_length: u64,
 
     assgn_params: AssgnParams,
     scheme_params: SchemeParams,
@@ -93,9 +96,9 @@ impl Default for Args {
             debug: DebugLvl::None,
 
             minimizer_kw: None,
-            minim_matches: None,
-            minim_groups: (30, 10),
-            chunk_size: 10000,
+            match_frac: None,
+            match_len: 2000,
+            chunk_length: 3_000_000,
 
             assgn_params: Default::default(),
             scheme_params: Default::default(),
@@ -130,8 +133,6 @@ impl Args {
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
         self.samtools = ext::sys::find_exe(self.samtools)?;
-
-        validate_param!(self.chunk_size != 0, "Chunk size cannot be zero");
         self.assgn_params.validate()?;
         Ok(self)
     }
@@ -208,17 +209,15 @@ fn print_help(extended: bool) {
             }));
         println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
             {EMPTY}  Default: {}.",
-            "-M, --m-matches".green(), "FLOAT".yellow(),
-            Technology::describe_values(|tech| super::fmt_def_f64(tech.default_minim_matches().into())));
-        println!("    {}   {}  Split long reads into groups of ~ {} minimizers [{}] and recruit\n\
-            {EMPTY}  the read if {} groups [{}] match the reference.",
-            "-g, --m-groups".green(), "INT INT".yellow(),
-            "INT_1".yellow(), super::fmt_def(defaults.minim_groups.0),
-            "INT_2".yellow(), super::fmt_def(defaults.minim_groups.1));
-        println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
+            "-M, --match-frac".green(), "FLOAT".yellow(),
+            Technology::describe_values(|tech| super::fmt_def_f64(tech.default_match_frac())));
+        println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
+            "-L, --match-len".green(), "INT".yellow(),
+            super::fmt_def(defaults.match_len));
+        println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this sum length [{}].\n\
             {EMPTY}  May impact runtime in multi-threaded read recruitment.",
-            "-c, --chunk-size".green(), "INT".yellow(),
-            super::fmt_def(PrettyUsize(defaults.chunk_size)));
+            "-c, --chunk-len".green(), "INT".yellow(),
+            super::fmt_def(PrettyU64(defaults.chunk_length)));
 
         println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
@@ -357,12 +356,12 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
                 args.minimizer_kw = Some((parser.value()?.parse()?, parser.value()?.parse()?)),
-            Short('M') | Long("m-matches") | Long("minim-matches") =>
-                args.minim_matches = Some(parser.value()?.parse()?),
-            Short('g') | Long("m-groups") | Long("minim-groups") =>
-                args.minim_groups = (parser.value()?.parse()?, parser.value()?.parse()?),
-            Short('c') | Long("chunk") | Long("chunk-size") =>
-                args.chunk_size = parser.value()?.parse::<PrettyUsize>()?.get(),
+            Short('M') | Long("match-frac") | Long("match-fraction") =>
+                args.match_frac = Some(parser.value()?.parse()?),
+            Short('L') | Long("match-len") | Long("match-length") =>
+                args.match_len = parser.value()?.parse::<PrettyU32>()?.get(),
+            Short('c') | Long("chunk") | Long("chunk-len") =>
+                args.chunk_length = parser.value()?.parse::<PrettyU64>()?.get(),
 
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
             Short('A') | Long("alt-cn") =>
@@ -696,6 +695,10 @@ fn recruit_reads(
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
     let targets = target_builder.finalize();
+    let chunk_size = max(1,
+        (args.chunk_length as f64 / bg_distr.seq_info().mean_read_len()
+        * (if bg_distr.insert_distr().is_paired_end() { 0.5 } else { 1.0 })) as usize);
+    log::debug!("Chunk size = {}", chunk_size);
     if args.has_indexed_alignment() {
         let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
         let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
@@ -703,13 +706,13 @@ fn recruit_reads(
         let fetch_regions = create_fetch_targets(&bam_reader, bg_distr, &filt_loci)?;
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
         if bg_distr.insert_distr().is_paired_end() {
-            targets.recruit(fastx::PairedBamReader::new(reader), writers, args.threads, args.chunk_size)?;
+            targets.recruit(fastx::PairedBamReader::new(reader), writers, args.threads, chunk_size)?;
         } else {
-            targets.recruit(reader, writers, args.threads, args.chunk_size)?;
+            targets.recruit(reader, writers, args.threads, chunk_size)?;
         }
     } else {
         fastx::process_readers!(args, None; let {} reader; {
-            targets.recruit(reader, writers, args.threads, args.chunk_size)
+            targets.recruit(reader, writers, args.threads, chunk_size)
         })?;
     }
 
@@ -923,8 +926,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let tech = bg_distr.seq_info().technology();
     let recr_params = recruit::Params::new(
         args.minimizer_kw.unwrap_or_else(|| tech.default_minim_size()),
-        args.minim_matches.unwrap_or_else(|| tech.default_minim_matches()),
-        2000)?; // TODO: 1000 must be a parameter.
+        args.match_frac.unwrap_or_else(|| tech.default_match_frac()),
+        args.match_len)?;
 
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;
