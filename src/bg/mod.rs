@@ -152,13 +152,16 @@ pub enum Technology {
     Nanopore,
 }
 
+// NOTE: In nightly version, can use `std::mem::variant_count`.
+const TECHS: [Technology; 4] = [Technology::Illumina, Technology::HiFi, Technology::PacBio, Technology::Nanopore];
+
 impl Technology {
     pub fn to_str(self) -> &'static str {
         match self {
             Self::Illumina => "illumina",
             Self::HiFi => "hifi",
             Self::PacBio => "pacbio",
-            Self::Nanopore => "nanopore",
+            Self::Nanopore => "ont",
         }
     }
 
@@ -183,20 +186,22 @@ impl Technology {
     /// Describe values for each technology in format
     /// "illumina: X, hifi: Y, ..."
     pub fn describe_values<D, F>(f: F) -> String
-    where D: fmt::Display,
+    where D: fmt::Display + Eq,
           F: Fn(Self) -> D,
     {
-        // NOTE: In nightly version, can use `std::mem::variant_count`.
-        const TECHS: [Technology; 4] = [Technology::Illumina, Technology::HiFi,
-            Technology::PacBio, Technology::Nanopore];
-        let mut s = String::new();
-        for (i, &tech) in TECHS.iter().enumerate() {
-            if i > 0 {
-                s.push_str(", ");
+        let mut tech_vals: Vec<(String, D)> = Vec::new();
+        for &tech in TECHS.iter() {
+            let val = f(tech);
+            if let Some(i) = tech_vals.iter().position(|(_, v)| v == &val) {
+                write!(tech_vals[i].0, ",{}", tech).unwrap();
+            } else {
+                tech_vals.push((tech.to_string(), val));
             }
-            write!(s, "{}: {}", tech, f(tech)).unwrap();
         }
-        s
+        tech_vals.into_iter()
+            .map(|(techs, val)| format!("{} for {}", val, techs))
+            .collect::<Vec<String>>()
+            .join("; ")
     }
 
     /// Returns true if the technology exhibits different depth values at different GC-contents.
@@ -221,7 +226,7 @@ impl Technology {
     /// Returns minimizer matching fraction for different technologies.
     pub fn default_match_frac(self) -> f64 {
         match self {
-            Self::Illumina => 0.7,
+            Self::Illumina => 0.6,
             Self::HiFi | Self::PacBio | Self::Nanopore => 0.5,
         }
     }
@@ -229,7 +234,7 @@ impl Technology {
     /// Returns default k-mer size and minimizer window size.
     pub fn default_minim_size(self) -> (u8, u8) {
         match self {
-            Self::Illumina => (11, 5),
+            Self::Illumina => (15, 5),
             Self::HiFi | Self::PacBio | Self::Nanopore => (15, 10),
         }
     }

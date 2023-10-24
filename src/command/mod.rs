@@ -90,16 +90,16 @@ fn print_help() {
         "   cite".red());
 }
 
-fn flag() -> impl std::fmt::Display {
+fn flag() -> colored::ColoredString {
     "░░░".yellow().dimmed()
 }
 
 /// Format default value for the help message.
-fn fmt_def(val: impl fmt::Display) -> impl fmt::Display {
+fn fmt_def(val: impl fmt::Display) -> colored::ColoredString {
     val.to_string().cyan()
 }
 
-fn fmt_def_f64(val: f64) -> impl fmt::Display {
+fn fmt_def_f64(val: f64) -> colored::ColoredString {
     crate::math::fmt_signif(val, 6).cyan()
 }
 

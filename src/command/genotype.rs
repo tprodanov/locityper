@@ -216,7 +216,7 @@ fn print_help(extended: bool) {
             "-L, --match-len".green(), "INT".yellow(),
             super::fmt_def(defaults.match_len));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this sum length [{}].\n\
-            {EMPTY}  May impact runtime in multi-threaded read recruitment.",
+            {EMPTY}  Impacts runtime in multi-threaded read recruitment.",
             "-c, --chunk-len".green(), "INT".yellow(),
             super::fmt_def(PrettyU64(defaults.chunk_length)));
 
