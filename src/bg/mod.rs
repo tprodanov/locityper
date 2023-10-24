@@ -230,7 +230,7 @@ impl Technology {
     pub fn default_minim_size(self) -> (u8, u8) {
         match self {
             Self::Illumina => (11, 5),
-            Self::HiFi | Self::PacBio | Self::Nanopore => (15, 5),
+            Self::HiFi | Self::PacBio | Self::Nanopore => (15, 10),
         }
     }
 
