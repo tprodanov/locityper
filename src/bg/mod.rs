@@ -222,7 +222,7 @@ impl Technology {
     pub fn default_match_frac(self) -> f64 {
         match self {
             Self::Illumina => 0.7,
-            Self::Hifi | Self::PacBio | Self::Nanopore => 0.5,
+            Self::HiFi | Self::PacBio | Self::Nanopore => 0.5,
         }
     }
 
