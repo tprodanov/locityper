@@ -754,7 +754,7 @@ fn create_mapping_command(
             "-a", // Output SAM format,
             "-x", seq_info.technology().minimap_preset(), // Set mapping preset.
             "-N", n_locs,   // Output as many secondary alignments as possible.
-            "-f", "0.02",
+            "-f", "0.05",   // Filter out 5% minimizers. Should be still enough minimizers for long reads.
             "--eqx",        // Output X/= instead of M operations.
             "-t", &args.threads.to_string()]);
     }
