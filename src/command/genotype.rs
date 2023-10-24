@@ -692,7 +692,7 @@ fn recruit_reads(
         let fasta_path = locus.db_locus_dir.join(paths::LOCUS_FASTA_ALL);
         let mut fasta_reader = fastx::Reader::from_path(&fasta_path)?;
         let locus_all_seqs = fasta_reader.read_all()?;
-        target_builder.add(locus_all_seqs.iter().map(NamedSeq::seq));
+        target_builder.add(&locus.set);
         // Output files with a large buffer (4 Mb).
         const BUFFER: usize = 4_194_304;
         writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))

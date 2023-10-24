@@ -7,15 +7,14 @@ use std::{
     time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
 };
-use const_format::formatcp;
 use nohash::IntMap;
 use smallvec::{smallvec, SmallVec};
 use crate::{
     err::{Error, validate_param, add_path},
     seq::{
+        ContigSet,
         kmers::{self, Kmer},
-        fastx::{self, FastxRead},
-        fastx::UPDATE_SECS,
+        fastx::{self, FastxRead, UPDATE_SECS},
     },
     math::RoundDiv,
 };
@@ -94,7 +93,7 @@ impl Stats {
     fn print_log_always(&mut self, elapsed: Duration) {
         let processed = self.processed as f64;
         let speed = 1e-3 * processed / elapsed.as_secs_f64();
-        log::debug!("    Recruited {:11} /{:8}k reads, {:5.1}k reads/s", self.recruited, 1e-3 * processed, speed);
+        log::debug!("    Recruited {:11} /{:8.0}k reads, {:5.1}k reads/s", self.recruited, 1e-3 * processed, speed);
         self.last_msg = elapsed;
     }
 
@@ -156,7 +155,7 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
 
 const CAPACITY: usize = 4;
 /// Key: minimizer, value: vector of loci indices, where the minimizer appears.
-type MinimToLoci = IntMap<Minimizer, SmallVec<[u16; CAPACITY]>>;
+type MinimToLoci = IntMap<Minimizer, SmallVec<[(u16, bool); CAPACITY]>>;
 /// Vector of loci indices, to which the read was recruited.
 type Answer = Vec<u16>;
 
@@ -166,7 +165,7 @@ pub struct TargetBuilder {
     locus_ix: u16,
     total_seqs: u32,
     minim_to_loci: MinimToLoci,
-    buffer: Vec<Minimizer>,
+    buffer: Vec<(u32, Minimizer)>,
 }
 
 impl TargetBuilder {
@@ -181,25 +180,58 @@ impl TargetBuilder {
     }
 
     /// Add set of locus alleles.
-    pub fn add<'a>(&mut self, seqs: impl Iterator<Item = &'a [u8]>) {
-        for seq in seqs {
+    pub fn add<'a>(&mut self, contig_set: &ContigSet) -> () {
+        let kmer_counts = contig_set.kmer_counts();
+        let base_k = kmer_counts.k();
+        let shift = if u32::from(self.params.minimizer_k) <= base_k {
+            (base_k as usize - usize::from(self.params.minimizer_k)) / 2
+        } else {
+            usize::from(self.params.minimizer_k) - base_k as usize
+        };
+
+        log::info!("Add a set of alleles ({} sequences, {} counts), k = ({}, {}) -> shift = {}",
+            contig_set.seqs().len(), contig_set.kmer_counts().len(), self.params.minimizer_k, base_k, shift);
+
+        for (seq, counts) in contig_set.seqs().iter().zip(kmer_counts.iter()) {
+            log::debug!("Seq of {} bp, {} k-mer counts", seq.len(), counts.len());
+            let n_counts = counts.len();
             self.buffer.clear();
             kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, &mut self.buffer);
-            for &minimizer in self.buffer.iter() {
+            for &(pos, minimizer) in self.buffer.iter() {
+                let mut s = format!("    [{:5}] {:016X}", pos, minimizer);
+                let pos = pos as usize;
+                let is_unique = if u32::from(self.params.minimizer_k) <= base_k {
+                    // Check Jellyfish k-mer that is centered around k-mer at `pos`.
+                    s.push_str(&format!(", [{:5}] {:5}",
+                        min(pos.saturating_sub(shift), n_counts - 1),
+                        counts[min(pos.saturating_sub(shift), n_counts - 1)])
+                    );
+                    counts[min(pos.saturating_sub(shift), n_counts - 1)] == 0
+                } else {
+                    // Compare first and last Jellyfish k-mers contained in the k-mer at `pos`.
+                    s.push_str(&format!(", [{:5}] {:5} + [{:6}] {:5}",
+                        pos, counts[pos], pos + shift, counts[pos + shift]));
+                    counts[pos] == 0 || counts[pos + shift] == 0 //    WARN: Need `min` here
+                };
+                log::debug!("{} -> {}", s, is_unique);
+
                 match self.minim_to_loci.entry(minimizer) {
                     Entry::Occupied(entry) => {
                         let loci_ixs = entry.into_mut();
-                        if *loci_ixs.last().unwrap() != self.locus_ix {
-                            loci_ixs.push(self.locus_ix);
+                        let last = loci_ixs.last_mut().unwrap();
+                        if last.0 == self.locus_ix {
+                            last.1 &= is_unique; // All counts must be unique.
+                        } else {
+                            loci_ixs.push((self.locus_ix, is_unique));
                         }
                     }
-                    Entry::Vacant(entry) => { entry.insert(smallvec![self.locus_ix]); }
+                    Entry::Vacant(entry) => { entry.insert(smallvec![(self.locus_ix, is_unique)]); }
                 }
             }
             self.total_seqs += 1;
         }
         self.locus_ix = self.locus_ix.checked_add(1)
-            .expect(formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
+            .expect(const_format::formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
     }
 
     /// Finalize targets construction.
@@ -238,7 +270,7 @@ impl Targets {
         matches.clear();
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &locus_ix in loci_ixs.iter() {
+                for &(locus_ix, is_unique) in loci_ixs.iter() {
                     matches.entry(locus_ix).and_modify(|x| *x += 1).or_insert(1);
                 }
             }
@@ -274,7 +306,7 @@ impl Targets {
             matches1.clear();
             for minimizer in chunk.iter() {
                 if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                    for &locus_ix in loci_ixs.iter() {
+                    for &(locus_ix, is_unique) in loci_ixs.iter() {
                         matches1.entry(locus_ix).and_modify(|x| *x += 1).or_insert(1);
                     }
                 }
@@ -313,7 +345,7 @@ impl Targets {
         let total1 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &locus_ix in loci_ixs.iter() {
+                for &(locus_ix, is_unique) in loci_ixs.iter() {
                     matches.entry(locus_ix).or_default().0 += 1;
                 }
             }
@@ -325,7 +357,7 @@ impl Targets {
         let total2 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for locus_ix in loci_ixs.iter() {
+                for (locus_ix, is_unique) in loci_ixs.iter() {
                     // No reason to insert new loci if they did not match the first read end.
                     if let Some(counts) = matches.get_mut(locus_ix) {
                         counts.1 += 1;

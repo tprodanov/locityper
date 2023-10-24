@@ -115,7 +115,7 @@ pub const NON_CANONICAL: bool = false;
 /// Returns `K::UNDEF` for k-mers containing N.
 ///
 /// If `CANONICAL` is true, returns canonical k-mers (min between forward and reverse-complement k-mer).
-pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, buffer: &mut Vec<K>) {
+pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, output: &mut Vec<K>) {
     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     let mask = K::create_mask(k);
     let rv_shift = 2 * k - 2;
@@ -135,7 +135,7 @@ pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, buffer: &mut Vec<K>)
             _ => {
                 reset = i + k;
                 if i + 1 >= k {
-                    buffer.push(K::UNDEF);
+                    output.push(K::UNDEF);
                 }
                 continue;
             },
@@ -147,13 +147,34 @@ pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, buffer: &mut Vec<K>)
 
         if i >= reset {
             if CANON {
-                buffer.push(min(fw_kmer & mask, rv_kmer));
+                output.push(min(fw_kmer & mask, rv_kmer));
             } else {
-                buffer.push(fw_kmer & mask);
+                output.push(fw_kmer & mask);
             }
         } else if i + 1 >= k {
-            buffer.push(K::UNDEF);
+            output.push(K::UNDEF);
         }
+    }
+}
+
+/// Trait that summarizes tuple `(u32, kmer)` and simply `kmer`.
+/// In the first case, minimizers are saved together with their positions,
+/// in the other, only kmers are saved.
+pub trait PosKmer<K> {
+    fn transform(pos: u32, kmer: K) -> Self;
+}
+
+impl<K: Kmer> PosKmer<K> for K {
+    #[inline]
+    fn transform(_: u32, kmer: K) -> K {
+        kmer
+    }
+}
+
+impl<K: Kmer> PosKmer<K> for (u32, K) {
+    #[inline]
+    fn transform(pos: u32, kmer: K) -> (u32, K) {
+        (pos, kmer)
     }
 }
 
@@ -162,31 +183,37 @@ pub const MAX_MINIMIZER_W: u8 = 64;
 const MOD_MAXW: u32 = MAX_MINIMIZER_W as u32 - 1;
 
 /// Function that goes over indices `start..end`, and returns new `start`.
-/// Additionally, the function pushes the new minimizer to the buffer, if it is not `UNDEF`.
+/// Additionally, the function pushes the new minimizer to the output, if it is not `UNDEF`.
 #[inline]
-fn select_minimizer<K: Kmer>(
-    buffer: &mut Vec<K>,
+fn select_minimizer<K: Kmer, P: PosKmer<K>>(
+    start: u32,
+    end: u32,
+    k: u32,
     hashes: &mut [K; MAX_MINIMIZER_W as usize],
-    start: u32, end: u32,
+    output: &mut Vec<P>,
 ) -> u32 {
     let mut minimizer = K::UNDEF;
-    let mut new_start = end;
+    let mut kmer_end = end;
     for j in start..end {
         let h = hashes[(j & MOD_MAXW) as usize];
         if h < minimizer {
             minimizer = h;
-            new_start = j + 1;
+            kmer_end = j + 1;
         }
     }
     if minimizer != K::UNDEF {
-        buffer.push(minimizer);
+        output.push(P::transform(kmer_end - k, minimizer));
     }
-    new_start
+    kmer_end
 }
 
 /// Finds sequence minimizers.
 /// Minimizer is a k-mer with the smallest hash value across `w` consecutive k-mers.
-pub fn minimizers<K: Minimizer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
+/// Output vector should have type `Vec<K>` or `Vec<(u32, K)>`, then minimizers are saved together with their positions.
+pub fn minimizers<K, P>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
+where K: Minimizer,
+      P: PosKmer<K>,
+{
     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     debug_assert!(w <= MAX_MINIMIZER_W, "Minimizer window ({}) can be at most {}", w, MAX_MINIMIZER_W);
     let mask = K::create_mask(k);
@@ -215,7 +242,7 @@ pub fn minimizers<K: Minimizer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
                 reset = i + k;
                 if reset >= start + w {
                     if i > start {
-                        select_minimizer(buffer, &mut hashes, start, i);
+                        select_minimizer(start, i, k, &mut hashes, output);
                     }
                     start = reset;
                 }
@@ -232,13 +259,13 @@ pub fn minimizers<K: Minimizer>(seq: &[u8], k: u8, w: u8, buffer: &mut Vec<K>) {
 
         hashes[(i & MOD_MAXW) as usize] = min(fw_kmer & mask, rv_kmer).fast_hash();
         if i == start + w - 1 {
-            start = select_minimizer(buffer, &mut hashes, start, i + 1);
+            start = select_minimizer(start, i + 1, k, &mut hashes, output);
         }
     }
     let l = seq.len() as u32;
     if l >= start {
         debug_assert!(l <= start + w - 1);
-        select_minimizer(buffer, &mut hashes, start, l);
+        select_minimizer(start, l, k, &mut hashes, output);
     }
 }
 
@@ -277,6 +304,11 @@ impl KmerCounts {
     /// Returns iterator over k-mer counts for every contig.
     pub fn iter(&self) -> std::slice::Iter<'_, Vec<KmerCount>> {
         self.counts.iter()
+    }
+
+    /// Returns the number of entries (one per each sequences) in the collection.
+    pub fn len(&self) -> usize {
+        self.counts.len()
     }
 
     /// Returns all k-mer counts for the corresponding contig.
