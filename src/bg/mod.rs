@@ -219,7 +219,7 @@ impl Technology {
     }
 
     /// Returns minimizer matching fraction for different technologies.
-    pub fn default_minim_matches(self) -> f32 {
+    pub fn default_minim_matches(self) -> f64 {
         match self {
             Self::Illumina | Self::HiFi => 0.7,
             Self::PacBio | Self::Nanopore => 0.5,

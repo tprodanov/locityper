@@ -17,7 +17,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        recruit, fastx, dist, NamedSeq, Interval,
+        recruit, fastx, dist, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
     },
@@ -60,7 +60,7 @@ struct Args {
     debug: DebugLvl,
 
     minimizer_kw: Option<(u8, u8)>,
-    minim_matches: Option<f32>,
+    minim_matches: Option<f64>,
     minim_groups: (u16, u16),
     chunk_size: usize,
 
@@ -689,9 +689,6 @@ fn recruit_reads(
     let mut writers = Vec::with_capacity(n_filt_loci);
 
     for locus in filt_loci.iter() {
-        let fasta_path = locus.db_locus_dir.join(paths::LOCUS_FASTA_ALL);
-        let mut fasta_reader = fastx::Reader::from_path(&fasta_path)?;
-        let locus_all_seqs = fasta_reader.read_all()?;
         target_builder.add(&locus.set);
         // Output files with a large buffer (4 Mb).
         const BUFFER: usize = 4_194_304;
@@ -927,7 +924,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let recr_params = recruit::Params::new(
         args.minimizer_kw.unwrap_or_else(|| tech.default_minim_size()),
         args.minim_matches.unwrap_or_else(|| tech.default_minim_matches()),
-        args.minim_groups)?;
+        2000)?; // TODO: 1000 must be a parameter.
 
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;
