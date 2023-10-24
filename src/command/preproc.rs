@@ -15,6 +15,7 @@ use std::{
 use colored::Colorize;
 use const_format::str_repeat;
 use htslib::bam;
+use regex::{Regex, RegexBuilder};
 use crate::{
     ext::{
         self,
@@ -39,6 +40,48 @@ use crate::{
     },
 };
 use super::paths;
+
+fn check_filename(
+    filename: &Path,
+    should_match: &Regex,
+    exp_format: &'static str,
+    shouldnt_match: &Regex,
+    wrong_format: &'static str,
+) -> Result<(), Error> {
+    if !filename.exists() {
+        return Err(Error::InvalidInput(format!("Input file {} does not exist", ext::fmt::path(filename))));
+    } else if let Some(s) = filename.to_str() {
+        if shouldnt_match.is_match(s) {
+            return Err(Error::InvalidInput(format!(
+                "Incorrect file format for {} (expected {}, found {}). Please check -i and -a arguments",
+                ext::fmt::path(filename), exp_format, wrong_format)));
+        } else if !should_match.is_match(s) {
+            log::warn!("Could not guess file format for {} (expected {}). Can lead to problems later",
+                ext::fmt::path(filename), exp_format);
+        }
+    } else {
+        log::warn!("Could not guess file format for {} (expected {}). Can lead to problems later",
+            ext::fmt::path(filename), exp_format);
+    }
+    Ok(())
+}
+
+/// Checks if input reads have fastq/fasta extensions, or input alignments have bam/cram extensions.
+pub(super) fn check_input_filenames(input: &[PathBuf], alns: &Option<PathBuf>) -> Result<(), Error> {
+    // Should only be run once, so there is no need for lazy static.
+    let re_fastx = RegexBuilder::new(r"\.f(ast)?[aq](\.[^.]{1,3})?$").case_insensitive(true).build().unwrap();
+    let re_bam = RegexBuilder::new(r"\.(bam|cram)$").case_insensitive(true).build().unwrap();
+    let fastx_descr = "fasta/fastq[.gz]";
+    let bam_descr = "bam/cram";
+
+    for filename in input {
+        check_filename(filename, &re_fastx, fastx_descr, &re_bam, bam_descr)?;
+    }
+    if let Some(filename) = alns {
+        check_filename(filename, &re_bam, bam_descr, &re_fastx, fastx_descr)?;
+    }
+    Ok(())
+}
 
 struct Args {
     input: Vec<PathBuf>,
@@ -128,6 +171,7 @@ impl Args {
                 "Similar dataset (-~) can only be used together with input reads (-i) \
                 or unindexed alignments (-a ... --no-index)");
         }
+        check_input_filenames(&self.input, &self.alns)?;
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");

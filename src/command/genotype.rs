@@ -128,6 +128,7 @@ impl Args {
                     "Neither reads (-i/--input) nor alignments (-a/--alignment) are provided"),
             }
         }
+        super::preproc::check_input_filenames(&self.input, &self.alns)?;
 
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
@@ -686,19 +687,18 @@ fn recruit_reads(
     log::info!("Generating recruitment targets");
     let mut target_builder = recruit::TargetBuilder::new(recr_params);
     let mut writers = Vec::with_capacity(n_filt_loci);
+    let mean_read_len = bg_distr.seq_info().mean_read_len();
 
     for locus in filt_loci.iter() {
-        target_builder.add(&locus.set);
+        target_builder.add(&locus.set, mean_read_len);
         // Output files with a large buffer (4 Mb).
         const BUFFER: usize = 4_194_304;
         writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
     let targets = target_builder.finalize();
-    let chunk_size = max(1,
-        (args.chunk_length as f64 / bg_distr.seq_info().mean_read_len()
+    let chunk_size = max(1, (args.chunk_length as f64 / mean_read_len
         * (if bg_distr.insert_distr().is_paired_end() { 0.5 } else { 1.0 })) as usize);
-    log::debug!("Chunk size = {}", chunk_size);
     if args.has_indexed_alignment() {
         let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
         let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
