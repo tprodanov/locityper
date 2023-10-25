@@ -86,6 +86,8 @@ def process(prefix, res, sol, filt, dist):
         weighted_dist += dist.loc[gt].dist * w
         weight_sum += w
         gt_probs[gt] = option['log10_prob']
+        if gt_probs[gt] is None:
+            gt_probs[gt] = np.nan
     weighted_dist /= weight_sum
 
     min_dist = dist.loc[filt_gts].dist.min()
