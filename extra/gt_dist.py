@@ -6,8 +6,9 @@ import collections
 import operator
 import argparse
 import numpy as np
+import os
 
-from common import open_stream
+from common import open_stream, temporary_filename
 
 
 def averaging_function(mode):
@@ -142,8 +143,16 @@ def main():
         help='Averaging function [%(default)s]. '
             'Possible values: `min`, `max`, `sum`, `mean`, or FLOAT: Hölder mean.')
     parser.add_argument('-v', '--verbose', action='store_true',
-        help='Produce more output')
+        help='Produce more output.')
+    parser.add_argument('-F', '--force', action='store_true',
+        help='Replace output file, if present.')
     args = parser.parse_args()
+
+    if os.path.exists(args.output):
+        if args.force:
+            os.remove(args.output)
+        else:
+            return
 
     targets = list(map(str.strip, args.genotype.split(',')))
     if args.input.endswith('.bam'):
@@ -159,7 +168,8 @@ def main():
     aver = averaging_function(args.averaging)
     best_dist = _process_distances(targets, contigs, distances, aver, args.verbose)
 
-    with open_stream(args.output, 'w') as out:
+    tmp_filename = temporary_filename(args.output)
+    with open_stream(tmp_filename, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         out.write('# target: {}\n'.format(args.genotype))
         out.write('# field: {}\n'.format(args.field))
@@ -167,6 +177,7 @@ def main():
         out.write('genotype\tdist\n')
         for query, dist in sorted(best_dist.items(), key=operator.itemgetter(1)):
             out.write('{}\t{:.10g}\n'.format(contigs.fmt_gt(query), dist))
+    os.rename(tmp_filename, args.output)
 
 
 if __name__ == '__main__':

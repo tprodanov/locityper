@@ -49,7 +49,7 @@ def main():
         help='CSV file with haplogroups')
     args = parser.parse_args()
 
-    tmp_filename = os.path.join(os.path.dirname(args.input), 'tmp-{}'.format(os.path.basename(args.input)))
+    tmp_filename = common.temporary_filename(args.input)
     with common.open_stream(args.haplogroups) as inp:
         fields, groups = load_haplogroups(inp)
     with common.open_stream(args.input) as inp, common.open_stream(tmp_filename, 'w') as out:
