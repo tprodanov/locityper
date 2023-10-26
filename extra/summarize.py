@@ -110,7 +110,7 @@ def process(prefix, res, sol, filt, dist):
 
     weighted_dist = '{:.5f}'.format(weighted_dist).rstrip('0').rstrip('.')
     warnings = '*' if 'warnings' not in res else ','.join(sorted(res['warnings']))
-    s1 = '{}{}\t{}\t{}\t{:.5f}\t{}\t{:.5f}\t{:.3f}\t{}\n'.format(
+    s1 = '{}{}\t{}\t{}\t{:.5f}\t{:.5f}\t{}\t{:.3f}\t{}\n'.format(
         prefix, filt.shape[0] if filt is not None else sol.shape[0], sol.shape[0], min_dist,
         pearson, spearman, weighted_dist, float(res['quality']), warnings)
 
