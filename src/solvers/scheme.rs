@@ -526,6 +526,13 @@ impl Genotyping {
         distr_cache: &DistrCache,
         all_contig_infos: &[Arc<ContigInfo>],
     ) {
+        let ploidy = self.genotypes[0].ploidy();
+        if n_reads < ploidy {
+            log::warn!("[{}] Impossible to find {}-ploid genotype from {} read(s)", self.tag, ploidy, n_reads);
+            self.warnings.push(GenotypingWarning::FewReads);
+            return;
+        }
+
         let (i, sum_weight) = ext::vec::IterExt::argmin(all_contig_infos.iter().map(|info| info.default_weight_sum()));
         let smallest_contig = &all_contig_infos[i];
         let mut exp_depth = 0.0;
@@ -534,7 +541,7 @@ impl Genotyping {
             let distr = distr_cache.get_inner_distribution(window_chars.gc_content);
             exp_depth += distr.inner().null_distr().mean() * window_chars.weight;
         }
-        exp_depth *= self.genotypes[0].ploidy() as f64;
+        exp_depth *= ploidy as f64;
         if (n_reads as f64) < 0.7 * exp_depth {
             log::warn!("[{}] There are fewer reads ({}) than expected (at least {:.2} \
                 for shortest contig of {} bp and average window weight {:.4})",
