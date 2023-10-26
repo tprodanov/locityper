@@ -234,7 +234,6 @@ pub struct ContigInfo {
 
     /// Default window weights (without boundary tweaking).
     default_weights: Vec<f64>,
-    default_weight_sum: f64,
 }
 
 impl ContigInfo {
@@ -274,7 +273,6 @@ impl ContigInfo {
             kmers_weight_calc: params.kmers_weight_calc.clone(),
             compl_weight_calc: params.compl_weight_calc.clone(),
             default_weights: Vec::with_capacity(n_windows as usize),
-            default_weight_sum: 0.0,
             complexities: seq::compl::linguistic_complexity_123(seq, neighb_size as usize),
         };
 
@@ -282,13 +280,9 @@ impl ContigInfo {
             let (start, end) = res.window_getter.ith_window(i);
             let chars = res.window_characteristics(start, end);
             res.default_weights.push(chars.weight);
-            res.default_weight_sum += chars.weight;
             writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}\t{:.5}",
                 contig_name, start, end, chars.gc_content, chars.uniq_kmer_frac, chars.ling_compl, chars.weight)
                 .map_err(add_path!(!))?;
-        }
-        if res.default_weight_sum == 0.0 {
-            log::error!("[{}] Contig {} has no useful windows", contigs.tag(), contig_name);
         }
         Ok(res)
     }
@@ -341,10 +335,6 @@ impl ContigInfo {
     /// Default window weights (can change due to random tweaking).
     pub fn default_weights(&self) -> &[f64] {
         &self.default_weights
-    }
-
-    pub fn default_weight_sum(&self) -> f64 {
-        self.default_weight_sum
     }
 
     /// Returns window range within the contig based on the read alignment range.

@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, BufRead},
     process::{Command, Stdio},
-    cmp::{min, max},
+    cmp::{min, max, Ordering},
     path::{Path, PathBuf},
     time::Instant,
     sync::Arc,
@@ -534,12 +534,17 @@ impl LocusData {
 }
 
 /// Removes all files with `.gz` extension, as well as `alns` directory, if it exists.
-fn clean_dir(dir: &Path) -> Result<(), Error> {
+fn clean_dir(dir: &Path, n_warnings: &mut usize) -> Result<(), Error> {
     let gz_files = ext::sys::filenames_with_ext(dir, "gz")?;
     let alns_dir = dir.join(paths::ALNS_DIR);
     let alns_exist = alns_dir.exists();
     if !gz_files.is_empty() || alns_exist {
-        log::warn!("    Partially cleaning {}", ext::fmt::path(dir));
+        match (*n_warnings).cmp(&3) {
+            Ordering::Less  => log::warn!("    Partially cleaning {}", ext::fmt::path(dir)),
+            Ordering::Equal => log::warn!("    More directories cleaned, warnings suppressed"),
+            Ordering::Greater => {}
+        }
+        *n_warnings += 1;
     }
     for filename in gz_files.into_iter() {
         if let Err(e) = fs::remove_file(&filename) {
@@ -567,6 +572,7 @@ fn load_loci(
     ext::sys::mkdir(&out_loci_dir)?;
     let mut loci = Vec::new();
     let mut total_entries = 0;
+    let mut n_warnings = 0;
     let mut loci_names = HashSet::default();
 
     for db_path in databases {
@@ -597,7 +603,7 @@ fn load_loci(
                 match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS)) {
                     Ok(set) => {
                         let locus_data = LocusData::new(set, &path, &out_loci_dir);
-                        if rerun.prepare_and_clean_dir(&locus_data.out_dir, clean_dir)? {
+                        if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
                             loci.push(locus_data);
                         }
                     },

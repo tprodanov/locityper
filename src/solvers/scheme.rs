@@ -423,6 +423,8 @@ pub enum GenotypingWarning {
     NoReads,
     /// There are some reads, but fewer than expected.
     FewReads,
+    /// There are more reads than expected.
+    TooManyReads,
     /// Even the best genotype has very low quality.
     NoProbableGenotype,
     /// Two predicted genotypes are very far apart.
@@ -434,6 +436,7 @@ impl GenotypingWarning {
         match self {
             Self::NoReads => "NoReads",
             Self::FewReads => "FewReads",
+            Self::TooManyReads => "TooManyReads",
             Self::NoProbableGenotype => "NoProbableGenotype",
             Self::GtsFarApart => "GtsFarApart",
         }
@@ -526,28 +529,42 @@ impl Genotyping {
         distr_cache: &DistrCache,
         all_contig_infos: &[Arc<ContigInfo>],
     ) {
-        let ploidy = self.genotypes[0].ploidy();
-        if n_reads < ploidy {
-            log::warn!("[{}] Impossible to find {}-ploid genotype from {} read(s)", self.tag, ploidy, n_reads);
+        let gt = &self.genotypes[0];
+        if n_reads < gt.ploidy() {
+            log::warn!("[{}] Impossible to find {}-ploid genotype from {} read(s)", self.tag, gt.ploidy(), n_reads);
             self.warnings.push(GenotypingWarning::FewReads);
             return;
         }
 
-        let (i, sum_weight) = ext::vec::IterExt::argmin(all_contig_infos.iter().map(|info| info.default_weight_sum()));
-        let smallest_contig = &all_contig_infos[i];
-        let mut exp_depth = 0.0;
-        for (start, end) in smallest_contig.default_windows() {
-            let window_chars = smallest_contig.window_characteristics(start, end);
-            let distr = distr_cache.get_inner_distribution(window_chars.gc_content);
-            exp_depth += distr.inner().null_distr().mean() * window_chars.weight;
+        let mut lower_bound = 0.0;
+        let mut upper_bound = 0.0;
+        for contig_id in gt.ids() {
+            let contig_info = &all_contig_infos[contig_id.ix()];
+            for (start, end) in contig_info.default_windows() {
+                let window_chars = contig_info.window_characteristics(start, end);
+                let m = distr_cache.get_inner_distribution(window_chars.gc_content).inner().null_distr().mean();
+                lower_bound += window_chars.weight * m;
+                upper_bound += m;
+            }
         }
-        exp_depth *= ploidy as f64;
-        if (n_reads as f64) < 0.7 * exp_depth {
-            log::warn!("[{}] There are fewer reads ({}) than expected (at least {:.2} \
-                for shortest contig of {} bp and average window weight {:.4})",
-                self.tag, n_reads, exp_depth, smallest_contig.window_getter().len(),
-                sum_weight / f64::from(smallest_contig.n_windows()));
+
+        /// Simple heuristic: multiply/divide expected read depth by 2 at read depth = 5, by 1.5 at read depth = 200.
+        fn bound_multiplier(x: f64) -> f64 {
+            const X1: f64 = 5.0;
+            const X2: f64 = 200.0;
+            const Y1: f64 = 2.0;
+            const Y2: f64 = 1.5;
+            (x.clamp(X1, X2) - X1) / (X2 - X1) * (Y2 - Y1) + Y1
+        }
+
+        if (n_reads as f64) < lower_bound / bound_multiplier(lower_bound) {
+            log::warn!("[{}] There are fewer reads ({}) than expected (≥ {:.2} for {})",
+                self.tag, n_reads, lower_bound, gt);
             self.warnings.push(GenotypingWarning::FewReads);
+        } else if (n_reads as f64) > upper_bound * bound_multiplier(upper_bound) {
+            log::warn!("[{}] There are much more reads ({}) than expected ({:.2} for {})",
+                self.tag, n_reads, upper_bound, gt);
+            self.warnings.push(GenotypingWarning::TooManyReads);
         }
     }
 
