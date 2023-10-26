@@ -877,36 +877,45 @@ fn analyze_locus(
         fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
     }
 
-    if is_paired_end && args.debug >= DebugLvl::Full {
-        let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
-        let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
-        all_alns.write_read_pair_info::<false>(pairs_writer, contigs).map_err(add_path!(read_pairs_filename))?;
-    }
-
-    let contig_ids: Vec<ContigId> = contigs.ids().collect();
-    let (genotypes, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
-    if genotypes.is_empty() {
-        return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
-    }
-
-    let haplotype_alns_filename = locus.db_locus_dir.join(super::paths::LOCUS_ALNS_BAM);
-    let contig_distances = if haplotype_alns_filename.exists() {
-        Some(dist::load_edit_distances(haplotype_alns_filename, &contigs)?)
+    let genotyping = if all_alns.reads().is_empty() {
+        log::error!("No reads available for {}", locus.set.tag());
+        scheme::Genotyping::empty_result(locus.set.tag().to_string(), vec![scheme::GenotypingWarning::NoReads])
     } else {
-        None
+        if is_paired_end && args.debug >= DebugLvl::Full {
+            let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
+            let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
+            all_alns.write_read_pair_info::<false>(pairs_writer, contigs).map_err(add_path!(read_pairs_filename))?;
+        }
+
+        let contig_ids: Vec<ContigId> = contigs.ids().collect();
+        let (genotypes, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
+        if genotypes.is_empty() {
+            return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
+        }
+
+        let haplotype_alns_filename = locus.db_locus_dir.join(super::paths::LOCUS_ALNS_BAM);
+        let contig_distances = if haplotype_alns_filename.exists() {
+            Some(dist::load_edit_distances(haplotype_alns_filename, &contigs)?)
+        } else {
+            None
+        };
+
+        let data = scheme::Data {
+            scheme: Arc::clone(scheme),
+            contigs: Arc::clone(contigs),
+            contig_distances,
+            distr_cache: Arc::clone(distr_cache),
+            assgn_params: args.assgn_params.clone(),
+            debug: args.debug,
+            threads: usize::from(args.threads),
+            all_alns, genotypes, priors, all_contig_infos, is_paired_end,
+        };
+        scheme::solve(data, &locus.out_dir, &mut rng)?
     };
 
-    let data = scheme::Data {
-        scheme: Arc::clone(scheme),
-        contigs: Arc::clone(contigs),
-        contig_distances,
-        distr_cache: Arc::clone(distr_cache),
-        assgn_params: args.assgn_params.clone(),
-        debug: args.debug,
-        threads: usize::from(args.threads),
-        all_alns, genotypes, priors, all_contig_infos, is_paired_end,
-    };
-    scheme::solve(data, &locus.out_dir, &mut rng)?;
+    let res_filename = locus.out_dir.join(super::paths::RES_JSON);
+    let mut res_writer = ext::sys::create_gzip(&res_filename)?;
+    genotyping.to_json().write_pretty(&mut res_writer, 4).map_err(add_path!(res_filename))?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));
     Ok(())

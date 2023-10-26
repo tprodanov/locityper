@@ -49,6 +49,10 @@ fn check_filename(
     wrong_format: &'static str,
 ) -> Result<(), Error> {
     if !filename.exists() {
+        if filename == std::ffi::OsStr::new("!") {
+            log::debug!("Do not check input fliename `!`");
+            return Ok(());
+        }
         return Err(Error::InvalidInput(format!("Input file {} does not exist", ext::fmt::path(filename))));
     } else if let Some(s) = filename.to_str() {
         if shouldnt_match.is_match(s) {

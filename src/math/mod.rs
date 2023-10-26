@@ -2,24 +2,24 @@ pub mod distr;
 
 use statrs::distribution::{StudentsT, ContinuousCDF};
 
-/// Constant log(10).
-pub const LOG10: f64 = 2.302585092994045684_f64;
-/// Constant 1 / log(10).
-pub const INV_LOG10: f64 = 0.4342944819032518277_f64;
-
 pub struct Ln;
 
 impl Ln {
+    /// log(10).
+    pub const LN10: f64 = 2.302585092994045684_f64;
+    /// 1 / log(10).
+    pub const INV_LN10: f64 = 0.4342944819032518277_f64;
+
     /// Converts log10 value into natural log value.
     #[inline]
     pub fn from_log10(l10: f64) -> f64 {
-        l10 * LOG10
+        l10 * Self::LN10
     }
 
     /// Converts natural log value into log10 value.
     #[inline]
     pub fn to_log10(ln: f64) -> f64 {
-        ln * INV_LOG10
+        ln * Self::INV_LN10
     }
 
     /// Calculates *log(exp(a) + exp(b))*.

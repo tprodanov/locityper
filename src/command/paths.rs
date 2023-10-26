@@ -15,8 +15,10 @@ pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
 /// Dendrogram is stored in `database/loci/<locus_name>/LOCUS_DENDROGRAM`.
 pub(super) const LOCUS_DENDROGRAM: &'static str = "all_haplotypes.nwk";
 
-/// Background distributions are stored in `output/bg/BG_DISTR`.
+/// Background distributions are stored in `output/BG_DISTR`.
 pub(super) const BG_DISTR: &'static str = "distr.gz";
+/// Save results to `output/RES_JSON`.
+pub(super) const RES_JSON: &'static str = "res.json.gz";
 /// Store alignments in `output/ALNS_DIR/GENOTYPE.bam`.
 pub const ALNS_DIR: &'static str = "alns";
 

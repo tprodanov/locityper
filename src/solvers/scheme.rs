@@ -416,23 +416,29 @@ impl Likelihoods {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GenotypingWarning {
+    /// There are very no reads available for genotyping.
+    NoReads,
+    /// Even the best genotype has very low quality.
+    NoProbableGenotype,
     /// Two predicted genotypes are very far apart.
-    FarApart,
+    GtsFarApart,
 }
 
 impl GenotypingWarning {
     pub fn to_str(&self) -> &'static str {
         match self {
-            Self::FarApart => "gts_far_apart",
+            Self::NoReads => "NoReads",
+            Self::NoProbableGenotype => "NoProbableGenotype",
+            Self::GtsFarApart => "GtsFarApart",
         }
     }
 
-    pub fn from_string(s: &str) -> Result<Self, Error> {
-        match s {
-            "gts_far_apart" => Ok(Self::FarApart),
-            _ => Err(Error::ParsingError(format!("Unknown warning {:?}", s))),
-        }
-    }
+    // pub fn from_string(s: &str) -> Result<Self, Error> {
+    //     match s {
+    //         "GtsFarApart" => Ok(Self::FarApart),
+    //         _ => Err(Error::ParsingError(format!("Unknown warning {:?}", s))),
+    //     }
+    // }
 }
 
 impl Into<json::JsonValue> for GenotypingWarning {
@@ -462,6 +468,19 @@ pub struct Genotyping {
 }
 
 impl Genotyping {
+    /// Creates empty result.
+    pub fn empty_result(tag: String, warnings: Vec<GenotypingWarning>) -> Self {
+        Self {
+            tag, warnings,
+            genotypes: Vec::new(),
+            assgn_counts: Vec::new(),
+            mean_sds: Vec::new(),
+            ln_probs: Vec::new(),
+            distances: Vec::new(),
+            quality: 0.0,
+        }
+    }
+
     pub fn print_log(&self) {
         let (mean, sd) = self.mean_sds[0];
         log::info!("    Best genotype for {}: {},  likelihood = {:.2} ± {:.2}, quality = {:.1}, confidence = {:.4}%",
@@ -471,41 +490,51 @@ impl Genotyping {
 
     pub fn issue_warnings(&mut self) {
         self.warnings.clear();
-        // ln(0.1)
-        const LN_01: f64 = -2.3025850929940455;
         const DIST_THRESH: u32 = 100;
+
+        let ln_prob0 = *self.ln_probs.first().expect("Expected at least one genotype");
+        // < 0.01
+        if ln_prob0.is_nan() || ln_prob0 < -2.0 * Ln::LN10 {
+            self.warnings.push(GenotypingWarning::NoProbableGenotype);
+            log::warn!("[{}] Best genotype {} is improbable (10^{:.5} = {:.5})",
+                self.tag, self.genotypes[0], Ln::to_log10(ln_prob0), ln_prob0.exp());
+        }
         for (i, (&ln_prob, &dist)) in self.ln_probs.iter().zip(&self.distances).enumerate() {
             if let Some(d) = dist {
-                if ln_prob >= LN_01 && d > DIST_THRESH {
-                    self.warnings.push(GenotypingWarning::FarApart);
-                    log::warn!("Genotypes {} and {} are both probable ({:.5} and {:.5}), \
+                if ln_prob >= ln_prob0 - Ln::LN10 && d > DIST_THRESH {
+                    self.warnings.push(GenotypingWarning::GtsFarApart);
+                    log::warn!("[{}] Genotypes {} and {} are similarly probable ({:.5} and {:.5}), \
                         but have high edit distance between each other ({})",
-                        self.genotypes[0], self.genotypes[i], self.ln_probs[0].exp(), self.ln_probs[i].exp(), d);
+                        self.tag, self.genotypes[0], self.genotypes[i], ln_prob0.exp(), self.ln_probs[i].exp(), d);
+                    break;
                 }
             }
         }
     }
 
     pub fn to_json(&self) -> json::JsonValue {
-        let options: Vec<_> = self.genotypes.iter().enumerate().map(|(i, gt)| {
-            let mut obj = json::object! {
-                genotype: gt.name(),
-                lik_mean: Ln::to_log10(self.mean_sds[i].0),
-                lik_sd: Ln::to_log10(self.mean_sds[i].1),
-                prob: self.ln_probs[i].exp(),
-                log10_prob: Ln::to_log10(self.ln_probs[i]),
-            };
-            if let Some(d) = self.distances[i] {
-                obj.insert::<u32>("distance", d.into()).unwrap();
-            }
-            obj
-        }).collect();
         let mut res = json::object! {
             locus: &self.tag as &str,
-            genotype: self.genotypes[0].name(),
             quality: self.quality,
-            options: options,
         };
+
+        if !self.genotypes.is_empty() {
+            res.insert("genotype", self.genotypes[0].name()).unwrap();
+            let options: Vec<_> = self.genotypes.iter().enumerate().map(|(i, gt)| {
+                let mut obj = json::object! {
+                    genotype: gt.name(),
+                    lik_mean: Ln::to_log10(self.mean_sds[i].0),
+                    lik_sd: Ln::to_log10(self.mean_sds[i].1),
+                    prob: self.ln_probs[i].exp(),
+                    log10_prob: Ln::to_log10(self.ln_probs[i]),
+                };
+                if let Some(d) = self.distances[i] {
+                    obj.insert::<u32>("distance", d.into()).unwrap();
+                }
+                obj
+            }).collect();
+            res.insert("options", options).unwrap();
+        }
         if !self.warnings.is_empty() {
             res.insert::<&[GenotypingWarning]>("warnings", &self.warnings).unwrap();
         }
@@ -603,7 +632,7 @@ pub fn solve(
     mut data: Data,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
-) -> Result<(), Error>
+) -> Result<Genotyping, Error>
 {
     let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
@@ -666,12 +695,6 @@ pub fn solve(
     let data = &data;
     let mut genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes,
         &data.assgn_params, &data.contig_distances);
-    genotyping.print_log();
-    genotyping.issue_warnings();
-    let json_filename = locus_dir.join("res.json.gz");
-    let mut json_writer = ext::sys::create_gzip(&json_filename)?;
-    genotyping.to_json().write_pretty(&mut json_writer, 4).map_err(add_path!(json_filename))?;
-
     if data.assgn_params.out_bams > 0 {
         let bam_dir = locus_dir.join(crate::command::paths::ALNS_DIR);
         ext::sys::mkdir(&bam_dir)?;
@@ -685,7 +708,9 @@ pub fn solve(
             model::bam::write_bam(&bam_path, gt, data, &mut contig_to_tid, assgn_counts)?
         }
     }
-    Ok(())
+    genotyping.print_log();
+    genotyping.issue_warnings();
+    Ok(genotyping)
 }
 
 /// Task, sent to the workers: stage index and a vector of genotype indices.
