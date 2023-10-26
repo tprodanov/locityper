@@ -61,8 +61,12 @@ impl Ln {
             1 => f(&a[0]),
             _ => {
                 let m = a.iter().map(|v| f(v)).fold(f64::NEG_INFINITY, f64::max);
-                let s = a.iter().fold(0.0_f64, |acc, el| acc + (f(&el) - m).exp());
-                m + s.ln()
+                if m.is_infinite() {
+                    m
+                } else {
+                    let s = a.iter().fold(0.0_f64, |acc, el| acc + (f(&el) - m).exp());
+                    m + s.ln()
+                }
             },
         }
     }
@@ -75,8 +79,12 @@ impl Ln {
             1 => Ln::add(init, f(&a[0])),
             _ => {
                 let m = a.iter().map(|v| f(v)).fold(init, f64::max);
-                let s = a.iter().fold((init - m).exp(), |acc, el| acc + (f(&el) - m).exp());
-                m + s.ln()
+                if m.is_infinite() {
+                    m
+                } else {
+                    let s = a.iter().fold((init - m).exp(), |acc, el| acc + (f(&el) - m).exp());
+                    m + s.ln()
+                }
             },
         }
     }

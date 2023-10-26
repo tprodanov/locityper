@@ -154,7 +154,11 @@ def load_and_process(tup, tags, input_fmt, dist_fmt):
         filtering = None
     dist = pd.read_csv(dist_fmt.format(**d), sep='\t', comment='#')
     prefix = ''.join(map('{}\t'.format, tup))
-    return process(prefix, res, sol, filtering, dist)
+    try:
+        return process(prefix, res, sol, filtering, dist)
+    except:
+        sys.stderr.write(f'Encountered problem at directory {input_dir}')
+        raise
 
 
 def main():

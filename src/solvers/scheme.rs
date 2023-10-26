@@ -409,7 +409,7 @@ impl Likelihoods {
         ln_probs.truncate(n);
         let norm_fct = Ln::sum(&ln_probs);
         ln_probs.iter_mut().for_each(|v| *v -= norm_fct);
-        let quality = Phred::from_ln_prob(Ln::sum(&ln_probs[1..]));
+        let quality = Phred::from_ln_prob(Ln::sum(&ln_probs[1..])).min(1e9);
         Genotyping {
             genotypes: out_genotypes,
             warnings: Vec::new(),
