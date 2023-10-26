@@ -41,7 +41,7 @@ impl EditDist {
 
 impl fmt::Display for EditDist {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "{}/{}", self.edit, self.read_len)
+        write!(f, "{}/{}", self.edit, self.read_len)
     }
 }
 

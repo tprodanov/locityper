@@ -531,10 +531,26 @@ impl Genotyping {
         all_contig_infos: &[Arc<ContigInfo>],
     ) {
         let gt = &self.genotypes[0];
-        if n_reads < gt.ploidy() {
-            log::warn!("[{}] Impossible to find {}-ploid genotype from {} read(s)", self.tag, gt.ploidy(), n_reads);
+        let ploidy = gt.ploidy();
+        if n_reads < ploidy {
+            log::warn!("[{}] Impossible to find {}-ploid genotype from {} read(s)", self.tag, ploidy, n_reads);
             self.warnings.push(GenotypingWarning::FewReads);
             return;
+        } else if ploidy > 1 && n_reads < ploidy * 10 {
+            let k = ploidy as f64;
+            let n = n_reads as f64;
+            // Expected number of zeros in the multinomial distribution with k possibilities, all probabilities = 1/k,
+            // and n observations: (k-1)^n / k^(n-1).
+            let exp_zeros = ((k - 1.0).ln() * n - k.ln() * (n - 1.0)).exp();
+            if exp_zeros > 0.1 {
+                log::warn!("[{}] Too few reads ({}) to find {}-ploid genotype: \
+                    expected number of unobserved contigs = {:.4}", self.tag, ploidy, n_reads, exp_zeros);
+                self.warnings.push(GenotypingWarning::FewReads);
+                return;
+            } else if exp_zeros > 0.01 {
+                log::debug!("    [{}] Possibly too few reads ({}) to find {}-ploid genotype: \
+                    expected number of unobserved contigs = {:.4}. Continuing", self.tag, ploidy, n_reads, exp_zeros);
+            }
         }
 
         let mut lbound = 0.0;
