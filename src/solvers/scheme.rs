@@ -24,6 +24,7 @@ use crate::{
         vec::F64Ext,
         rand::XoshiroRng,
     },
+    bg::{BgDistr, ReadDepth},
     math::{
         self, Ln, Phred, RoundDiv,
         distr::WithMoments,
@@ -526,7 +527,7 @@ impl Genotyping {
     pub fn check_num_of_reads(
         &mut self,
         n_reads: usize,
-        distr_cache: &DistrCache,
+        bg_depth: &ReadDepth,
         all_contig_infos: &[Arc<ContigInfo>],
     ) {
         let gt = &self.genotypes[0];
@@ -542,26 +543,31 @@ impl Genotyping {
             let contig_info = &all_contig_infos[contig_id.ix()];
             for (start, end) in contig_info.default_windows() {
                 let window_chars = contig_info.window_characteristics(start, end);
-                let m = distr_cache.get_inner_distribution(window_chars.gc_content).inner().null_distr().mean();
+                // Note: number of reads is actually the number of read pairs.
+                // However, bg_depth also only counts the number of read pairs.
+                let m = bg_depth.depth_distribution(window_chars.gc_content).mean();
                 lower_bound += window_chars.weight * m;
                 upper_bound += m;
             }
         }
 
-        /// Simple heuristic: multiply/divide expected read depth by 2 at read depth = 5, by 1.5 at read depth = 200.
-        fn bound_multiplier(x: f64) -> f64 {
-            const X1: f64 = 5.0;
-            const X2: f64 = 200.0;
-            const Y1: f64 = 2.0;
-            const Y2: f64 = 1.5;
-            (x.clamp(X1, X2) - X1) / (X2 - X1) * (Y2 - Y1) + Y1
-        }
+        // Simple heuristic:
+        //    at <= 10 reads:   lower_bound *= 0;   upper_bound *= 3,
+        //    at >= 1000 reads: lower_bound *= 0.5; upper_bound *= 2.
+        const X1: f64 = 10.0;
+        const X2: f64 = 1000.0;
+        const LY1: f64 = 0.0;
+        const LY2: f64 = 0.5;
+        const UY1: f64 = 3.0;
+        const UY2: f64 = 2.0;
+        let lmult = math::interpolate((X1, X2), (LY1, LY2), lower_bound.clamp(X1, X2));
+        let umult = math::interpolate((X1, X2), (UY1, UY2), upper_bound.clamp(X1, X2));
 
-        if (n_reads as f64) < lower_bound / bound_multiplier(lower_bound) {
+        if (n_reads as f64) < lmult * lower_bound {
             log::warn!("[{}] There are fewer reads ({}) than expected (≥ {:.2} for {})",
                 self.tag, n_reads, lower_bound, gt);
             self.warnings.push(GenotypingWarning::FewReads);
-        } else if (n_reads as f64) > upper_bound * bound_multiplier(upper_bound) {
+        } else if (n_reads as f64) > umult * upper_bound {
             log::warn!("[{}] There are much more reads ({}) than expected ({:.2} for {})",
                 self.tag, n_reads, upper_bound, gt);
             self.warnings.push(GenotypingWarning::TooManyReads);
@@ -686,6 +692,7 @@ fn merge_files(filenames: &[PathBuf]) -> Result<(), Error> {
 
 pub fn solve(
     mut data: Data,
+    bg_distr: &BgDistr,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
 ) -> Result<Genotyping, Error>
@@ -766,7 +773,7 @@ pub fn solve(
     }
     genotyping.print_log();
     genotyping.issue_warnings();
-    genotyping.check_num_of_reads(data.all_alns.reads().len(), &data.distr_cache, &data.all_contig_infos);
+    genotyping.check_num_of_reads(data.all_alns.reads().len(), bg_distr.depth(), &data.all_contig_infos);
     Ok(genotyping)
 }
 

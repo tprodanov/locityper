@@ -916,7 +916,7 @@ fn analyze_locus(
             threads: usize::from(args.threads),
             all_alns, genotypes, priors, all_contig_infos, is_paired_end,
         };
-        scheme::solve(data, &locus.out_dir, &mut rng)?
+        scheme::solve(data, bg_distr, &locus.out_dir, &mut rng)?
     };
 
     let res_filename = locus.out_dir.join(super::paths::RES_JSON);
