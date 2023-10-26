@@ -552,16 +552,16 @@ impl Genotyping {
         }
 
         // Simple heuristic:
-        //    at <= 10 reads:   lbound *= 0;   ubound *= 3,
-        //    at >= 1000 reads: lbound *= 0.5; ubound *= 2.
-        const X1: f64 = 10.0;
+        //    at <= 10 reads:   lbound *= 0;   ubound *= 10,
+        //    at >= 1000 reads: lbound *= 0.5; ubound *=  2.
+        const X1: f64 =   10.0;
         const X2: f64 = 1000.0;
         const LY1: f64 = 0.0;
         const LY2: f64 = 0.5;
-        const UY1: f64 = 3.0;
-        const UY2: f64 = 2.0;
-        let lbound2 = lbound * math::interpolate((X1, X2), (LY1, LY2), lbound.clamp(X1, X2));
-        let ubound2 = (ubound * math::interpolate((X1, X2), (UY1, UY2), ubound.clamp(X1, X2))).max(9.5);
+        const UY1: f64 = 10.0;
+        const UY2: f64 =  2.0;
+        let lbound2 = math::interpolate((X1, X2), (LY1, LY2), lbound.clamp(X1, X2)) * lbound;
+        let ubound2 = math::interpolate((X1, X2), (UY1, UY2), ubound.clamp(X1, X2)) * ubound.max(1.5);
 
         if (n_reads as f64) < lbound2 {
             log::warn!("[{}] There are fewer reads ({}) than expected (≥ {:.2} for {})",
