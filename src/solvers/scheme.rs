@@ -24,7 +24,10 @@ use crate::{
         vec::F64Ext,
         rand::XoshiroRng,
     },
-    math::{self, Ln, Phred, RoundDiv},
+    math::{
+        self, Ln, Phred, RoundDiv,
+        distr::WithMoments,
+    },
     err::{Error, validate_param, add_path},
     seq::{
         contigs::{ContigNames, Genotype},
@@ -418,6 +421,8 @@ impl Likelihoods {
 pub enum GenotypingWarning {
     /// There are very no reads available for genotyping.
     NoReads,
+    /// There are some reads, but fewer than expected.
+    FewReads,
     /// Even the best genotype has very low quality.
     NoProbableGenotype,
     /// Two predicted genotypes are very far apart.
@@ -428,6 +433,7 @@ impl GenotypingWarning {
     pub fn to_str(&self) -> &'static str {
         match self {
             Self::NoReads => "NoReads",
+            Self::FewReads => "FewReads",
             Self::NoProbableGenotype => "NoProbableGenotype",
             Self::GtsFarApart => "GtsFarApart",
         }
@@ -509,6 +515,32 @@ impl Genotyping {
                     break;
                 }
             }
+        }
+    }
+
+    /// Tests the total number of reads and issues a warning if the number of reads
+    /// is significantly smaller than expected.
+    pub fn check_num_of_reads(
+        &mut self,
+        n_reads: usize,
+        distr_cache: &DistrCache,
+        all_contig_infos: &[Arc<ContigInfo>],
+    ) {
+        let (i, sum_weight) = ext::vec::IterExt::argmin(all_contig_infos.iter().map(|info| info.default_weight_sum()));
+        let smallest_contig = &all_contig_infos[i];
+        let mut exp_depth = 0.0;
+        for (start, end) in smallest_contig.default_windows() {
+            let window_chars = smallest_contig.window_characteristics(start, end);
+            let distr = distr_cache.get_inner_distribution(window_chars.gc_content);
+            exp_depth += distr.inner().null_distr().mean() * window_chars.weight;
+        }
+        exp_depth *= self.genotypes[0].ploidy() as f64;
+        if (n_reads as f64) < 0.7 * exp_depth {
+            log::warn!("[{}] There are fewer reads ({}) than expected (at least {:.2} \
+                for shortest contig of {} bp and average window weight {:.4})",
+                self.tag, n_reads, exp_depth, smallest_contig.window_getter().len(),
+                sum_weight / f64::from(smallest_contig.n_windows()));
+            self.warnings.push(GenotypingWarning::FewReads);
         }
     }
 
@@ -710,6 +742,7 @@ pub fn solve(
     }
     genotyping.print_log();
     genotyping.issue_warnings();
+    genotyping.check_num_of_reads(data.all_alns.reads().len(), &data.distr_cache, &data.all_contig_infos);
     Ok(genotyping)
 }
 

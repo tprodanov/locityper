@@ -71,6 +71,11 @@ impl DistrCache {
         Self(cached_distrs)
     }
 
+    /// Returns distribution corresponding to GC content `gc`, without accounting for window weight.
+    pub fn get_inner_distribution(&self, gc: u8) -> &CachedDistr {
+        &self.0[usize::from(gc)]
+    }
+
     /// Returns a box to either `NBinom`, `WeightedDistr`, depending on GC-content and the weight of the window.
     pub fn get_distribution(&self, gc: u8, weight: f64) -> WindowDistr {
         if weight < 1e-7 {
