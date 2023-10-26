@@ -64,8 +64,11 @@ def load_tags(path1, path2):
 
 
 def process(prefix, res, sol, filt, dist):
-    max_stage = sol.stage.max()
-    sol = sol[sol.stage == max_stage].groupby('genotype').mean()
+    if sol is None:
+        sol = pd.DataFrame(columns=['genotype', 'lik'])
+    else:
+        max_stage = sol.stage.max()
+        sol = sol[sol.stage == max_stage].groupby('genotype').mean()
 
     if filt is not None:
         filt.set_index('genotype', inplace=True)
@@ -80,23 +83,36 @@ def process(prefix, res, sol, filt, dist):
     weighted_dist = 0.0
     weight_sum = 0.0
     gt_probs = {}
-    for option in res['options']:
+    for option in res.get('options', ()):
         gt = option['genotype']
         w = option['prob']
         weighted_dist += dist.loc[gt].dist * w
         weight_sum += w
         gt_probs[gt] = option['log10_prob']
         if gt_probs[gt] is None:
-            gt_probs[gt] = np.nan
-    weighted_dist /= weight_sum
+            gt_probs[gt] = -np.inf
+    if weight_sum > 0:
+        weighted_dist /= weight_sum
+    else:
+        weighted_dist = np.nan
 
     min_dist = dist.loc[filt_gts].dist.min()
     x = sol.lik
     y = dist.loc[sol.index].dist
+    try:
+        pearson = pearsonr(x, y).statistic
+    except ValueError:
+        pearson = np.nan
+    try:
+        spearman = spearmanr(x, y).statistic
+    except ValueError:
+        spearman = np.nan
+
     weighted_dist = '{:.10f}'.format(weighted_dist).rstrip('0').rstrip('.')
-    s1 = '{}{}\t{}\t{}\t{:.5f}\t{:.5f}\t{}\n'.format(
+    warnings = '*' if 'warnings' not in res else ','.join(sorted(res['warnings']))
+    s1 = '{}{}\t{}\t{}\t{:.5f}\t{:.5f}\t{}\t{:.3}\t{}\n'.format(
         prefix, filt.shape[0] if filt is not None else sol.shape[0], sol.shape[0], min_dist,
-        pearsonr(x, y).statistic, spearmanr(x, y).statistic, weighted_dist)
+        pearson, spearman, weighted_dist, float(res['quality']), warnings)
 
     highest_lik = sol.lik.max()
     interesting_gts = set(true_gts)
@@ -128,7 +144,10 @@ def load_and_process(tup, tags, input_fmt, dist_fmt):
     input_dir = input_fmt.format(**d)
     with gzip.open(os.path.join(input_dir, 'res.json.gz'), 'rt') as f:
         res = json.load(f)
-    sol = pd.read_csv(os.path.join(input_dir, 'sol.csv.gz'), sep='\t', comment='#')
+    try:
+        sol = pd.read_csv(os.path.join(input_dir, 'sol.csv.gz'), sep='\t', comment='#')
+    except FileNotFoundError:
+        sol = None
     try:
         filtering = pd.read_csv(os.path.join(input_dir, 'filter.csv.gz'), sep='\t', comment='#')
     except FileNotFoundError:
@@ -165,7 +184,8 @@ def main():
 
     out_summary = open_stream(f'{path_prefix}summary.csv.gz', 'w')
     out_summary.write('# {}\n'.format(' '.join(sys.argv)))
-    out_summary.write(f'{tags_prefix}total_gts\tafter_filt_gts\tmin_dist\tpearsonr\tspearmanr\tweighted_dist\n')
+    out_summary.write(f'{tags_prefix}total_gts\tafter_filt_gts\tmin_dist\tpearsonr\tspearmanr\tweighted_dist\t' +
+        'quality\twarnings\n')
 
     out_gts = open_stream(f'{path_prefix}gts.csv.gz', 'w')
     out_gts.write('# {}\n'.format(' '.join(sys.argv)))

@@ -884,7 +884,7 @@ fn analyze_locus(
     }
 
     let genotyping = if all_alns.reads().is_empty() {
-        log::error!("No reads available for {}", locus.set.tag());
+        log::error!("[{}] No available reads", locus.set.tag());
         scheme::Genotyping::empty_result(locus.set.tag().to_string(), vec![scheme::GenotypingWarning::NoReads])
     } else {
         if is_paired_end && args.debug >= DebugLvl::Full {
