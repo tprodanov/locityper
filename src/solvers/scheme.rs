@@ -513,9 +513,9 @@ impl Genotyping {
             if let Some(d) = dist {
                 if ln_prob >= ln_prob0 - Ln::LN10 && d > DIST_THRESH {
                     self.warnings.push(GenotypingWarning::GtsFarApart);
-                    log::warn!("[{}] Genotypes {} and {} are similarly probable ({:.5} and {:.5}), \
-                        but have high edit distance between each other ({})",
-                        self.tag, self.genotypes[0], self.genotypes[i], ln_prob0.exp(), self.ln_probs[i].exp(), d);
+                    log::warn!("[{}] Distant genotypes {} & {} (edit dist = {}) \
+                        have similar probabilities ({:.5} & {:.5})",
+                        self.tag, self.genotypes[0], self.genotypes[i], d, ln_prob0.exp(), self.ln_probs[i].exp());
                     break;
                 }
             }
