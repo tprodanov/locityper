@@ -537,8 +537,8 @@ impl Genotyping {
             return;
         }
 
-        let mut lower_bound = 0.0;
-        let mut upper_bound = 0.0;
+        let mut lbound = 0.0;
+        let mut ubound = 0.0;
         for contig_id in gt.ids() {
             let contig_info = &all_contig_infos[contig_id.ix()];
             for (start, end) in contig_info.default_windows() {
@@ -546,30 +546,30 @@ impl Genotyping {
                 // Note: number of reads is actually the number of read pairs.
                 // However, bg_depth also only counts the number of read pairs.
                 let m = bg_depth.depth_distribution(window_chars.gc_content).mean();
-                lower_bound += window_chars.weight * m;
-                upper_bound += m;
+                lbound += window_chars.weight * m;
+                ubound += m;
             }
         }
 
         // Simple heuristic:
-        //    at <= 10 reads:   lower_bound *= 0;   upper_bound *= 3,
-        //    at >= 1000 reads: lower_bound *= 0.5; upper_bound *= 2.
+        //    at <= 10 reads:   lbound *= 0;   ubound *= 3,
+        //    at >= 1000 reads: lbound *= 0.5; ubound *= 2.
         const X1: f64 = 10.0;
         const X2: f64 = 1000.0;
         const LY1: f64 = 0.0;
         const LY2: f64 = 0.5;
         const UY1: f64 = 3.0;
         const UY2: f64 = 2.0;
-        let lmult = math::interpolate((X1, X2), (LY1, LY2), lower_bound.clamp(X1, X2));
-        let umult = math::interpolate((X1, X2), (UY1, UY2), upper_bound.clamp(X1, X2));
+        let lbound2 = lbound * math::interpolate((X1, X2), (LY1, LY2), lbound.clamp(X1, X2));
+        let ubound2 = (ubound * math::interpolate((X1, X2), (UY1, UY2), ubound.clamp(X1, X2))).max(9.5);
 
-        if (n_reads as f64) < lmult * lower_bound {
+        if (n_reads as f64) < lbound2 {
             log::warn!("[{}] There are fewer reads ({}) than expected (≥ {:.2} for {})",
-                self.tag, n_reads, lower_bound, gt);
+                self.tag, n_reads, lbound, gt);
             self.warnings.push(GenotypingWarning::FewReads);
-        } else if (n_reads as f64) > umult * upper_bound {
+        } else if (n_reads as f64) > ubound2 {
             log::warn!("[{}] There are much more reads ({}) than expected ({:.2} for {})",
-                self.tag, n_reads, upper_bound, gt);
+                self.tag, n_reads, ubound, gt);
             self.warnings.push(GenotypingWarning::TooManyReads);
         }
     }
