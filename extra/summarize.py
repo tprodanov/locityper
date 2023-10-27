@@ -157,7 +157,7 @@ def load_and_process(tup, tags, input_fmt, dist_fmt):
     try:
         return process(prefix, res, sol, filtering, dist)
     except:
-        sys.stderr.write(f'Encountered problem at directory {input_dir}')
+        sys.stderr.write(f'Encountered problem at directory {input_dir}\n')
         raise
 
 

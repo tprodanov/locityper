@@ -19,7 +19,7 @@ use crate::{
     seq::{
         recruit, fastx, dist, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
-        kmers::Kmer,
+        kmers::{Kmer, KmerCount},
     },
     bg::{
         BgDistr, Technology, SequencingInfo,
@@ -65,6 +65,7 @@ struct Args {
     minimizer_kw: Option<(u8, u8)>,
     match_frac: Option<f64>,
     match_len: u32,
+    kmer_thresh_count: KmerCount,
     chunk_length: u64,
 
     assgn_params: AssgnParams,
@@ -98,6 +99,7 @@ impl Default for Args {
             minimizer_kw: None,
             match_frac: None,
             match_len: 2000,
+            kmer_thresh_count: 5,
             chunk_length: 3_000_000,
 
             assgn_params: Default::default(),
@@ -130,6 +132,7 @@ impl Args {
         }
         super::preproc::check_input_filenames(&self.input, &self.alns)?;
 
+        validate_param!(self.kmer_thresh_count > 0, "k-mer threshold must not be zero");
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
@@ -215,6 +218,8 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
             "-L, --match-len".green(), "INT".yellow(),
             super::fmt_def(defaults.match_len));
+        println!("    {:KEY$} {:VAL$}  Use only k-mers that appear less than {} times off target [{}].",
+            "    --kmer-thresh".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.kmer_thresh_count));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this sum length [{}].\n\
             {EMPTY}  Impacts runtime in multi-threaded read recruitment.",
             "-c, --chunk-len".green(), "INT".yellow(),
@@ -361,6 +366,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
                 args.match_frac = Some(parser.value()?.parse()?),
             Short('L') | Long("match-len") | Long("match-length") =>
                 args.match_len = parser.value()?.parse::<PrettyU32>()?.get(),
+            Long("kmer-thresh") => args.kmer_thresh_count = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-len") =>
                 args.chunk_length = parser.value()?.parse::<PrettyU64>()?.get(),
 
@@ -691,7 +697,7 @@ fn recruit_reads(
     }
 
     log::info!("Generating recruitment targets");
-    let mut target_builder = recruit::TargetBuilder::new(recr_params);
+    let mut target_builder = recruit::TargetBuilder::new(recr_params, args.kmer_thresh_count);
     let mut writers = Vec::with_capacity(n_filt_loci);
     let mean_read_len = bg_distr.seq_info().mean_read_len();
 

@@ -197,12 +197,10 @@ type MinimToLoci = IntMap<Minimizer, SmallVec<[(u16, bool); CAPACITY]>>;
 /// Vector of loci indices, to which the read was recruited.
 type Answer = Vec<u16>;
 
-/// k-mer is usable when it appears at most 4 times off target.
-const THRESH_KMER_COUNT: KmerCount = 4;
-
 /// Target builder. Can be converted to targets using `finalize()`.
 pub struct TargetBuilder {
     params: Params,
+    thresh_kmer_count: KmerCount,
     total_seqs: u32,
     buffer: Vec<(u32, Minimizer)>,
 
@@ -213,9 +211,11 @@ pub struct TargetBuilder {
 }
 
 impl TargetBuilder {
-    pub fn new(params: Params) -> Self {
+    /// Creates a new targets builder.
+    /// Discard k-mers that appear off target more than `thresh_kmer_count` times.
+    pub fn new(params: Params, thresh_kmer_count: KmerCount) -> Self {
         Self {
-            params,
+            params, thresh_kmer_count,
             total_seqs: 0,
             buffer: Vec::new(),
             minim_to_loci: Default::default(),
@@ -246,10 +246,10 @@ impl TargetBuilder {
                 let pos = pos as usize;
                 let is_usable = if u32::from(self.params.minimizer_k) <= base_k {
                     // Check Jellyfish k-mer that is centered around k-mer at `pos`.
-                    counts[min(pos.saturating_sub(shift), n_counts - 1)] <= THRESH_KMER_COUNT
+                    counts[min(pos.saturating_sub(shift), n_counts - 1)] < self.thresh_kmer_count
                 } else {
                     // Compare first and last Jellyfish k-mers contained in the k-mer at `pos`.
-                    counts[pos] <= THRESH_KMER_COUNT && counts[pos + shift] <= THRESH_KMER_COUNT
+                    counts[pos] < self.thresh_kmer_count && counts[pos + shift] < self.thresh_kmer_count
                 };
 
                 match self.minim_to_loci.entry(minimizer) {
