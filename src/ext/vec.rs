@@ -103,7 +103,7 @@ impl F64Ext {
 
     /// Returns maximal vector value.
     pub fn max(a: &[f64]) -> f64 {
-        a.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        IterExt::max(a.iter().copied())
     }
 
     /// Returns the index of the minimal value and the value itself.
@@ -184,6 +184,12 @@ impl IterExt {
             }
         }
         (k, opt)
+    }
+
+    /// Returns maximal f64 value across the iterator.
+    #[inline]
+    pub fn max(it: impl Iterator<Item = f64>) -> f64 {
+        it.fold(f64::NEG_INFINITY, f64::max)
     }
 
     /// Finds an index of the minimal value in the iterator and the value itself.

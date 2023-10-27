@@ -2,7 +2,7 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    thread,
+    thread, fmt,
     cmp::{min, max},
     io::{self, Write},
     time::{Instant, Duration},
@@ -21,7 +21,7 @@ use crate::{
     ext::{
         self,
         sys::GzFile,
-        vec::F64Ext,
+        vec::{F64Ext, IterExt},
         rand::XoshiroRng,
     },
     bg::{BgDistr, ReadDepth},
@@ -418,42 +418,38 @@ impl Likelihoods {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum GenotypingWarning {
     /// There are very no reads available for genotyping.
     NoReads,
-    /// There are some reads, but fewer than expected.
-    FewReads,
-    /// There are more reads than expected.
-    TooManyReads,
+    /// There are some reads, but fewer than expected (number of reads).
+    FewReads(u32),
+    /// There are more reads than expected (number of reads).
+    TooManyReads(u32),
     /// Even the best genotype has very low quality.
     NoProbableGenotype,
     /// Two predicted genotypes are very far apart.
     GtsFarApart,
+    /// There are many unexplained reads (percentage of unexplained reads).
+    UnexplainedReads(f64),
 }
 
-impl GenotypingWarning {
-    pub fn to_str(&self) -> &'static str {
+impl fmt::Display for GenotypingWarning {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::NoReads => "NoReads",
-            Self::FewReads => "FewReads",
-            Self::TooManyReads => "TooManyReads",
-            Self::NoProbableGenotype => "NoProbableGenotype",
-            Self::GtsFarApart => "GtsFarApart",
+            Self::NoReads => write!(f, "NoReads"),
+            Self::FewReads(count) => write!(f, "FewReads({})", count),
+            Self::TooManyReads(count) => write!(f, "TooManyReads({})", count),
+            Self::NoProbableGenotype => write!(f, "NoProbableGenotype"),
+            Self::GtsFarApart => write!(f, "GtsFarApart"),
+            Self::UnexplainedReads(perc) => write!(f, "UnexplainedReads({:.1}%)", perc),
         }
     }
-
-    // pub fn from_string(s: &str) -> Result<Self, Error> {
-    //     match s {
-    //         "GtsFarApart" => Ok(Self::FarApart),
-    //         _ => Err(Error::ParsingError(format!("Unknown warning {:?}", s))),
-    //     }
-    // }
 }
 
 impl Into<json::JsonValue> for GenotypingWarning {
     fn into(self) -> json::JsonValue {
-        json::JsonValue::String(self.to_str().to_string())
+        json::JsonValue::String(self.to_string())
     }
 }
 
@@ -526,26 +522,26 @@ impl Genotyping {
     /// is significantly smaller than expected.
     pub fn check_num_of_reads(
         &mut self,
-        n_reads: usize,
+        n_reads: u32,
         bg_depth: &ReadDepth,
         all_contig_infos: &[Arc<ContigInfo>],
     ) {
         let gt = &self.genotypes[0];
-        let ploidy = gt.ploidy();
+        let ploidy = gt.ploidy() as u32;
         if n_reads < ploidy {
             log::warn!("[{}] Impossible to find {}-ploid genotype from {} read(s)", self.tag, ploidy, n_reads);
-            self.warnings.push(GenotypingWarning::FewReads);
+            self.warnings.push(GenotypingWarning::FewReads(n_reads));
             return;
         } else if ploidy > 1 && n_reads < ploidy * 10 {
-            let k = ploidy as f64;
-            let n = n_reads as f64;
+            let k = f64::from(ploidy);
+            let n = f64::from(n_reads);
             // Expected number of zeros in the multinomial distribution with k possibilities, all probabilities = 1/k,
             // and n observations: (k-1)^n / k^(n-1).
             let exp_zeros = ((k - 1.0).ln() * n - k.ln() * (n - 1.0)).exp();
             if exp_zeros > 0.1 {
                 log::warn!("[{}] Too few reads ({}) to find {}-ploid genotype: \
                     expected number of unobserved contigs = {:.4}", self.tag, ploidy, n_reads, exp_zeros);
-                self.warnings.push(GenotypingWarning::FewReads);
+                self.warnings.push(GenotypingWarning::FewReads(n_reads));
                 return;
             } else if exp_zeros > 0.01 {
                 log::debug!("    [{}] Possibly too few reads ({}) to find {}-ploid genotype: \
@@ -579,17 +575,41 @@ impl Genotyping {
         let lbound2 = math::interpolate((X1, X2), (LY1, LY2), lbound.clamp(X1, X2)) * lbound;
         let ubound2 = math::interpolate((X1, X2), (UY1, UY2), ubound.clamp(X1, X2)) * ubound.max(1.5);
 
-        if (n_reads as f64) < lbound2 {
+        if f64::from(n_reads) < lbound2 {
             log::warn!("[{}] There are fewer reads ({}) than expected (≥ {:.2} for {})",
                 self.tag, n_reads, lbound, gt);
-            self.warnings.push(GenotypingWarning::FewReads);
-        } else if (n_reads as f64) > ubound2 {
+            self.warnings.push(GenotypingWarning::FewReads(n_reads));
+        } else if f64::from(n_reads) > ubound2 {
             log::warn!("[{}] There are much more reads ({}) than expected ({:.2} for {})",
                 self.tag, n_reads, ubound, gt);
-            self.warnings.push(GenotypingWarning::TooManyReads);
+            self.warnings.push(GenotypingWarning::TooManyReads(n_reads));
         }
     }
 
+    /// Checks reads that are much less likely at some other contig compared to the predicted genotype.
+    pub fn count_unexplained_reads(&mut self, all_alns: &AllAlignments) {
+        // log(100).
+        const LIK_DIFF: f64 = 4.605170185988092;
+        const UNEXPLAINED_FRAC: f64 = 0.2;
+
+        let mut unexplained = 0_u32;
+        let gt = &self.genotypes[0];
+        for read in all_alns.reads() {
+            let best_lik = IterExt::max(gt.ids().iter().map(|&id| read.best_at_contig(id)));
+            if best_lik + LIK_DIFF < read.max_lik() {
+                unexplained += 1;
+            }
+        }
+        let n_reads = all_alns.reads().len();
+        if unexplained > 1 && f64::from(unexplained) > n_reads as f64 * UNEXPLAINED_FRAC {
+            let unexpl_perc = 100.0 * f64::from(unexplained) / n_reads as f64;
+            log::warn!("[{}] Best genotype does not explain {}/{} reads ({:.1}%)",
+                self.tag, unexplained, n_reads, unexpl_perc);
+            self.warnings.push(GenotypingWarning::UnexplainedReads(unexpl_perc));
+        }
+    }
+
+    /// Converts genotyping result into JSON format.
     pub fn to_json(&self) -> json::JsonValue {
         let mut res = json::object! {
             locus: &self.tag as &str,
@@ -789,7 +809,8 @@ pub fn solve(
     }
     genotyping.print_log();
     genotyping.issue_warnings();
-    genotyping.check_num_of_reads(data.all_alns.reads().len(), bg_distr.depth(), &data.all_contig_infos);
+    genotyping.check_num_of_reads(data.all_alns.reads().len() as u32, bg_distr.depth(), &data.all_contig_infos);
+    genotyping.count_unexplained_reads(&data.all_alns);
     Ok(genotyping)
 }
 

@@ -431,7 +431,7 @@ impl GenotypeWindows {
         let mut thresh_prob = unmapped_prob - prob_diff;
         for (i, &contig_id) in self.genotype.ids().iter().enumerate() {
             let contig_ix = u8::try_from(i).unwrap();
-            let alns = groupped_alns.contig_aln_pairs(contig_id);
+            let alns = groupped_alns.contig_alns(contig_id);
             if !alns.is_empty() {
                 // First alignment should have highest probability.
                 thresh_prob = thresh_prob.max(alns[0].ln_prob() - prob_diff);

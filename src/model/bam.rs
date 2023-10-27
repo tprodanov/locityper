@@ -372,7 +372,7 @@ pub fn write_bam(
     for groupped_alns in data.all_alns.unused_reads() {
         aln_pairs.clear();
         for &id in unique_ids.iter() {
-            aln_pairs.extend(groupped_alns.contig_aln_pairs(id).iter());
+            aln_pairs.extend(groupped_alns.contig_alns(id).iter());
         }
         aln_pairs.sort_unstable_by(|a, b| b.ln_prob().total_cmp(&a.ln_prob()));
         if data.is_paired_end {

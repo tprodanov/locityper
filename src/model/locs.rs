@@ -278,6 +278,8 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 pub struct GrouppedAlignments {
     /// Read name.
     read_data: ReadData,
+    /// Highest likelihood across all possible locations.
+    max_lik: f64,
     /// Probability that both mates are unmapped.
     unmapped_prob: f64,
     /// All read alignments.
@@ -292,13 +294,29 @@ impl GrouppedAlignments {
         &self.read_data.name
     }
 
+    /// Maximum likelihood across all contigs.
+    pub fn max_lik(&self) -> f64 {
+        self.max_lik
+    }
+
     /// Probability that both reads are unmapped for one specific contig (but same for all contigs).
     pub fn unmapped_prob(&self) -> f64 {
         self.unmapped_prob
     }
 
+    /// Returns the highest probability at given contig.
+    pub fn best_at_contig(&self, contig_id: ContigId) -> f64 {
+        let i = bisect::left_by(&self.aln_pairs, |paln| paln.contig_id().cmp(&contig_id));
+        if let Some(aln) = self.aln_pairs.get(i) {
+            if aln.contig_id() == contig_id {
+                return aln.ln_prob();
+            }
+        }
+        self.unmapped_prob
+    }
+
     /// For a given contig, returns alignment pairs, corresponding to this contig.
-    pub fn contig_aln_pairs(&self, contig_id: ContigId) -> &[PairAlignment] {
+    pub fn contig_alns(&self, contig_id: ContigId) -> &[PairAlignment] {
         let i = bisect::left_by(&self.aln_pairs, |paln| paln.contig_id().cmp(&contig_id));
         let j = bisect::right_boundary(&self.aln_pairs, |paln| contig_id == paln.contig_id(), i, self.aln_pairs.len());
         &self.aln_pairs[i..j]
@@ -547,13 +565,14 @@ fn identify_paired_end_alignments(
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
+    let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob = aln.ln_prob - norm_fct; // weight * (aln.ln_prob - norm_fct);
+        max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
-        read_data,
+        read_data, max_lik, alignments, aln_pairs,
         unmapped_prob: both_unmapped - norm_fct, // weight * (both_unmapped - norm_fct),
-        alignments, aln_pairs,
     }
 }
 
@@ -595,13 +614,14 @@ fn identify_single_end_alignments(
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
+    let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob = aln.ln_prob - norm_fct; // weight * (aln.ln_prob - norm_fct);
+        max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
-        read_data,
+        read_data, max_lik, alignments, aln_pairs,
         unmapped_prob: unmapped_prob - norm_fct, // weight * (unmapped_prob - norm_fct),
-        alignments, aln_pairs,
     }
 }
 
