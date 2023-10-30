@@ -496,7 +496,7 @@ impl Genotyping {
 
     pub fn issue_warnings(&mut self) {
         self.warnings.clear();
-        const DIST_THRESH: u32 = 100;
+        const DIST_THRESH: u32 = 50;
 
         let ln_prob0 = *self.ln_probs.first().expect("Expected at least one genotype");
         // < 0.01
@@ -587,16 +587,17 @@ impl Genotyping {
     }
 
     /// Checks reads that are much less likely at some other contig compared to the predicted genotype.
-    pub fn count_unexplained_reads(&mut self, all_alns: &AllAlignments) {
-        // log(100).
-        const LIK_DIFF: f64 = 4.605170185988092;
-        const UNEXPLAINED_FRAC: f64 = 0.2;
+    pub fn count_unexplained_reads(&mut self, all_alns: &AllAlignments, unmapped_penalty: f64) {
+        const UNEXPLAINED_FRAC: f64 = 0.1;
+        // Correct for rounding errors.
+        let unmapped_penalty = unmapped_penalty + 1e-8;
 
         let mut unexplained = 0_u32;
         let gt = &self.genotypes[0];
         for read in all_alns.reads() {
             let best_lik = IterExt::max(gt.ids().iter().map(|&id| read.best_at_contig(id)));
-            if best_lik + LIK_DIFF < read.max_lik() {
+            // Unmapped penalty is negative.
+            if best_lik < read.max_lik() + unmapped_penalty {
                 unexplained += 1;
             }
         }
@@ -810,7 +811,7 @@ pub fn solve(
     genotyping.print_log();
     genotyping.issue_warnings();
     genotyping.check_num_of_reads(data.all_alns.reads().len() as u32, bg_distr.depth(), &data.all_contig_infos);
-    genotyping.count_unexplained_reads(&data.all_alns);
+    genotyping.count_unexplained_reads(&data.all_alns, data.assgn_params.unmapped_penalty);
     Ok(genotyping)
 }
 
