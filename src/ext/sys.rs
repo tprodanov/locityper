@@ -21,26 +21,33 @@ pub fn find_exe(p: impl AsRef<Path>) -> Result<PathBuf, Error> {
     which::which(p.as_ref()).map_err(|_| Error::NoExec(p.as_ref().to_owned()))
 }
 
+/// Guesses compression type (gzip | lz4 | nothing) and returns decompressed stream.
+fn decompress_stream(
+    mut stream: BufReader<impl Read + Send + 'static>,
+    filename: &Path,
+) -> Result<Box<dyn BufRead + Send>, Error>
+{
+    let buffer = stream.fill_buf().map_err(add_path!(filename))?;
+    if buffer.len() < 2 {
+        return Ok(Box::new(stream));
+    } else if buffer[0] == 0x1f && buffer[1] == 0x8b {
+        // gzip magic number
+        Ok(Box::new(BufReader::new(MultiGzDecoder::new(stream))))
+    } else if buffer[0] == 0x04 && buffer[1] == 0x22 {
+        // lz4 magic number
+        Ok(Box::new(BufReader::new(lz4::Decoder::new(stream).map_err(add_path!(filename))?)))
+    } else {
+        Ok(Box::new(stream))
+    }
+}
+
 /// Returns stdin if filename is `-`.
 /// Otherwise, tries to guess input format (gzip OR lz4 OR no compression).
 pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
-        return Ok(Box::new(BufReader::new(stdin())));
+        decompress_stream(BufReader::new(stdin()), filename)
     } else {
-        // Guess file format (gz | lz4 | no compression).
-        let mut stream = BufReader::new(File::open(filename).map_err(add_path!(filename))?);
-        let mut two_bytes = [0_u8; 2];
-        let bytes_read = stream.read(&mut two_bytes).map_err(add_path!(filename))?;
-        stream.seek_relative(-(bytes_read as i64)).map_err(add_path!(filename))?;
-        if two_bytes[0] == 0x1f && two_bytes[1] == 0x8b {
-            // gzip magic number
-            Ok(Box::new(BufReader::new(MultiGzDecoder::new(stream))))
-        } else if two_bytes[0] == 0x04 && two_bytes[1] == 0x22 {
-            // lz4 magic number
-            Ok(Box::new(BufReader::new(lz4::Decoder::new(stream).map_err(add_path!(filename))?)))
-        } else {
-            Ok(Box::new(stream))
-        }
+        decompress_stream(BufReader::new(File::open(filename).map_err(add_path!(filename))?), filename)
     }
 }
 

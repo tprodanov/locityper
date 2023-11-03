@@ -48,7 +48,7 @@ fn filter_windows(
     kmer_coll: &KmerCounts,
     window_size: u32,
     neighb_size: u32,
-    kmer_perc: f64,
+    uniq_kmer_frac: f64,
     mut dbg_writer: impl Write,
 ) -> io::Result<usize>
 {
@@ -83,7 +83,7 @@ fn filter_windows(
             inv_quant1 = kmer_counts[start_ix..end_ix2].iter().filter(|&&x| x <= 1).count() as f64
                 / (end_ix2 - start_ix) as f64;
             window.gc = seq::gc_content(window_seq);
-            if inv_quant1 < kmer_perc {
+            if inv_quant1 < uniq_kmer_frac {
                 have_common_kmers += 1;
                 false
             } else {
@@ -153,10 +153,10 @@ impl Windows {
             let dbg_filename = dir.join("windows.bed.gz");
             let dbg_writer = ext::sys::create_gzip(&dbg_filename)?;
             filter_windows(&mut windows, interval, ref_seq, kmer_coll, window_size, neighb_size,
-                0.01 * params.kmer_perc, dbg_writer).map_err(add_path!(dbg_filename))?
+                0.01 * params.uniq_kmer_perc, dbg_writer).map_err(add_path!(dbg_filename))?
         } else {
             filter_windows(&mut windows, interval, ref_seq, kmer_coll, window_size, neighb_size,
-                0.01 * params.kmer_perc, io::sink()).map_err(add_path!(!))?
+                0.01 * params.uniq_kmer_perc, io::sink()).map_err(add_path!(!))?
         };
         if selected == 0 {
             Err(Error::RuntimeError("Retained 0 windows after filtering".to_owned()))

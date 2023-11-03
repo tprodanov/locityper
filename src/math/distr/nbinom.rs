@@ -207,7 +207,7 @@ impl Default for RegularizedEstimator {
     fn default() -> Self {
         Self {
             rate: 1.0,
-            lambda: 1e-8,
+            lambda: 1e-5,
         }
     }
 }

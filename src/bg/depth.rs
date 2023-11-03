@@ -147,7 +147,7 @@ pub struct ReadDepthParams {
     /// Filter windows with too many frequent k-mers:
     /// where less than this percetage of k-mers are unique.
     /// Default: 90.
-    pub kmer_perc: f64,
+    pub uniq_kmer_perc: f64,
 
     /// When calculating read depth averages for various GC-content values, use `frac_windows` fraction
     /// across all windows. For example, if frac_windows is 0.1 (default),
@@ -175,7 +175,7 @@ impl Default for ReadDepthParams {
             ploidy: 2,
             window_size: None,
             boundary_size: 1000,
-            kmer_perc: 90.0,
+            uniq_kmer_perc: 90.0,
 
             frac_windows: 0.5,
             min_tail_obs: 100,
@@ -188,8 +188,8 @@ impl ReadDepthParams {
     /// Validate all parameter values.
     pub fn validate(&self) -> Result<(), Error> {
         validate_param!(self.ploidy > 0, "Ploidy cannot be zero");
-        validate_param!(1.0 < self.kmer_perc && self.kmer_perc <= 100.0,
-            "Kmer percentile ({}) must be within (1, 100].", self.kmer_perc);
+        validate_param!(1.0 < self.uniq_kmer_perc && self.uniq_kmer_perc <= 100.0,
+            "Unique k-mer percentile ({}) must be within (1, 100].", self.uniq_kmer_perc);
         validate_param!(0.0 < self.frac_windows && self.frac_windows <= 1.0,
             "Fraction of windows ({}) must be within (0, 1]", self.frac_windows);
 

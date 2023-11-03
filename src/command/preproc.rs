@@ -49,12 +49,15 @@ fn check_filename(
     wrong_format: &'static str,
 ) -> Result<(), Error> {
     if !filename.exists() {
-        if filename == std::ffi::OsStr::new("!") {
-            log::debug!("Do not check input fliename `!`");
+        if filename == std::ffi::OsStr::new("!") || filename == std::ffi::OsStr::new("-")
+                || filename.starts_with("/dev") {
             return Ok(());
+        } else {
+            log::error!("Input file {} does not exist. Continuing for now", ext::fmt::path(filename));
         }
-        return Err(Error::InvalidInput(format!("Input file {} does not exist", ext::fmt::path(filename))));
-    } else if let Some(s) = filename.to_str() {
+    }
+
+    if let Some(s) = filename.to_str() {
         if shouldnt_match.is_match(s) {
             return Err(Error::InvalidInput(format!(
                 "Incorrect file format for {} (expected {}, found {}). Please check -i and -a arguments",
@@ -295,7 +298,7 @@ fn print_help(extended: bool) {
             super::fmt_def(PrettyU32(defaults.bg_params.depth.boundary_size)));
         println!("    {:KEY$} {:VAL$}  Ignore windows, where less than {}% k-mers are unique [{}].",
             "    --kmer-perc".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-            super::fmt_def_f64(defaults.bg_params.depth.kmer_perc));
+            super::fmt_def_f64(defaults.bg_params.depth.uniq_kmer_perc));
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used in LOESS during read depth\n\
             {EMPTY}  estimation [{}]. Smaller values lead to less robust estimates,\n\
             {EMPTY}  larger values - to similar estimates across different GC-contents.",
@@ -384,7 +387,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Long("boundary") => args.bg_params.depth.boundary_size = parser.value()?.parse::<PrettyU32>()?.get(),
             Long("kmer-perc") | Long("kmer-percentage") | Long("kmer-percentile") =>
-                args.bg_params.depth.kmer_perc = parser.value()?.parse()?,
+                args.bg_params.depth.uniq_kmer_perc = parser.value()?.parse()?,
             Long("frac-windows") | Long("fraction-windows") =>
                 args.bg_params.depth.frac_windows = parser.value()?.parse()?,
             Long("blur-extreme") => {
