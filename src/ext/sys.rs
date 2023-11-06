@@ -27,6 +27,7 @@ fn decompress_stream(
     filename: &Path,
 ) -> Result<Box<dyn BufRead + Send>, Error>
 {
+    assert!(stream.buffer().is_empty());
     let buffer = stream.fill_buf().map_err(add_path!(filename))?;
     if buffer.len() < 2 {
         return Ok(Box::new(stream));

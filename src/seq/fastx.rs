@@ -921,6 +921,15 @@ pub fn set_reference(
     }
 }
 
+/// Opens BAM file from filename or from stdin, if filename is `-` or `/dev/stdin`.
+pub fn open_bam_reader(filename: &Path) -> htslib::errors::Result<bam::Reader> {
+    if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
+        bam::Reader::from_stdin()
+    } else {
+        bam::Reader::from_path(filename)
+    }
+}
+
 /// Based on the input arguments, selects appropriate reader and performs `action(reader)`.
 /// Input arguments must contain:
 /// - `args.input: Vec<PathBuf>` - zero, one or two FASTA/FASTQ filenames,
@@ -950,7 +959,7 @@ macro_rules! process_readers {
                 }
             } else {
                 let bam_filename = $args.alns.clone().expect("Alignment file must be defined");
-                let mut inner_reader = bam::Reader::from_path(&bam_filename)?;
+                let mut inner_reader = fastx::open_bam_reader(&bam_filename)?;
                 fastx::set_reference(&bam_filename, &mut inner_reader, &$args.reference, $contigs)?;
                 let bam_reader = fastx::DirectBamReader::new(bam_filename, inner_reader);
                 if $args.interleaved {
