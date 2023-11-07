@@ -136,9 +136,8 @@ impl<T: SingleRecord + WritableRecord> WritableRecord for [T; 2] {
 pub trait FastxRead: Send {
     type Record: WritableRecord;
 
-    /// Reader filename, needed for better error messages.
-    /// If there are two files, returns the first one.
-    fn filename(&self) -> &Path;
+    /// All filenames, associated with the reader.
+    fn filenames(&self) -> &[PathBuf];
 
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self, record: &mut Self::Record) -> Result<bool, Error>;
@@ -237,29 +236,36 @@ impl fmt::Debug for FastxRecord {
 
 /// Dynamic FASTA/Q reader.
 pub struct Reader<R: BufRead> {
-    filename: PathBuf,
+    filenames: Vec<PathBuf>,
     stream: R,
     buffer: Vec<u8>,
 }
 
 impl Reader<Box<dyn BufRead + Send>> {
     pub fn from_path(path: &Path) -> Result<Self, Error> {
-        Self::new(ext::sys::open(path)?, path.to_path_buf())
+        Self::new(ext::sys::open(path)?, vec![path.to_path_buf()])
+    }
+}
+
+impl Reader<ext::sys::FileChain> {
+    /// Concatenates multiple FASTA/FASTQ readers.
+    pub fn from_paths(paths: &[PathBuf]) -> Result<Self, Error> {
+        Self::new(ext::sys::FileChain::new(paths)?, paths.to_vec())
     }
 }
 
 impl<R: BufRead> Reader<R> {
-    pub fn new(mut stream: R, filename: PathBuf) -> Result<Self, Error> {
+    pub fn new(mut stream: R, filenames: Vec<PathBuf>) -> Result<Self, Error> {
         let mut buffer = Vec::new();
-        read_line(&mut stream, &mut buffer).map_err(add_path!(filename))?;
-        Ok(Self { stream, buffer, filename })
+        read_line(&mut stream, &mut buffer).map_err(|e| Error::Io(e, filenames.clone()))?;
+        Ok(Self { stream, buffer, filenames })
     }
 
     fn fill_fasta_record(&mut self, record: &mut FastxRecord) -> Result<bool, Error> {
         self.buffer.clear();
         let mut seq_len = 0;
         loop {
-            let n = read_line(&mut self.stream, &mut record.seq).map_err(add_path!(self.filename))?;
+            let n = read_line(&mut self.stream, &mut record.seq).map_err(|e| Error::Io(e, self.filenames.clone()))?;
             if n == 0 {
                 // File ended.
                 if seq_len == 0 {
@@ -279,11 +285,11 @@ impl<R: BufRead> Reader<R> {
 
     fn fill_fastq_record(&mut self, record: &mut FastxRecord) -> Result<bool, Error> {
         // Sequence
-        let seq_len = read_line(&mut self.stream, &mut record.seq).map_err(add_path!(self.filename))?;
+        let seq_len = read_line(&mut self.stream, &mut record.seq).map_err(|e| Error::Io(e, self.filenames.clone()))?;
         let prev_buf_len = self.buffer.len();
 
         // +
-        let n = read_line(&mut self.stream, &mut self.buffer).map_err(add_path!(self.filename))?;
+        let n = read_line(&mut self.stream, &mut self.buffer).map_err(|e| Error::Io(e, self.filenames.clone()))?;
         if n == 0 {
             return Err(Error::InvalidData(
                 format!("Fastq record {} is incomplete", record.name_str())));
@@ -293,7 +299,7 @@ impl<R: BufRead> Reader<R> {
         }
 
         // Qualities
-        let qual_len = read_line(&mut self.stream, &mut record.qual).map_err(add_path!(self.filename))?;
+        let qual_len = read_line(&mut self.stream, &mut record.qual).map_err(|e| Error::Io(e, self.filenames.clone()))?;
         if seq_len != qual_len {
             return Err(Error::InvalidData(
                 format!("Fastq record {} has non-matching sequence and qualities", record.name_str())));
@@ -301,7 +307,7 @@ impl<R: BufRead> Reader<R> {
 
         // Next record name.
         self.buffer.clear();
-        read_line(&mut self.stream, &mut self.buffer).map_err(add_path!(self.filename))?;
+        read_line(&mut self.stream, &mut self.buffer).map_err(|e| Error::Io(e, self.filenames.clone()))?;
         Ok(true)
     }
 }
@@ -350,8 +356,8 @@ impl<R: BufRead + Send> FastxRead for Reader<R> {
         }
     }
 
-    fn filename(&self) -> &Path {
-        &self.filename
+    fn filenames(&self) -> &[PathBuf] {
+        &self.filenames
     }
 }
 
@@ -375,32 +381,37 @@ impl<T: SingleRecord, R: FastxRead<Record = T>> FastxRead for PairedEndInterleav
             Ok(false)
         } else if !self.reader.read_next(record2)? {
             Err(Error::InvalidData(format!(
-                "Odd number of records in an interleaved input file {}", ext::fmt::path(&self.reader.filename()))))
+                "Odd number of records in an interleaved input file(s) {}",
+                ext::fmt::paths(self.reader.filenames()))))
         } else {
             if !equal_names_fast(record1.name(), record2.name()) {
                 Err(Error::InvalidData(format!(
-                    "Interleaved input file {} contains non matching first and second mate ({} and {})",
-                    ext::fmt::path(&self.reader.filename()), record1.name_str(), record2.name_str())))
+                    "Interleaved input file(s) {} contains non matching first and second mate ({} and {})",
+                    ext::fmt::paths(self.reader.filenames()), record1.name_str(), record2.name_str())))
             } else {
                 Ok(true)
             }
         }
     }
 
-    fn filename(&self) -> &Path {
-        self.reader.filename()
+    fn filenames(&self) -> &[PathBuf] {
+        self.reader.filenames()
     }
 }
 
 /// Two paired-end FASTA/Q readers, that stores two buffer records to reduce memory allocations.
 pub struct PairedEndReaders<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> {
+    filenames: Vec<PathBuf>,
     reader1: R,
     reader2: S,
 }
 
 impl<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> PairedEndReaders<T, R, S> {
     pub fn new(reader1: R, reader2: S) -> Self {
-        Self { reader1, reader2 }
+        Self {
+            filenames: [reader1.filenames(), reader2.filenames()].concat(),
+            reader1, reader2,
+        }
     }
 }
 
@@ -416,21 +427,21 @@ impl<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> FastxR
             (true, true) => {
                 if !equal_names_fast(record1.name(), record2.name()) {
                     Err(Error::InvalidData(format!(
-                        "Input files {} and {} have non matching first and second mates ({} and {})",
-                        ext::fmt::path(&self.reader1.filename()), ext::fmt::path(&self.reader2.filename()),
+                        "Paired-end input files {} and {} have non matching first and second mates ({} and {})",
+                        ext::fmt::paths(self.reader1.filenames()), ext::fmt::paths(self.reader2.filenames()),
                         record1.name_str(), record2.name_str())))
                 } else {
                     Ok(true)
                 }
             }
-            _ => Err(Error::InvalidData(format!("Different number of records in input files {} and {}",
-                ext::fmt::path(&self.reader1.filename()), ext::fmt::path(&self.reader2.filename())))),
+            _ => Err(Error::InvalidData(format!("Different number of records in paired-end input files {} and {}",
+                ext::fmt::paths(self.reader1.filenames()), ext::fmt::paths(self.reader2.filenames())))),
         }
     }
 
     /// Returns the first filename.
-    fn filename(&self) -> &Path {
-        self.reader1.filename()
+    fn filenames(&self) -> &[PathBuf] {
+        &self.filenames
     }
 }
 
@@ -650,32 +661,49 @@ impl Eq for BamRecord {}
 
 /// Read BAM/CRAM file directly, without any fetching.
 pub struct DirectBamReader {
-    filename: PathBuf,
-    reader: bam::Reader,
+    filenames: Vec<PathBuf>,
+    current_reader: bam::Reader,
+    /// Following BAM readers, in reverse order.
+    future_readers: Vec<bam::Reader>,
 }
 
 impl DirectBamReader {
-    pub fn new(filename: PathBuf, reader: bam::Reader) -> Self {
-        Self { filename, reader }
+    pub fn new(
+        filenames: &[PathBuf],
+        mut build_reader: impl FnMut(&Path) -> Result<bam::Reader, Error>,
+    ) -> Result<Self, Error>
+    {
+        let filenames = filenames.to_vec();
+        let current_reader = build_reader(&filenames[0])?;
+        let future_readers = filenames[1..].iter().rev().map(|f| build_reader(f))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Self { filenames, current_reader, future_readers })
     }
 }
 
 impl FastxRead for DirectBamReader {
     type Record = BamRecord;
 
-    fn filename(&self) -> &Path {
-        &self.filename
+    fn filenames(&self) -> &[PathBuf] {
+        &self.filenames
     }
 
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
     fn read_next(&mut self, record: &mut BamRecord) -> Result<bool, Error> {
-        record.read_from(&mut self.reader, i64::MIN)
+        while !record.read_from(&mut self.current_reader, i64::MIN)? {
+            if let Some(reader) = self.future_readers.pop() {
+                self.current_reader = reader;
+            } else {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
 /// Read single-end BAM/CRAM file across multiple fetches.
 pub struct IndexedBamReader {
-    filename: PathBuf,
+    filename: [PathBuf; 1],
     reader: bam::IndexedReader,
     /// Fetch regions. Contig IDs must be taken from exactly this bam/cram reader.
     /// All unmapped reads are then fetch in any case.
@@ -693,7 +721,8 @@ impl IndexedBamReader {
     /// WARN: Regions should go in increasing order, otherwise some code may fail in paired-end case.
     pub fn new(filename: PathBuf, reader: bam::IndexedReader, regions: Vec<Interval>) -> Result<Self, Error> {
         let mut res = Self {
-            filename, reader, regions,
+            filename: [filename],
+            reader, regions,
             next_ix: 0,
             min_start: i64::MIN,
         };
@@ -741,7 +770,7 @@ impl FastxRead for IndexedBamReader {
         }
     }
 
-    fn filename(&self) -> &Path {
+    fn filenames(&self) -> &[PathBuf] {
         &self.filename
     }
 }
@@ -812,8 +841,8 @@ impl FastxRead for PairedBamReader {
         }
     }
 
-    fn filename(&self) -> &Path {
-        self.reader.filename()
+    fn filenames(&self) -> &[PathBuf] {
+        self.reader.filenames()
     }
 }
 
@@ -834,7 +863,8 @@ where T: WritableRecord,
         }
     }
     if n == 0 {
-        Err(Error::InvalidData(format!("Empty input file {}", ext::fmt::path(reader.filename()))))
+        Err(Error::InvalidData(format!("Cannot calculate average read length: empty input file(s) {}",
+            ext::fmt::paths(reader.filenames()))))
     } else {
         Ok(s as f64 / n as f64)
     }
@@ -921,19 +951,11 @@ pub fn set_reference(
     }
 }
 
-/// Opens BAM file from filename or from stdin, if filename is `-` or `/dev/stdin`.
-pub fn open_bam_reader(filename: &Path) -> htslib::errors::Result<bam::Reader> {
-    if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
-        bam::Reader::from_stdin()
-    } else {
-        bam::Reader::from_path(filename)
-    }
-}
-
 /// Based on the input arguments, selects appropriate reader and performs `action(reader)`.
 /// Input arguments must contain:
-/// - `args.input: Vec<PathBuf>` - zero, one or two FASTA/FASTQ filenames,
-/// - `args.alns: Option<PathBuf>` - zero or one BAM/CRAM filename,
+/// - `args.reads1: Vec<PathBuf>` - first or single-end FASTA/FASTQ filenames,
+/// - `args.reads2: Vec<PathBuf>` - second mate FASTA/FASTQ filenames,
+/// - `args.alns: Vec<PathBuf>` - zero, one or several BAM/CRAM filename,
 /// - `args.reference: Option<PathBuf>` - zero or one FASTA reference file,
 /// - `args.interleaved: bool` - are the input reads interleaved.
 /// Next: `contigs: Option<&ContigNames>`.
@@ -941,27 +963,49 @@ pub fn open_bam_reader(filename: &Path) -> htslib::errors::Result<bam::Reader> {
 /// After semicolon argument: either `let {} reader` or `let {mut} reader`, depending on mutability,
 /// Last argument: action on the reader.
 macro_rules! process_readers {
-    ($args:ident, $contigs:expr; let {$( $mut_:tt )?} $reader:ident; $action:tt) => {
+    ($args:expr, $contigs:expr; let {$( $mut_:tt )?} $reader:ident; $action:tt) => {
         {
             use crate::seq::fastx;
-            if !$args.input.is_empty() {
-                let reader1 = fastx::Reader::from_path(&$args.input[0])?;
-                if $args.input.len() == 1 && !$args.interleaved {
-                    let $($mut_)? $reader = reader1;
+            let n1 = $args.reads1.len();
+            let n2 = $args.reads2.len();
+            assert_eq!(n1, n2);
+            let m = $args.alns.len();
+            assert!(n1 == 0 || m == 0);
+
+            if n1 >= 2 {
+                // Multiple FASTA/Q files.
+                let reader1 = fastx::Reader::from_paths(&$args.reads1)?;
+                if n2 > 0 {
+                    let reader2 = fastx::Reader::from_paths(&$args.reads2)?;
+                    let $($mut_)? $reader = fastx::PairedEndReaders::new(reader1, reader2);
                     #[allow(unused_braces)] $action
                 } else if $args.interleaved {
                     let $($mut_)? $reader = fastx::PairedEndInterleaved::new(reader1);
                     #[allow(unused_braces)] $action
                 } else {
-                    let reader2 = fastx::Reader::from_path(&$args.input[1])?;
+                    let $($mut_)? $reader = reader1;
+                    #[allow(unused_braces)] $action
+                }
+            } else if n1 == 1 {
+                // One FASTA/Q files.
+                let reader1 = fastx::Reader::from_path(&$args.reads1[0])?;
+                if n2 > 0 {
+                    let reader2 = fastx::Reader::from_path(&$args.reads2[0])?;
                     let $($mut_)? $reader = fastx::PairedEndReaders::new(reader1, reader2);
+                    #[allow(unused_braces)] $action
+                } else if $args.interleaved {
+                    let $($mut_)? $reader = fastx::PairedEndInterleaved::new(reader1);
+                    #[allow(unused_braces)] $action
+                } else {
+                    let $($mut_)? $reader = reader1;
                     #[allow(unused_braces)] $action
                 }
             } else {
-                let bam_filename = $args.alns.clone().expect("Alignment file must be defined");
-                let mut inner_reader = fastx::open_bam_reader(&bam_filename)?;
-                fastx::set_reference(&bam_filename, &mut inner_reader, &$args.reference, $contigs)?;
-                let bam_reader = fastx::DirectBamReader::new(bam_filename, inner_reader);
+                let bam_reader = fastx::DirectBamReader::new(&$args.alns, |path| {
+                    let mut inner_reader = bam::Reader::from_path(path)?;
+                    fastx::set_reference(path, &mut inner_reader, &$args.reference, $contigs)?;
+                    Ok(inner_reader)
+                })?;
                 if $args.interleaved {
                     let $($mut_)? $reader = fastx::PairedEndInterleaved::new(bam_reader);
                     #[allow(unused_braces)] $action

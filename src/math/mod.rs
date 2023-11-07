@@ -215,3 +215,9 @@ impl<T: num_traits::PrimInt + num_traits::Unsigned> RoundDiv for T {
 pub fn interpolate((x1, x2): (f64, f64), (y1, y2): (f64, f64), x: f64) -> f64 {
     x * (y2 - y1) / (x2 - x1) + y1
 }
+
+/// Logical operator `a => b` = `!a || b`.
+#[inline(always)]
+pub fn implies(a: bool, b: bool) -> bool {
+    !a || b
+}

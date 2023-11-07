@@ -21,6 +21,18 @@ pub fn path(path: &Path) -> String {
     if s.contains(char::is_whitespace) { format!("'{}'", s) } else { s.into_owned() }
 }
 
+/// Format multiple paths via comma.
+pub fn paths(paths: &[impl AsRef<Path>]) -> String {
+    let mut s = String::new();
+    for f in paths {
+        if !s.is_empty() {
+            s.push_str(", ");
+        }
+        s.push_str(&path(f.as_ref()));
+    }
+    s
+}
+
 /// Converts command into a string, removing quotes if argument has no whitespace, and replacing HOME with ~.
 pub fn command(cmd: &Command) -> String {
     std::iter::once(cmd.get_program())

@@ -41,9 +41,7 @@ use crate::{
 use super::{paths, DebugLvl};
 
 struct Args {
-    input: Vec<PathBuf>,
-    alns: Option<PathBuf>,
-    reference: Option<PathBuf>,
+    in_files: super::preproc::InputFiles,
     preproc: Option<PathBuf>,
     databases: Vec<PathBuf>,
     output: Option<PathBuf>,
@@ -52,8 +50,6 @@ struct Args {
     ploidy: u8,
     priors: Option<PathBuf>,
 
-    interleaved: bool,
-    no_index: bool,
     threads: u16,
     rerun: super::Rerun,
     strobealign: PathBuf,
@@ -75,9 +71,7 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            input: Vec::new(),
-            alns: None,
-            reference: None,
+            in_files: Default::default(),
             preproc: None,
             databases: Vec::new(),
             output: None,
@@ -86,8 +80,6 @@ impl Default for Args {
             ploidy: 2,
             priors: None,
 
-            interleaved: false,
-            no_index: false,
             threads: 8,
             rerun: super::Rerun::None,
             strobealign: PathBuf::from("strobealign"),
@@ -111,26 +103,14 @@ impl Default for Args {
 impl Args {
     /// Validate arguments, modifying some, if needed.
     fn validate(mut self) -> Result<Self, Error> {
+        self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
-        let n_input = self.input.len();
-        if n_input > 0 {
-            validate_param!(self.alns.is_none(),
-                "Read files (-i/--input) cannot be used together with alignments (-a/--alignment)");
-            validate_param!(n_input != 2 || !self.interleaved,
-                "Two read files (-i/--input) are provided, however, --interleaved is specified");
-            validate_param!(self.ploidy > 0 && self.ploidy <= 11, "Ploidy ({}) must be within [1, 10]", self.ploidy);
-        } else {
-            match self.alns.as_ref() {
-                Some(filename) => {
-                    let is_cram = filename.extension().map(|ext| ext == "cram").unwrap_or(false);
-                    validate_param!(self.reference.is_some() || !is_cram,
-                        "Input CRAM file requires reference file (see -a/--alignment and -r/--reference)")
-                }
-                None => validate_param!(false,
-                    "Neither reads (-i/--input) nor alignments (-a/--alignment) are provided"),
-            }
+
+        if self.in_files.alns.iter().any(|filename| filename.extension()
+                .map(|ext| ext == "cram" || ext == "CRAM").unwrap_or(false)) {
+            validate_param!(self.in_files.reference.is_some(),
+                "Input CRAM file requires a reference file (see -a/--alignment and -r/--reference)");
         }
-        super::preproc::check_input_filenames(&self.input, &self.alns)?;
 
         validate_param!(self.kmer_thresh_count > 0, "k-mer threshold must not be zero");
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
@@ -139,17 +119,6 @@ impl Args {
         self.samtools = ext::sys::find_exe(self.samtools)?;
         self.assgn_params.validate()?;
         Ok(self)
-    }
-
-    /// Returns true if need to process indexed alignment file.
-    fn has_indexed_alignment(&self) -> bool {
-        self.alns.is_some() && !self.no_index
-    }
-
-    /// Returns true if input reads are paired-end. Panics for indexed alignment file.
-    fn is_paired_end(&self) -> bool {
-        assert!(!self.has_indexed_alignment());
-        self.input.len() == 2 || self.interleaved
     }
 }
 
@@ -170,13 +139,15 @@ fn print_help(extended: bool) {
     }
 
     println!("\n{}", "Input/output arguments:".bold());
+    println!("{EMPTY}  {} Please see README on repeating {}/{} arguments.",
+        "Note:".red(), "-i".green(), "-a".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
-    println!("    {:KEY$} {:VAL$}  Indexed BAM/CRAM file with read alignments. Reads must be mapped\n\
-        {EMPTY}  to the same reference genome, which was used for database construction.\n\
-        {EMPTY}  Mutually exclusive with {}.",
-        "-a, --alignment".green(), "FILE".yellow(), "-i".green());
+    println!("    {:KEY$} {:VAL$}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
+        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n
+        {EMPTY}  please specify {} otherwise.",
+        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Required with input CRAM file ({} alns.cram).",
         "-r, --reference".green(), "FILE".yellow(), "-a".green());
     println!("    {:KEY$} {:VAL$}  Preprocessed dataset information (see {}).",
@@ -341,11 +312,16 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('i') | Long("input") =>
-                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
+            Short('i') | Long("input") => {
+                let mut values = parser.values()?.take(2);
+                args.in_files.reads1.push(values.next().expect("First argument is always present").parse()?);
+                if let Some(val) = values.next() {
+                    args.in_files.reads2.push(val.parse()?);
+                }
+            }
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
-                args.alns = Some(parser.value()?.parse()?),
-            Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
+                args.in_files.alns.push(parser.value()?.parse()?),
+            Short('r') | Long("reference") => args.in_files.reference = Some(parser.value()?.parse()?),
             Short('p') | Long("preproc") | Long("preprocessing") => args.preproc = Some(parser.value()?.parse()?),
             Short('d') | Long("db") | Long("database") | Long("databases") => {
                 for val in parser.values()? {
@@ -425,8 +401,8 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             Long("gurobi") => args.scheme_params.gurobi_params.push(parser.value()?.parse()?),
             Short('O') | Long("out-bams") => args.assgn_params.out_bams = parser.value()?.parse::<PrettyUsize>()?.get(),
 
-            Short('^') | Long("interleaved") => args.interleaved = true,
-            Long("no-index") => args.no_index = true,
+            Short('^') | Long("interleaved") => args.in_files.interleaved = true,
+            Long("no-index") => args.in_files.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
@@ -711,10 +687,10 @@ fn recruit_reads(
     let targets = target_builder.finalize();
     let chunk_size = max(1, (args.chunk_length as f64 / mean_read_len
         * (if bg_distr.insert_distr().is_paired_end() { 0.5 } else { 1.0 })) as usize);
-    if args.has_indexed_alignment() {
-        let bam_filename = args.alns.as_ref().unwrap().to_path_buf();
+    if args.in_files.has_indexed_alignment() {
+        let bam_filename = args.in_files.alns[0].to_path_buf();
         let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
-        fastx::set_reference(&bam_filename, &mut bam_reader, &args.reference, None)?;
+        fastx::set_reference(&bam_filename, &mut bam_reader, &args.in_files.reference, None)?;
         let fetch_regions = create_fetch_targets(&bam_reader, bg_distr, &filt_loci)?;
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
         if bg_distr.insert_distr().is_paired_end() {
@@ -723,9 +699,8 @@ fn recruit_reads(
             targets.recruit(reader, writers, args.threads, chunk_size)?;
         }
     } else {
-        fastx::process_readers!(args, None; let {} reader; {
-            targets.recruit(reader, writers, args.threads, chunk_size)
-        })?;
+        fastx::process_readers!(args.in_files, None; let {} reader;
+            { targets.recruit(reader, writers, args.threads, chunk_size) })?;
     }
 
     for locus in filt_loci.iter() {
@@ -955,7 +930,8 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(), GOOD_DISTANCE_ADD, args.assgn_params.edit_pvals);
     edit_dist_cache.print_log(bg_distr.seq_info().mean_read_len());
 
-    validate_param!(args.has_indexed_alignment() || bg_distr.insert_distr().is_paired_end() == args.is_paired_end(),
+    validate_param!(args.in_files.has_indexed_alignment()
+        || bg_distr.insert_distr().is_paired_end() == args.in_files.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
     if tech == Technology::Illumina {
         args.strobealign = ext::sys::find_exe(args.strobealign)?;

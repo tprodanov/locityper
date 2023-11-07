@@ -2,6 +2,7 @@
 
 use std::{
     fs, thread,
+    ffi::OsStr,
     io::{self, Write},
     fmt::Write as FmtWrite,
     cmp::{min, max},
@@ -38,6 +39,7 @@ use crate::{
         depth::ReadDepth,
         ser::{JsonSer, json_get},
     },
+    math::implies,
 };
 use super::paths;
 
@@ -48,13 +50,14 @@ fn check_filename(
     shouldnt_match: &Regex,
     wrong_format: &'static str,
 ) -> Result<(), Error> {
-    if !filename.exists() {
-        if filename == std::ffi::OsStr::new("!") || filename == std::ffi::OsStr::new("-")
-                || filename.starts_with("/dev") {
-            return Ok(());
-        } else {
-            log::error!("Input file {} does not exist. Continuing for now", ext::fmt::path(filename));
-        }
+    if filename == OsStr::new("-") || filename.starts_with("/dev") {
+        log::error!("Stdin and other /dev/* files may not be supported. Continuing for now");
+        return Ok(());
+    } else if filename == OsStr::new("!") {
+        // Ignore this filename.
+        return Ok(());
+    } else if !filename.exists() {
+        log::error!("Input file {} does not exist. Continuing for now", ext::fmt::path(filename));
     }
 
     if let Some(s) = filename.to_str() {
@@ -73,27 +76,73 @@ fn check_filename(
     Ok(())
 }
 
-/// Checks if input reads have fastq/fasta extensions, or input alignments have bam/cram extensions.
-pub(super) fn check_input_filenames(input: &[PathBuf], alns: &Option<PathBuf>) -> Result<(), Error> {
-    // Should only be run once, so there is no need for lazy static.
-    let re_fastx = RegexBuilder::new(r"\.f(ast)?[aq](\.[^.]{1,3})?$").case_insensitive(true).build().unwrap();
-    let re_bam = RegexBuilder::new(r"\.(bam|cram)$").case_insensitive(true).build().unwrap();
-    let fastx_descr = "fasta/fastq[.gz]";
-    let bam_descr = "bam/cram";
+/// Collection of input files, same as for `genotype`.
+pub struct InputFiles {
+    pub reads1: Vec<PathBuf>,
+    pub reads2: Vec<PathBuf>,
+    pub alns: Vec<PathBuf>,
+    pub reference: Option<PathBuf>,
+    pub interleaved: bool,
+    pub no_index: bool,
+}
 
-    for filename in input {
-        check_filename(filename, &re_fastx, fastx_descr, &re_bam, bam_descr)?;
+impl Default for InputFiles {
+    fn default() -> Self {
+        Self {
+            reads1: Vec::new(),
+            reads2: Vec::new(),
+            alns: Vec::new(),
+            reference: None,
+            interleaved: false,
+            no_index: false,
+        }
     }
-    if let Some(filename) = alns {
-        check_filename(filename, &re_bam, bam_descr, &re_fastx, fastx_descr)?;
+}
+
+impl InputFiles {
+    pub fn validate(&self, ref_required: bool) -> Result<(), Error> {
+        let n1 = self.reads1.len();
+        let n2 = self.reads2.len();
+        let m = self.alns.len();
+
+        validate_param!(n1 == n2, "Cannot mix single-end and paired-end reads");
+        validate_param!(n1 > 0 || m > 0, "Neither reads (-i) nor alignments (-a) are provided");
+        validate_param!(n1 == 0 || m == 0, "Cannot use reads (-i) and alignments (-a) together");
+        validate_param!(implies(self.interleaved, n2 == 0),
+            "Second end reads are specified together with --interleaved");
+        validate_param!(implies(ref_required, self.reference.is_some()), "Reference file (-r) is not provided");
+        validate_param!(implies(m > 2, self.no_index),
+            "Cannot use multilpe indexed BAM/CRAM files (consider --no-index)");
+
+        // Should only be run once, so there is no need for lazy static.
+        let re_fastx = RegexBuilder::new(r"\.f(ast)?[aq](\.[^.]{1,3})?$").case_insensitive(true).build().unwrap();
+        let re_bam = RegexBuilder::new(r"\.(bam|cram)$").case_insensitive(true).build().unwrap();
+        let fastx_descr = "fasta/fastq[.gz]";
+        let bam_descr = "bam/cram";
+
+        for filename in self.reads1.iter().chain(&self.reads2) {
+            check_filename(filename, &re_fastx, fastx_descr, &re_bam, bam_descr)?;
+        }
+        for filename in self.alns.iter() {
+            check_filename(filename, &re_bam, bam_descr, &re_fastx, fastx_descr)?;
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Returns true if need to process indexed alignment file.
+    pub fn has_indexed_alignment(&self) -> bool {
+        !self.alns.is_empty() && !self.no_index
+    }
+
+    /// Returns true if input reads are paired-end. Panics for indexed alignment file.
+    pub fn is_paired_end(&self) -> bool {
+        assert!(!self.has_indexed_alignment());
+        !self.reads2.is_empty() || self.interleaved
+    }
 }
 
 struct Args {
-    input: Vec<PathBuf>,
-    alns: Option<PathBuf>,
-    reference: Option<PathBuf>,
+    in_files: InputFiles,
     jf_counts: Option<PathBuf>,
     output: Option<PathBuf>,
     similar_dataset: Option<PathBuf>,
@@ -104,8 +153,6 @@ struct Args {
     subsampling_rate: f64,
     seed: Option<u64>,
 
-    interleaved: bool,
-    no_index: bool,
     threads: u16,
     rerun: super::Rerun,
     strobealign: PathBuf,
@@ -125,9 +172,7 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            input: Vec::new(),
-            alns: None,
-            reference: None,
+            in_files: InputFiles::default(),
             jf_counts: None,
             output: None,
             similar_dataset: None,
@@ -138,8 +183,6 @@ impl Default for Args {
             subsampling_rate: 0.1,
             seed: None,
 
-            interleaved: false,
-            no_index: false,
             threads: 8,
             rerun: super::Rerun::None,
             debug: false,
@@ -157,37 +200,30 @@ impl Default for Args {
 impl Args {
     /// Validate arguments, modifying some, if needed.
     fn validate(mut self) -> Result<Self, Error> {
+        self.in_files.validate(true)?;
         self.threads = max(self.threads, 1);
-        let n_input = self.input.len();
-        validate_param!(n_input > 0 || self.alns.is_some(),
-            "Neither read files, nor alignment files are not provided (see -i and -a)");
-        validate_param!(n_input == 0 || self.alns.is_none(),
-            "Read files (-i) and an alignment file (-a) cannot be provided together");
-        validate_param!(n_input != 2 || !self.interleaved,
-            "Two read files (-i/--input) are provided, however, --interleaved is specified");
 
-        if !self.has_indexed_alignment() {
+        if self.in_files.has_indexed_alignment() {
+            validate_param!(self.similar_dataset.is_none(),
+                "Similar dataset (-~) cannot be used with indexed alignments:\
+                    preprocessing without the similar dataset is faster and more accurate");
+        } else {
             let paired_end_allowed = self.technology.paired_end_allowed();
-            validate_param!(!self.is_paired_end() || paired_end_allowed,
+            validate_param!(!self.in_files.is_paired_end() || paired_end_allowed,
                 "Paired end reads are not supported by {}", self.technology.long_name());
-            if !self.is_paired_end() && paired_end_allowed {
+            if !self.in_files.is_paired_end() && paired_end_allowed {
                 log::warn!("Running in single-end mode.");
             }
-        } else {
-            validate_param!(self.similar_dataset.is_none(),
-                "Similar dataset (-~) can only be used together with input reads (-i) \
-                or unindexed alignments (-a ... --no-index)");
         }
-        check_input_filenames(&self.input, &self.alns)?;
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
-        validate_param!(self.reference.is_some(), "Reference fasta file is not provided (see -r/--reference)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
         validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
             "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
-        if self.subsampling_rate > 0.99 {
+        if self.in_files.has_indexed_alignment() || self.subsampling_rate > 0.99 {
             self.subsampling_rate = 1.0;
+            self.seed = None;
         }
 
         if self.technology == Technology::Illumina {
@@ -200,23 +236,8 @@ impl Args {
 
         validate_param!(0.0 <= self.max_clipping && self.max_clipping <= 1.0,
             "Max clipping ({:.5}) must be within [0, 1]", self.max_clipping);
-        if self.has_indexed_alignment() {
-            self.subsampling_rate = 1.0;
-            self.seed = None;
-        }
         self.bg_params.validate()?;
         Ok(self)
-    }
-
-    /// Returns true if need to process indexed alignment file.
-    fn has_indexed_alignment(&self) -> bool {
-        self.alns.is_some() && !self.no_index
-    }
-
-    /// Returns true if input reads are paired-end. Panics for indexed alignment file.
-    fn is_paired_end(&self) -> bool {
-        assert!(!self.has_indexed_alignment());
-        self.input.len() == 2 || self.interleaved
     }
 }
 
@@ -238,12 +259,15 @@ fn print_help(extended: bool) {
     }
 
     println!("\n{}", "Input/output arguments:".bold());
+    println!("{EMPTY}  {} Please see README on repeating {}/{} arguments.",
+        "Note:".red(), "-i".green(), "-a".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
-    println!("    {:KEY$} {:VAL$}  Reads in indexed BAM/CRAM format, already mapped to the whole genome.\n\
-        {EMPTY}  Mutually exclusive with {}.",
-        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green());
+    println!("    {:KEY$} {:VAL$}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
+        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n
+        {EMPTY}  please specify {} otherwise.",
+        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see README).",
@@ -354,11 +378,16 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('i') | Long("input") =>
-                args.input = parser.values()?.take(2).map(|s| s.parse()).collect::<Result<_, _>>()?,
+            Short('i') | Long("input") => {
+                let mut values = parser.values()?.take(2);
+                args.in_files.reads1.push(values.next().expect("First argument is always present").parse()?);
+                if let Some(val) = values.next() {
+                    args.in_files.reads2.push(val.parse()?);
+                }
+            }
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
-                args.alns = Some(parser.value()?.parse()?),
-            Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
+                args.in_files.alns.push(parser.value()?.parse()?),
+            Short('r') | Long("reference") => args.in_files.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Short('t') | Long("tech") | Long("technology") => {
                 args.explicit_technology = true;
@@ -395,8 +424,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.bg_params.depth.tail_var_mult = parser.value()?.parse()?;
             }
 
-            Short('^') | Long("interleaved") => args.interleaved = true,
-            Long("no-index") => args.no_index = true,
+            Short('^') | Long("interleaved") => args.in_files.interleaved = true,
+            Long("no-index") => args.in_files.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Long("debug") => args.debug = true,
@@ -486,7 +515,7 @@ fn set_mapping_stdin(
     let mut local_rng = rng.clone();
     rng.long_jump();
     let mut writer = io::BufWriter::new(child_stdin);
-    let handle = fastx::process_readers!(args, Some(contigs); let {mut} reader; {
+    let handle = fastx::process_readers!(args.in_files, Some(contigs); let {mut} reader; {
         thread::spawn(move || {
             Ok(if rate < 1.0 {
                 reader.subsample(&mut writer, rate, &mut local_rng)?
@@ -513,7 +542,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "-r", &format!("{:.0}", seq_info.mean_read_len()), // Provide mean read length.
             "--no-progress",
             ]);
-        if args.is_paired_end() {
+        if args.in_files.is_paired_end() {
             command.arg("--interleaved");
         }
     } else {
@@ -539,22 +568,21 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
 
 fn first_step_str(args: &Args) -> String {
     let mut s = String::new();
-    if args.subsampling_rate == 1.0 {
-        s.push_str("_interleave_");
-    } else {
-        write!(s, "_subsample_ --rate {}", args.subsampling_rate).unwrap();
-        if let Some(seed) = args.seed {
-            write!(s, " --seed {}", seed).unwrap();
-        }
+    write!(s, "_subsample_ --rate {}", args.subsampling_rate).unwrap();
+    if let Some(seed) = args.seed {
+        write!(s, " --seed {}", seed).unwrap();
     }
+
     s.push_str(" -i ");
-    if let Some(bam_filename) = &args.alns {
-        s.push_str(&ext::fmt::path(bam_filename));
+    if args.in_files.reads1.len() > 1 || args.in_files.alns.len() > 1 {
+        s.push_str("...");
+    } else if let Some(filename) = args.in_files.alns.first() {
+        s.push_str(&ext::fmt::path(filename));
     } else {
-        s.push_str(&ext::fmt::path(&args.input[0]));
-    }
-    if args.input.len() > 1 {
-        write!(s, " {}", ext::fmt::path(&args.input[1])).unwrap();
+        s.push_str(&ext::fmt::path(&args.in_files.reads1[0]));
+        if let Some(filename) = args.in_files.reads2.first() {
+            s.push_str(&ext::fmt::path(filename));
+        }
     }
     s.push_str(" | ");
     s
@@ -774,7 +802,8 @@ fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
 /// Calculate mean read length from input reads.
 fn read_len_from_reads(args: &Args, contigs: Option<&ContigNames>) -> Result<f64, Error> {
     log::info!("Calculating mean read length");
-    fastx::process_readers!(args, contigs; let {mut} reader; { fastx::mean_read_len(&mut reader, MEAN_LEN_RECORDS) })
+    fastx::process_readers!(args.in_files, contigs; let {mut} reader;
+        { fastx::mean_read_len(&mut reader, MEAN_LEN_RECORDS) })
 }
 
 fn estimate_bg_from_paired(
@@ -866,16 +895,16 @@ fn estimate_bg_distrs(
 ) -> Result<BgDistr, Error>
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
-    let ref_filename = args.reference.as_ref().unwrap();
+    let ref_filename = args.in_files.reference.as_ref().unwrap();
     let aln_is_paired_end: bool;
     let alns: Vec<NamedAlignment>;
     let mut seq_info: SequencingInfo;
 
-    if args.has_indexed_alignment() {
-        let alns_filename = args.alns.as_ref().unwrap();
+    if args.in_files.has_indexed_alignment() {
+        let alns_filename = &args.in_files.alns[0];
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
-        fastx::set_reference(alns_filename, &mut bam_reader, &args.reference, Some(&bg_region.ref_contigs))?;
+        fastx::set_reference(alns_filename, &mut bam_reader, &args.in_files.reference, Some(&bg_region.ref_contigs))?;
 
         let interval = &bg_region.interval;
         let interval_start = interval.start();
@@ -907,11 +936,11 @@ fn estimate_bg_distrs(
             Some(cigar)
         };
         (alns, aln_is_paired_end) = load_alns(&mut bam_reader, get_cigar, &bg_region.ref_contigs, args)?;
-        if aln_is_paired_end != args.is_paired_end() {
+        if aln_is_paired_end != args.in_files.is_paired_end() {
             return Err(Error::RuntimeError(format!(
                 "Input data is {}-end, while alignment file is {}-end. \
                 Perhaps preprocessing was run multiple times with different inputs?",
-                if args.is_paired_end() { "paired" } else { "single" },
+                if args.in_files.is_paired_end() { "paired" } else { "single" },
                 if aln_is_paired_end { "paired" } else { "single" },
             )));
         }
@@ -941,7 +970,7 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
         return Err(Error::InvalidInput(format!(
             "Cannot use similar dataset {}: different sequencing technology ({} and {})",
             ext::fmt::path(like_dir), similar_seq_info.technology(), seq_info.technology())));
-    } else if similar_distr.insert_distr().is_paired_end() != args.is_paired_end() {
+    } else if similar_distr.insert_distr().is_paired_end() != args.in_files.is_paired_end() {
         return Err(Error::InvalidInput(format!(
             "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(like_dir))));
     } else if !seq_info.technology().is_read_len_similar(seq_info.mean_read_len(), similar_seq_info.mean_read_len()) {
@@ -949,14 +978,18 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
             "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",
             ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len())));
     }
-    let mut total_reads = if let Some(bam_filename) = args.alns.as_ref() {
-        log::info!("Counting reads in {}", ext::fmt::path(bam_filename));
-        fastx::count_reads_bam(bam_filename, &args.samtools, &args.reference, args.threads)?
+    let mut total_reads = if !args.in_files.alns.is_empty() {
+        log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.alns));
+        args.in_files.alns.iter()
+            .map(|filename| fastx::count_reads_bam(filename, &args.samtools, &args.in_files.reference, args.threads))
+            .sum::<Result<u64, _>>()?
     } else {
-        log::info!("Counting reads in {}", ext::fmt::path(&args.input[0]));
-        fastx::count_reads_fastx(&args.input[0])?
+        log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.reads1));
+        args.in_files.reads1.iter()
+            .map(|filename| fastx::count_reads_fastx(filename))
+            .sum::<Result<u64, _>>()?
     };
-    if args.interleaved {
+    if args.in_files.interleaved {
         total_reads /= 2;
     }
     log::debug!("    Input contains {} reads", total_reads);
@@ -990,7 +1023,7 @@ struct BgRegion {
 
 impl BgRegion {
     fn new(args: &Args) -> Result<Self, Error> {
-        let ref_filename = args.reference.as_ref().unwrap();
+        let ref_filename = args.in_files.reference.as_ref().unwrap();
         let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
         let ref_contigs = Arc::new(ref_contigs);
         let interval = select_bg_interval(&ref_filename, &ref_contigs, &args.bg_region)?;

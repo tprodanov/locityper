@@ -52,6 +52,58 @@ pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
     }
 }
 
+/// Chain multiple files together.
+pub struct FileChain {
+    /// Currently open stream.
+    stream: Box<dyn BufRead + Send>,
+    /// Files that will be open in future, in reverse order.
+    future_files: Vec<PathBuf>,
+}
+
+impl FileChain {
+    pub fn new(filenames: &[PathBuf]) -> Result<Self, Error> {
+        Ok(Self {
+            stream: open(&filenames[0])?,
+            future_files: filenames[1..].iter().rev().cloned().collect(),
+        })
+    }
+}
+
+impl Read for FileChain {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let n = self.stream.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            } else if let Some(filename) = self.future_files.pop() {
+                self.stream = open(&filename).map_err(|e| e.try_into_io_error())?;
+            } else {
+                return Ok(0);
+            }
+        }
+    }
+}
+
+impl BufRead for FileChain {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        loop {
+            let buf = self.stream.fill_buf()?;
+            if !buf.is_empty() {
+                // Have to use unsafe code to overcome borrow checker shortcomings.
+                return Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(buf) });
+            } if let Some(filename) = self.future_files.pop() {
+                self.stream = open(&filename).map_err(|e| e.try_into_io_error())?;
+            } else {
+                return Ok(&[])
+            }
+        }
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.stream.consume(amt)
+    }
+}
+
 /// Loads full JSON contents from a file.
 pub fn load_json(filename: &Path) -> Result<json::JsonValue, Error> {
     let stream = open(filename)?;

@@ -70,7 +70,7 @@ impl Error {
                     write!(s, "unnamed streams").unwrap();
                 } else {
                     write!(s, "{}", files.iter().map(|f| ext::fmt::path(f).cyan().to_string())
-                        .collect::<Vec<_>>().join(" ")).unwrap();
+                        .collect::<Vec<_>>().join(", ")).unwrap();
                 }
                 write!(s, ": {}", e.kind()).unwrap();
                 if let Some(e2) = e.get_ref() {
@@ -92,6 +92,21 @@ impl Error {
                 "UTF-8 error".red(), desc, String::from_utf8_lossy(bytes), bytes).unwrap(),
         };
         s
+    }
+
+    /// Converts this error back to io::Error.
+    /// If this is already an io::Error, adds information about the filename to the end,
+    /// otherwise panics.
+    pub fn try_into_io_error(self) -> io::Error {
+        match self {
+            Self::Io(e, files) =>
+                io::Error::new(e.kind(), format!("{:?} in relation to {}",
+                    e, if files.is_empty() { "unnamed files".to_string() } else { ext::fmt::paths(&files) })),
+            e => {
+                log::error!("{}", e.display());
+                panic!("Cannot convert non-IO error to IO");
+            }
+        }
     }
 }
 
