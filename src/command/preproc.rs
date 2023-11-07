@@ -109,8 +109,8 @@ impl InputFiles {
     ///
     /// Paired-end (`p`) line may contain either two files or one file with `*` inside, which is replaced with 1 and 2.
     pub fn fill_from_inlist(&mut self) -> Result<(), Error> {
-        let list = match self.in_list.take() {
-            Some(filename) => ext::sys::open(&filename)?,
+        let list_filename = match self.in_list.take() {
+            Some(filename) => filename,
             None => return Ok(()),
         };
 
@@ -118,9 +118,13 @@ impl InputFiles {
             "Input list (-I) cannot be used together with other input files (-i/-a).");
         validate_param!(!self.interleaved && !self.no_index,
             "Input list (-I) and --interleaved/--no-index cannot be provided together, please see README");
+        let dirname = list_filename.parent();
+        fn add_dir(dirname: Option<&Path>, filename: &str) -> PathBuf {
+            dirname.map(|d| d.join(Path::new(filename))).unwrap_or_else(|| PathBuf::from(filename))
+        }
 
         let mut prev_flag: Option<String> = None;
-        for line in list.lines() {
+        for line in ext::sys::open(&list_filename)?.lines() {
             let line = line.map_err(add_path!(!))?;
             if line.starts_with('#') {
                 continue;
@@ -137,18 +141,18 @@ impl InputFiles {
                 "s" => {
                     // validate_param!(!self.interleaved,
                     //     "Cannot provide single-end and paired-end interleaved files together");
-                    self.reads1.push(PathBuf::from(filename1));
+                    self.reads1.push(add_dir(dirname, filename1));
                 }
                 "pi" => {
                     // validate_param!(self.interleaved || self.reads1.is_empty(),
                     //     "Cannot provide single-end and paired-end interleaved files together");
                     self.interleaved = true;
-                    self.reads1.push(PathBuf::from(filename1));
+                    self.reads1.push(add_dir(dirname, filename1));
                 }
                 "a" => {
                     // validate_param!(!self.no_index,
                     //     "Cannot provide indexed and non-indexed alignment files together");
-                    self.alns.push(PathBuf::from(filename1));
+                    self.alns.push(add_dir(dirname, filename1));
                 }
                 "u" => {
                     // validate_param!(self.no_index || self.alns.is_empty(),
@@ -156,7 +160,7 @@ impl InputFiles {
                     // validate_param!(!self.interleaved,
                     //     "Cannot provide single-end and paired-end interleaved files together");
                     self.no_index = true;
-                    self.alns.push(PathBuf::from(filename1));
+                    self.alns.push(add_dir(dirname, filename1));
                 }
                 "ui" => {
                     // validate_param!(self.no_index || self.alns.is_empty(),
@@ -165,18 +169,18 @@ impl InputFiles {
                     //     "Cannot provide single-end and paired-end interleaved files together");
                     self.no_index = true;
                     self.interleaved = true;
-                    self.alns.push(PathBuf::from(filename1));
+                    self.alns.push(add_dir(dirname, filename1));
                 }
                 "p" => {
                     if split.len() == 3 {
-                        self.reads1.push(PathBuf::from(filename1));
-                        self.reads2.push(PathBuf::from(split[2]));
+                        self.reads1.push(add_dir(dirname, filename1));
+                        self.reads2.push(add_dir(dirname, split[2]));
                     } else {
                         validate_param!(filename1.contains('*'),
                             "Cannot parse line {:?}: paired-end entry requires either two files, or one file with `*`",
                             trimmed_line);
-                        self.reads1.push(PathBuf::from(filename1.replace('*', "1")));
-                        self.reads2.push(PathBuf::from(filename1.replace('*', "2")));
+                        self.reads1.push(add_dir(dirname, &filename1.replace('*', "1")));
+                        self.reads2.push(add_dir(dirname, &filename1.replace('*', "2")));
                     }
                 }
                 rem => return Err(Error::ParsingError(

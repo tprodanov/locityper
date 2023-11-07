@@ -174,8 +174,8 @@ and specify genotype priors with `--priors`.
 
 ## Input files for preprocessing/genotyping WGS dataset
 
-Locityper allows multiple input files for a single dataset.
-You can specify this by repeating `-i/-a` arguments:
+Locityper `preproc` and `genotype` commands allow multiple input files for a single dataset.
+You can specify them by repeating `-i/-a` arguments:
 ```bash
 locityper preproc -i readsA.fq.gz -i readsB.fq.gz ...
 locityper preproc -i readsA1.fq.gz readsA2.fq.gz \
@@ -188,11 +188,11 @@ locityper preproc -a readsA.bam -a readsB.bam --no-index ...
 > Additionally, please make sure to use the same input files for genotyping as for preprocessing.
 
 Alternatively, you can specify an input list of files with `-I list.txt` where each line is
-`<flag>  <file>  [<file2>]`.
+`<flag> <file> [<file2>]`.
 Specifically, lines can be
-- Two paired-end files: `p  reads1.fq.gz  reads2.fq.gz` or `p  reads*.fq.gz`,
-- Interleaved paired-end file: `pi  reads.fq.gz` (same as `-i reads.fq.gz --interleaved`),
-- Single-end FASTA/Q file: `s  reads.fq.gz`,
+- Two paired-end files: `p reads1.fq.gz  reads2.fq.gz` or `p reads*.fq.gz`,
+- Interleaved paired-end file: `pi reads.fq.gz` (same as `-i reads.fq.gz --interleaved`),
+- Single-end FASTA/Q file: `s reads.fq.gz`,
 - Alignment and mapped BAM/CRAM file: `a alns.bam`,
 - Unmapped BAM/CRAM file: `u reads.bam` (same as `-a reads.bam --no-index`).
 - Unmapped interleaved BAM/CRAM file: `ui reads.bam` (same as `-a reads.bam --no-index --interleaved`).
