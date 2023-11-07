@@ -138,16 +138,17 @@ fn print_help(extended: bool) {
             "short".red(), "-H/--full-help".green());
     }
 
-    println!("\n{}", "Input/output arguments:".bold());
-    println!("{EMPTY}  {} Please see README on repeating {}/{} arguments.",
-        "Note:".red(), "-i".green(), "-a".green());
+    println!("\n{}  (please see {} for more information on {}/{}/{} arguments)",
+        "Input/output arguments:".bold(), "README".italic(), "-i".green(), "-a".green(), "-I".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
-        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n
+        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n\
         {EMPTY}  please specify {} otherwise.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
+    println!("    {:KEY$} {:VAL$}  File with input filenames (see {}).",
+        "-I, --in-list".green(), "FILE".yellow(), "README".italic());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Required with input CRAM file ({} alns.cram).",
         "-r, --reference".green(), "FILE".yellow(), "-a".green());
     println!("    {:KEY$} {:VAL$}  Preprocessed dataset information (see {}).",
@@ -242,9 +243,9 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
 
         println!("\n{}", "Locus genotyping:".bold());
-        println!("    {:KEY$} {:VAL$}  Solving stages through comma (see README) [{}].\n\
+        println!("    {:KEY$} {:VAL$}  Solving stages through comma (see {}) [{}].\n\
             {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
-            "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
+            "-S, --stages".green(), "STR".yellow(), "README".italic(), super::fmt_def(defaults.scheme_params.stages),
             "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
         println!("    {:KEY$} {:VAL$}  During pre-filtering, discard genotypes that have 10^{}\n\
             {EMPTY}  worse alignment probability than the best genotype [{}].",
@@ -265,11 +266,9 @@ fn print_help(extended: bool) {
             {EMPTY}  genotype, raised to this power (0 - no normalization) [{}].",
             "-N, --depth-norm".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_norm_power));
         println!("        {} {}, {} {}, {} {}, {} {}\n\
-            {EMPTY}  Solver parameters (see README).",
-            "--greedy".green(), "STR".yellow(),
-            "--anneal".green(), "STR".yellow(),
-            "--highs".green(), "STR".yellow(),
-            "--gurobi".green(), "STR".yellow());
+            {EMPTY}  Solver parameters (see {}).",
+            "--greedy".green(), "STR".yellow(), "--anneal".green(), "STR".yellow(),
+            "--highs".green(), "STR".yellow(), "--gurobi".green(), "STR".yellow(), "README".italic());
         println!("    {:KEY$} {:VAL$}  Output BAM files for this number of genotypes [{}].",
             "-O, --out-bams".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.out_bams));
     }
@@ -321,6 +320,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
             }
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
                 args.in_files.alns.push(parser.value()?.parse()?),
+            Short('I') | Long("in-list") | Long("input-list") => args.in_files.in_list = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.in_files.reference = Some(parser.value()?.parse()?),
             Short('p') | Long("preproc") | Long("preprocessing") => args.preproc = Some(parser.value()?.parse()?),
             Short('d') | Long("db") | Long("database") | Long("databases") => {
@@ -909,7 +909,10 @@ fn analyze_locus(
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let mut args = parse_args(argv)?.validate()?;
+    let mut args = parse_args(argv)?;
+    args.in_files.fill_from_inlist()?;
+    let mut args = args.validate()?;
+
     super::greet();
     let timer = Instant::now();
     let mut rng = ext::rand::init_rng(args.seed);

@@ -3,7 +3,7 @@
 use std::{
     fs, thread,
     ffi::OsStr,
-    io::{self, Write},
+    io::{self, Write, BufRead},
     fmt::Write as FmtWrite,
     cmp::{min, max},
     path::{Path, PathBuf},
@@ -81,6 +81,7 @@ pub struct InputFiles {
     pub reads1: Vec<PathBuf>,
     pub reads2: Vec<PathBuf>,
     pub alns: Vec<PathBuf>,
+    pub in_list: Option<PathBuf>,
     pub reference: Option<PathBuf>,
     pub interleaved: bool,
     pub no_index: bool,
@@ -92,6 +93,7 @@ impl Default for InputFiles {
             reads1: Vec::new(),
             reads2: Vec::new(),
             alns: Vec::new(),
+            in_list: None,
             reference: None,
             interleaved: false,
             no_index: false,
@@ -100,6 +102,91 @@ impl Default for InputFiles {
 }
 
 impl InputFiles {
+    /// Sets input files (except for the reference) based on `in_list` with lines
+    /// `<flag>  <file>  [<file2>]`.
+    /// Flag is one of `p` (paired-end), `s` (single-end), `pi` (paired-end interleaved),
+    /// `a` (alignment), `u` (unmapped BAM/CRAM file) and `ui` (unmapped interleaved BAM/CRAM file).
+    ///
+    /// Paired-end (`p`) line may contain either two files or one file with `*` inside, which is replaced with 1 and 2.
+    pub fn fill_from_inlist(&mut self) -> Result<(), Error> {
+        let list = match self.in_list.take() {
+            Some(filename) => ext::sys::open(&filename)?,
+            None => return Ok(()),
+        };
+
+        validate_param!(self.reads1.is_empty() && self.reads2.is_empty() && self.alns.is_empty(),
+            "Input list (-I) cannot be used together with other input files (-i/-a).");
+        validate_param!(!self.interleaved && !self.no_index,
+            "Input list (-I) and --interleaved/--no-index cannot be provided together, please see README");
+
+        let mut prev_flag: Option<String> = None;
+        for line in list.lines() {
+            let line = line.map_err(add_path!(!))?;
+            if line.starts_with('#') {
+                continue;
+            }
+            let trimmed_line = line.trim_end();
+            let split: smallvec::SmallVec::<[&str; 3]> = trimmed_line.split_whitespace().collect();
+            validate_param!(split.len() == 2 || (split[0] == "p" && split.len() == 3),
+                "Incorrect number of arguments in input line {:?}", trimmed_line);
+            let flag = split[0].to_string();
+            let filename1 = split[1];
+            validate_param!(prev_flag.as_ref().map(|val| val == &flag).unwrap_or(true),
+                "All lines in the input list (-I) must contain the same flag ({} != {})", prev_flag.unwrap(), &flag);
+            match &flag as &str {
+                "s" => {
+                    // validate_param!(!self.interleaved,
+                    //     "Cannot provide single-end and paired-end interleaved files together");
+                    self.reads1.push(PathBuf::from(filename1));
+                }
+                "pi" => {
+                    // validate_param!(self.interleaved || self.reads1.is_empty(),
+                    //     "Cannot provide single-end and paired-end interleaved files together");
+                    self.interleaved = true;
+                    self.reads1.push(PathBuf::from(filename1));
+                }
+                "a" => {
+                    // validate_param!(!self.no_index,
+                    //     "Cannot provide indexed and non-indexed alignment files together");
+                    self.alns.push(PathBuf::from(filename1));
+                }
+                "u" => {
+                    // validate_param!(self.no_index || self.alns.is_empty(),
+                    //     "Cannot provide indexed and non-indexed alignment files together");
+                    // validate_param!(!self.interleaved,
+                    //     "Cannot provide single-end and paired-end interleaved files together");
+                    self.no_index = true;
+                    self.alns.push(PathBuf::from(filename1));
+                }
+                "ui" => {
+                    // validate_param!(self.no_index || self.alns.is_empty(),
+                    //     "Cannot provide indexed and non-indexed alignment files together");
+                    // validate_param!(self.interleaved || self.alns.is_empty(),
+                    //     "Cannot provide single-end and paired-end interleaved files together");
+                    self.no_index = true;
+                    self.interleaved = true;
+                    self.alns.push(PathBuf::from(filename1));
+                }
+                "p" => {
+                    if split.len() == 3 {
+                        self.reads1.push(PathBuf::from(filename1));
+                        self.reads2.push(PathBuf::from(split[2]));
+                    } else {
+                        validate_param!(filename1.contains('*'),
+                            "Cannot parse line {:?}: paired-end entry requires either two files, or one file with `*`",
+                            trimmed_line);
+                        self.reads1.push(PathBuf::from(filename1.replace('*', "1")));
+                        self.reads2.push(PathBuf::from(filename1.replace('*', "2")));
+                    }
+                }
+                rem => return Err(Error::ParsingError(
+                    format!("Cannot parse line {:?}: unexpected flag {}", trimmed_line, rem))),
+            }
+            prev_flag = Some(flag);
+        }
+        Ok(())
+    }
+
     pub fn validate(&self, ref_required: bool) -> Result<(), Error> {
         let n1 = self.reads1.len();
         let n2 = self.reads2.len();
@@ -258,20 +345,21 @@ fn print_help(extended: bool) {
             "short".red(), "-H/--full-help".green());
     }
 
-    println!("\n{}", "Input/output arguments:".bold());
-    println!("{EMPTY}  {} Please see README on repeating {}/{} arguments.",
-        "Note:".red(), "-i".green(), "-a".green());
+    println!("\n{}  (please see {} for more information on {}/{}/{} arguments)",
+        "Input/output arguments:".bold(), "README".italic(), "-i".green(), "-a".green(), "-I".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
     println!("    {:KEY$} {:VAL$}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
-        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n
+        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n\
         {EMPTY}  please specify {} otherwise.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
-    println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must contain FAI index.",
+    println!("    {:KEY$} {:VAL$}  File with input filenames (see {}).",
+        "-I, --in-list".green(), "FILE".yellow(), "README".italic());
+    println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must be indexed with FAIDX.",
         "-r, --reference".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see README).",
-        "-j, --jf-counts".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see {}).",
+        "-j, --jf-counts".green(), "FILE".yellow(), "README".italic());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  This dataset is similar to already preprocessed dataset.\n\
@@ -387,6 +475,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
                 args.in_files.alns.push(parser.value()?.parse()?),
+            Short('I') | Long("in-list") | Long("input-list") => args.in_files.in_list = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.in_files.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Short('t') | Long("tech") | Long("technology") => {
@@ -1037,7 +1126,10 @@ impl BgRegion {
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
-    let args = parse_args(argv)?.validate()?;
+    let mut args = parse_args(argv)?;
+    args.in_files.fill_from_inlist()?;
+    let args = args.validate()?;
+
     super::greet();
     let timer = Instant::now();
     let out_dir = args.output.as_ref().unwrap();

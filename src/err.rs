@@ -95,8 +95,7 @@ impl Error {
     }
 
     /// Converts this error back to io::Error.
-    /// If this is already an io::Error, adds information about the filename to the end,
-    /// otherwise panics.
+    /// If this is already an io::Error, adds information about the filename to the end, otherwise panics.
     pub fn try_into_io_error(self) -> io::Error {
         match self {
             Self::Io(e, files) =>
