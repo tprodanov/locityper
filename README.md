@@ -190,10 +190,11 @@ locityper preproc -a readsA.bam -a readsB.bam --no-index ...
 Alternatively, you can specify an input list of files with `-I list.txt` where each line is
 `<flag> <file> [<file2>]`.
 Specifically, lines can be
-- Two paired-end files: `p reads1.fq.gz  reads2.fq.gz` or `p reads*.fq.gz`,
+- Two paired-end files: `p reads1.fq.gz reads2.fq.gz` or `p reads*.fq.gz`,
 - Interleaved paired-end file: `pi reads.fq.gz` (same as `-i reads.fq.gz --interleaved`),
 - Single-end FASTA/Q file: `s reads.fq.gz`,
 - Alignment and mapped BAM/CRAM file: `a alns.bam`,
 - Unmapped BAM/CRAM file: `u reads.bam` (same as `-a reads.bam --no-index`).
 - Unmapped interleaved BAM/CRAM file: `ui reads.bam` (same as `-a reads.bam --no-index --interleaved`).
+
 Multiple lines are allowed, but all must have the same flag.

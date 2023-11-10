@@ -13,7 +13,7 @@ pub use {
 };
 
 use std::{
-    fmt::{self, Write},
+    fmt,
     str::FromStr,
     path::Path,
 };
@@ -153,7 +153,12 @@ pub enum Technology {
 }
 
 // NOTE: In nightly version, can use `std::mem::variant_count`.
-const TECHS: [Technology; 4] = [Technology::Illumina, Technology::HiFi, Technology::PacBio, Technology::Nanopore];
+pub const TECHNOLOGIES: [Technology; 4] = [
+    Technology::Illumina,
+    Technology::HiFi,
+    Technology::PacBio,
+    Technology::Nanopore
+];
 
 impl Technology {
     pub fn to_str(self) -> &'static str {
@@ -183,27 +188,6 @@ impl Technology {
         }
     }
 
-    /// Describe values for each technology in format
-    /// "illumina: X, hifi: Y, ..."
-    pub fn describe_values<D, F>(f: F) -> String
-    where D: fmt::Display + Eq,
-          F: Fn(Self) -> D,
-    {
-        let mut tech_vals: Vec<(String, D)> = Vec::new();
-        for &tech in TECHS.iter() {
-            let val = f(tech);
-            if let Some(i) = tech_vals.iter().position(|(_, v)| v == &val) {
-                write!(tech_vals[i].0, ",{}", tech).unwrap();
-            } else {
-                tech_vals.push((tech.to_string(), val));
-            }
-        }
-        tech_vals.into_iter()
-            .map(|(techs, val)| format!("{} for {}", val, techs))
-            .collect::<Vec<String>>()
-            .join("; ")
-    }
-
     /// Returns true if the technology exhibits different depth values at different GC-contents.
     pub fn has_gc_bias(self) -> bool {
         self == Self::Illumina
@@ -224,10 +208,12 @@ impl Technology {
     }
 
     /// Returns minimizer matching fraction for different technologies.
-    pub fn default_match_frac(self) -> f64 {
-        match self {
-            Self::Illumina => 0.6,
-            Self::HiFi | Self::PacBio | Self::Nanopore => 0.5,
+    pub fn default_match_frac(self, is_paired_end: bool) -> f64 {
+        match (self, is_paired_end) {
+            (Self::Illumina, false) => 0.7,
+            (Self::Illumina, true)  => 0.6,
+            (_, false) => 0.5,
+            (_, true) => unreachable!("Paired-end long reads are not supported"),
         }
     }
 

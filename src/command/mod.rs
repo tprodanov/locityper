@@ -4,7 +4,8 @@ mod preproc;
 mod genotype;
 
 use std::{
-    fs, fmt,
+    fs,
+    fmt::{self, Write as FmtWrite},
     path::Path,
     str::FromStr,
 };
@@ -247,4 +248,29 @@ impl From<u8> for DebugLvl {
 
 fn write_success_file(filename: impl AsRef<Path>) -> Result<(), Error> {
     fs::write(&filename, const_format::formatcp!("v{}\n", VERSION)).map_err(add_path!(filename))
+}
+
+/// Describe values for each technology in format
+/// "illumina: X, hifi: Y, ..."
+pub fn describe_defaults<T, V>(
+    options: impl IntoIterator<Item = T>,
+    fmt_option: impl Fn(&T) -> String,
+    get_default: impl Fn(&T) -> V,
+) -> String
+where V: fmt::Display + PartialEq,
+{
+    // Vector of pairs (Default value, all options where it appears).
+    let mut tech_vals: Vec<(V, String)> = Vec::new();
+    for opt in options {
+        let val = get_default(&opt);
+        if let Some(i) = tech_vals.iter().position(|(v, _)| v == &val) {
+            write!(tech_vals[i].1, ",{}", fmt_option(&opt)).unwrap();
+        } else {
+            tech_vals.push((val, fmt_option(&opt)));
+        }
+    }
+    tech_vals.into_iter()
+        .map(|(val, opts)| format!("{}: {}", opts, fmt_def(val)))
+        .collect::<Vec<String>>()
+        .join("; ")
 }

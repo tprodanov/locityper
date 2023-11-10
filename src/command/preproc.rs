@@ -1017,7 +1017,7 @@ fn estimate_bg_distrs(
         log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
 
         let bam_filename = out_dir.join("aln.bam");
-        log::info!("Mapping reads to the reference");
+        log::info!("Mapping reads to the reference in {} threads", args.threads);
         let mut rng = init_rng(args.seed);
         run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, bg_region, &mut rng)?;
 
