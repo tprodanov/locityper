@@ -202,7 +202,7 @@ impl InputFiles {
         validate_param!(implies(self.interleaved, n2 == 0),
             "Second end reads are specified together with --interleaved");
         validate_param!(implies(ref_required, self.reference.is_some()), "Reference file (-r) is not provided");
-        validate_param!(implies(m > 2, self.no_index),
+        validate_param!(implies(m > 1, self.no_index),
             "Cannot use multilpe indexed BAM/CRAM files (consider --no-index)");
 
         // Should only be run once, so there is no need for lazy static.
