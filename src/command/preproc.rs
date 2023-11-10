@@ -196,7 +196,7 @@ impl InputFiles {
         let n2 = self.reads2.len();
         let m = self.alns.len();
 
-        validate_param!(n1 == n2, "Cannot mix single-end and paired-end reads");
+        validate_param!(n1 == n2 || n2 == 0, "Cannot mix single-end and paired-end reads");
         validate_param!(n1 > 0 || m > 0, "Neither reads (-i) nor alignments (-a) are provided");
         validate_param!(n1 == 0 || m == 0, "Cannot use reads (-i) and alignments (-a) together");
         validate_param!(implies(self.interleaved, n2 == 0),
