@@ -88,7 +88,7 @@ impl Params {
         // there are 2L/(w + 1) minimizers per sequence of length of L.
         let stretch_minims = (2 * match_length).fast_ceil_div(u32::from(minimizer_w) + 1);
         let stretch_score = f64::from(stretch_minims)
-            * (f64::from(SUBSUM_BONUS + 1) * match_frac - f64::from(SUBSUM_PENALTY));
+            * (f64::from(SUBSUM_BONUS + SUBSUM_PENALTY) * match_frac - f64::from(SUBSUM_PENALTY));
         assert!(stretch_score > 0.0);
         let stretch_score = stretch_score.ceil() as u32;
         Ok(Self { minimizer_k, minimizer_w, match_frac, match_length, stretch_minims, stretch_score, thresholds })

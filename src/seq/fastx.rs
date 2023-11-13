@@ -968,7 +968,7 @@ macro_rules! process_readers {
             use crate::seq::fastx;
             let n1 = $args.reads1.len();
             let n2 = $args.reads2.len();
-            assert_eq!(n1, n2);
+            assert!(n2 == 0 || (n1 == n2));
             let m = $args.alns.len();
             assert!(n1 == 0 || m == 0);
 
