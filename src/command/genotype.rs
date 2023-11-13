@@ -787,9 +787,9 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), E
 
     let mut samtools_cmd = Command::new(&args.samtools);
     samtools_cmd.args(&["view", "-b"]); // Output BAM.
-    if !bg_distr.insert_distr().is_paired_end() {
-        samtools_cmd.arg("-F4"); // ignore unmapped reads in case of single-end reads.
-    }
+    // if !bg_distr.insert_distr().is_paired_end() {
+    //     samtools_cmd.arg("-F4"); // ignore unmapped reads in case of single-end reads.
+    // }
     samtools_cmd.arg("-o").arg(&locus.tmp_aln_filename);
     samtools_cmd.stdin(Stdio::from(child_stdout)).stdout(Stdio::piped()).stderr(Stdio::piped());
 
