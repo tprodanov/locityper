@@ -528,12 +528,12 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], divergences: &TriangleMat
     }
 }
 
-/// Cluster haplotypes using `kodama` crate
+/// Cluster alleles using `kodama` crate
 /// (which, in turn, is based on this paper https://arxiv.org/pdf/1109.2378.pdf).
 ///
 /// Clusters with divergence not exceeding the threshold are joined.
 /// Returns boolean vector: does the sequence remain after mergin?
-fn cluster_haplotypes(
+fn cluster_alleles(
     mut nwk_writer: impl Write,
     entries: &[NamedSeq],
     divergences: TriangleMatrix<f64>,
@@ -581,20 +581,19 @@ fn cluster_haplotypes(
     Ok(keep_seqs)
 }
 
-/// Process haplotypes: write FASTA, PAF, kmers files, cluster sequences.
-fn process_haplotypes(
+/// Process alleles: write FASTA, PAF, kmers files, cluster sequences.
+fn process_alleles(
     #[allow(unused_variables)] // Not used if feature `aln` is disabled.
     locus: &NamedInterval,
     locus_dir: &Path,
-    ref_seq: Vec<u8>,
+    mut ref_seq: Vec<u8>,
     entries: Vec<NamedSeq>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
 ) -> Result<(), Error>
 {
     let n_entries = entries.len();
-    log::info!("    Writing {} haplotypes to {}/", n_entries, ext::fmt::path(locus_dir));
-    log::info!("    Calculating haplotype divergence");
+    log::info!("    Calculating sequence divergence for {} alleles in {} threads", n_entries, args.threads);
     let divergences: TriangleMatrix<f64>;
     if args.accuracy > 0 {
         #[cfg(feature = "aln")] {
@@ -612,23 +611,22 @@ fn process_haplotypes(
             move |(i, j)| if entries_ref[i].seq() == entries_ref[j].seq() { 0.0 } else { 1.0 });
     }
 
-    log::info!("    Clustering haploypes");
     let nwk_filename = locus_dir.join(paths::LOCUS_DENDROGRAM);
     let nwk_writer = ext::sys::create_file(&nwk_filename)?;
-    let keep_seqs = cluster_haplotypes(nwk_writer, &entries, divergences, args.max_divergence)
+    let keep_seqs = cluster_alleles(nwk_writer, &entries, divergences, args.max_divergence)
         .map_err(add_path!(nwk_filename))?;
-    let n_filtered = keep_seqs.iter().fold(0, |sum, &keep| sum + usize::from(keep));
-    if n_filtered == n_entries {
-        log::info!("        Keep all sequences after clustering");
+    let n_retained = keep_seqs.iter().fold(0, |sum, &keep| sum + usize::from(keep));
+    if n_retained == n_entries {
+        log::info!("    Keep all {} alleles", n_entries);
     } else {
-        log::info!("        Discard {} sequences after clustering", n_entries - n_filtered);
+        log::info!("    Retain {}/{} alleles after clustering", n_retained, n_entries);
     }
 
     let filt_fasta_readername = locus_dir.join(paths::LOCUS_FASTA);
     let mut filt_fasta_writer = ext::sys::create_gzip(&filt_fasta_readername)?;
     let locus_fasta = locus_dir.join(paths::LOCUS_FASTA_ALL);
     let mut all_fasta_writer = ext::sys::create_gzip(&locus_fasta)?;
-    let mut filt_seqs = Vec::with_capacity(n_filtered);
+    let mut filt_seqs = Vec::with_capacity(n_retained);
     for (&keep, entry) in keep_seqs.iter().zip(entries.into_iter()) {
         seq::write_fasta(&mut all_fasta_writer, entry.name().as_bytes(), entry.seq()).map_err(add_path!(locus_fasta))?;
         if keep {
@@ -640,12 +638,25 @@ fn process_haplotypes(
     std::mem::drop((filt_fasta_writer, all_fasta_writer));
 
     log::info!("    Counting k-mers");
+    // Replace Ns with As in the reference sequence.
+    let ref_n_runs = seq::n_runs(&ref_seq);
+    for &(start, end) in ref_n_runs.iter() {
+        (&mut ref_seq[start as usize..end as usize]).fill(b'A');
+    }
+
     // Calculate k-mer counts for the reference sequence as well.
-    filt_seqs.push(ref_seq.to_vec());
+    filt_seqs.push(ref_seq);
     let mut kmer_counts = kmer_getter.fetch(filt_seqs.clone())?;
     let ref_seq = filt_seqs.pop().unwrap();
-    let ref_counts = kmer_counts.pop();
-    let off_target_counts = kmer_counts.off_target_counts(&filt_seqs, &ref_seq, &ref_counts);
+    let mut ref_counts = kmer_counts.pop();
+
+    // Replace k-mer counts with 0s where Ns were observed.
+    let k = kmer_getter.k();
+    let ref_counts_size = ref_counts.len();
+    for &(start, end) in ref_n_runs.iter() {
+        (&mut ref_counts[(start + 1).saturating_sub(k) as usize..min(end as usize, ref_counts_size)]).fill(0);
+    }
+    let off_target_counts = kmer_counts.off_target_counts(&filt_seqs, &ref_seq, &ref_counts, ref_n_runs.is_empty());
 
     let kmers_filename = locus_dir.join(paths::KMERS);
     let mut kmers_writer = ext::sys::create_lz4_slow(&kmers_filename)?;
@@ -658,8 +669,8 @@ fn process_haplotypes(
 
 /// Checks sequences for Ns, minimal size and for equal boundaries.
 fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u8]>) -> Result<(), Error> {
-    if seqs.is_empty() {
-        return Err(Error::InvalidData(format!("No sequences available for locus {}", locus.name())));
+    if seqs.len() < 2 {
+        return Err(Error::InvalidData(format!("Less than two alleles available for locus {}", locus.name())));
     }
     let min_size = seqs.iter().map(|s| s.len()).min().unwrap();
     if min_size < 1000 {
@@ -667,9 +678,6 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
             locus, min_size)));
     } else if min_size < 10000 {
         log::warn!("[{}] Locus alleles may be too short (shortest: {} bp)", locus.name(), min_size);
-    }
-    if seqs.iter().any(|entry| seq::has_n(entry.seq())) {
-        return Err(Error::InvalidData(format!("Locus alleles contain Ns for locus {}", locus.name())));
     }
 
     const AFFIX_SIZE: usize = 5;
@@ -725,7 +733,7 @@ fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>
             left_out.truncate(5);
             left_out.push("...".to_owned());
         }
-        log::warn!("    Leave out {} haplotypes ({})", discarded, left_out.join(", "));
+        log::warn!("    Leave out {} alleles ({})", discarded, left_out.join(", "));
     } else {
         log::warn!("Zero matches between leave-out and FASTA alleles");
     }
@@ -751,9 +759,6 @@ fn add_locus(
         }
     }
     let ref_seq = locus.interval().fetch_seq(fasta_reader)?;
-    if seq::has_n(&ref_seq) {
-        return Err(Error::RuntimeError(format!("Locus {} sequence contains Ns", locus)));
-    }
 
     // Write reference coordinates to the BED file.
     let locus_bed = locus_dir.join(paths::LOCUS_BED);
@@ -766,13 +771,19 @@ fn add_locus(
     } else if let Some(fasta_filename) = alleles_fasta {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let alleles = fasta_reader.read_all()?;
-        log::info!("FASTA file contains {} haplotypes", alleles.len());
+        log::info!("FASTA file contains {} alleles", alleles.len());
         discard_leave_out_alleles(alleles, &args.leave_out)
     } else {
         unreachable!("Either VCF file or alleles FASTA must be specified")
     };
+    let obtained_count = allele_seqs.len();
+    let allele_seqs: Vec<_> = allele_seqs.into_iter().filter(|entry| !seq::has_n(entry.seq())).collect();
+    let without_ns = allele_seqs.len();
+    if without_ns < obtained_count {
+        log::warn!("    Removed {}/{} alleles with Ns", obtained_count - without_ns, obtained_count);
+    }
     check_sequences(&allele_seqs, &locus, if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
-    process_haplotypes(&locus, locus_dir, ref_seq, allele_seqs, kmer_getter, args)
+    process_alleles(&locus, locus_dir, ref_seq, allele_seqs, kmer_getter, args)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {

@@ -243,7 +243,6 @@ pub fn pairwise_divergences(
 ) -> Result<TriangleMatrix<f64>, Error> {
     let caches: Vec<_> = entries.iter().map(|entry| cache_kmers(entry.seq(), k)).collect();
     let alns = if threads == 1 {
-        log::debug!("        Aligning sequences in 1 thread");
         let n = entries.len();
         let mut alns = Vec::with_capacity(n * (n - 1) / 2);
         let aligner = Aligner::new(penalties.clone(), accuracy);
@@ -269,7 +268,6 @@ fn divergences_multithread(
     threads: u16,
 ) -> Result<TriangleMatrix<(Cigar, i32)>, Error> {
     let threads = usize::from(threads);
-    log::debug!("        Aligning sequences in {} threads", threads);
     let n = entries.len();
     let pairs: Arc<Vec<(u32, u32)>> = Arc::new(TriangleMatrix::indices(n).map(|(i, j)| (i as u32, j as u32)).collect());
     let n_pairs = pairs.len();

@@ -409,7 +409,14 @@ impl KmerCounts {
     /// while we replace other k-mer counts with off-target counts.
     ///
     /// If one of the counts is equal to `max_count`, keep it as it is.
-    pub fn off_target_counts(&self, seqs: &[Vec<u8>], target_seq: &[u8], target_counts: &[KmerCount]) -> Self {
+    pub fn off_target_counts(
+        &self,
+        seqs: &[Vec<u8>],
+        target_seq: &[u8],
+        target_counts: &[KmerCount],
+        check_negatives: bool,
+    ) -> Self
+    {
         let k = u8::try_from(self.k).expect("k-mer size is too large");
         assert!(k <= u128::MAX_KMER_SIZE, "Cannot subtract k-mer counts: k is too high ({})", self.k);
 
@@ -421,16 +428,16 @@ impl KmerCounts {
         let mut off_target_map = HashMap::default();
         // Insert max value for the undefined k-mer (with Ns), just in case.
         off_target_map.insert(u128::UNDEF, self.max_value);
-        let mut have_negative = false;
+        let mut have_negatives = false;
         for (&kmer, &count) in buffer.iter().zip(target_counts) {
             let val = off_target_map.entry(kmer).or_insert(count);
             if *val != self.max_value {
-                have_negative |= *val == 0;
+                have_negatives |= *val == 0;
                 // Decrease off-target count by one.
                 *val = val.saturating_sub(1);
             }
         }
-        if have_negative {
+        if check_negatives && have_negatives {
             log::error!("Reference sequence does not match completely with Jellyfish k-mer counts.\n    \
                 Perhaps Jellyfish counts were calculated for another reference?");
         }
@@ -523,6 +530,9 @@ impl JfKmerGetter {
         let handle = std::thread::spawn(move || -> Result<Vec<usize>, Error> {
             let mut n_kmers = Vec::new();
             for seq in seqs.into_iter() {
+                if seq::has_n(&seq) {
+                    return Err(Error::RuntimeError(format!("Cannot count k-mers for sequence with Ns")));
+                }
                 n_kmers.push((seq.len() + 1).saturating_sub(k_usize));
                 seq::write_fasta(&mut child_stdin, b"", &seq).map_err(add_path!(!))?;
             }

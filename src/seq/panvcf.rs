@@ -7,7 +7,7 @@ use htslib::bcf::{
 };
 use crate::{
     Error,
-    seq::{self, Interval},
+    seq::Interval,
     ext::vec::F64Ext,
     algo::HashSet,
 };
@@ -219,7 +219,7 @@ fn discard_unknown(
     let unfilt_seqs = std::mem::replace(seqs, Vec::with_capacity(n_remain));
     seqs.extend(unfilt_seqs.into_iter().zip(&keep_seqs)
         .filter_map(|(seq, &keep)| if keep { Some(seq) } else { None }));
-    log::warn!("        Reconstructed {} haplotypes ({} unavailable)", n_remain, n_discard);
+    log::warn!("        Reconstructed {} alleles ({} unavailable)", n_remain, n_discard);
 }
 
 /// Reconstructs sample sequences by adding variants to the reference sequence.
@@ -254,10 +254,10 @@ pub fn reconstruct_sequences(
     let mut ref_pos = ref_start;
     for var in recs.iter() {
         let alleles = var.alleles();
-        if alleles.iter().copied().any(seq::has_n) {
-            return Err(Error::InvalidData(format!("Input VCF file contains Ns in one of the alleles of {}",
-                format_var(var, header))));
-        }
+        // if alleles.iter().copied().any(seq::has_n) {
+        //     return Err(Error::InvalidData(format!("Input VCF file contains Ns in one of the alleles of {}",
+        //         format_var(var, header))));
+        // }
         let var_start = u32::try_from(var.pos()).unwrap();
         let ref_len = alleles[0].len() as u32;
         let var_end = var_start + ref_len;
@@ -304,9 +304,5 @@ pub fn reconstruct_sequences(
     }
 
     discard_unknown(&mut seqs, &unknown_nts, unknown_frac);
-    if seqs.len() < 2 {
-        Err(Error::InvalidData("Less than two haplotypes reconstructed".to_owned()))
-    } else {
-        Ok(seqs)
-    }
+    Ok(seqs)
 }
