@@ -86,6 +86,9 @@ def process(prefix, res, sol, filt, dist):
     for option in res.get('options', ()):
         gt = option['genotype']
         w = option['prob']
+        if w is None:
+            weighted_dist = np.nan
+            break
         weighted_dist += dist.loc[gt].dist * w
         weight_sum += w
         gt_probs[gt] = option['log10_prob']
