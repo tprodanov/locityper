@@ -99,7 +99,7 @@ def process(prefix, res, sol, filt, dist):
     else:
         weighted_dist = np.nan
 
-    min_dist = dist.loc[filt_gts].dist.min()
+    min_dist = min(dist.loc[gt].dist for gt in filt_gts)
     x = sol.lik
     y = dist.loc[sol.index].dist
     try:

@@ -71,6 +71,7 @@ def process_locus(variants, reference, samples, locus_tup, prediction_paths, out
             newvar.chrom = chrom
             newvar.start = var.start
             newvar.alleles = var.alleles
+            newvar.id = var.id
             for sample in samples:
                 pred = predictions[sample]
                 fmt = newvar.samples[sample]
