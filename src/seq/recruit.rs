@@ -147,10 +147,51 @@ impl Stats {
     }
 }
 
-type MatchesBuffer = IntMap<u16, u64>;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ShortMatchCount {
+    usable1: u16,
+    unusable1: u16,
+    usable2: u16,
+    unusable2: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LongMatchCount {
+    usable: u32,
+    unusable: u32,
+}
+
+/// During read recruitment, we count minimizer matches within 8 bytes,
+/// but use them differently for short and long reads.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) union MatchCount {
+    short: ShortMatchCount,
+    long: LongMatchCount,
+}
+
+const SHORT_ZERO_MATCHES: MatchCount = MatchCount {
+    short: ShortMatchCount {
+        usable1: 0,
+        unusable1: 0,
+        usable2: 0,
+        unusable2: 0,
+    },
+};
+
+const LONG_ZERO_MATCHES: MatchCount = MatchCount {
+    long: LongMatchCount {
+        usable: 0,
+        unusable: 0,
+    },
+};
+
+type MatchesBuffer = IntMap<u16, MatchCount>;
 
 /// Trait-extension over single/paired reads.
-pub trait RecruitableRecord : fastx::WritableRecord + Send + 'static {
+pub(crate) trait RecruitableRecord : fastx::WritableRecord + Send + 'static {
     /// Recruit a short single-end/paired-end read, or a long read.
     /// `minimizers` and `matches` are buffer structures, that can be freely cleaned and reused.
     fn recruit(&self,
@@ -313,27 +354,21 @@ impl Targets {
         kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total = u16::try_from(minimizers.len()).expect("Short read has too many minimizers");
 
-        // Matches have 8-byte values. Ignore first 4 bytes,
-        // then use first 2 bytes for usable k-mer matches and 2 bytes for unusable k-mer matches.
         matches.clear();
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for &(locus_ix, is_usable) in loci_ixs.iter() {
-                    let counts = matches.entry(locus_ix).or_default();
-                    let (_, usable_count, unusable_count) = unsafe {
-                        std::mem::transmute::<&mut u64, &mut (u32, u16, u16)>(counts)
-                    };
-                    if is_usable { *usable_count += 1 } else { *unusable_count += 1 };
+                    let counts = matches.entry(locus_ix).or_insert(SHORT_ZERO_MATCHES);
+                    let counts = unsafe { &mut counts.short };
+                    if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
                 }
             }
         }
 
         answer.clear();
         for (&locus_ix, &counts) in matches.iter() {
-            let (_, usable_count, unusable_count) = unsafe {
-                std::mem::transmute::<u64, (u32, u16, u16)>(counts)
-            };
-            if self.params.short_read_passes(usable_count, unusable_count, total) {
+            let counts = unsafe { counts.short };
+            if self.params.short_read_passes(counts.usable1, counts.unusable1, total) {
                 answer.push(locus_ix);
             }
         }
@@ -373,23 +408,23 @@ impl Targets {
         minimizers.clear();
         kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total_minims = u32::try_from(minimizers.len()).expect("Long read has too many minimizers");
-        // Matches have 8-byte values. Reinterpret it as two u32s: usable and unusable k-mer matches.
+
         matches.clear();
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for &(locus_ix, is_usable) in loci_ixs.iter() {
-                    let counts = matches.entry(locus_ix).or_default();
-                    let (usable, unusable) = unsafe { std::mem::transmute::<&mut u64, &mut (u32, u32)>(counts) };
-                    if is_usable { *usable += 1 } else { *unusable += 1 };
+                    let counts = matches.entry(locus_ix).or_insert(LONG_ZERO_MATCHES);
+                    let counts = unsafe { &mut counts.long };
+                    if is_usable { counts.usable += 1 } else { counts.unusable += 1 };
                 }
             }
         }
 
         answer.clear();
         for (&locus_ix, &counts) in matches.iter() {
-            let (usable, unusable) = unsafe { std::mem::transmute::<u64, (u32, u32)>(counts) };
-            let total_wo_unusable = total_minims - unusable;
-            if usable >= self.params.long_read_threshold(min(self.params.stretch_minims, total_wo_unusable)) {
+            let counts = unsafe { counts.long };
+            let total_wo_unusable = total_minims - counts.unusable;
+            if counts.usable >= self.params.long_read_threshold(min(self.params.stretch_minims, total_wo_unusable)) {
                 if total_wo_unusable < self.params.stretch_minims || self.has_matching_stretch(minimizers, locus_ix) {
                     answer.push(locus_ix);
                 }
@@ -416,11 +451,9 @@ impl Targets {
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
                 for &(locus_ix, is_usable) in loci_ixs.iter() {
-                    let counts = matches.entry(locus_ix).or_default();
-                    let (usable1, unusable1, _) = unsafe {
-                        std::mem::transmute::<&mut u64, &mut (u16, u16, u32)>(counts)
-                    };
-                    if is_usable { *usable1 += 1 } else { *unusable1 += 1 };
+                    let counts = matches.entry(locus_ix).or_insert(SHORT_ZERO_MATCHES);
+                    let counts = unsafe { &mut counts.short };
+                    if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
                 }
             }
         }
@@ -431,13 +464,11 @@ impl Targets {
         let total2 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for (locus_ix, is_usable) in loci_ixs.iter() {
+                for &(locus_ix, is_usable) in loci_ixs.iter() {
                     // No reason to insert new loci if they did not match the first read end.
-                    if let Some(counts) = matches.get_mut(locus_ix) {
-                        let (_, usable2, unusable2) = unsafe {
-                            std::mem::transmute::<&mut u64, &mut (u32, u16, u16)>(counts)
-                        };
-                        if *is_usable { *usable2 += 1 } else { *unusable2 += 1 };
+                    if let Some(counts) = matches.get_mut(&locus_ix) {
+                        let counts = unsafe { &mut counts.short };
+                        if is_usable { counts.usable2 += 1 } else { counts.unusable2 += 1 };
                     }
                 }
             }
@@ -445,11 +476,9 @@ impl Targets {
 
         answer.clear();
         for (&locus_ix, &counts) in matches.iter() {
-            let (usable1, unusable1, usable2, unusable2) = unsafe {
-                std::mem::transmute::<u64, (u16, u16, u16, u16)>(counts)
-            };
-            if self.params.short_read_passes(usable1, unusable1, total1)
-                    && self.params.short_read_passes(usable2, unusable2, total2) {
+            let counts = unsafe { counts.short };
+            if self.params.short_read_passes(counts.usable1, counts.unusable1, total1)
+                    && self.params.short_read_passes(counts.usable2, counts.unusable2, total2) {
                 answer.push(locus_ix);
             }
         }
@@ -497,7 +526,7 @@ impl Targets {
     }
 
     /// Recruit reads to the targets, possibly in multiple threads.
-    pub fn recruit<T: RecruitableRecord, W: io::Write>(
+    pub(crate) fn recruit<T: RecruitableRecord, W: io::Write>(
         &self,
         reader: impl FastxRead<Record = T>,
         mut writers: Vec<W>,
