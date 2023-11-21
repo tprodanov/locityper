@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import collections
+import argparse
+
+
+class Locus(collections.namedtuple('Locus', 'chrom start end name')):
+    def __str__(self):
+        return f'{self.name} ({self.chrom}:{self.start+1:,}-{self.end:,})'
+
+    def __lt__(self, oth):
+        # Order first by chromosome, then by start, and then in descending order, by end.
+        return (self.chrom, self.start, -self.end).__lt__((oth.chrom, oth.start, -oth.end))
+
+
+def load_loci(indir):
+    loci = []
+    for subdir in os.listdir(indir):
+        subdir = os.path.join(indir, subdir)
+        if os.path.exists(os.path.join(subdir, 'success')):
+            with open(os.path.join(subdir, 'ref.bed')) as inp:
+                chrom, start, end, name = next(inp).strip().split()
+                start = int(start)
+                end = int(end)
+                loci.append(Locus(chrom, start, end, name))
+    return loci
+
+
+def find_redundant(loci):
+    loci.sort()
+    furthest = None
+    for locus in loci:
+        if furthest is None or furthest.chrom != locus.chrom or furthest.end < locus.end:
+            if furthest is not None and furthest.chrom == locus.chrom and furthest.end > locus.start:
+                sys.stderr.write(f'...    {str(furthest):50} overlaps {locus}\n')
+            furthest = locus
+        else:
+            sys.stderr.write(f'!!!    {str(locus):50} contained completely in {furthest}\n')
+            yield locus
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Discard redundant loci, completely contained within other targets.')
+    parser.add_argument('input', metavar='DIR',
+        help='Locityper database with target loci.')
+    parser.add_argument('-o', '--output', metavar='DIR',
+        help='Move discarded loci to this directory (default: <input>/redundant).')
+    parser.add_argument('-d', '--dont-move', action='store_false', dest='move',
+        help='Only warn of redundant loci, do not move them.')
+    args = parser.parse_args()
+
+    loci_dir = os.path.join(args.input, 'loci')
+    sys.stderr.write(f'Loading coordinates from {loci_dir}/*/ref.bed\n')
+    loci = load_loci(loci_dir)
+    sys.stderr.write(f'Found {len(loci)} loci\n')
+    if args.move:
+        if args.output is None:
+            args.output = os.path.join(args.input, 'redundant')
+        sys.stderr.write(f'Writing redundant loci to {args.output}\n')
+        if not os.path.isdir(args.output):
+            os.mkdir(args.output)
+    redundant = 0
+    for locus in find_redundant(loci):
+        redundant += 1
+        if args.move:
+            os.rename(os.path.join(loci_dir, locus.name), os.path.join(args.output, locus.name))
+    sys.stderr.write(f'{redundant} / {len(loci)} redundant loci\n')
+
+
+if __name__ == '__main__':
+    main()
