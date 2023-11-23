@@ -4,6 +4,7 @@ import os
 import sys
 import collections
 import argparse
+import random
 
 
 class Locus(collections.namedtuple('Locus', 'chrom start end name')):
@@ -17,14 +18,17 @@ class Locus(collections.namedtuple('Locus', 'chrom start end name')):
 
 def load_loci(indir):
     loci = []
-    for subdir in os.listdir(indir):
-        subdir = os.path.join(indir, subdir)
+    for subdir_name in os.listdir(indir):
+        subdir = os.path.join(indir, subdir_name)
         if os.path.exists(os.path.join(subdir, 'success')):
             with open(os.path.join(subdir, 'ref.bed')) as inp:
-                chrom, start, end, name = next(inp).strip().split()
+                chrom, start, end, locus_name = next(inp).strip().split()
                 start = int(start)
                 end = int(end)
-                loci.append(Locus(chrom, start, end, name))
+
+                if locus_name != subdir_name:
+                    sys.stderr.write(f'WARN: Locus name does not match directory name at {subdir} ({locus_name})\n')
+                loci.append(Locus(chrom, start, end, subdir_name))
     return loci
 
 
@@ -66,7 +70,12 @@ def main():
     for locus in find_redundant(loci):
         redundant += 1
         if args.move:
-            os.rename(os.path.join(loci_dir, locus.name), os.path.join(args.output, locus.name))
+            new_dir = os.path.join(args.output, locus.name)
+            while os.path.isdir(new_dir):
+                rand_dir = os.path.join(args.output, '{}-{:X}'.format(locus.name, random.randint(0, 0xffffffff)))
+                sys.stderr.write(f'WARN: Output directory {new_dir} already exists, moving to {rand_dir}\n')
+                new_dir = rand_dir
+            os.rename(os.path.join(loci_dir, locus.name), new_dir)
     sys.stderr.write(f'{redundant} / {len(loci)} redundant loci\n')
 
 
