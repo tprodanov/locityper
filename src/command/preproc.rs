@@ -916,8 +916,8 @@ fn estimate_bg_from_paired(
         min_insert, max_insert, crate::math::fmt_signif(100.0 * conf_lvl, 5));
 
     let interval = &bg_region.interval;
-    let windows = bg::Windows::create(interval, &bg_region.sequence, &bg_region.kmer_counts, &seq_info,
-        &args.bg_params.depth, opt_out_dir)?;
+    let windows = bg::Windows::create(interval, bg_region.region_sequence(),
+        bg_region.kmer_counts.as_ref().unwrap(), &seq_info, &args.bg_params.depth, opt_out_dir)?;
 
     // Estimate error profile from read pairs with appropriate insert size.
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
@@ -962,8 +962,8 @@ fn estimate_bg_from_unpaired(
 {
     let insert_distr = InsertDistr::undefined();
     let interval = &bg_region.interval;
-    let windows = bg::Windows::create(interval, &bg_region.sequence, &bg_region.kmer_counts, &seq_info,
-        &args.bg_params.depth, opt_out_dir)?;
+    let windows = bg::Windows::create(interval, bg_region.region_sequence(),
+        bg_region.kmer_counts.as_ref().unwrap(), &seq_info, &args.bg_params.depth, opt_out_dir)?;
     let err_prof = ErrorProfile::estimate(&alns, interval, &windows, opt_out_dir)?;
     let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
     edit_dist_cache.print_log(seq_info.mean_read_len());
@@ -1000,11 +1000,12 @@ fn estimate_bg_distrs(
         fastx::set_reference(alns_filename, &mut bam_reader, &args.in_files.reference, Some(&bg_region.ref_contigs))?;
 
         let interval = &bg_region.interval;
-        let interval_start = interval.start();
-        let ref_seq = &bg_region.sequence;
-        bam_reader.fetch((interval.contig_name(), i64::from(interval_start), i64::from(interval.end())))?;
+
+        let padded_start = bg_region.padded_interval.start();
+        let padded_seq = &bg_region.padded_sequence;
+        bam_reader.fetch((interval.contig_name(), i64::from(interval.start()), i64::from(interval.end())))?;
         (alns, aln_is_paired_end) = load_alns(&mut bam_reader,
-            |record| Cigar::infer_ext_cigar(record, ref_seq, interval_start),
+            |record| Cigar::infer_ext_cigar(record, padded_seq, padded_start),
             &bg_region.ref_contigs, args)?;
         if aln_is_paired_end && !args.technology.paired_end_allowed() {
             return Err(Error::InvalidInput(format!("Paired end reads are not supported by {}",
@@ -1108,10 +1109,13 @@ struct BgRegion {
     ref_contigs: Arc<ContigNames>,
     /// Background region.
     interval: Interval,
-    /// Sequence of the background region.
-    sequence: Vec<u8>,
+    /// Background region + padding.
+    padded_interval: Interval,
+    padded_sequence: Vec<u8>,
+
     /// k-mer counts on the background region.
-    kmer_counts: KmerCounts,
+    /// Should be `Some` once initialization finishes.
+    kmer_counts: Option<KmerCounts>,
 }
 
 impl BgRegion {
@@ -1120,12 +1124,26 @@ impl BgRegion {
         let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
         let ref_contigs = Arc::new(ref_contigs);
         let interval = select_bg_interval(&ref_filename, &ref_contigs, &args.bg_region)?;
+        const PADDING: u32 = 50_000;
+        let padded_interval = interval.add_padding(PADDING);
 
         let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;
-        let sequence = interval.fetch_seq(&mut ref_fasta)?;
+        let padded_sequence = padded_interval.fetch_seq(&mut ref_fasta)?;
+        let mut reg = Self {
+            ref_contigs, interval, padded_interval, padded_sequence,
+            kmer_counts: None,
+        };
         log::info!("Calculating k-mer counts on the background region");
-        let kmer_counts = kmer_getter.fetch([sequence.clone()])?;
-        Ok(Self { ref_contigs, interval, sequence, kmer_counts })
+        let kmer_counts = kmer_getter.fetch([reg.region_sequence().to_vec()])?;
+        reg.kmer_counts = Some(kmer_counts);
+        Ok(reg)
+    }
+
+    /// Returns region sequence without padding.
+    pub fn region_sequence(&self) -> &[u8] {
+        let i = (self.interval.start() - self.padded_interval.start()) as usize;
+        let j = (self.interval.end() - self.padded_interval.start()) as usize;
+        &self.padded_sequence[i..j]
     }
 }
 
