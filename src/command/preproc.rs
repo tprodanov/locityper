@@ -877,7 +877,7 @@ fn load_alns(
     }
     log::debug!("    Loaded {} alignments, discarded {}", alns.len(), ignored);
     if wo_cigar > 0 {
-        log::warn!("    Could not load CIGAR for {} records", wo_cigar);
+        log::warn!("    Could not create extended CIGAR for {} records", wo_cigar);
     }
     Ok((alns, paired_counts[1] > 0))
 }

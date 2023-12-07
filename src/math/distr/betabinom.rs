@@ -44,6 +44,8 @@ impl BetaBinomial {
     }
 
     /// Calculates ln-PMF(k, n).
+    ///
+    /// NOTE: Need to be careful about edit distance being larger than read length (k > n).
     pub fn ln_pmf(&self, k: u32, n: u32) -> f64 {
         let n = f64::from(n);
         self.ln_pmf_inner(f64::from(k), n) - (n + 1.0).ln() - self.ln_beta_ab

@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    cmp::max,
+    cmp::{min, max},
     io::Write,
     ops::AddAssign,
     cell::RefCell,
@@ -173,17 +173,19 @@ impl ErrorProfile {
         }
 
         let oper_probs = total_counts.to_ln_probs();
-        let edit_distances: Vec<_> = edit_distances.into_iter()
-            .map(|(EditDist { edit, read_len }, count)| (edit, read_len, count as f64))
+        // Use `min(edit, read_len)` as due to deletions it is possible to get bigger edit distance than read length.
+        let triples: Vec<_> = edit_distances.iter()
+            .map(|(&EditDist { edit, read_len }, &count)| (min(edit, read_len), read_len, count as f64))
             .collect();
-        let edit_distr = BetaBinomial::max_lik_estimate(&edit_distances);
+        let edit_distr = BetaBinomial::max_lik_estimate(&triples);
 
         if let Some(dir) = out_dir {
             let dbg_filename = dir.join("edit_dist.csv.gz");
             let mut dbg_writer = ext::sys::create_gzip(&dbg_filename)?;
             writeln!(dbg_writer, "edit\tsize\tcount").map_err(add_path!(dbg_filename))?;
-            for (k, n, count) in edit_distances.iter() {
-                writeln!(dbg_writer, "{}\t{}\t{}", k, n, count).map_err(add_path!(dbg_filename))?;
+            for (edit_dist, count) in edit_distances.iter() {
+                writeln!(dbg_writer, "{}\t{}\t{}", edit_dist.edit, edit_dist.read_len, count)
+                    .map_err(add_path!(dbg_filename))?;
             }
             writeln!(dbg_writer, "# alpha = {}, beta = {}", edit_distr.alpha(), edit_distr.beta())
                 .map_err(add_path!(dbg_filename))?;
