@@ -50,9 +50,9 @@ def main():
     args = parser.parse_args()
 
     tmp_filename = common.temporary_filename(args.input)
-    with common.open_stream(args.haplogroups) as inp:
+    with common.open(args.haplogroups) as inp:
         fields, groups = load_haplogroups(inp)
-    with common.open_stream(args.input) as inp, common.open_stream(tmp_filename, 'w') as out:
+    with common.open(args.input) as inp, common.open(tmp_filename, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         add_columns(inp, out, fields, groups)
     os.rename(tmp_filename, args.input)

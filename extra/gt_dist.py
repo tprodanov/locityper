@@ -8,7 +8,7 @@ import argparse
 import numpy as np
 import os
 
-from common import open_stream, temporary_filename
+import common
 
 
 def averaging_function(mode):
@@ -162,14 +162,14 @@ def main():
             pysam.set_verbosity(save)
             contigs, distances = _load_distances(f, _get_info_bam(args.field), targets, args.verbose)
     else:
-        with open_stream(args.input) as f:
+        with common.open(args.input) as f:
             contigs, distances = _load_distances(f, _get_info_paf(args.field), targets, args.verbose)
 
     aver = averaging_function(args.averaging)
     best_dist = _process_distances(targets, contigs, distances, aver, args.verbose)
 
-    tmp_filename = temporary_filename(args.output)
-    with open_stream(tmp_filename, 'w') as out:
+    tmp_filename = common.temporary_filename(args.output)
+    with common.open(tmp_filename, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         out.write('# target: {}\n'.format(args.genotype))
         out.write('# field: {}\n'.format(args.field))

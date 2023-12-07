@@ -8,7 +8,7 @@ import tqdm
 import sys
 import lz4.frame
 
-from common import open_stream
+import common
 
 
 def get_divergencies(filename):
@@ -61,7 +61,7 @@ def main():
         help='Output CSV file [stdout].')
     args = parser.parse_args()
 
-    out = open_stream(args.output, 'w')
+    out = common.open(args.output, 'w')
     out.write('locus\tregion\tlength\thaplotypes\tfilt_haplotypes\taver_dist')
     for i in range(1, KMER_COLS + 1):
         out.write(f'\tkmers{i}')

@@ -5,7 +5,7 @@ import re
 import numpy as np
 from tqdm import tqdm
 
-from common import open_stream
+import common
 
 
 def get_count(size, window):
@@ -66,7 +66,7 @@ def main():
         help='Window sizes.')
     args = parser.parse_args()
 
-    with open_stream(args.paf) as inp, open_stream(args.output, 'w') as out:
+    with common.open(args.paf) as inp, common.open(args.output, 'w') as out:
         for line in tqdm(inp):
             out.write(add_dist(line, args.windows))
 

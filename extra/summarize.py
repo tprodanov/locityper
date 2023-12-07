@@ -15,7 +15,7 @@ import re
 import gzip
 import json
 
-from common import open_stream
+import common
 
 
 def _recursive_find_tuples(path, matches, all_tuples, curr_tuple=(), depth=0, shift=0):
@@ -41,15 +41,18 @@ def _recursive_find_tuples(path, matches, all_tuples, curr_tuple=(), depth=0, sh
     return not_found
 
 
-def load_tags(path1, path2):
-    path1 = os.path.abspath(path1)
-    matches = list(re.finditer(r'\{([a-zA-Z0-9_]+)\}', path1))
+def load_tags(path):
+    path = os.path.abspath(path)
+    matches = list(re.finditer(r'\{([a-zA-Z0-9_]+)\}', path))
     tags = [m.group(1) for m in matches]
     all_tuples = []
-    not_found = _recursive_find_tuples(path1, matches, all_tuples)
+    not_found = _recursive_find_tuples(path, matches, all_tuples)
     if not_found:
         sys.stderr.write(f'Skipped {not_found} directories\n')
+    return tags, all_tuples
 
+
+def discard_tags(tags, all_tuples, path2):
     sel_tuples = []
     disc_tuples = []
     for tup in all_tuples:
@@ -60,7 +63,7 @@ def load_tags(path1, path2):
             disc_tuples.append(tup)
 
     sys.stderr.write(f'Found {len(all_tuples)} tag combinations. Discarded {len(disc_tuples)} of them\n')
-    return tags, sel_tuples, disc_tuples
+    return sel_tuples, disc_tuples
 
 
 def process(prefix, res, sol, filt, dist):
@@ -180,21 +183,22 @@ def main():
     args = parser.parse_args()
 
     path_prefix = args.output + ('/' if os.path.isdir(args.output) else '.')
-    tags, tag_tuples, disc_tuples = load_tags(args.input, args.distances)
+    tags, tag_tuples = load_tags(args.input)
+    tag_tuples, disc_tuples = discard_tags(tags, tag_tuples, args.distances)
     tags_prefix = ''.join(map('{}\t'.format, tags))
 
     if disc_tuples:
-        with open_stream(f'{path_prefix}missing.csv.gz', 'w') as out:
+        with common.open(f'{path_prefix}missing.csv.gz', 'w') as out:
             out.write('\t'.join(tags) + '\n')
             for tup in disc_tuples:
                 out.write('\t'.join(tup) + '\n')
 
-    out_summary = open_stream(f'{path_prefix}summary.csv.gz', 'w')
+    out_summary = common.open(f'{path_prefix}summary.csv.gz', 'w')
     out_summary.write('# {}\n'.format(' '.join(sys.argv)))
     out_summary.write(f'{tags_prefix}total_gts\tafter_filt_gts\tmin_dist\tpearsonr\tspearmanr\tweighted_dist\t' +
         'quality\twarnings\n')
 
-    out_gts = open_stream(f'{path_prefix}gts.csv.gz', 'w')
+    out_gts = common.open(f'{path_prefix}gts.csv.gz', 'w')
     out_gts.write('# {}\n'.format(' '.join(sys.argv)))
     out_gts.write(f'{tags_prefix}genotype\tdist\tdist_rank\tfilt_score\tscore_diff\t'
         'score_rank\tlik\tlik_diff\tlik_rank\tprob\n')
