@@ -14,41 +14,32 @@ from tqdm import tqdm
 import re
 import gzip
 import json
+import glob
 
 import common
-
-
-def _recursive_find_tuples(path, matches, all_tuples, curr_tuple=(), depth=0, shift=0):
-    if depth == len(matches):
-        all_tuples.append(curr_tuple)
-        return 0
-    m = matches[depth]
-    dir = path[ : m.start() + shift]
-    if not os.path.isdir(dir):
-        return 1
-
-    suffix = path[m.end() + shift : ]
-    subdirs = []
-    with os.scandir(dir) as it:
-        for entry in it:
-            if not entry.name.startswith('.') and entry.is_dir():
-                subdirs.append(entry)
-
-    not_found = 0
-    for entry in subdirs:
-        not_found += _recursive_find_tuples(entry.path + suffix, matches, all_tuples,
-            curr_tuple + (entry.name,), depth + 1, len(entry.path) - m.end())
-    return not_found
 
 
 def load_tags(path):
     path = os.path.abspath(path)
     matches = list(re.finditer(r'\{([a-zA-Z0-9_]+)\}', path))
-    tags = [m.group(1) for m in matches]
-    all_tuples = []
-    not_found = _recursive_find_tuples(path, matches, all_tuples)
-    if not_found:
-        sys.stderr.write(f'Skipped {not_found} directories\n')
+
+    tags = []
+    filename_pattern = '^'
+    glob_pattern = ''
+    s = 0
+    for m in matches:
+        tags.append(m.group(1))
+        filename_pattern += re.escape(path[s:m.start()]) + r'([a-zA-Z0-9_]+)'
+        glob_pattern += path[s:m.start()] + '*'
+        s = m.end()
+    filename_pattern += re.escape(path[s:]) + '$'
+    glob_pattern += path[s:]
+
+    filename_pattern = re.compile(filename_pattern)
+    for filename in glob.glob(glob_pattern):
+        m = filename_pattern.match(filename)
+        if m is not None:
+            all_tuples.append(tuple(m.groups()))
     return tags, all_tuples
 
 

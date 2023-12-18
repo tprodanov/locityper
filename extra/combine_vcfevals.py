@@ -87,7 +87,7 @@ def main():
     args = parser.parse_args()
 
     tags1, tag_tuples1 = summarize.load_tags(args.input)
-    tags2, tag_tuples2 = summarize.load_tags(args.baseline)
+    tags2, tag_tuples2 = summarize.load_tags(args.calls)
     assert set(tags1) == set(tags2)
 
     tags = tags1
@@ -110,7 +110,6 @@ def main():
                 with pysam.VariantFile(args.baseline.format(**fmt)) as base_vcf, \
                     pysam.VariantFile(args.calls.format(**fmt)) as calls_vcf:
                     process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds)
-
 
 
 if __name__ == '__main__':
