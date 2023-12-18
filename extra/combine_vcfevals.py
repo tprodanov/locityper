@@ -4,6 +4,8 @@ import os
 import sys
 import argparse
 import gzip
+import pysam
+import numpy as np
 from tqdm import tqdm
 
 import common
@@ -40,28 +42,75 @@ def process_file(prefix, filename, out, thresholds):
                 out.write(f'NA\t0\t0\t0\t{total_base}\tNA\tNA\tNA\n')
 
 
+def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds):
+    assert len(base_vcf.samples) == len(calls_vcf.samples) == 1
+    total_baseline = np.zeros(3, dtype=int)
+    for rec in base_vcf:
+        assert len(rec.alleles) == 2
+        if rec.allele_variant_types[1] == 'SNP':
+            total_baseline[[0, 2]] += 1
+        else:
+            total_baseline[[1, 2]] += 1
+
+    over_thresh = np.zeros((3, len(thresholds)), dtype=int)
+    for rec in calls_vcf:
+        assert len(rec.alleles) == 2
+        qual = rec.samples[0]['GQ']
+        if rec.allele_variant_types[1] == 'SNP':
+            over_thresh[[0, 2], :] += qual >= thresholds
+        else:
+            over_thresh[[1, 2], :] += qual >= thresholds
+
+    for i, ty in enumerate(('snps', 'indels', 'all')):
+        curr_base = total_baseline[i]
+        for thresh, curr_calls in zip(thresholds, over_thresh[i]):
+            out.write(f'{prefix}{ty}\t{curr_base}\t{curr_calls}\t{thresh}\t')
+            assert curr_base == 0 or curr_calls == 0
+            if curr_base:
+                out.write(f'NA\t0\t0\t0\t{curr_base}\tNA\tNA\tNA\n')
+            else:
+                out.write(f'NA\t0\t{curr_call}\t0\t0\tNA\tNA\tNA\n')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input', metavar='STR', required=True,
         help='Path to vcfeval output directories. Tags within `{tag}` are automatically found.')
+    parser.add_argument('-b', '--baseline', metavar='STR', required=True,
+        help='Path to baseline calls, containing the same tags as --input.')
+    parser.add_argument('-c', '--calls', metavar='STR', required=True,
+        help='Path to variant calls, containing the same tags as --input.')
     parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output CSV file.')
     parser.add_argument('-t', '--thresholds', metavar='STR', default='0,10,20,30',
         help='Score thresholds via comma [%(default)s].')
     args = parser.parse_args()
 
-    tags, tag_tuples = summarize.load_tags(args.input)
-    thresholds = list(map(int, args.thresholds.split(',')))
+    tags1, tag_tuples1 = summarize.load_tags(args.input)
+    tags2, tag_tuples2 = summarize.load_tags(args.baseline)
+    assert set(tags1) == set(tags2)
+
+    tags = tags1
+    tag_tuples = set(tag_tuples1) | set(tag_tuples2)
+
+    thresholds = np.array(list(map(int, args.thresholds.split(','))))
     with common.open(args.output, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         out.write(''.join(map('{}\t'.format, tags)))
         out.write('type\ttotal_base\ttotal_call\tthreshold\tscore\ttp_base\tfp\ttp_call\tfn\tprecision\trecall\tf1\n')
         for tup in tqdm(tag_tuples):
-            dir = args.input.format(**dict(zip(tags, tup)))
-            prefix = ''.join(map('{}\t'.format, tup))
-            process_file(f'{prefix}snps\t', os.path.join(dir, 'snp_roc.tsv.gz'), out, thresholds)
-            process_file(f'{prefix}indels\t', os.path.join(dir, 'non_snp_roc.tsv.gz'), out, thresholds)
-            process_file(f'{prefix}all\t', os.path.join(dir, 'weighted_roc.tsv.gz'), out, thresholds)
+            fmt = dict(zip(tags, tup))
+            dir = args.input.format(**fmt)
+            if os.path.isdir(dir):
+                prefix = ''.join(map('{}\t'.format, tup))
+                process_file(f'{prefix}snps\t', os.path.join(dir, 'snp_roc.tsv.gz'), out, thresholds)
+                process_file(f'{prefix}indels\t', os.path.join(dir, 'non_snp_roc.tsv.gz'), out, thresholds)
+                process_file(f'{prefix}all\t', os.path.join(dir, 'weighted_roc.tsv.gz'), out, thresholds)
+            else:
+                with pysam.VariantFile(args.baseline.format(**fmt)) as base_vcf, \
+                    pysam.VariantFile(args.calls.format(**fmt)) as calls_vcf:
+                    process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds)
+
 
 
 if __name__ == '__main__':
