@@ -27,7 +27,7 @@ def process_file(prefix, filename, out, thresholds):
             elif not line.startswith('#'):
                 line = line.strip().split()
                 if line[0] == 'None':
-                    line[0] = 0
+                    line[0] = np.inf
                 score = float(line[0])
                 for i, thresh in enumerate(thresholds):
                     if score >= thresh:
@@ -60,8 +60,8 @@ def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds, gq_unavail):
         assert len(rec.alleles) == 2
         qual = rec.samples[0].get('GQ')
         if qual is None:
-            qual = 0
-            gq_unavail.append(prefix)
+            qual = np.inf
+            gq_unavail.append(prefix.replace('\t', ','))
 
         if rec.alleles_variant_types[1] == 'SNP':
             over_thresh[[0, 2], :] += qual >= thresholds
@@ -123,7 +123,7 @@ def main():
     if gq_unavail:
         n_gq_unavail = len(gq_unavail)
         sys.stderr.write(f'GQ was not available in {n_gq_unavail} call files.\n')
-        sys.stderr.write('    For example: {}'.format('; '.join(
+        sys.stderr.write('    For example: {}\n'.format('; '.join(
             random.sample(gq_unavail, k=min(10, n_gq_unavail)))))
 
 
