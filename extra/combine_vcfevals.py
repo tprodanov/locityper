@@ -24,8 +24,10 @@ def process_file(prefix, filename, out, thresholds):
             elif 'total call variants' in line:
                 total_call = int(line.split(':')[1].strip())
             elif not line.startswith('#'):
-                line = list(map(float, line.strip().split()))
-                score = line[0]
+                line = line.strip().split()
+                if line[0] == 'None':
+                    line[0] = 0
+                score = float(line[0])
                 for i, thresh in enumerate(thresholds):
                     if score >= thresh:
                         saved_lines[i] = line
@@ -33,7 +35,7 @@ def process_file(prefix, filename, out, thresholds):
         for thresh, line in zip(thresholds, saved_lines):
             out.write(f'{prefix}{total_base}\t{total_call}\t{thresh:g}\t')
             if line is not None:
-                out.write('\t'.join(map('{:.10g}'.format, line)))
+                out.write('\t'.join('{:.10g}'.format(float(x)) for x in line))
                 if len(line) < 8:
                     out.write('\tNA' * (8 - len(line)))
                 out.write('\n')
@@ -43,11 +45,11 @@ def process_file(prefix, filename, out, thresholds):
 
 
 def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds):
-    assert len(base_vcf.samples) == len(calls_vcf.samples) == 1
+    assert len(base_vcf.header.samples) == len(calls_vcf.header.samples) == 1
     total_baseline = np.zeros(3, dtype=int)
     for rec in base_vcf:
         assert len(rec.alleles) == 2
-        if rec.allele_variant_types[1] == 'SNP':
+        if rec.alleles_variant_types[1] == 'SNP':
             total_baseline[[0, 2]] += 1
         else:
             total_baseline[[1, 2]] += 1
@@ -56,7 +58,7 @@ def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds):
     for rec in calls_vcf:
         assert len(rec.alleles) == 2
         qual = rec.samples[0]['GQ']
-        if rec.allele_variant_types[1] == 'SNP':
+        if rec.alleles_variant_types[1] == 'SNP':
             over_thresh[[0, 2], :] += qual >= thresholds
         else:
             over_thresh[[1, 2], :] += qual >= thresholds
@@ -69,7 +71,7 @@ def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds):
             if curr_base:
                 out.write(f'NA\t0\t0\t0\t{curr_base}\tNA\tNA\tNA\n')
             else:
-                out.write(f'NA\t0\t{curr_call}\t0\t0\tNA\tNA\tNA\n')
+                out.write(f'NA\t0\t{curr_calls}\t0\t0\tNA\tNA\tNA\n')
 
 
 def main():
@@ -86,13 +88,7 @@ def main():
         help='Score thresholds via comma [%(default)s].')
     args = parser.parse_args()
 
-    tags1, tag_tuples1 = summarize.load_tags(args.input)
-    tags2, tag_tuples2 = summarize.load_tags(args.calls)
-    assert set(tags1) == set(tags2)
-
-    tags = tags1
-    tag_tuples = set(tag_tuples1) | set(tag_tuples2)
-
+    tags, tag_tuples = summarize.load_tags(args.input)
     thresholds = np.array(list(map(int, args.thresholds.split(','))))
     with common.open(args.output, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
@@ -101,15 +97,21 @@ def main():
         for tup in tqdm(tag_tuples):
             fmt = dict(zip(tags, tup))
             dir = args.input.format(**fmt)
-            if os.path.isdir(dir):
+            try:
                 prefix = ''.join(map('{}\t'.format, tup))
-                process_file(f'{prefix}snps\t', os.path.join(dir, 'snp_roc.tsv.gz'), out, thresholds)
-                process_file(f'{prefix}indels\t', os.path.join(dir, 'non_snp_roc.tsv.gz'), out, thresholds)
-                process_file(f'{prefix}all\t', os.path.join(dir, 'weighted_roc.tsv.gz'), out, thresholds)
-            else:
-                with pysam.VariantFile(args.baseline.format(**fmt)) as base_vcf, \
-                    pysam.VariantFile(args.calls.format(**fmt)) as calls_vcf:
-                    process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds)
+                if os.path.isfile(os.path.join(dir, 'weighted_roc.tsv.gz')):
+                    assert os.path.isfile(os.path.join(dir, 'done'))
+                    process_file(f'{prefix}snps\t', os.path.join(dir, 'snp_roc.tsv.gz'), out, thresholds)
+                    process_file(f'{prefix}indels\t', os.path.join(dir, 'non_snp_roc.tsv.gz'), out, thresholds)
+                    process_file(f'{prefix}all\t', os.path.join(dir, 'weighted_roc.tsv.gz'), out, thresholds)
+                else:
+                    basename = args.baseline.format(**fmt)
+                    callname = args.calls.format(**fmt)
+                    with pysam.VariantFile(basename) as base_vcf, pysam.VariantFile(callname) as calls_vcf:
+                        process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds)
+            except:
+                sys.stderr.write(f'ERROR in {fmt}:\n')
+                raise
 
 
 if __name__ == '__main__':

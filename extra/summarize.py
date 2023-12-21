@@ -20,9 +20,7 @@ import common
 
 
 def load_tags(path):
-    path = os.path.abspath(path)
     matches = list(re.finditer(r'\{([a-zA-Z0-9_]+)\}', path))
-
     tags = []
     filename_pattern = '^'
     glob_pattern = ''
@@ -36,7 +34,9 @@ def load_tags(path):
     glob_pattern += path[s:]
 
     filename_pattern = re.compile(filename_pattern)
-    for filename in glob.glob(glob_pattern):
+    all_tuples = []
+    sys.stderr.write(f'Searching for files/directories `{glob_pattern}`\n')
+    for filename in tqdm(glob.iglob(glob_pattern)):
         m = filename_pattern.match(filename)
         if m is not None:
             all_tuples.append(tuple(m.groups()))
