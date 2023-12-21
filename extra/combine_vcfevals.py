@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import gzip
+import random
 import pysam
 import numpy as np
 from tqdm import tqdm
@@ -44,7 +45,7 @@ def process_file(prefix, filename, out, thresholds):
                 out.write(f'NA\t0\t0\t0\t{total_base}\tNA\tNA\tNA\n')
 
 
-def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds):
+def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds, gq_unavail):
     assert len(base_vcf.header.samples) == len(calls_vcf.header.samples) == 1
     total_baseline = np.zeros(3, dtype=int)
     for rec in base_vcf:
@@ -57,7 +58,11 @@ def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds):
     over_thresh = np.zeros((3, len(thresholds)), dtype=int)
     for rec in calls_vcf:
         assert len(rec.alleles) == 2
-        qual = rec.samples[0]['GQ']
+        qual = rec.samples[0].get('GQ')
+        if qual is None:
+            qual = 0
+            gq_unavail.append(prefix)
+
         if rec.alleles_variant_types[1] == 'SNP':
             over_thresh[[0, 2], :] += qual >= thresholds
         else:
@@ -90,6 +95,8 @@ def main():
 
     tags, tag_tuples = summarize.load_tags(args.input)
     thresholds = np.array(list(map(int, args.thresholds.split(','))))
+    gq_unavail = []
+
     with common.open(args.output, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         out.write(''.join(map('{}\t'.format, tags)))
@@ -108,10 +115,16 @@ def main():
                     basename = args.baseline.format(**fmt)
                     callname = args.calls.format(**fmt)
                     with pysam.VariantFile(basename) as base_vcf, pysam.VariantFile(callname) as calls_vcf:
-                        process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds)
+                        process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds, gq_unavail)
             except:
                 sys.stderr.write(f'ERROR in {fmt}:\n')
                 raise
+
+    if gq_unavail:
+        n_gq_unavail = len(gq_unavail)
+        sys.stderr.write(f'GQ was not available in {n_gq_unavail} call files.\n')
+        sys.stderr.write('    For example: {}'.format('; '.join(
+            random.sample(gq_unavail, k=min(10, n_gq_unavail)))))
 
 
 if __name__ == '__main__':
