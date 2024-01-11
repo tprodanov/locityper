@@ -71,11 +71,15 @@ def process(prefix, res, sol, filt, dist):
     else:
         filt_gts = list(sol.index)
 
-    true_gts = dist[dist.dist == 0].genotype
+    true_gts = dist[dist.distance == 0].genotype
     dist.set_index('genotype', inplace=True)
 
-    reached_dist = dist.loc[res['genotype']].dist
+    pred_gt = res['genotype']
+    reached_row = dist.loc[pred_gt]
+    reached_dist = reached_row.distance
+    reached_div = reached_row.divergence
     weighted_dist = 0.0
+    weighted_div = 0.0
     weight_sum = 0.0
     gt_probs = {}
     for option in res.get('options', ()):
@@ -84,18 +88,22 @@ def process(prefix, res, sol, filt, dist):
         if w is None:
             weighted_dist = np.nan
             break
-        weighted_dist += dist.loc[gt].dist * w
+        row = dist.loc[gt]
+        weighted_dist += row.distance * w
+        weighted_div += row.divergence * w
         weight_sum += w
         gt_probs[gt] = option['log10_prob']
         if gt_probs[gt] is None:
             gt_probs[gt] = -np.inf
     if weight_sum > 0:
         weighted_dist /= weight_sum
+        weighted_div /= weight_sum
     else:
         weighted_dist = np.nan
+        weighted_div = np.nan
 
     x = sol.lik
-    y = dist.loc[sol.index].dist
+    y = dist.loc[sol.index].distance
     try:
         pearson = pearsonr(x, y).statistic
     except ValueError:
@@ -105,22 +113,28 @@ def process(prefix, res, sol, filt, dist):
     except ValueError:
         spearman = np.nan
 
-    avail_dist = min(dist.loc[gt].dist for gt in filt_gts)
+    avail_dist = np.inf
+    avail_div = np.inf
+    for gt in filt_gts:
+        row = dist.loc[gt]
+        if row.distance < avail_dist:
+            avail_dist = row.distance
+            avail_div = row.divergence
     weighted_dist = '{:.5f}'.format(weighted_dist).rstrip('0').rstrip('.')
     warnings = '*' if 'warnings' not in res else ','.join(sorted(res['warnings']))
-    s1 = '{}{}\t{}\t{:.5f}\t{:.5f}\t{}\t{}\t{}\t{:.3f}\t{}\n'.format(
-        prefix, filt.shape[0] if filt is not None else sol.shape[0], sol.shape[0],
-        pearson, spearman, avail_dist, reached_dist, weighted_dist, float(res['quality']), warnings)
+    s1 = '{}{}\t{}\t{:.5f}\t{:.5f}\t{:.0f}\t{:.7f}\t{:.0f}\t{:.7f}\t{:s}\t{:.7f}\t{:.3f}\t{}\n'.format(
+        prefix, filt.shape[0] if filt is not None else sol.shape[0], sol.shape[0], pearson, spearman,
+        avail_dist, avail_div, reached_dist, reached_div, weighted_dist, weighted_div, float(res['quality']), warnings)
 
     highest_lik = sol.lik.max()
     interesting_gts = set(true_gts)
-    interesting_gts.update(dist.index[dist.dist == avail_dist])
+    interesting_gts.update(dist.index[dist.distance == avail_dist])
     interesting_gts.update(gt_probs.keys())
     s2 = ''
 
     for gt in interesting_gts:
-        d = dist.loc[gt].dist
-        s2 += '{}{}\t{}\t{}\t{:.10f}\t'.format(prefix, gt, d, 1 + np.sum(dist.dist < d), dist.loc[gt].divergence)
+        d = dist.loc[gt].distance
+        s2 += '{}{}\t{}\t{}\t{:.10f}\t'.format(prefix, gt, d, 1 + np.sum(dist.distance < d), dist.loc[gt].divergence)
         if filt is not None and gt in filt.index:
             score = filt.loc[gt].score
             s2 += '{:.5f}\t{:.5f}\t{}\t'.format(score, score - highest_score, 1 + np.sum(filt.score > score))
@@ -191,7 +205,7 @@ def main():
     out_summary = common.open(f'{path_prefix}summary.csv.gz', 'w')
     out_summary.write('# {}\n'.format(' '.join(sys.argv)))
     out_summary.write(f'{tags_prefix}avail_gts\tafter_filt_gts\tpearsonr\tspearmanr\t'
-        'avail_dist\tachieved_dist\tweighted_dist\tquality\twarnings\n')
+        'avail_dist\tavail_div\tachieved_dist\tachieved_div\tweighted_dist\tweighted_div\tquality\twarnings\n')
 
     out_gts = common.open(f'{path_prefix}gts.csv.gz', 'w')
     out_gts.write('# {}\n'.format(' '.join(sys.argv)))

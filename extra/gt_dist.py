@@ -133,7 +133,7 @@ def main():
     tmp_filename = common.temporary_filename(args.output)
     with common.open(tmp_filename, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
-        out.write('genotype\tdist\tdivergence\n')
+        out.write('genotype\tdistance\tdivergence\n')
         for query, (dist, div) in sorted(best_dist.items(), key=operator.itemgetter(1)):
             out.write('{}\t{:.0f}\t{:.10f}\n'.format(contigs.fmt_gt(query), dist, div))
     os.rename(tmp_filename, args.output)
