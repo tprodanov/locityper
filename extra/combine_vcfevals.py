@@ -56,17 +56,20 @@ def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds, gq_unavail):
             total_baseline[[1, 2]] += 1
 
     over_thresh = np.zeros((3, len(thresholds)), dtype=int)
+    has_unavail_gq = False
     for rec in calls_vcf:
         assert len(rec.alleles) == 2
         qual = rec.samples[0].get('GQ')
         if qual is None:
             qual = np.inf
-            gq_unavail.append(prefix.replace('\t', ','))
-
+            has_unavail_gq = True
+        
         if rec.alleles_variant_types[1] == 'SNP':
             over_thresh[[0, 2], :] += qual >= thresholds
         else:
             over_thresh[[1, 2], :] += qual >= thresholds
+    if has_unavail_gq:
+        gq_unavail.append(prefix.replace('\t', ','))
 
     for i, ty in enumerate(('snps', 'indels', 'all')):
         curr_base = total_baseline[i]
@@ -96,6 +99,7 @@ def main():
     tags, tag_tuples = summarize.load_tags(args.input)
     thresholds = np.array(list(map(int, args.thresholds.split(','))))
     gq_unavail = []
+    counts = [0, 0]
 
     with common.open(args.output, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
@@ -111,18 +115,21 @@ def main():
                     process_file(f'{prefix}snps\t', os.path.join(dir, 'snp_roc.tsv.gz'), out, thresholds)
                     process_file(f'{prefix}indels\t', os.path.join(dir, 'non_snp_roc.tsv.gz'), out, thresholds)
                     process_file(f'{prefix}all\t', os.path.join(dir, 'weighted_roc.tsv.gz'), out, thresholds)
+                    counts[0] += 1
                 else:
                     basename = args.baseline.format(**fmt)
                     callname = args.calls.format(**fmt)
                     with pysam.VariantFile(basename) as base_vcf, pysam.VariantFile(callname) as calls_vcf:
                         process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds, gq_unavail)
+                    counts[1] += 1
             except:
                 sys.stderr.write(f'ERROR in {fmt}:\n')
                 raise
+    sys.stderr.write(f'VCFEVAL available in {counts[0]} cases and unavailable in {counts[1]} cases\n')
 
     if gq_unavail:
         n_gq_unavail = len(gq_unavail)
-        sys.stderr.write(f'GQ was not available in {n_gq_unavail} call files.\n')
+        sys.stderr.write(f'GQ format field was not available in {n_gq_unavail} call files.\n')
         sys.stderr.write('    For example: {}\n'.format('; '.join(
             random.sample(gq_unavail, k=min(10, n_gq_unavail)))))
 
