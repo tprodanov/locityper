@@ -628,7 +628,7 @@ impl Genotyping {
                     log10_prob: Ln::to_log10(self.ln_probs[i]),
                 };
                 if let Some(d) = self.distances[i] {
-                    obj.insert::<u32>("distance", d.into()).unwrap();
+                    obj.insert::<u32>("dist_to_first", d.into()).unwrap();
                 }
                 obj
             }).collect();

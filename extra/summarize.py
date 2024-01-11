@@ -74,6 +74,7 @@ def process(prefix, res, sol, filt, dist):
     true_gts = dist[dist.dist == 0].genotype
     dist.set_index('genotype', inplace=True)
 
+    reached_dist = dist.loc[res['genotype']].dist
     weighted_dist = 0.0
     weight_sum = 0.0
     gt_probs = {}
@@ -93,7 +94,6 @@ def process(prefix, res, sol, filt, dist):
     else:
         weighted_dist = np.nan
 
-    min_dist = min(dist.loc[gt].dist for gt in filt_gts)
     x = sol.lik
     y = dist.loc[sol.index].dist
     try:
@@ -105,21 +105,22 @@ def process(prefix, res, sol, filt, dist):
     except ValueError:
         spearman = np.nan
 
+    avail_dist = min(dist.loc[gt].dist for gt in filt_gts)
     weighted_dist = '{:.5f}'.format(weighted_dist).rstrip('0').rstrip('.')
     warnings = '*' if 'warnings' not in res else ','.join(sorted(res['warnings']))
-    s1 = '{}{}\t{}\t{}\t{:.5f}\t{:.5f}\t{}\t{:.3f}\t{}\n'.format(
-        prefix, filt.shape[0] if filt is not None else sol.shape[0], sol.shape[0], min_dist,
-        pearson, spearman, weighted_dist, float(res['quality']), warnings)
+    s1 = '{}{}\t{}\t{:.5f}\t{:.5f}\t{}\t{}\t{}\t{:.3f}\t{}\n'.format(
+        prefix, filt.shape[0] if filt is not None else sol.shape[0], sol.shape[0],
+        pearson, spearman, avail_dist, reached_dist, weighted_dist, float(res['quality']), warnings)
 
     highest_lik = sol.lik.max()
     interesting_gts = set(true_gts)
-    interesting_gts.update(dist.index[dist.dist == min_dist])
+    interesting_gts.update(dist.index[dist.dist == avail_dist])
     interesting_gts.update(gt_probs.keys())
     s2 = ''
-    # gt\tdist\tdist_rank\tfilt_score\tscore_rank\tlik\tlik_rank\tprob
+
     for gt in interesting_gts:
         d = dist.loc[gt].dist
-        s2 += '{}{}\t{}\t{}\t'.format(prefix, gt, d, 1 + np.sum(dist.dist < d))
+        s2 += '{}{}\t{}\t{}\t{:.10f}\t'.format(prefix, gt, d, 1 + np.sum(dist.dist < d), dist.loc[gt].divergence)
         if filt is not None and gt in filt.index:
             score = filt.loc[gt].score
             s2 += '{:.5f}\t{:.5f}\t{}\t'.format(score, score - highest_score, 1 + np.sum(filt.score > score))
@@ -132,7 +133,7 @@ def process(prefix, res, sol, filt, dist):
         else:
             s2 += 'nan\tnan\tnan\t'
 
-        s2 += '{}\n'.format(gt_probs.get(gt, np.nan))
+        s2 += '{:.7g}\n'.format(gt_probs.get(gt, np.nan))
     return s1, s2
 
 
@@ -164,7 +165,7 @@ def main():
         usage='%(prog)s -i path -d path -o out.csv [-@ threads]')
     parser.add_argument('-i', '--input', metavar='STR', required=True,
         help='Path to genotyping results. Tags within `{tag}` are automatically found. '
-            'Input directories must contain `lik.csv.gz` and `res.json.gz` files.')
+            'Input directories must contain `sol.csv.gz`, `filter.csv.gz` and `res.json.gz` files.')
     parser.add_argument('-d', '--distances', metavar='STR',  required=True,
         help='Path to distances. Tags within `{tag}` are automatically found.')
     parser.add_argument('-o', '--output', metavar='STR',  required=True,
@@ -183,15 +184,18 @@ def main():
             out.write('\t'.join(tags) + '\n')
             for tup in disc_tuples:
                 out.write('\t'.join(tup) + '\n')
+    if not tag_tuples:
+        sys.stderr.write('No input files found, stopping.\n')
+        exit(1)
 
     out_summary = common.open(f'{path_prefix}summary.csv.gz', 'w')
     out_summary.write('# {}\n'.format(' '.join(sys.argv)))
-    out_summary.write(f'{tags_prefix}total_gts\tafter_filt_gts\tmin_dist\tpearsonr\tspearmanr\tweighted_dist\t' +
-        'quality\twarnings\n')
+    out_summary.write(f'{tags_prefix}avail_gts\tafter_filt_gts\tpearsonr\tspearmanr\t'
+        'avail_dist\tachieved_dist\tweighted_dist\tquality\twarnings\n')
 
     out_gts = common.open(f'{path_prefix}gts.csv.gz', 'w')
     out_gts.write('# {}\n'.format(' '.join(sys.argv)))
-    out_gts.write(f'{tags_prefix}genotype\tdist\tdist_rank\tfilt_score\tscore_diff\t'
+    out_gts.write(f'{tags_prefix}genotype\tdist\tdist_rank\tdivergence\tfilt_score\tscore_diff\t'
         'score_rank\tlik\tlik_diff\tlik_rank\tprob\n')
 
     n = len(tag_tuples)

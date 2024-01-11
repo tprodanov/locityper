@@ -698,7 +698,7 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
         if d > 0 {
             log::log!(
                 if d == n { log::Level::Error } else { log::Level::Warn },
-                "[{}] {} of the alleles ({}/{}) do not match the reference sequence at {}", locus.name(),
+                "[{}] {} of the alleles ({}/{}) do not match the reference sequence at {}. Continuing", locus.name(),
                 if d == n { "All" } else if d >= n / 2 { "Most" } else { "Some" },
                 d, n, locus.interval());
         }

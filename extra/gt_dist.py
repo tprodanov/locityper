@@ -2,37 +2,13 @@
 
 import sys
 import itertools
-import collections
 import operator
 import argparse
 import numpy as np
 import os
+import pysam
 
 import common
-
-
-def averaging_function(mode):
-    mode = mode.lower()
-    if mode == 'min':
-        return np.min
-    elif mode == 'max':
-        return np.max
-    elif mode == 'sum':
-        return np.sum
-    elif mode == 'mean':
-        return np.mean
-
-    power = float(mode)
-    if power == 1:
-        return np.mean
-    elif power == np.inf:
-        return np.max
-    elif power == -np.inf:
-        return np.min
-
-    import scipy
-    import functools
-    return functools.partial(scipy.stats.pmean, p=power)
 
 
 class Contigs:
@@ -55,76 +31,71 @@ class Contigs:
         return ','.join(self.contigs[i] for i in ixs)
 
 
-def _load_distances(f, get_info, targets, verbose):
+def _load_distances(f, targets, verbose):
     targets_dict = { target: i for i, target in enumerate(targets) }
     contigs = Contigs()
     uns_distances = []
 
     if verbose:
-        sys.stderr.write('Load distances\n')
+        sys.stderr.write('Loading distances\n')
     for record in f:
-        contig1, contig2, dist = get_info(record)
+        contig1 = record.query_name
+        contig2 = record.reference_name
+        dist = record.get_tag('NM')
+        div = record.get_tag('dv')
+        if div != 0:
+            aln_len = int(round(dist / div))
+        else:
+            cigar = record.cigartuples
+            assert len(cigar) == 1
+            aln_len = cigar[0][1]
+
         # Second contig is reference, therefore goes first.
         contigs.add_if_needed(contig2)
         contigs.add_if_needed(contig1)
-        if contig1 in targets_dict or contig2 in targets_dict:
-            uns_distances.append((contig1, contig2, dist))
+        if contig1 in targets_dict:
+            uns_distances.append((contig1, contig2, dist, aln_len))
             if verbose:
-                sys.stderr.write(f'    {contig1} {contig2} -> {dist:.10f}\n')
+                sys.stderr.write(f'    {contig1} {contig2}: NM {dist}, div {div:.6g}, aln len {aln_len} \n')
     if not uns_distances:
         sys.stderr.write('    ERROR: Target genotype {} not found\n'.format(','.join(targets)))
         exit(1)
 
     n = len(targets)
     m = len(contigs)
-    distances = np.zeros((n, m))
-    for contig1, contig2, dist in uns_distances:
+    distances = np.full((n, m), np.nan)
+    aln_lens = np.full((n, m), np.nan)
+    for contig1, contig2, dist, aln_len in uns_distances:
         i = targets_dict.get(contig1)
-        j = targets_dict.get(contig2)
         if i is not None:
-            distances[i, contigs.order[contig2]] = dist
-        if j is not None:
-            distances[j, contigs.order[contig1]] = dist
-    return contigs, distances
+            distances[i, contigs.order[contig2]] = float(dist)
+            aln_lens[i, contigs.order[contig2]] = float(aln_len)
+    na_ixs = np.where(np.isnan(distances))
+    if len(na_ixs[0]):
+        sys.stderr.write('Distances unavailable for {} haplotype pairs, for example for {} and {}\n'.format(
+            len(na_ixs[0]), targets[na_ixs[0][0]], contigs[na_ixs[1][0]]))
+        exit(1)
+    return contigs, distances, aln_lens
 
 
-def _process_distances(targets, contigs, distances, mean, verbose):
+def _process_distances(ploidy, contigs, distances, aln_lens, verbose):
     n, m = distances.shape
-    best_dist = collections.defaultdict(lambda: np.inf)
+    best_dist = {}
     range_n = np.arange(n)
     if verbose:
         sys.stderr.write('Process distances\n')
-    for ixs in itertools.product(range(m), repeat=n):
+    for ixs in itertools.product(range(m), repeat=ploidy):
         curr_dist = distances[range_n, ixs]
-        dist = mean(curr_dist)
+        dist = np.sum(curr_dist)
+        div = dist / np.sum(aln_lens[range_n, ixs])
         query = tuple(sorted(ixs))
-        old_val = best_dist[query]
+        old_dist, old_div = best_dist.get(query, (np.inf, np.inf))
         if verbose:
-            sys.stderr.write('    {}: {} -> {:.10f} (old {:.10f})\n'
-                .format(contigs.fmt_gt(query), curr_dist, dist, old_val))
-        best_dist[query] = min(old_val, dist)
+            sys.stderr.write('    {}: {} -> {:.0f}, div {:.6g} (old {:.0f}, {:.6g})\n'
+                .format(contigs.fmt_gt(query), curr_dist, dist, div, old_dist, old_div))
+        if dist < old_dist:
+            best_dist[query] = (dist, div)
     return best_dist
-
-
-def _get_info_paf(tag):
-    prefix = tag + ':'
-    def inner(line):
-        line = line.strip().split('\t')
-        contig1 = line[0]
-        contig2 = line[5]
-        try:
-            dist = float(next(col.rsplit(':', 1)[1] for col in line[12:] if col.startswith(prefix)))
-        except StopIteration:
-            sys.stderr.write(f'Distance not available for contigs {contig1} and {contig2}\n')
-            exit(1)
-        return contig1, contig2, dist
-    return inner
-
-
-def _get_info_bam(tag):
-    def inner(record):
-        return record.query_name, record.reference_name, record.get_tag(tag)
-    return inner
 
 
 def main():
@@ -137,11 +108,6 @@ def main():
         help='Target genotype (through comma).')
     parser.add_argument('-o', '--output', metavar='FILE', required=False,
         help='Output CSV file [stdout].')
-    parser.add_argument('-f', '--field', metavar='STR', default='NM',
-        help='Take haplotype distance from this field [%(default)s].')
-    parser.add_argument('-a', '--averaging', metavar='STR', default='sum',
-        help='Averaging function [%(default)s]. '
-            'Possible values: `min`, `max`, `sum`, `mean`, or FLOAT: Hölder mean.')
     parser.add_argument('-v', '--verbose', action='store_true',
         help='Produce more output.')
     parser.add_argument('-F', '--force', action='store_true',
@@ -152,31 +118,24 @@ def main():
         if args.force:
             os.remove(args.output)
         else:
+            sys.stderr.write(f'Skipping output file `{args.output}` (use --force to rewrite)\n')
             return
 
     targets = list(map(str.strip, args.genotype.split(',')))
-    if args.input.endswith('.bam'):
-        import pysam
-        save = pysam.set_verbosity(0)
-        with pysam.AlignmentFile(args.input, require_index=False) as f:
-            pysam.set_verbosity(save)
-            contigs, distances = _load_distances(f, _get_info_bam(args.field), targets, args.verbose)
-    else:
-        with common.open(args.input) as f:
-            contigs, distances = _load_distances(f, _get_info_paf(args.field), targets, args.verbose)
-
-    aver = averaging_function(args.averaging)
-    best_dist = _process_distances(targets, contigs, distances, aver, args.verbose)
+    ploidy = len(targets)
+    unique_targets = sorted(set(targets))
+    save = pysam.set_verbosity(0)
+    with pysam.AlignmentFile(args.input, require_index=False) as f:
+        pysam.set_verbosity(save)
+        contigs, distances, aln_lens = _load_distances(f, unique_targets, args.verbose)
+    best_dist = _process_distances(ploidy, contigs, distances, aln_lens, args.verbose)
 
     tmp_filename = common.temporary_filename(args.output)
     with common.open(tmp_filename, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
-        out.write('# target: {}\n'.format(args.genotype))
-        out.write('# field: {}\n'.format(args.field))
-        out.write('# averaging: {}\n'.format(args.averaging))
-        out.write('genotype\tdist\n')
-        for query, dist in sorted(best_dist.items(), key=operator.itemgetter(1)):
-            out.write('{}\t{:.10g}\n'.format(contigs.fmt_gt(query), dist))
+        out.write('genotype\tdist\tdivergence\n')
+        for query, (dist, div) in sorted(best_dist.items(), key=operator.itemgetter(1)):
+            out.write('{}\t{:.0f}\t{:.10f}\n'.format(contigs.fmt_gt(query), dist, div))
     os.rename(tmp_filename, args.output)
 
 
