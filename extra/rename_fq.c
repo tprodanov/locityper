@@ -1,4 +1,4 @@
-// NOTE: Compile with gcc `rename_fq.c -o bin/rename_fq -O3`
+// NOTE: Compile with `gcc rename_fq.c -o bin/rename_fq -O3`
 
 #define _GNU_SOURCE
 #include <stdio.h>

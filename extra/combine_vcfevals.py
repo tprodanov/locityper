@@ -63,7 +63,7 @@ def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds, gq_unavail):
         if qual is None:
             qual = np.inf
             has_unavail_gq = True
-        
+
         if rec.alleles_variant_types[1] == 'SNP':
             over_thresh[[0, 2], :] += qual >= thresholds
         else:
@@ -74,7 +74,7 @@ def process_vcfs(prefix, base_vcf, calls_vcf, out, thresholds, gq_unavail):
     for i, ty in enumerate(('snps', 'indels', 'all')):
         curr_base = total_baseline[i]
         for thresh, curr_calls in zip(thresholds, over_thresh[i]):
-            out.write(f'{prefix}{ty}\t{curr_base}\t{curr_calls}\t{thresh}\t')
+            out.write(f'{prefix}{ty}\t{curr_base}\t{curr_calls}\t{thresh:g}\t')
             assert curr_base == 0 or curr_calls == 0
             if curr_base:
                 out.write(f'NA\t0\t0\t0\t{curr_base}\tNA\tNA\tNA\n')
@@ -97,7 +97,7 @@ def main():
     args = parser.parse_args()
 
     tags, tag_tuples = summarize.load_tags(args.input)
-    thresholds = np.array(list(map(int, args.thresholds.split(','))))
+    thresholds = np.array(list(map(float, args.thresholds.split(','))))
     gq_unavail = []
     counts = [0, 0]
 

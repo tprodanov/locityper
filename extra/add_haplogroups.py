@@ -16,9 +16,11 @@ def load_haplogroups(f):
     return fields, groups
 
 
-def get_gt_groups(gt, groups):
+def get_gt_groups(gt, groups, size):
     hap1, hap2 = gt.split(',')
-    return tuple(map(','.join, map(sorted, zip(groups[hap1], groups[hap2]))))
+    groups1 = groups.get(hap1) or ('?',) * size
+    groups2 = groups.get(hap2) or ('?',) * size
+    return tuple(map(','.join, map(sorted, zip(groups1, groups2))))
 
 
 def add_columns(inp, out, group_fields, groups):
@@ -33,11 +35,11 @@ def add_columns(inp, out, group_fields, groups):
             out.write(s)
             break
 
-    n = len(group_fields)
+    size = len(group_fields)
     for line in inp:
         s = line.strip()
         split = s.split('\t')
-        s += '\t' + '\t'.join(get_gt_groups(split[gt_field], groups))
+        s += '\t' + '\t'.join(get_gt_groups(split[gt_field], groups, size))
         out.write(s + '\n')
 
 
@@ -47,6 +49,8 @@ def main():
         help='Input CSV file, to which additional columns will be added.')
     parser.add_argument('-H', '--haplogroups', metavar='FILE', required=True,
         help='CSV file with haplogroups')
+    parser.add_argument('-o', '--output', metavar='FILE', required=False,
+        help='Output CSV file [default: overwrite input].')
     args = parser.parse_args()
 
     tmp_filename = common.temporary_filename(args.input)
@@ -55,7 +59,7 @@ def main():
     with common.open(args.input) as inp, common.open(tmp_filename, 'w') as out:
         out.write('# {}\n'.format(' '.join(sys.argv)))
         add_columns(inp, out, fields, groups)
-    os.rename(tmp_filename, args.input)
+    os.rename(tmp_filename, args.output or args.input)
 
 
 if __name__ == '__main__':
