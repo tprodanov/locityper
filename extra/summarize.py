@@ -27,7 +27,7 @@ def load_tags(path):
     s = 0
     for m in matches:
         tags.append(m.group(1))
-        filename_pattern += re.escape(path[s:m.start()]) + r'([a-zA-Z0-9_]+)'
+        filename_pattern += re.escape(path[s:m.start()]) + r'([a-zA-Z0-9_-]+)'
         glob_pattern += path[s:m.start()] + '*'
         s = m.end()
     filename_pattern += re.escape(path[s:]) + '$'
