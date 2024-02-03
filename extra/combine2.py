@@ -76,8 +76,6 @@ def main():
     common.mkdir(os.path.join(args.output, 'loci'))
     loci = sorted(loci1 & loci2)
     for i, locus in enumerate(loci, 1):
-        if locus != 'KRTAP1-1':
-            continue
         sys.stderr.write('[{:3}/{}] {}\n'.format(i, len(loci), locus))
         out_dir = os.path.join(args.output, 'loci', locus)
         common.mkdir(out_dir)
