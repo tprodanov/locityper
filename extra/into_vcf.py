@@ -104,8 +104,13 @@ def create_vcf_header(chrom, length, input_paths):
 def load_predictions(input_paths, locus):
     predictions = {}
     for sample, dirname in input_paths:
-        with gzip.open(os.path.join(dirname, 'loci', locus, 'res.json.gz'), 'rt') as inp:
-            res = json.load(inp)
+        json_filename = os.path.join(dirname, 'loci', locus, 'res.json.gz')
+        with gzip.open(json_filename, 'rt') as inp:
+            try:
+                res = json.load(inp)
+            except json.decoder.JSONDecodeError:
+                sys.stderr.write(f'Cannot parse json from {json_filename}')
+                raise
             pred = {}
             if 'genotype' not in res:
                 pred = None
