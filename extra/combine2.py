@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import argparse
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 import gzip
-import tqdm
 
 import common
 
@@ -52,8 +52,9 @@ def main():
     loci2 = set(os.listdir(os.path.join(args.input_2, 'loci')))
     common.mkdir(args.output)
     common.mkdir(os.path.join(args.output, 'loci'))
-    for locus in loci1 & loci2:
-        print(locus)
+    loci = sorted(loci1 & loci2)
+    for i, locus in enumerate(loci, 1):
+        sys.stderr.write('[{:3}/{}] {}\n'.format(i, len(loci), locus))
         out_dir = os.path.join(args.output, 'loci', locus)
         common.mkdir(out_dir)
         process_locus(
