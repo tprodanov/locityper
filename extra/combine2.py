@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 import gzip
+import shutil
 
 import common
 
@@ -22,6 +23,11 @@ def process_locus(dir1, dir2, out_dir):
     sol1 = load_sol(os.path.join(dir1, 'sol.csv.gz'))
     sol2 = load_sol(os.path.join(dir2, 'sol.csv.gz'))
     solj = pd.merge(sol1, sol2, how='inner', on='genotype')
+    if solj.shape[0] == 0:
+        shutil.copy(os.path.join(dir1, 'sol.csv.gz'), out_dir)
+        shutil.copy(os.path.join(dir1, 'res.json.gz'), out_dir)
+        return
+
     solj['lik'] = solj.lik_x + solj.lik_y
     solj.sort_values(by='lik', inplace=True, ascending=False)
     solj.to_csv(os.path.join(out_dir, 'sol.csv.gz'), sep='\t', index=False)
