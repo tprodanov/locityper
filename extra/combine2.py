@@ -13,29 +13,38 @@ import common
 
 
 def load_sol(path):
-    sol = pd.read_csv(path, sep='\t', comment='#')
+    try:
+        sol = pd.read_csv(path, sep='\t', comment='#')
+    except gzip.BadGzipFile:
+        sys.stderr.write(f'Problem with GZIP file {path}\n')
+        raise
     max_stage = sol.stage.max()
     sol = sol[sol.stage == max_stage].groupby('genotype').mean().reset_index()
     return sol[['genotype', 'lik']]
 
 
+LOG10 = np.log(10)
+
+
 def process_locus(dir1, dir2, out_dir):
     sol1 = load_sol(os.path.join(dir1, 'sol.csv.gz'))
     sol2 = load_sol(os.path.join(dir2, 'sol.csv.gz'))
-    solj = pd.merge(sol1, sol2, how='inner', on='genotype')
-    if solj.shape[0] == 0:
-        shutil.copy(os.path.join(dir1, 'sol.csv.gz'), out_dir)
-        shutil.copy(os.path.join(dir1, 'res.json.gz'), out_dir)
-        return
+    solj = pd.merge(sol1, sol2, how='outer', on='genotype')
 
-    solj['lik'] = solj.lik_x + solj.lik_y
+    min1 = sol1.lik.min()
+    min2 = sol2.lik.min()
+    solj['lik'] = solj.lik_x.fillna(value=min1 - 1) + solj.lik_y.fillna(value=min2 - 1)
     solj.sort_values(by='lik', inplace=True, ascending=False)
-    solj.to_csv(os.path.join(out_dir, 'sol.csv.gz'), sep='\t', index=False)
+    solj.to_csv(os.path.join(out_dir, 'sol.csv.gz'), sep='\t', index=False, na_rep='NA')
 
-    liks = np.array(solj.lik) * np.log(10)
-    oth_prob = logsumexp(liks[1:])
-    oth_prob = oth_prob - logsumexp((liks[0], oth_prob))
-    phred = max(-10 * oth_prob / np.log(10), 0.01)
+    liks = np.array(solj.lik) * LOG10
+    if len(liks) > 1:
+        oth_prob = logsumexp(liks[1:])
+        oth_prob = oth_prob - logsumexp((liks[0], oth_prob))
+        phred = max(-10 * oth_prob / LOG10, 0.01)
+    else:
+        phred = 10000
+
     with gzip.open(os.path.join(out_dir, 'res.json.gz'), 'wt') as out:
         out.write('{\n')
         out.write('    "locus": "{}"\n'.format(os.path.basename(out_dir)))
