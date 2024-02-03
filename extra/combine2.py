@@ -47,8 +47,8 @@ def process_locus(dir1, dir2, out_dir):
 
     with gzip.open(os.path.join(out_dir, 'res.json.gz'), 'wt') as out:
         out.write('{\n')
-        out.write('    "locus": "{}"\n'.format(os.path.basename(out_dir)))
-        out.write('    "genotype": "{}"\n'.format(solj.genotype[0]))
+        out.write('    "locus": "{}",\n'.format(os.path.basename(out_dir)))
+        out.write('    "genotype": "{}",\n'.format(solj.genotype[0]))
         out.write('    "quality": {}\n'.format(phred))
         out.write('}\n')
 
