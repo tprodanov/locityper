@@ -109,7 +109,7 @@ def load_predictions(input_paths, locus):
             try:
                 res = json.load(inp)
             except json.decoder.JSONDecodeError:
-                sys.stderr.write(f'Cannot parse json from {json_filename}')
+                sys.stderr.write(f'Cannot parse json from {json_filename}\n')
                 raise
             pred = {}
             if 'genotype' not in res:

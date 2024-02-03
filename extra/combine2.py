@@ -31,9 +31,15 @@ def process_locus(dir1, dir2, out_dir):
     sol2 = load_sol(os.path.join(dir2, 'sol.csv.gz'))
     solj = pd.merge(sol1, sol2, how='outer', on='genotype')
 
-    min1 = sol1.lik.min()
-    min2 = sol2.lik.min()
-    solj['lik'] = solj.lik_x.fillna(value=min1 - 1) + solj.lik_y.fillna(value=min2 - 1)
+    min1 = np.nanmin(np.array(sol1.lik)) - 1.0
+    min2 = np.nanmin(np.array(sol2.lik)) - 1.0
+    if not np.isfinite(min1) or np.isnan(min1):
+        min1 = 0.0
+    if not np.isfinite(min2) or np.isnan(min2):
+        min2 = 0.0
+
+    solj['lik'] = np.nan_to_num(solj.lik_x, nan=min1, neginf=min1) \
+        + np.nan_to_num(solj.lik_y, nan=min2, neginf=min2)
     solj.sort_values(by='lik', inplace=True, ascending=False)
     solj.to_csv(os.path.join(out_dir, 'sol.csv.gz'), sep='\t', index=False, na_rep='NA')
 
@@ -41,15 +47,16 @@ def process_locus(dir1, dir2, out_dir):
     if len(liks) > 1:
         oth_prob = logsumexp(liks[1:])
         oth_prob = oth_prob - logsumexp((liks[0], oth_prob))
-        phred = max(-10 * oth_prob / LOG10, 0.01)
+        qual = max(-10 * oth_prob / LOG10, 0.01)
     else:
-        phred = 10000
+        qual = 10000
 
+    assert np.isfinite(qual) and not np.isnan(qual)
     with gzip.open(os.path.join(out_dir, 'res.json.gz'), 'wt') as out:
         out.write('{\n')
         out.write('    "locus": "{}",\n'.format(os.path.basename(out_dir)))
         out.write('    "genotype": "{}",\n'.format(solj.genotype[0]))
-        out.write('    "quality": {}\n'.format(phred))
+        out.write('    "quality": {}\n'.format(qual))
         out.write('}\n')
 
 
@@ -69,6 +76,8 @@ def main():
     common.mkdir(os.path.join(args.output, 'loci'))
     loci = sorted(loci1 & loci2)
     for i, locus in enumerate(loci, 1):
+        if locus != 'KRTAP1-1':
+            continue
         sys.stderr.write('[{:3}/{}] {}\n'.format(i, len(loci), locus))
         out_dir = os.path.join(args.output, 'loci', locus)
         common.mkdir(out_dir)
