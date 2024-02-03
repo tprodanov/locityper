@@ -196,11 +196,7 @@ def main():
         help='Limit the analysis to these loci.')
     args = parser.parse_args()
 
-    try:
-        os.mkdir(args.output)
-    except FileExistsError:
-        pass
-
+    common.mkdir(args.output)
     input_paths = load_input(args)
     loci = load_database(args.database, args.subset_loci)
 

@@ -16,3 +16,10 @@ def open(filename, mode='r'):
 
 def temporary_filename(filename):
     return os.path.join(os.path.dirname(filename), 'tmp-{}'.format(os.path.basename(filename)))
+
+
+def mkdir(path):
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass

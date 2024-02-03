@@ -6,6 +6,8 @@ import collections
 import argparse
 import random
 
+import common
+
 
 class Locus(collections.namedtuple('Locus', 'chrom start end name')):
     def __str__(self):
@@ -64,8 +66,8 @@ def main():
         if args.output is None:
             args.output = os.path.join(args.input, 'redundant')
         sys.stderr.write(f'Writing redundant loci to {args.output}\n')
-        if not os.path.isdir(args.output):
-            os.mkdir(args.output)
+        common.mkdir(args.output)
+
     redundant = 0
     for locus in find_redundant(loci):
         redundant += 1
