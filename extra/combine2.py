@@ -26,20 +26,24 @@ def load_sol(path):
 LOG10 = np.log(10)
 
 
+def standartize(v):
+    v = np.array(v)
+    mean = np.nanmean(v)
+    std = np.nanstd(v)
+    if not np.isfinite(mean) or np.isnan(mean) or std == 0.0:
+        return np.zeros(len(v))
+    v = (v - mean) / std
+    return np.nan_to_num(v, nan=0.0, neginf=-5.0)
+
+
 def process_locus(dir1, dir2, out_dir):
     sol1 = load_sol(os.path.join(dir1, 'sol.csv.gz'))
     sol2 = load_sol(os.path.join(dir2, 'sol.csv.gz'))
-    solj = pd.merge(sol1, sol2, how='outer', on='genotype')
+    solj = pd.merge(sol1, sol2, how='outer', on='genotype', suffixes=('1', '2'))
 
-    min1 = np.nanmin(np.array(sol1.lik)) - 1.0
-    min2 = np.nanmin(np.array(sol2.lik)) - 1.0
-    if not np.isfinite(min1) or np.isnan(min1):
-        min1 = 0.0
-    if not np.isfinite(min2) or np.isnan(min2):
-        min2 = 0.0
-
-    solj['lik'] = np.nan_to_num(solj.lik_x, nan=min1, neginf=min1) \
-        + np.nan_to_num(solj.lik_y, nan=min2, neginf=min2)
+    solj['lik1_norm'] = standartize(solj.lik1)
+    solj['lik2_norm'] = standartize(solj.lik2)
+    solj['lik'] = solj['lik1_norm'] + solj['lik2_norm']
     solj.sort_values(by='lik', inplace=True, ascending=False)
     solj.to_csv(os.path.join(out_dir, 'sol.csv.gz'), sep='\t', index=False, na_rep='NA')
 
