@@ -33,7 +33,7 @@ def process_sample(sample, sample_dir):
 
             gt = res['genotype']
             qual = math.floor(10 * float(res['quality'])) * 0.1
-            warnings = ';'.join(w.split('(', 1)[0] for w in res.get('warnings', '*'))
+            warnings = ';'.join(res.get('warnings', '*'))
             s += f'{gt}\t{qual:.1f}\t{warnings}\n'
     return s
 
@@ -66,7 +66,7 @@ def main():
         nonlocal finished
         finished += 1
         out.write(s)
-        if finished % 10 == 0:
+        if finished % 10 == 0 or finished == total:
             sys.stderr.write(f'Finished [{finished:4} / {total}]\n')
             out.flush()
 
