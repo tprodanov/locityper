@@ -11,6 +11,7 @@ import collections
 import glob
 import multiprocessing
 import functools
+import operator
 
 import common
 
@@ -88,15 +89,16 @@ def load_database(path, subset_loci):
     return loci
 
 
-def create_vcf_header(chrom, length, input_paths):
+def create_vcf_header(chrom_lengths, samples):
     header = pysam.VariantHeader()
-    header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
+    for chrom, length in chrom_lengths:
+        header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
     header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
     header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="Genotype quality">')
     header.add_line('##FORMAT=<ID=GQ0,Number=1,Type=Float,'
         'Description="Initial genotype quality, not accounting for warnings">')
     header.add_line('##FORMAT=<ID=WARN,Number=1,Type=String,Description="Genotype warnings">')
-    for sample, _ in input_paths:
+    for sample in samples:
         header.add_sample(sample)
     return header
 
@@ -128,7 +130,7 @@ def load_predictions(input_paths, locus):
     return predictions
 
 
-def copy_genotype(var, pred_gt, genome_names):
+def copy_genotype(var, pred_gt, genome_name):
     out_gt = []
     for allele in pred_gt.split(','):
         if len(allele) > 2 and (allele[-2] == '.' or allele[-2] == '_'):
@@ -136,7 +138,7 @@ def copy_genotype(var, pred_gt, genome_names):
             hap = int(allele[-1])
             var_gt = var.samples[sample]['GT']
             out_gt.append(None if var_gt is None else var_gt[int(hap) - 1])
-        elif allele in genome_names:
+        elif allele == genome_name:
             out_gt.append(0)
         else:
             sample = allele
@@ -146,15 +148,16 @@ def copy_genotype(var, pred_gt, genome_names):
     return out_gt
 
 
-def process_locus(locus, input_paths, genome_names, output):
+def process_locus(locus, input_paths, genome_name, output):
     locus, chrom, start, end = locus
     predictions = load_predictions(input_paths, locus)
     out_filename = os.path.join(output, f'{locus}.vcf.gz')
 
-    global variants
-    header = create_vcf_header(chrom, variants.header.contigs[chrom].length, input_paths)
+    global in_vcf
+    header = create_vcf_header(((chrom, in_vcf.header.contigs[chrom].length),),
+        map(operator.itemgetter(0), input_paths))
     with pysam.VariantFile(out_filename, 'wz', header=header) as out_vcf:
-        for var in variants.fetch(chrom, start, end):
+        for var in in_vcf.fetch(chrom, start, end):
             newvar = out_vcf.new_record()
             newvar.chrom = chrom
             newvar.start = var.start
@@ -162,18 +165,62 @@ def process_locus(locus, input_paths, genome_names, output):
             newvar.id = var.id
             for sample, pred in predictions.items():
                 fmt = newvar.samples[sample]
-                fmt['GT'] = copy_genotype(var, pred['GT'], genome_names)
+                fmt['GT'] = copy_genotype(var, pred['GT'], genome_name)
                 fmt.phased = True
                 for key in ('GQ', 'GQ0', 'WARN'):
                     if key in pred:
                         fmt[key] = pred[key]
             out_vcf.write(newvar)
+    pysam.tabix_index(out_filename, preset='vcf')
     return locus
 
 
 def create_thread(vcf_filename):
-    global variants
-    variants = pysam.VariantFile(vcf_filename)
+    global in_vcf
+    in_vcf = pysam.VariantFile(vcf_filename)
+
+
+def merge_vars(rec1, rec2, n_samples):
+    assert rec1.id == rec2.id
+    for sample_ix in range(n_samples):
+        fmt1 = rec1.samples[sample_ix]
+        fmt2 = rec2.samples[sample_ix]
+        if fmt1['GT'] != fmt2['GT']:
+            gq1 = (fmt1['GQ'], fmt1.get('GQ0', 0))
+            gq2 = (fmt2['GQ'], fmt2.get('GQ0', 0))
+            if gq1 < gq2:
+                fmt1['GT'] = fmt2['GT']
+
+
+def merge_vcfs(in_vcf, input_paths, out_dir, loci):
+    chroms = set(map(operator.itemgetter(1), loci))
+    chroms = { chrom: in_vcf.get_tid(chrom) for chrom in chroms }
+    chrom_lengths = [(chrom, in_vcf.header.contigs[chrom].length)
+        for chrom, _ in sorted(chroms.items(), key=operator.itemgetter(1))]
+
+    n_samples = len(input_paths)
+    records = {}
+    loci.sort(key=lambda tup: (chroms[tup[1]], tup[2], tup[3]))
+    total = 0
+    for locus in map(operator.itemgetter(0), loci):
+        with pysam.VariantFile(os.path.join(out_dir, f'{locus}.vcf.gz')) as vcf:
+            for record in vcf:
+                key = (chroms[record.chrom], record.start, record.alleles)
+                if key in records:
+                    merge_vars(records[key], record, n_samples)
+                    total += 1
+                else:
+                    records[key] = record
+    sys.stderr.write(f'    Merged {total} variants\n')
+
+    header = create_vcf_header(chrom_lengths, map(operator.itemgetter(0), input_paths))
+    out_filename = os.path.join(out_dir, 'merged.vcf.gz')
+    with pysam.VariantFile(out_filename, 'wz', header=header) as out_vcf:
+        for key in sorted(records.keys()):
+            rec = records[key]
+            rec.translate(header)
+            out_vcf.write(rec)
+    pysam.tabix_index(out_filename, preset='vcf')
 
 
 def main():
@@ -193,8 +240,8 @@ def main():
             'Must have matching sample names with the loci alleles.')
     parser.add_argument('-o', '--output', metavar='DIR', required=True,
         help='Output directory.')
-    parser.add_argument('-g', '--genome', metavar='STR',
-        help='Reference genome name (if the script cannot guess).')
+    parser.add_argument('-g', '--genome', metavar='STR', required=True,
+        help='Reference genome name.')
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
         help='Analyze loci in this many threads [%(default)s].')
     parser.add_argument('--subset-loci', metavar='STR', nargs='+',
@@ -205,11 +252,6 @@ def main():
     input_paths = load_input(args)
     loci = load_database(args.database, args.subset_loci)
 
-    if args.genome:
-        genome_names = { args.genome }
-    else:
-        genome_names = { 'GRCh38', 'GRCh37', 'hg38', 'hg19', 'CHM13' }
-
     total = len(loci)
     finished = 0
     def callback(locus):
@@ -218,15 +260,15 @@ def main():
         sys.stderr.write(f'Finished [{finished:3}/{total}] {locus}\n')
 
     with multiprocessing.Pool(args.threads, initializer=create_thread, initargs=(args.variants,)) as pool:
-        # run_locus = functools.partial(process_locus,
-        #     input_paths=input_paths, genome_names=genome_names, output=args.output)
-        # pool.map_async(run_locus, loci, callback=callback, chunksize=1)
-        results = [pool.apply_async(process_locus, (locus, input_paths, genome_names, args.output), callback=callback)
+        results = [pool.apply_async(process_locus, (locus, input_paths, args.genome, args.output), callback=callback)
             for locus in loci]
         for res in results:
             res.get()
         pool.close()
         pool.join()
+
+    sys.stderr.write('Merging variants\n')
+    merge_vcfs(pysam.VariantFile(args.variants), input_paths, args.output, loci)
 
 
 if __name__ == '__main__':
