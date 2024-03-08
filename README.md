@@ -109,7 +109,7 @@ If you don't know exact region coordinates, you can align locus alleles to the r
 ```bash
 minimap2 -cx asm20 genome.fa alleles.fa | \
     awk '{ printf("%s:%d-%d\n",$6,$8+1,$9) }' | \
-    sort | uniq -c | sort -k1,1nr
+    sort | uniq -c | sort -k1,1nr | head
 ```
 This will produce a list of possible reference coordinates ranked by the number of alleles.
 You can then select the most common coordinates / largest region at your discretion.
