@@ -1,10 +1,19 @@
 <h1 align="center">Locityper</h1>
 
-Locityper is designed to **genotype complex loci** from *short-* and *long-read* whole genome sequencing.
+<div align="center">
+
+<a href="">[![Last updated](https://img.shields.io/github/last-commit/tprodanov/locityper/main.svg?label=Last%20updated&color=blue&style=flat-square)](https://github.com/tprodanov/locityper/commits/main/)</a>
+<a href="">[![Last release](https://img.shields.io/github/v/tag/tprodanov/locityper.svg?label=GitHub&color=blueviolet&style=flat-square)](https://github.com/tprodanov/locityper/releases)</a>
+<a href="">[![Bioconda](https://img.shields.io/conda/v/bioconda/locityper.svg?label=Bioconda&color=blue&style=flat-square)](https://anaconda.org/bioconda/locityper)</a>
+
+</div>
+
+Locityper is targeted genotyper for polymorphic genes based on short- and long-read whole genome sequencing.
 
 Locityper is created by
 [Timofey Prodanov](https://marschall-lab.github.io/people/tprodanov/) `timofey.prodanov[at]hhu.de` and
-[Tobias Marschall](https://marschall-lab.github.io/people/tmarschall/) `tobias.marschall[at]hhu.de`.
+[Tobias Marschall](https://marschall-lab.github.io/people/tmarschall/) `tobias.marschall[at]hhu.de`
+at the [Marschall Lab](https://marschall-lab.github.io/), [Heinrich Heine University Düsseldorf](hhu.de).
 
 # Table of contents
 * [Citing Locityper](#citing-locityper)
@@ -17,7 +26,36 @@ Locityper is created by
 
 Publication in progress, please check later.
 
+<br>
+
 # Installation
+
+## Conda
+
+You can use `conda`/`mamba` to easily install `locityper`:
+```bash
+conda install -c bioconda locityper
+# OR
+mamba install -c bioconda locityper
+```
+
+## Singularity
+
+It is possible to compile `locityper` using `singularity` container platform.
+For that, simply run
+```bash
+singularity build --fakeroot locityper.sif containers/locityper.def
+# OR
+sudo singularity build locityper.sif containers/locityper.def
+```
+and then execute with
+```bash
+singularity exec locityper.sif locityper ...
+# OR
+./locityper.sif locityper ...
+```
+
+## Manual installation
 
 For manual installation, you need the following software:
 * [Rust](https://www.rust-lang.org/),
@@ -35,7 +73,7 @@ cargo build --release
 cargo install
 </code></pre>
 
-## Compiling without WFA and GCC
+### Compiling without WFA and GCC
 
 It is possible to reduce the number of dependencies by sacrificing some functionality.
 In particular, one can compile `locityper` without the `WFA` library and the `GCC` compiler with
@@ -47,6 +85,8 @@ cargo install
 </code></pre>
 However, in such configuration Locityper will not calculate pairwise haplotype alignments
 in order to discard similar alleles, only identical alleles will be removed.
+
+<br>
 
 # General usage
 
