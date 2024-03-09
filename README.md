@@ -48,12 +48,9 @@ singularity build --fakeroot locityper.sif containers/locityper.def
 # OR
 sudo singularity build locityper.sif containers/locityper.def
 ```
-and then execute with
-```bash
-singularity exec locityper.sif locityper ...
-# OR
-./locityper.sif locityper ...
-```
+and then execute with `./locityper.sif ...`.
+You can also run Locityper dependencies with `./locityper.sif jellyfish/minimap2/strobealign ...`.
+You `singularity exec locityper.sif ...` if the option above does not work.
 
 ## Manual installation
 
