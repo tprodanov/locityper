@@ -41,7 +41,8 @@ mamba install -c bioconda locityper
 
 ## Singularity
 
-It is possible to compile `locityper` using `singularity` container platform.
+It is possible to compile `locityper` using
+[Singularity](https://docs.sylabs.io/guides/latest/user-guide/) container platform.
 For that, simply run
 ```bash
 singularity build --fakeroot locityper.sif containers/locityper.def
@@ -51,6 +52,19 @@ sudo singularity build locityper.sif containers/locityper.def
 and then execute with `./locityper.sif ...`.
 You can also run Locityper dependencies with `./locityper.sif jellyfish/minimap2/strobealign ...`.
 You `singularity exec locityper.sif ...` if the option above does not work.
+
+## Docker
+
+Alternatively, you can compile `locityper` via [Docker](https://www.docker.com/):
+```bash
+sudo docker build -t locityper containers
+# OR
+sudo docker buildx build -t locityper containers
+```
+Then, you can execute with
+```bash
+sudo docker run locityper locityper ...
+```
 
 ## Manual installation
 
