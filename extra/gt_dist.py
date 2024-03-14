@@ -72,9 +72,8 @@ def _load_distances(f, targets, verbose):
             aln_lens[i, contigs.order[contig2]] = float(aln_len)
     na_ixs = np.where(np.isnan(distances))
     if len(na_ixs[0]):
-        sys.stderr.write('Distances unavailable for {} haplotype pairs, for example for {} and {}\n'.format(
+        sys.stderr.write('WARN: Distances unavailable for {} haplotype pairs, for example for {} and {}\n'.format(
             len(na_ixs[0]), targets[na_ixs[0][0]], contigs[na_ixs[1][0]]))
-        exit(1)
     return contigs, distances, aln_lens
 
 
