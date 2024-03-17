@@ -76,7 +76,7 @@ impl Default for Params {
             tweak: None,
             alt_cn: (0.5, 1.5),
 
-            min_gts: 100,
+            min_gts: 500,
             filt_diff: Ln::from_log10(100.0),
             prob_thresh: Ln::from_log10(-4.0),
             attempts: 20,

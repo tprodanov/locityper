@@ -558,7 +558,7 @@ fn discard_identical(entries: Vec<NamedSeq>, locus_dir: &Path) -> Result<Vec<Nam
     }
 
     if n_discarded > 0 {
-        log::debug!("    {} duplicated haplotypes discarded", n_discarded);
+        log::info!("    Discarded {} duplicate haplotypes", n_discarded);
         let filename = locus_dir.join("discarded_haplotypes.txt");
         let mut f = ext::sys::create_file(&filename)?;
         for (entry, discarded) in selected.iter().zip(&disc_names) {
@@ -599,7 +599,7 @@ fn process_alleles(
     }
     std::mem::drop(fasta_filename);
 
-    log::info!("    Calculating sequence divergence for {} alleles in {} threads", n_entries, args.threads);
+    log::info!("    Calculating sequence divergence for {} alleles", n_entries);
     let divergences = div::pairwise_divergences(&entries, args.div_k, args.div_w, args.threads);
     check_divergencies(locus, &entries, &divergences, args.variants.is_some());
     let dist_filename = locus_dir.join(paths::DISTANCES);

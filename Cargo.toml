@@ -1,11 +1,11 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.13.4-2"
+version = "0.13.4-4"
 edition = "2021"
 
 [dependencies]
-htslib = { package = "rust-htslib", version = "0.44", default-features = false }
+htslib = { package = "rust-htslib", version = "0.46", default-features = false }
 nalgebra = { version = "0.32", default-features = false, features = ["std"] } # Possibly remove later.
 statrs = { version = "0.16", default-features = false } # Possibly remove later.
 nohash = { package = "nohash-hasher", version = "0.2.0", default-features = false, features = ["std"] }
@@ -24,15 +24,15 @@ highs-sys = { version = "=1.5.0", default-features = false, optional = true }
 highs = { version = "1.5.0", default-features = false, optional = true }
 lexopt = { version = "0.3", default-features = false }
 colored = { version = "2.0", default-features = false }
-which = { version = "5.0.0", default-features = false }
+which = { version = "6.0.0", default-features = false }
 regex = { version = "1.7", default-features = false, features = ["std", "perf"] }
 lazy_static = { version = "1.4", default-features = false }
 const_format = { version = "0.2.30", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 smallvec = { version = "1", default-features = false }
 kodama = { version = "0.3", default-features = false }
-argmin = { version = "0.8", default-features = false }
-argmin-math = { version = "0.3", default-features = false, features = ["vec"] }
+argmin = { version = "0.10", default-features = false }
+argmin-math = { version = "0.4", default-features = false, features = ["vec"] }
 lz4 = { version = "1.24", default-features = false }
 wyhash = { version = "0.5.0", default-features = false }
 num-traits = { version = "0.2", default-features = false }
