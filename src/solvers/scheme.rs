@@ -28,12 +28,11 @@ use crate::{
     bg::{BgDistr, ReadDepth},
     math::{
         self, Ln, Phred, RoundDiv,
-        distr::WithMoments,
+        // distr::WithMoments,
     },
     err::{Error, validate_param, add_path},
     seq::{
         contigs::{ContigNames, Genotype},
-        dist,
         fastx::UPDATE_SECS,
     },
     model::{
@@ -281,6 +280,18 @@ fn compare_two_likelihoods(mean1: f64, var1: f64, mean2: f64, var2: f64, attempt
     }
 }
 
+/// Calculates distance between two genotypes as minimum sum distance between permutations of contigs within genotypes.
+pub fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMatrix<u32>) -> u32 {
+    let mut min_dist = u32::MAX;
+    ext::vec::gen_permutations(gt1.ids(), |perm_ids1| {
+        let dist: u32 = perm_ids1.iter().zip(gt2.ids())
+            .map(|(i, j)| distances.get_symmetric(i.ix(), j.ix()).copied().unwrap_or(0))
+            .sum();
+        min_dist = min(min_dist, dist);
+    });
+    min_dist
+}
+
 struct Likelihoods {
     /// Mean and variance of various genotypes.
     likelihoods: Vec<(f64, f64)>,
@@ -388,7 +399,7 @@ impl Likelihoods {
             let gt = genotypes[self.ixs[i]].clone();
             match (out_genotypes.first(), &contig_distances) {
                 (Some(top_gt), Some(dist_matrix)) =>
-                    distances.push(Some(dist::genotype_distance(top_gt, &gt, dist_matrix))),
+                    distances.push(Some(genotype_distance(top_gt, &gt, dist_matrix))),
                 _ => distances.push(None),
             }
             out_genotypes.push(gt);
@@ -497,7 +508,7 @@ impl Genotyping {
 
     pub fn issue_warnings(&mut self) {
         self.warnings.clear();
-        const DIST_THRESH: u32 = 50;
+        const DIST_THRESH: u32 = 30;
 
         let ln_prob0 = *self.ln_probs.first().expect("Expected at least one genotype");
         // < 0.01
@@ -510,7 +521,7 @@ impl Genotyping {
             if let Some(d) = dist {
                 if ln_prob >= ln_prob0 - Ln::LN10 && d > DIST_THRESH {
                     self.warnings.push(GenotypingWarning::GtsFarApart);
-                    log::warn!("[{}] Distant genotypes {} & {} (edit dist = {}) \
+                    log::warn!("[{}] Distant genotypes {} & {} (minimizer distance = {}) \
                         have similar probabilities ({:.5} & {:.5})",
                         self.tag, self.genotypes[0], self.genotypes[i], d, ln_prob0.exp(), self.ln_probs[i].exp());
                     break;
@@ -524,7 +535,9 @@ impl Genotyping {
     pub fn check_num_of_reads(
         &mut self,
         n_reads: u32,
+        #[allow(unused_variables)]
         bg_depth: &ReadDepth,
+        #[allow(unused_variables)]
         all_contig_infos: &[Arc<ContigInfo>],
     ) {
         let gt = &self.genotypes[0];
@@ -550,46 +563,47 @@ impl Genotyping {
             }
         }
 
-        let mut lbound = 0.0;
-        let mut ubound = 0.0;
-        for contig_id in gt.ids() {
-            let contig_info = &all_contig_infos[contig_id.ix()];
-            for (start, end) in contig_info.default_windows() {
-                let window_chars = contig_info.window_characteristics(start, end);
-                // Note: number of reads is actually the number of read pairs.
-                // However, bg_depth also only counts the number of read pairs.
-                let m = bg_depth.depth_distribution(window_chars.gc_content).mean();
-                lbound += window_chars.weight * m;
-                ubound += m;
-            }
-        }
+        // TODO: Refine this comparison.
+        // let mut lbound = 0.0;
+        // let mut ubound = 0.0;
+        // for contig_id in gt.ids() {
+        //     let contig_info = &all_contig_infos[contig_id.ix()];
+        //     for (start, end) in contig_info.default_windows() {
+        //         let window_chars = contig_info.window_characteristics(start, end);
+        //         // Note: number of reads is actually the number of read pairs.
+        //         // However, bg_depth also only counts the number of read pairs.
+        //         let m = bg_depth.depth_distribution(window_chars.gc_content).mean();
+        //         lbound += window_chars.weight * m;
+        //         ubound += m;
+        //     }
+        // }
 
-        // Simple heuristic:
-        //    at <= 10 reads:   lbound *= 0;   ubound *= 10,
-        //    at >= 1000 reads: lbound *= 0.5; ubound *=  2.
-        const X1: f64 =   10.0;
-        const X2: f64 = 1000.0;
-        const LY1: f64 = 0.0;
-        const LY2: f64 = 0.5;
-        const UY1: f64 = 10.0;
-        const UY2: f64 =  2.0;
-        let lbound2 = math::interpolate((X1, X2), (LY1, LY2), lbound.clamp(X1, X2)) * lbound;
-        let ubound2 = math::interpolate((X1, X2), (UY1, UY2), ubound.clamp(X1, X2)) * ubound.max(1.5);
+        // // Simple heuristic:
+        // //    at <= 10 reads:   lbound *= 0;   ubound *= 10,
+        // //    at >= 1000 reads: lbound *= 0.5; ubound *=  2.
+        // const X1: f64 =   10.0;
+        // const X2: f64 = 1000.0;
+        // const LY1: f64 = 0.0;
+        // const LY2: f64 = 0.5;
+        // const UY1: f64 = 10.0;
+        // const UY2: f64 =  2.0;
+        // let lbound2 = math::interpolate((X1, X2), (LY1, LY2), lbound.clamp(X1, X2)) * lbound;
+        // let ubound2 = math::interpolate((X1, X2), (UY1, UY2), ubound.clamp(X1, X2)) * ubound.max(1.5);
 
-        if f64::from(n_reads) < lbound2 {
-            log::warn!("[{}] There are fewer reads ({}) than expected (≥ {:.2} for {})",
-                self.tag, n_reads, lbound, gt);
-            self.warnings.push(GenotypingWarning::FewReads(n_reads));
-        } else if f64::from(n_reads) > ubound2 {
-            log::warn!("[{}] There are much more reads ({}) than expected ({:.2} for {})",
-                self.tag, n_reads, ubound, gt);
-            self.warnings.push(GenotypingWarning::TooManyReads(n_reads));
-        }
+        // if f64::from(n_reads) < lbound2 {
+        //     log::warn!("[{}] There are fewer reads ({}) than expected (≥ {:.2} for {})",
+        //         self.tag, n_reads, lbound, gt);
+        //     self.warnings.push(GenotypingWarning::FewReads(n_reads));
+        // } else if f64::from(n_reads) > ubound2 {
+        //     log::warn!("[{}] There are much more reads ({}) than expected ({:.2} for {})",
+        //         self.tag, n_reads, ubound, gt);
+        //     self.warnings.push(GenotypingWarning::TooManyReads(n_reads));
+        // }
     }
 
     /// Checks reads that are much less likely at some other contig compared to the predicted genotype.
     pub fn count_unexplained_reads(&mut self, all_alns: &AllAlignments, unmapped_penalty: f64) {
-        const UNEXPLAINED_FRAC: f64 = 0.1;
+        const UNEXPLAINED_FRAC: f64 = 0.5;
         // Correct for rounding errors.
         let unmapped_penalty = unmapped_penalty + 1e-8;
 
@@ -603,7 +617,7 @@ impl Genotyping {
             }
         }
         let n_reads = all_alns.reads().len();
-        if unexplained > 1 && f64::from(unexplained) > n_reads as f64 * UNEXPLAINED_FRAC {
+        if unexplained >= 20 && f64::from(unexplained) > n_reads as f64 * UNEXPLAINED_FRAC {
             let unexpl_perc = 100.0 * f64::from(unexplained) / n_reads as f64;
             log::warn!("[{}] Best genotype does not explain {}/{} reads ({:.1}%)",
                 self.tag, unexplained, n_reads, unexpl_perc);

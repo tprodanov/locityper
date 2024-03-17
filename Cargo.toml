@@ -46,7 +46,7 @@ bindgen = { version = "0.66", default-features = false, features = ["runtime"], 
 # debug = 1  # Needed for profiling.
 
 [features]
-default = ["aln"]
+default = []
 gurobi = ["dep:grb"]
 highs = ["dep:highs", "dep:highs-sys"]
 aln = ["dep:bindgen"]

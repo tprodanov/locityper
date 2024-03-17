@@ -344,15 +344,3 @@ pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> Res
         Ok(matrix)
     }
 }
-
-/// Calculates distance between two genotypes as minimum sum distance between permutations of contigs within genotypes.
-pub fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMatrix<u32>) -> u32 {
-    let mut min_dist = u32::MAX;
-    ext::vec::gen_permutations(gt1.ids(), |perm_ids1| {
-        let dist: u32 = perm_ids1.iter().zip(gt2.ids())
-            .map(|(i, j)| distances.get_symmetric(i.ix(), j.ix()).copied().unwrap_or(0))
-            .sum();
-        min_dist = min(min_dist, dist);
-    });
-    min_dist
-}
