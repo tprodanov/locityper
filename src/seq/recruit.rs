@@ -282,7 +282,7 @@ impl TargetBuilder {
             too_short_alleles += u32::from(seq.len() < self.params.match_length as usize);
             let n_counts = counts.len();
             self.buffer.clear();
-            kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, &mut self.buffer);
+            kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, &mut self.buffer);
             for &(pos, minimizer) in self.buffer.iter() {
                 let pos = pos as usize;
                 let is_usable = if u32::from(self.params.minimizer_k) <= base_k {
@@ -351,7 +351,7 @@ impl Targets {
         matches: &mut MatchesBuffer,
     ) {
         minimizers.clear();
-        kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
+        kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total = u16::try_from(minimizers.len()).expect("Short read has too many minimizers");
 
         matches.clear();
@@ -406,7 +406,7 @@ impl Targets {
         matches: &mut MatchesBuffer,
     ) {
         minimizers.clear();
-        kmers::minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
+        kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total_minims = u32::try_from(minimizers.len()).expect("Long read has too many minimizers");
 
         matches.clear();
@@ -446,7 +446,7 @@ impl Targets {
         matches.clear();
         // First mate.
         minimizers.clear();
-        kmers::minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, minimizers);
+        kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total1 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
@@ -460,7 +460,7 @@ impl Targets {
 
         // Second mate.
         minimizers.clear();
-        kmers::minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, minimizers);
+        kmers::canon_minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total2 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
         for minimizer in minimizers.iter() {
             if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {

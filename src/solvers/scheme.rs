@@ -20,6 +20,7 @@ use rand::{
 use crate::{
     ext::{
         self,
+        TriangleMatrix,
         sys::GzFile,
         vec::{F64Ext, IterExt},
         rand::XoshiroRng,
@@ -32,7 +33,7 @@ use crate::{
     err::{Error, validate_param, add_path},
     seq::{
         contigs::{ContigNames, Genotype},
-        dist::{self, TriangleMatrix},
+        dist,
         fastx::UPDATE_SECS,
     },
     model::{

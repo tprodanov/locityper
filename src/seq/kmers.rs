@@ -210,7 +210,9 @@ fn select_minimizer<K: Kmer, P: PosKmer<K>>(
 /// Finds sequence minimizers.
 /// Minimizer is a k-mer with the smallest hash value across `w` consecutive k-mers.
 /// Output vector should have type `Vec<K>` or `Vec<(u32, K)>`, then minimizers are saved together with their positions.
-pub fn minimizers<K, P>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
+///
+/// NOTE: minimizers should be cleared in advance.
+pub fn minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
 where K: Minimizer,
       P: PosKmer<K>,
 {
@@ -251,13 +253,20 @@ where K: Minimizer,
             },
         };
         fw_kmer = (fw_kmer << 2) | K::from(fw_enc);
-        rv_kmer = (K::from(rv_enc) << rv_shift) | (rv_kmer >> 2);
+        if CANON {
+            rv_kmer = (K::from(rv_enc) << rv_shift) | (rv_kmer >> 2);
+        }
         if i < reset {
             hashes[(i & MOD_MAXW) as usize] = K::UNDEF;
             continue;
         }
 
-        hashes[(i & MOD_MAXW) as usize] = min(fw_kmer & mask, rv_kmer).fast_hash();
+        let kmer = if CANON {
+            min(fw_kmer & mask, rv_kmer)
+        } else {
+            fw_kmer
+        };
+        hashes[(i & MOD_MAXW) as usize] = kmer.fast_hash();
         if i == start + w - 1 {
             start = select_minimizer(start, i + 1, k, &mut hashes, output);
         }
@@ -267,6 +276,15 @@ where K: Minimizer,
         debug_assert!(l <= start + w - 1);
         select_minimizer(start, l, k, &mut hashes, output);
     }
+}
+
+/// Find canonical minimizers (wrapper around `minimizers`).
+#[inline]
+pub fn canon_minimizers<K, P>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
+where K: Minimizer,
+      P: PosKmer<K>,
+{
+    minimizers::<K, P, { CANONICAL }>(seq, k, w, output)
 }
 
 /// Store k-mer counts as u16.

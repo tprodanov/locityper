@@ -10,6 +10,7 @@ pub mod wfa;
 pub mod compl;
 #[cfg(feature = "aln")]
 pub mod dist;
+pub mod div;
 
 pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames, ContigSet};

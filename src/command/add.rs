@@ -18,18 +18,18 @@ use crate::{
     algo::HashSet,
     ext::{
         self,
+        TriangleMatrix,
         vec::IterExt,
         fmt::PrettyU32,
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        panvcf, fastx,
+        panvcf, fastx, dist,
         contigs::GenomeVersion,
         kmers::{JfKmerGetter, KmerCount},
         wfa::Penalties,
     },
 };
-use crate::seq::dist::{self, TriangleMatrix};
 use super::paths;
 
 struct Args {
