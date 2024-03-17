@@ -10,7 +10,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-/// Upper triangle matrix, excluding diagonal (i < j).
+/// Upper triangle matrix, excluding the diagonal (i < j).
 pub struct TriangleMatrix<T> {
     side: usize,
     data: Vec<T>,
@@ -34,7 +34,7 @@ impl<T> TriangleMatrix<T> {
     }
 
     #[inline]
-    fn expected_len(side: usize) -> usize {
+    pub fn expected_len(side: usize) -> usize {
         side.saturating_sub(1) * side / 2
     }
 

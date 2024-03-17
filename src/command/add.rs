@@ -1,6 +1,6 @@
 use std::{
     cmp::{min, max},
-    io::{self, BufRead, Read, Seek, Write},
+    io::{BufRead, Read, Seek, Write},
     sync::Arc,
     path::{Path, PathBuf},
     time::Instant,
@@ -24,10 +24,9 @@ use crate::{
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        panvcf, fastx, dist,
+        panvcf, fastx, div,
         contigs::GenomeVersion,
-        kmers::{JfKmerGetter, KmerCount},
-        wfa::Penalties,
+        kmers::{self, Kmer, JfKmerGetter, KmerCount},
     },
 };
 use super::paths;
@@ -45,12 +44,9 @@ struct Args {
     max_expansion: u32,
     moving_window: u32,
 
-    penalties: Penalties,
-    backbone_k: usize,
-    /// Alignment accuracy between 0 and 9.
-    accuracy: u8,
+    div_k: u8,
+    div_w: u8,
     unknown_frac: f64,
-    max_divergence: f64,
 
     threads: u16,
     force: bool,
@@ -72,19 +68,9 @@ impl Default for Args {
             max_expansion: 50000,
             moving_window: 500,
 
-            penalties: Default::default(),
-            backbone_k: 101,
+            div_k: 25,
+            div_w: 15,
             unknown_frac: 0.0001,
-
-            #[cfg(feature = "aln")]
-            accuracy: 5,
-            #[cfg(not(feature = "aln"))]
-            accuracy: 0,
-
-            #[cfg(feature = "aln")]
-            max_divergence: 0.0001,
-            #[cfg(not(feature = "aln"))]
-            max_divergence: 0.0,
 
             threads: 8,
             force: false,
@@ -103,22 +89,14 @@ impl Args {
 
         validate_param!(0.0 <= self.unknown_frac && self.unknown_frac <= 1.0,
             "Unknown fraction ({}) must be within [0, 1]", self.unknown_frac);
-        validate_param!(0.0 <= self.max_divergence && self.max_divergence <= 1.0,
-            "Maximum divergence ({}) must be within [0, 1]", self.max_divergence);
-        validate_param!(self.backbone_k >= 5, "Backbone alignment k-mer size ({}) must be at least 5", self.backbone_k);
-        validate_param!(self.accuracy <= crate::seq::wfa::MAX_ACCURACY,
-            "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, crate::seq::wfa::MAX_ACCURACY);
-        #[cfg(not(feature = "aln"))] {
-            validate_param!(self.accuracy == 0,
-                "Cannot set non-zero alignment accuracy level when `aln` feature is disabled");
-            validate_param!(self.max_divergence == 0.0,
-                "Cannot set non-zero sequence divergence when `aln` feature is disabled");
-        }
+        validate_param!(0 < self.div_k && self.div_k <= u64::MAX_KMER_SIZE,
+            "k-mer size ({}) must be between 1 and {}", self.div_k, u64::MAX_KMER_SIZE);
+        validate_param!(0 < self.div_w && self.div_w <= kmers::MAX_MINIMIZER_W,
+            "Minimizer window ({}) must be between 1 and {}", self.div_w, kmers::MAX_MINIMIZER_W);
         validate_param!(self.moving_window < u32::from(u16::MAX),
             "Moving window ({}) must fit in two bytes", self.moving_window);
 
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
-        self.penalties.validate()?;
         Ok(self)
     }
 }
@@ -175,23 +153,9 @@ fn print_help(extended: bool) {
             "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
         println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
             "    --leave-out".green(), "STR+".yellow());
-
-        println!("\n{}", "Alignment and clustering of alleles:".bold());
-        println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
-            "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
-        println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
-            "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_open));
-        println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
-            "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
-        println!("    {:KEY$} {:VAL$}  Backbone alignment k-mer size [{}].",
-            "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
-        println!("    {:KEY$} {:VAL$}  Accuracy level of allele alignments (0-9) [{}].\n\
-            {EMPTY}  0: no sequence alignment, 1: fast and inaccurate alignment,\n\
-            {EMPTY}  9: slow and accurate alignment.",
-            "-a, --accuracy".green(), "INT".yellow(), super::fmt_def(defaults.accuracy));
-        println!("    {:KEY$} {:VAL$}  Sequence divergence threshold, used to discard very similar\n\
-            {EMPTY}  alleles [{}]. Use 0 to keep all distinct alleles.",
-            "-D, --divergence".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_divergence));
+        println!("    {}  {}  (k,w)-minimizers for sequence divergence calculation [{} {}].",
+            "-m, --minimizer".green(), "INT INT".yellow(),
+            super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -245,17 +209,12 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse::<PrettyU32>()?.get(),
-
-            Short('M') | Long("mismatch") => args.penalties.mismatch = parser.value()?.parse()?,
-            Short('O') | Long("gap-open") | Long("gap-opening") =>
-                args.penalties.gap_open = parser.value()?.parse()?,
-            Short('E') | Long("gap-extend") | Long("gap-extension") =>
-                args.penalties.gap_extend = parser.value()?.parse()?,
-            Short('k') | Long("backbone-k") => args.backbone_k = parser.value()?.parse()?,
-            Short('a') | Long("accuracy") => args.accuracy = parser.value()?.parse()?,
-
-            Short('D') | Long("divergence") => args.max_divergence = parser.value()?.parse()?,
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
+            Short('m') | Long("minimizer") | Long("minimizers") =>
+            {
+                args.div_k = parser.value()?.parse()?;
+                args.div_w = parser.value()?.parse()?;
+            }
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
@@ -503,13 +462,12 @@ fn expand_locus(
 }
 
 /// Check divergencies and warns if they are too high.
-#[cfg(feature = "aln")]
-fn check_divergencies(tag: &str, entries: &[NamedSeq], divergences: &TriangleMatrix<f64>, from_vcf: bool) {
+fn check_divergencies(tag: &str, entries: &[NamedSeq], divergences: &TriangleMatrix<(u32, f64)>, from_vcf: bool) {
     let mut count = 0;
     let mut highest = 0.0;
     let mut highest_i = 0;
     let mut highest_j = 0;
-    for ((i, j), &diverg) in TriangleMatrix::indices(divergences.side()).zip(divergences.iter()) {
+    for ((i, j), &(_, diverg)) in TriangleMatrix::indices(divergences.side()).zip(divergences.iter()) {
         if diverg >= 0.2 {
             count += 1;
             if diverg > highest {
@@ -523,68 +481,106 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], divergences: &TriangleMat
         log::warn!("    [{}] {} allele pairs with high divergence, highest {:.5} ({} and {})", tag, count,
             highest, entries[highest_i].name(), entries[highest_j].name());
         if highest > 0.5 && !from_vcf {
-            log::error!("    Extremely high sequence divergence, please check if allele sequences are accurate");
+            log::warn!("    Extremely high sequence divergence, please check if allele sequences are accurate");
         }
     }
 }
 
-/// Cluster alleles using `kodama` crate
-/// (which, in turn, is based on this paper https://arxiv.org/pdf/1109.2378.pdf).
-///
-/// Clusters with divergence not exceeding the threshold are joined.
-/// Returns boolean vector: does the sequence remain after mergin?
-fn cluster_alleles(
-    mut nwk_writer: impl Write,
-    entries: &[NamedSeq],
-    divergences: TriangleMatrix<f64>,
-    thresh: f64,
-) -> io::Result<Vec<bool>> {
-    let n = entries.len();
-    let total_clusters = 2 * n - 1;
-    // Use Complete method, meaning that we track maximal distance between two points between two clusters.
-    // This is done to cut as little as needed.
-    let dendrogram = kodama::linkage(&mut divergences.take_linear(), n, kodama::Method::Complete);
-    let mut clusters_nwk = Vec::with_capacity(total_clusters);
-    // Cluster representatives.
-    let mut cluster_repr = Vec::with_capacity(total_clusters);
-    clusters_nwk.extend(entries.iter().map(|entry| entry.name().to_owned()));
-    cluster_repr.extend(0..n);
+// /// Cluster alleles using `kodama` crate
+// /// (which, in turn, is based on this paper https://arxiv.org/pdf/1109.2378.pdf).
+// ///
+// /// Clusters with divergence not exceeding the threshold are joined.
+// /// Returns boolean vector: does the sequence remain after mergin?
+// fn cluster_alleles(
+//     mut nwk_writer: impl Write,
+//     entries: &[NamedSeq],
+//     divergences: TriangleMatrix<f64>,
+//     thresh: f64,
+// ) -> io::Result<Vec<bool>> {
+//     let n = entries.len();
+//     let total_clusters = 2 * n - 1;
+//     // Use Complete method, meaning that we track maximal distance between two points between two clusters.
+//     // This is done to cut as little as needed.
+//     let dendrogram = kodama::linkage(&mut divergences.take_linear(), n, kodama::Method::Complete);
+//     let mut clusters_nwk = Vec::with_capacity(total_clusters);
+//     // Cluster representatives.
+//     let mut cluster_repr = Vec::with_capacity(total_clusters);
+//     clusters_nwk.extend(entries.iter().map(|entry| entry.name().to_owned()));
+//     cluster_repr.extend(0..n);
 
-    let steps = dendrogram.steps();
-    for step in steps.iter() {
-        let i = step.cluster1;
-        let j = step.cluster2;
-        clusters_nwk.push(format!("({}:{dist},{}:{dist})", &clusters_nwk[i], &clusters_nwk[j],
-            dist = crate::math::fmt_signif(0.5 * step.dissimilarity, 5)));
-        let size1 = if i < n { 1 } else { steps[i - n].size };
-        let size2 = if j < n { 1 } else { steps[j - n].size };
-        cluster_repr.push(cluster_repr[if size1 >= size2 { i } else { j }]);
-    }
-    assert_eq!(clusters_nwk.len(), total_clusters);
-    writeln!(nwk_writer, "{};", clusters_nwk.last().unwrap())?;
+//     let steps = dendrogram.steps();
+//     for step in steps.iter() {
+//         let i = step.cluster1;
+//         let j = step.cluster2;
+//         clusters_nwk.push(format!("({}:{dist},{}:{dist})", &clusters_nwk[i], &clusters_nwk[j],
+//             dist = crate::math::fmt_signif(0.5 * step.dissimilarity, 5)));
+//         let size1 = if i < n { 1 } else { steps[i - n].size };
+//         let size2 = if j < n { 1 } else { steps[j - n].size };
+//         cluster_repr.push(cluster_repr[if size1 >= size2 { i } else { j }]);
+//     }
+//     assert_eq!(clusters_nwk.len(), total_clusters);
+//     writeln!(nwk_writer, "{};", clusters_nwk.last().unwrap())?;
 
-    let mut queue = vec![total_clusters - 1];
-    let mut keep_seqs = vec![false; n];
-    while let Some(i) = queue.pop() {
-        if i < n {
-            keep_seqs[i] = true;
-        } else {
-            let step = &steps[i - n];
-            if step.dissimilarity == 0.0 || step.dissimilarity <= thresh {
-                keep_seqs[cluster_repr[i]] = true;
-            } else {
-                queue.push(step.cluster1);
-                queue.push(step.cluster2);
+//     let mut queue = vec![total_clusters - 1];
+//     let mut keep_seqs = vec![false; n];
+//     while let Some(i) = queue.pop() {
+//         if i < n {
+//             keep_seqs[i] = true;
+//         } else {
+//             let step = &steps[i - n];
+//             if step.dissimilarity == 0.0 || step.dissimilarity <= thresh {
+//                 keep_seqs[cluster_repr[i]] = true;
+//             } else {
+//                 queue.push(step.cluster1);
+//                 queue.push(step.cluster2);
+//             }
+//         }
+//     }
+//     Ok(keep_seqs)
+// }
+
+/// Discards identical haplotypes, and, if any, writes their names into a text files.
+fn discard_identical(entries: Vec<NamedSeq>, locus_dir: &Path) -> Result<Vec<NamedSeq>, crate::Error> {
+    let mut selected: Vec<NamedSeq> = Vec::with_capacity(entries.len());
+    let mut n_discarded = 0;
+    let mut disc_names: Vec<Vec<String>> = Vec::with_capacity(entries.len());
+
+    'outer: for entry in entries.into_iter() {
+        for (i, entry0) in selected.iter().enumerate() {
+            if entry0.seq() == entry.seq() {
+                disc_names[i].push(entry.take_name());
+                n_discarded += 1;
+                continue 'outer;
             }
         }
+        selected.push(entry);
+        disc_names.push(Vec::new());
     }
-    Ok(keep_seqs)
+
+    if n_discarded > 0 {
+        log::debug!("    {} duplicated haplotypes discarded", n_discarded);
+        let filename = locus_dir.join("discarded_haplotypes.txt");
+        let mut f = ext::sys::create_file(&filename)?;
+        for (entry, discarded) in selected.iter().zip(&disc_names) {
+            if discarded.is_empty() {
+                continue;
+            }
+            write!(f, "{} = ", entry.name()).map_err(add_path!(filename))?;
+            for (i, name) in discarded.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ").map_err(add_path!(filename))?;
+                }
+                write!(f, "{}", name).map_err(add_path!(filename))?;
+            }
+            writeln!(f).map_err(add_path!(filename))?;
+        }
+    }
+    Ok(selected)
 }
 
 /// Process alleles: write FASTA, PAF, kmers files, cluster sequences.
 fn process_alleles(
-    #[allow(unused_variables)] // Not used if feature `aln` is disabled.
-    locus: &NamedInterval,
+    locus: &str,
     locus_dir: &Path,
     mut ref_seq: Vec<u8>,
     entries: Vec<NamedSeq>,
@@ -592,50 +588,23 @@ fn process_alleles(
     args: &Args,
 ) -> Result<(), Error>
 {
+    let entries = discard_identical(entries, locus_dir)?;
     let n_entries = entries.len();
+    let mut seqs = Vec::with_capacity(n_entries + 1);
+    let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
+    let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
+    for entry in entries.iter() {
+        seq::write_fasta(&mut fasta_writer, entry.name().as_bytes(), entry.seq()).map_err(add_path!(fasta_filename))?;
+        seqs.push(entry.seq().to_vec());
+    }
+    std::mem::drop(fasta_filename);
+
     log::info!("    Calculating sequence divergence for {} alleles in {} threads", n_entries, args.threads);
-    let divergences: TriangleMatrix<f64>;
-    if args.accuracy > 0 {
-        #[cfg(feature = "aln")] {
-            let bam_path = locus_dir.join(super::paths::LOCUS_ALNS_BAM);
-            divergences = dist::pairwise_divergences(&bam_path, &entries,
-                &args.penalties, args.backbone_k, args.accuracy, args.threads)?;
-            check_divergencies(locus.name(), &entries, &divergences, args.variants.is_some());
-        } #[cfg(not(feature = "aln"))] {
-            panic!("Accuracy > 0, but `aln` feature is disabled");
-        }
-    } else {
-        // Need this so that `entries` are not consumed by `move` closure.
-        let entries_ref = &entries;
-        divergences = TriangleMatrix::create(n_entries,
-            move |(i, j)| if entries_ref[i].seq() == entries_ref[j].seq() { 0.0 } else { 1.0 });
-    }
-
-    let nwk_filename = locus_dir.join(paths::LOCUS_DENDROGRAM);
-    let nwk_writer = ext::sys::create_file(&nwk_filename)?;
-    let keep_seqs = cluster_alleles(nwk_writer, &entries, divergences, args.max_divergence)
-        .map_err(add_path!(nwk_filename))?;
-    let n_retained = keep_seqs.iter().fold(0, |sum, &keep| sum + usize::from(keep));
-    if n_retained == n_entries {
-        log::info!("    Keep all {} alleles", n_entries);
-    } else {
-        log::info!("    Retain {}/{} alleles after clustering", n_retained, n_entries);
-    }
-
-    let filt_fasta_readername = locus_dir.join(paths::LOCUS_FASTA);
-    let mut filt_fasta_writer = ext::sys::create_gzip(&filt_fasta_readername)?;
-    let locus_fasta = locus_dir.join(paths::LOCUS_FASTA_ALL);
-    let mut all_fasta_writer = ext::sys::create_gzip(&locus_fasta)?;
-    let mut filt_seqs = Vec::with_capacity(n_retained);
-    for (&keep, entry) in keep_seqs.iter().zip(entries.into_iter()) {
-        seq::write_fasta(&mut all_fasta_writer, entry.name().as_bytes(), entry.seq()).map_err(add_path!(locus_fasta))?;
-        if keep {
-            seq::write_fasta(&mut filt_fasta_writer, entry.name().as_bytes(), entry.seq())
-                .map_err(add_path!(locus_fasta))?;
-            filt_seqs.push(entry.take_seq());
-        }
-    }
-    std::mem::drop((filt_fasta_writer, all_fasta_writer));
+    let divergences = div::pairwise_divergences(&entries, args.div_k, args.div_w, args.threads);
+    check_divergencies(locus, &entries, &divergences, args.variants.is_some());
+    let dist_filename = locus_dir.join(paths::DISTANCES);
+    let dist_file = ext::sys::create_file(&dist_filename)?;
+    div::write_divergences(&divergences, dist_file).map_err(add_path!(dist_filename))?;
 
     log::info!("    Counting k-mers");
     // Replace Ns with As in the reference sequence.
@@ -645,9 +614,9 @@ fn process_alleles(
     }
 
     // Calculate k-mer counts for the reference sequence as well.
-    filt_seqs.push(ref_seq);
-    let mut kmer_counts = kmer_getter.fetch(filt_seqs.clone())?;
-    let ref_seq = filt_seqs.pop().unwrap();
+    seqs.push(ref_seq);
+    let mut kmer_counts = kmer_getter.fetch(seqs.clone())?;
+    let ref_seq = seqs.pop().unwrap();
     let mut ref_counts = kmer_counts.pop();
 
     // Replace k-mer counts with 0s where Ns were observed.
@@ -656,7 +625,7 @@ fn process_alleles(
     for &(start, end) in ref_n_runs.iter() {
         (&mut ref_counts[(start + 1).saturating_sub(k) as usize..min(end as usize, ref_counts_size)]).fill(0);
     }
-    let off_target_counts = kmer_counts.off_target_counts(&filt_seqs, &ref_seq, &ref_counts, ref_n_runs.is_empty());
+    let off_target_counts = kmer_counts.off_target_counts(&seqs, &ref_seq, &ref_counts, ref_n_runs.is_empty());
 
     let kmers_filename = locus_dir.join(paths::KMERS);
     let mut kmers_writer = ext::sys::create_lz4_slow(&kmers_filename)?;
@@ -783,7 +752,7 @@ fn add_locus(
         log::warn!("    Removed {}/{} alleles with Ns", obtained_count - without_ns, obtained_count);
     }
     check_sequences(&allele_seqs, &locus, if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
-    process_alleles(&locus, locus_dir, ref_seq, allele_seqs, kmer_getter, args)
+    process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)
 }
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {

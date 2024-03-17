@@ -2,11 +2,14 @@ use std::{
     thread,
     cmp::Ordering,
     sync::Arc,
+    io::{self, Write, Read},
+    path::Path,
 };
 use crate::{
+    err::add_path,
     math::RoundDiv,
     seq::{NamedSeq, kmers},
-    ext::TriangleMatrix,
+    ext::{TriangleMatrix, fmt},
 };
 
 /// Calculates number of non-matching entries and corresponding Jaccard distance given two sorted vectors..
@@ -105,4 +108,38 @@ fn divergences_multithread(
     handles.into_iter()
         .flat_map(|handle| handle.join().expect("Worker process failed"))
         .collect()
+}
+
+/// Writes the number of non-shared minimizers to a binary file.
+pub fn write_divergences(divs: &TriangleMatrix<(u32, f64)>, mut f: impl Write) -> io::Result<()> {
+    f.write_all(&(divs.side() as u32).to_le_bytes())?;
+    for &(n, _) in divs.iter() {
+        f.write_all(&n.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// Reads the number of non-shared minimizers from a binary file.
+pub fn load_divergences(
+    mut f: impl Read,
+    filename: &Path,
+    n: usize,
+) -> Result<TriangleMatrix<u32>, crate::Error>
+{
+    let mut buf = [0_u8; 4];
+    f.read_exact(&mut buf).map_err(add_path!(filename))?;
+    let m = u32::from_le_bytes(buf);
+    if m as usize != n {
+        return Err(crate::Error::InvalidData(
+            format!("Cannot read distances from {}: invalid number of haplotypes ({} != {})",
+            fmt::path(filename), n, m)));
+    }
+
+    let total = TriangleMatrix::<()>::expected_len(n);
+    let mut divs = Vec::with_capacity(total);
+    for _ in 0..total {
+        f.read_exact(&mut buf).map_err(add_path!(filename))?;
+        divs.push(u32::from_le_bytes(buf));
+    }
+    Ok(TriangleMatrix::from_linear(n, divs))
 }

@@ -17,7 +17,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        recruit, fastx, dist, Interval,
+        recruit, fastx, div, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::{Kmer, KmerCount},
     },
@@ -897,9 +897,11 @@ fn analyze_locus(
             return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
         }
 
-        let haplotype_alns_filename = locus.db_locus_dir.join(super::paths::LOCUS_ALNS_BAM);
-        let contig_distances = if haplotype_alns_filename.exists() {
-            Some(dist::load_edit_distances(haplotype_alns_filename, &contigs)?)
+        let dist_filename = locus.db_locus_dir.join(paths::DISTANCES);
+        let contig_distances = if dist_filename.exists() {
+            let dist_file = io::BufReader::new(fs::File::open(&dist_filename)
+                .map_err(add_path!(dist_filename))?);
+            Some(div::load_divergences(dist_file, &dist_filename, genotypes.len())?)
         } else {
             None
         };
@@ -917,7 +919,7 @@ fn analyze_locus(
         scheme::solve(data, bg_distr, &locus.out_dir, &mut rng)?
     };
 
-    let res_filename = locus.out_dir.join(super::paths::RES_JSON);
+    let res_filename = locus.out_dir.join(paths::RES_JSON);
     let mut res_writer = ext::sys::create_gzip(&res_filename)?;
     genotyping.to_json().write_pretty(&mut res_writer, 4).map_err(add_path!(res_filename))?;
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;

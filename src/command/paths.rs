@@ -7,13 +7,10 @@ pub(super) const KMERS: &'static str = "kmers.bin.lz4";
 pub(super) const LOCI_DIR: &'static str = "loci";
 /// Reference locus location is stored in `database/loci/<locus_name>/LOCUS_BED`.
 pub(super) const LOCUS_BED: &'static str = "ref.bed";
-/// Unfiltered haplotypes for the locus are stored in `database/loci/<locus_name>/LOCUS_FASTA_ALL`.
-pub(super) const LOCUS_FASTA_ALL: &'static str = "all_haplotypes.fa.gz";
-pub(super) const LOCUS_ALNS_BAM: &'static str = "all_haplotypes.bam";
-/// Filtered haplotypes for the locus are stored in `database/loci/<locus_name>/LOCUS_FASTA`.
+/// Path to all non-identical locus haplotypes.
 pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
-/// Dendrogram is stored in `database/loci/<locus_name>/LOCUS_DENDROGRAM`.
-pub(super) const LOCUS_DENDROGRAM: &'static str = "all_haplotypes.nwk";
+/// Path to pairwise distances between haplotypes.
+pub(super) const DISTANCES: &'static str = "dist.bin";
 
 /// Background distributions are stored in `output/BG_DISTR`.
 pub(super) const BG_DISTR: &'static str = "distr.gz";
