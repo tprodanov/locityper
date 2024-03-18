@@ -111,7 +111,8 @@ fn divergences_multithread(
 }
 
 /// Writes the number of non-shared minimizers to a binary file.
-pub fn write_divergences(divs: &TriangleMatrix<(u32, f64)>, mut f: impl Write) -> io::Result<()> {
+pub fn write_divergences(k: u8, w: u8, divs: &TriangleMatrix<(u32, f64)>, mut f: impl Write) -> io::Result<()> {
+    f.write_all(&[k, w])?;
     f.write_all(&(divs.side() as u32).to_le_bytes())?;
     for &(n, _) in divs.iter() {
         f.write_all(&n.to_le_bytes())?;
@@ -119,13 +120,18 @@ pub fn write_divergences(divs: &TriangleMatrix<(u32, f64)>, mut f: impl Write) -
     Ok(())
 }
 
-/// Reads the number of non-shared minimizers from a binary file.
+/// Loads minimizer sizes k and w, and the number of non-shared minimizers for each pair of contigs.
 pub fn load_divergences(
     mut f: impl Read,
     filename: &Path,
     n: usize,
-) -> Result<TriangleMatrix<u32>, crate::Error>
+) -> Result<(u8, u8, TriangleMatrix<u32>), crate::Error>
 {
+    let mut buf = [0_u8; 2];
+    f.read_exact(&mut buf).map_err(add_path!(filename))?;
+    let k = buf[0];
+    let w = buf[1];
+
     let mut buf = [0_u8; 4];
     f.read_exact(&mut buf).map_err(add_path!(filename))?;
     let m = u32::from_le_bytes(buf);
@@ -141,5 +147,5 @@ pub fn load_divergences(
         f.read_exact(&mut buf).map_err(add_path!(filename))?;
         divs.push(u32::from_le_bytes(buf));
     }
-    Ok(TriangleMatrix::from_linear(n, divs))
+    Ok((k, w, TriangleMatrix::from_linear(n, divs)))
 }
