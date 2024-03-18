@@ -134,9 +134,9 @@ where R: VarintReader<Error = io::Error>,
     let k = f.read().map_err(add_path!(filename))?;
     let w = f.read().map_err(add_path!(filename))?;
     let m = f.read_u32_varint().map_err(add_path!(filename))?;
-    if m as usize != n {
+    if n != m as usize {
         return Err(crate::Error::InvalidData(
-            format!("Cannot read distances from {}: invalid number of haplotypes ({} != {})",
+            format!("Cannot read distances from {}: invalid number of haplotypes (expected {}, found {})",
             fmt::path(filename), n, m)));
     }
 

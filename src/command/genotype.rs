@@ -901,7 +901,7 @@ fn analyze_locus(
         let contig_distances = if dist_filename.exists() {
             let dist_file = io::BufReader::new(fs::File::open(&dist_filename)
                 .map_err(add_path!(dist_filename))?);
-            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, genotypes.len())?;
+            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;
             Some(dists)
         } else {
             None
