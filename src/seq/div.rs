@@ -41,12 +41,14 @@ fn jaccard_distance(minimizers1: &[u64], minimizers2: &[u64]) -> (u32, f64) {
 /// Calculates all pairwise divergences and returns the distance matrix.
 /// Distances are calculated based on the number of shared non-canonical minimizers.
 /// Returns two values for each pair: number of non-shared minimizers and Jaccard distance.
-pub fn pairwise_divergences(
+pub fn minimizer_divergences(
     entries: &[NamedSeq],
+    pairs: &[(u32, u32)],
     k: u8,
     w: u8,
     threads: u16,
-) -> TriangleMatrix<(u32, f64)> {
+) -> Vec<(u32, f64)>
+{
     let mut minimizers = Vec::with_capacity(entries.len());
     for entry in entries {
         let seq = entry.seq();
@@ -57,28 +59,24 @@ pub fn pairwise_divergences(
         minimizers.push(buff);
     }
 
-    let n = entries.len();
-    let divergences = if threads == 1 {
-        let mut divs = Vec::with_capacity(n * (n - 1) / 2);
-        for (i, minimizers1) in minimizers.iter().enumerate() {
-            for minimizers2 in minimizers[i+1..].iter() {
-                divs.push(jaccard_distance(minimizers1, minimizers2));
-            }
+    if threads == 1 {
+        let mut divs = Vec::with_capacity(pairs.len());
+        for &(i, j) in pairs.iter() {
+            divs.push(jaccard_distance(&minimizers[i as usize], &minimizers[j as usize]));
         }
         divs
     } else {
-        divergences_multithread(minimizers, threads)
-    };
-    TriangleMatrix::from_linear(n, divergences)
+        divergences_multithread(minimizers, pairs, threads)
+    }
 }
 
 fn divergences_multithread(
     minimizers: Vec<Vec<u64>>,
+    pairs: &[(u32, u32)],
     threads: u16,
 ) -> Vec<(u32, f64)> {
     let threads = usize::from(threads);
-    let n = minimizers.len();
-    let pairs: Arc<Vec<(u32, u32)>> = Arc::new(TriangleMatrix::indices(n).map(|(i, j)| (i as u32, j as u32)).collect());
+    let pairs = Arc::new(pairs.to_vec());
     let n_pairs = pairs.len();
     let mut handles = Vec::with_capacity(threads);
 

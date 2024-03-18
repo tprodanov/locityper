@@ -1,6 +1,5 @@
 use std::{
     thread,
-    cmp::min,
     path::Path,
     sync::Arc,
     rc::Rc,
@@ -15,7 +14,7 @@ use crate::{
     ext::{self, TriangleMatrix},
     seq::{
         NamedSeq,
-        contigs::{ContigNames, ContigId, Genotype},
+        contigs::{ContigNames, ContigId},
         wfa::{Aligner, Penalties},
         cigar::{Cigar, CigarItem, Operation},
     },
@@ -55,6 +54,44 @@ fn find_kmer_matches(cache1: &KmerCache, cache2: &KmerCache) -> Vec<(u32, u32)> 
     matches
 }
 
+#[inline(always)]
+fn align_gap(
+    seq1: &[u8],
+    seq2: &[u8],
+    i1: u32,
+    i2: u32,
+    j1: u32,
+    j2: u32,
+    aligner: &Aligner,
+    max_gap: u32,
+    cigar: &mut Cigar,
+) -> Result<i32, Error>
+{
+    let penalties = aligner.penalties();
+    debug_assert!(i1 <= i2 && j1 <= j2);
+    let jump1 = i2 - i1;
+    let jump2 = j2 - j1;
+    if jump1 > 0 && jump2 > 0 {
+        if jump1 > max_gap || jump2 > max_gap {
+            cigar.push_unchecked(Operation::Del, jump1);
+            cigar.push_unchecked(Operation::Ins, jump2);
+            Ok(-2 * penalties.gap_open - (jump1 + jump2) as i32 * penalties.gap_extend)
+        } else {
+            let subseq1 = &seq1[i1 as usize..i2 as usize];
+            let subseq2 = &seq2[j1 as usize..j2 as usize];
+            aligner.align(subseq1, subseq2, cigar)
+        }
+    } else if jump1 > 0 {
+        cigar.push_unchecked(Operation::Del, jump1);
+        Ok(-penalties.gap_open - jump1 as i32 * penalties.gap_extend)
+    } else if jump2 > 0 {
+        cigar.push_unchecked(Operation::Ins, jump2);
+        Ok(-penalties.gap_open - jump2 as i32 * penalties.gap_extend)
+    } else {
+        Ok(0)
+    }
+}
+
 /// Aligns two sequences between k-mer matches.
 /// First sequence: reference, sequence: query.
 fn align(
@@ -62,16 +99,15 @@ fn align(
     seq1: &[u8],
     seq2: &[u8],
     kmer_matches: &[(u32, u32)],
-    k: usize,
+    backbone_k: u32,
+    max_gap: u32,
 ) -> Result<(Cigar, i32), Error>
 {
-    let penalties = aligner.penalties();
-    let sparse_aln = bio::alignment::sparse::lcskpp(&kmer_matches, k);
+    let sparse_aln = bio::alignment::sparse::lcskpp(&kmer_matches, backbone_k as usize);
     let mut cigar = Cigar::new();
     let mut score = 0;
     let mut i1 = 0;
     let mut j1 = 0;
-    let k = k as u32;
     let mut curr_match = 0;
     for ix in sparse_aln.path.into_iter() {
         let (i2, j2) = kmer_matches[ix];
@@ -86,90 +122,77 @@ fn align(
             cigar.push_unchecked(Operation::Equal, curr_match);
             curr_match = 0;
         }
-        let jump1 = i2 - i1;
-        let jump2 = j2.checked_sub(j1).unwrap();
-        if jump1 > 0 && jump2 > 0 {
-            let subseq1 = &seq1[i1 as usize..i2 as usize];
-            let subseq2 = &seq2[j1 as usize..j2 as usize];
-            score += aligner.align(subseq1, subseq2, &mut cigar)?;
-        } else if jump1 > 0 {
-            score -= penalties.gap_open + jump1 as i32 * penalties.gap_extend;
-            cigar.push_unchecked(Operation::Del, jump1);
-        } else if jump2 > 0 {
-            score -= penalties.gap_open + jump2 as i32 * penalties.gap_extend;
-            cigar.push_unchecked(Operation::Ins, jump2);
-        }
-
-        curr_match += k;
-        i1 = i2 + k;
-        j1 = j2 + k;
+        score += align_gap(seq1, seq2, i1, i2, j1, j2, aligner, max_gap, &mut cigar)?;
+        curr_match += backbone_k;
+        i1 = i2 + backbone_k;
+        j1 = j2 + backbone_k;
     }
 
     if curr_match > 0 {
         cigar.push_unchecked(Operation::Equal, curr_match);
     }
-    let n = seq1.len() as u32;
-    let m = seq2.len() as u32;
-    let jump1 = n.checked_sub(i1).unwrap();
-    let jump2 = m.checked_sub(j1).unwrap();
-    if jump1 > 0 && jump2 > 0 {
-        score += aligner.align(&seq1[i1 as usize..n as usize], &seq2[j1 as usize..m as usize], &mut cigar)?;
-    } else if jump1 > 0 {
-        score -= penalties.gap_open + jump1 as i32 * penalties.gap_extend;
-        cigar.push_unchecked(Operation::Del, jump1);
-    } else if jump2 > 0 {
-        score -= penalties.gap_open + jump2 as i32 * penalties.gap_extend;
-        cigar.push_unchecked(Operation::Ins, jump2);
-    }
+    let n1 = seq1.len() as u32;
+    let n2 = seq2.len() as u32;
+    score += align_gap(seq1, seq2, i1, n1, j1, n2, aligner, max_gap, &mut cigar)?;
     Ok((cigar, score))
 }
 
-/// Calculates all pairwise divergences between all sequences, writes alignments to PAF file,
-/// and returns condensed distance matrix (see `kodama` crate).
-pub fn pairwise_divergences(
-    bam_path: &Path,
+/// Aligns sequences to each other.
+pub fn align_sequences(
     entries: &[NamedSeq],
+    pairs: Vec<(u32, u32)>,
     penalties: &Penalties,
-    k: usize,
+    backbone_k: u32,
     accuracy: u8,
+    max_gap: u32,
     threads: u16,
-) -> Result<TriangleMatrix<f64>, Error> {
-    let caches: Vec<_> = entries.iter().map(|entry| cache_kmers(entry.seq(), k)).collect();
-    let alns = if threads == 1 {
-        let n = entries.len();
-        let mut alns = Vec::with_capacity(n * (n - 1) / 2);
+) -> Result<Vec<(Cigar, i32)>, Error>
+{
+    let n = entries.len();
+    let n_pairs = pairs.len();
+    let mut caches = vec![None; n];
+    let mut kmer_matches = Vec::with_capacity(n_pairs);
+    for &(i, j) in pairs.iter() {
+        let i = i as usize;
+        let j = j as usize;
+        caches[i].get_or_insert_with(|| cache_kmers(entries[i].seq(), backbone_k as usize));
+        caches[j].get_or_insert_with(|| cache_kmers(entries[j].seq(), backbone_k as usize));
+        kmer_matches.push(find_kmer_matches(caches[i].as_ref().unwrap(), caches[j].as_ref().unwrap()));
+    }
+    std::mem::drop(caches);
+
+    if threads == 1 {
+        let mut alns = Vec::with_capacity(n_pairs);
         let aligner = Aligner::new(penalties.clone(), accuracy);
-        for (i, (entry1, cache1)) in entries.iter().zip(&caches).enumerate() {
-            for (entry2, cache2) in entries[i + 1..].iter().zip(&caches[i + 1..]) {
-                let kmer_matches = find_kmer_matches(cache1, cache2);
-                alns.push(align(&aligner, entry1.seq(), entry2.seq(), &kmer_matches, k)?);
-            }
+        for (&(i, j), matches) in pairs.iter().zip(&kmer_matches) {
+            let i = i as usize;
+            let j = j as usize;
+            alns.push(align(&aligner, entries[i].seq(), entries[j].seq(), matches, backbone_k, max_gap)?);
         }
-        TriangleMatrix::from_linear(n, alns)
+        Ok(alns)
     } else {
-        divergences_multithread(entries, &caches, penalties, k, accuracy, threads)?
-    };
-    write_all(bam_path, entries, alns, k, accuracy)
+        multithread_align(entries, pairs, kmer_matches, penalties, backbone_k, accuracy, max_gap, threads)
+    }
 }
 
-fn divergences_multithread(
+fn multithread_align(
     entries: &[NamedSeq],
-    caches: &[KmerCache],
+    pairs: Vec<(u32, u32)>,
+    kmer_matches: Vec<Vec<(u32, u32)>>,
     penalties: &Penalties,
-    k: usize,
+    backbone_k: u32,
     accuracy: u8,
+    max_gap: u32,
     threads: u16,
-) -> Result<TriangleMatrix<(Cigar, i32)>, Error> {
-    let threads = usize::from(threads);
-    let n = entries.len();
-    let pairs: Arc<Vec<(u32, u32)>> = Arc::new(TriangleMatrix::indices(n).map(|(i, j)| (i as u32, j as u32)).collect());
-    let n_pairs = pairs.len();
-    let mut handles = Vec::with_capacity(threads);
-
+) -> Result<Vec<(Cigar, i32)>, Error>
+{
+    let pairs = Arc::new(pairs);
     let entries = Arc::new(entries.to_vec());
-    // Need to precompute all kmer matches as `caches` cannot be passed between threads.
-    let all_kmer_matches = Arc::new(pairs.iter()
-        .map(|&(i, j)| find_kmer_matches(&caches[i as usize], &caches[j as usize])).collect::<Vec<_>>());
+    let kmer_matches = Arc::new(kmer_matches);
+
+    let threads = usize::from(threads);
+    let mut handles = Vec::with_capacity(threads);
+    let n_pairs = pairs.len();
     let mut start = 0;
     for worker_ix in 0..threads {
         if start == n_pairs {
@@ -181,13 +204,15 @@ fn divergences_multithread(
         {
             let pairs = Arc::clone(&pairs);
             let entries = Arc::clone(&entries);
-            let all_kmer_matches = Arc::clone(&all_kmer_matches);
+            let kmer_matches = Arc::clone(&kmer_matches);
             let penalties = penalties.clone();
             handles.push(thread::spawn(move || {
                 assert!(start < end);
                 let aligner = Aligner::new(penalties, accuracy);
-                pairs[start..end].iter().zip(all_kmer_matches[start..end].iter()).map(|(&(i, j), kmer_matches)|
-                        align(&aligner, &entries[i as usize].seq(), entries[j as usize].seq(), kmer_matches, k))
+                pairs[start..end].iter().zip(kmer_matches[start..end].iter())
+                    .map(|(&(i, j), matches)|
+                        align(&aligner, &entries[i as usize].seq(), entries[j as usize].seq(),
+                            matches, backbone_k, max_gap))
                     .collect::<Result<Vec<_>, Error>>()
             }));
         }
@@ -201,10 +226,10 @@ fn divergences_multithread(
     for res in results.into_iter() {
         alns.extend(res?.into_iter());
     }
-    Ok(TriangleMatrix::from_linear(n, alns))
+    Ok(alns)
 }
 
-fn create_bam_header(entries: &[NamedSeq], k: usize, accuracy: u8) -> bam::header::Header {
+fn create_bam_header(entries: &[NamedSeq], backbone_k: u32, accuracy: u8) -> bam::header::Header {
     let mut header = bam::header::Header::new();
     let mut prg = bam::header::HeaderRecord::new(b"PG");
     prg.push_tag(b"ID", crate::command::PROGRAM);
@@ -212,7 +237,7 @@ fn create_bam_header(entries: &[NamedSeq], k: usize, accuracy: u8) -> bam::heade
     prg.push_tag(b"VN", crate::command::VERSION);
     prg.push_tag(b"CL", &std::env::args().collect::<Vec<_>>().join(" "));
     header.push_record(&prg);
-    header.push_comment(format!("backbone-k={};accuracy-lvl={}", k, accuracy).as_bytes());
+    header.push_comment(format!("backbone-k={};accuracy-lvl={}", backbone_k, accuracy).as_bytes());
 
     for entry in entries {
         let mut record = bam::header::HeaderRecord::new(b"SQ");
@@ -252,14 +277,14 @@ fn create_record(
 }
 
 /// Creates BAM file, writes all pairwise records, and returns linear vector of divergences.
-fn write_all(
+pub fn write_all(
     bam_path: &Path,
     entries: &[NamedSeq],
     alns: TriangleMatrix<(Cigar, i32)>,
-    k: usize,
+    backbone_k: u32,
     accuracy: u8,
 ) -> Result<TriangleMatrix<f64>, Error> {
-    let header = create_bam_header(entries, k, accuracy);
+    let header = create_bam_header(entries, backbone_k, accuracy);
     let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
     writer.set_compression_level(bam::CompressionLevel::Maximum)?;
     let mut cigar_buffer = bam::record::CigarString(Vec::new());

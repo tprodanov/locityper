@@ -3,7 +3,7 @@ pub mod bisect;
 
 // Use these types instead of the default Hash Map.
 
-type Hasher = std::hash::BuildHasherDefault<wyhash::WyHash>;
+pub type Hasher = std::hash::BuildHasherDefault<wyhash::WyHash>;
 pub type HashMap<K, V> = std::collections::HashMap<K, V, Hasher>;
 pub type HashSet<T> = std::collections::HashSet<T, Hasher>;
 

@@ -2,6 +2,8 @@ pub mod paths;
 mod add;
 mod preproc;
 mod genotype;
+#[cfg(feature = "align")]
+mod align;
 
 use std::{
     fs,
@@ -27,6 +29,17 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
         "a" | "add" => add::run(&argv[2..])?,
         "p" | "preproc" | "preprocess" => preproc::run(&argv[2..])?,
         "g" | "genotype" => genotype::run(&argv[2..])?,
+
+        "aln" | "align" =>
+        {
+            #[cfg(feature = "align")] {
+                align::run(&argv[2..])?;
+            }
+            #[cfg(not(feature = "align"))] {
+                log::error!("{} command unavailable, please enable `align` feature during compilation", "align".bold());
+                std::process::exit(1);
+            }
+        }
 
         "h" | "help" | "--help" | "-h" => print_help(),
         "V" | "version" | "--version" | "-V" => print_version(),
@@ -81,6 +94,10 @@ fn print_help() {
         "p, preproc".red());
     println!("    {:WIDTH$} Genotype target loci",
         "g, genotype".red());
+
+    println!("\n{}", "[ Other utilities ]".bold());
+    println!("    {:WIDTH$} Align haplotypes to each other",
+        "   align".red());
 
     println!("\n{}", "[ General help ]".bold());
     println!("    {:WIDTH$} Show this help message",

@@ -21,6 +21,12 @@ impl TriangleMatrix<()> {
     pub fn indices(side: usize) -> impl Iterator<Item = (usize, usize)> {
         (0..side - 1).flat_map(move |i| (i + 1..side).map(move |j| (i, j)))
     }
+
+    /// Returns iterator over all pairs `(i, j)` such that `0 <= i < j < side`.
+    pub fn indices_u32(side: usize) -> impl Iterator<Item = (u32, u32)> {
+        let side = side as u32;
+        (0..side - 1).flat_map(move |i| (i + 1..side).map(move |j| (i, j)))
+    }
 }
 
 impl<T> TriangleMatrix<T> {

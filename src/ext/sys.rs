@@ -1,6 +1,6 @@
 use std::{
     fmt::Write as FmtWrite,
-    io::{self, Read, BufRead, BufReader, Write, BufWriter, stdin},
+    io::{self, Read, BufRead, BufReader, Write, BufWriter, stdin, stdout},
     fs::{self, File},
     path::{Path, PathBuf},
     ffi::OsStr,
@@ -160,6 +160,19 @@ pub fn create_lz4_slow(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>
 pub fn create_file(filename: &Path) -> Result<BufWriter<File>, Error> {
     File::create(filename).map_err(add_path!(filename))
         .map(|w| BufWriter::with_capacity(131_072, w)) // Set buffer capacity to 128 kb.
+}
+
+/// Based on extension, create file.
+pub fn create(filename: &Path) -> Result<Box<dyn Write>, Error> {
+    if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
+        Ok(Box::new(BufWriter::new(stdout())))
+    } else {
+        match filename.extension().and_then(OsStr::to_str) {
+            Some("gz") => Ok(Box::new(create_gzip(filename)?)),
+            Some("lz4") => Ok(Box::new(create_lz4_slow(filename)?)),
+            _ => Ok(Box::new(create_file(filename)?))
+        }
+    }
 }
 
 /// Finds all filenames with appropriate extension in the directory.

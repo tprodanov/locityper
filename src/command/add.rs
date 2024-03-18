@@ -153,7 +153,7 @@ fn print_help(extended: bool) {
             "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
         println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
             "    --leave-out".green(), "STR+".yellow());
-        println!("    {}  {}  (k,w)-minimizers for sequence divergence calculation [{} {}].",
+        println!("    {} {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
             "-m, --minimizer".green(), "INT INT".yellow(),
             super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
     }
@@ -600,7 +600,9 @@ fn process_alleles(
     std::mem::drop(fasta_filename);
 
     log::info!("    Calculating sequence divergence for {} alleles", n_entries);
-    let divergences = div::pairwise_divergences(&entries, args.div_k, args.div_w, args.threads);
+    let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
+    let divergences = div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
+    let divergences = TriangleMatrix::from_linear(n_entries, divergences);
     check_divergencies(locus, &entries, &divergences, args.variants.is_some());
     let dist_filename = locus_dir.join(paths::DISTANCES);
     let dist_file = ext::sys::create_file(&dist_filename)?;

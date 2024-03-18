@@ -8,7 +8,7 @@ pub mod fastx;
 pub mod recruit;
 pub mod wfa;
 pub mod compl;
-#[cfg(feature = "aln")]
+#[cfg(feature = "align")]
 pub mod dist;
 pub mod div;
 
