@@ -1,8 +1,7 @@
 use std::{
-    thread,
+    thread, io,
     cmp::Ordering,
     sync::Arc,
-    io::{self, Write, Read},
     path::Path,
 };
 use crate::{
@@ -11,6 +10,7 @@ use crate::{
     seq::{NamedSeq, kmers},
     ext::{TriangleMatrix, fmt},
 };
+use varint_rs::{VarintWriter, VarintReader};
 
 /// Calculates number of non-matching entries and corresponding Jaccard distance given two sorted vectors..
 fn jaccard_distance(minimizers1: &[u64], minimizers2: &[u64]) -> (u32, f64) {
@@ -111,30 +111,29 @@ fn divergences_multithread(
 }
 
 /// Writes the number of non-shared minimizers to a binary file.
-pub fn write_divergences(k: u8, w: u8, divs: &TriangleMatrix<(u32, f64)>, mut f: impl Write) -> io::Result<()> {
-    f.write_all(&[k, w])?;
-    f.write_all(&(divs.side() as u32).to_le_bytes())?;
-    for &(n, _) in divs.iter() {
-        f.write_all(&n.to_le_bytes())?;
+pub fn write_divergences<W>(k: u8, w: u8, divs: &TriangleMatrix<(u32, f64)>, mut f: W) -> io::Result<()>
+where W: VarintWriter<Error = io::Error>,
+{
+    f.write(k)?;
+    f.write(w)?;
+    f.write_u32_varint(divs.side() as u32)?;
+    for &(d, _) in divs.iter() {
+        f.write_u32_varint(d)?;
     }
     Ok(())
 }
 
 /// Loads minimizer sizes k and w, and the number of non-shared minimizers for each pair of contigs.
-pub fn load_divergences(
-    mut f: impl Read,
+pub fn load_divergences<R>(
+    mut f: R,
     filename: &Path,
     n: usize,
 ) -> Result<(u8, u8, TriangleMatrix<u32>), crate::Error>
+where R: VarintReader<Error = io::Error>,
 {
-    let mut buf = [0_u8; 2];
-    f.read_exact(&mut buf).map_err(add_path!(filename))?;
-    let k = buf[0];
-    let w = buf[1];
-
-    let mut buf = [0_u8; 4];
-    f.read_exact(&mut buf).map_err(add_path!(filename))?;
-    let m = u32::from_le_bytes(buf);
+    let k = f.read().map_err(add_path!(filename))?;
+    let w = f.read().map_err(add_path!(filename))?;
+    let m = f.read_u32_varint().map_err(add_path!(filename))?;
     if m as usize != n {
         return Err(crate::Error::InvalidData(
             format!("Cannot read distances from {}: invalid number of haplotypes ({} != {})",
@@ -144,8 +143,8 @@ pub fn load_divergences(
     let total = TriangleMatrix::<()>::expected_len(n);
     let mut divs = Vec::with_capacity(total);
     for _ in 0..total {
-        f.read_exact(&mut buf).map_err(add_path!(filename))?;
-        divs.push(u32::from_le_bytes(buf));
+        let d = f.read_u32_varint().map_err(add_path!(filename))?;
+        divs.push(d);
     }
     Ok((k, w, TriangleMatrix::from_linear(n, divs)))
 }

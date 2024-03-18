@@ -10,7 +10,7 @@ pub(super) const LOCUS_BED: &'static str = "ref.bed";
 /// Path to all non-identical locus haplotypes.
 pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
 /// Path to pairwise distances between haplotypes.
-pub(super) const DISTANCES: &'static str = "dist.bin";
+pub(super) const DISTANCES: &'static str = "distances.bin";
 
 /// Background distributions are stored in `output/BG_DISTR`.
 pub(super) const BG_DISTR: &'static str = "distr.gz";
