@@ -60,7 +60,7 @@ impl Default for Args {
             max_div: 0.5,
 
             penalties: Default::default(),
-            backbone_k: 101,
+            backbone_k: 25,
             accuracy: 9,
             max_gap: 500,
         }
@@ -214,7 +214,7 @@ fn parse_pair(split_pair: &[&str], name2id: &HashMap<&str, u32>) -> Result<(u32,
         return Err(Error::InvalidInput(
             format!("Cannot align sequence to itself ({})", split_pair[0])));
     }
-    Ok((id1, id2))
+    Ok((id2, id1))
 }
 
 fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> Result<Vec<(u32, u32)>, Error> {

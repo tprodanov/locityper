@@ -152,6 +152,8 @@ fn align(
     let n1 = seq1.len() as u32;
     let n2 = seq2.len() as u32;
     score += align_gap(seq1, seq2, i1, n1, j1, n2, aligner, max_gap, &mut cigar)?;
+    assert_eq!(cigar.ref_len(), seq1.len() as u32, "Alignment produced incorrect CIGAR {}", cigar);
+    assert_eq!(cigar.query_len(), seq2.len() as u32, "Alignment produced incorrect CIGAR {}", cigar);
     Ok((cigar, score))
 }
 
