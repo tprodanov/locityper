@@ -3,6 +3,7 @@ use std::{
     path::Path,
     sync::Arc,
     rc::Rc,
+    cmp::Ordering,
 };
 use smallvec::SmallVec;
 use htslib::bam::{
@@ -73,9 +74,26 @@ fn align_gap(
     let jump2 = j2 - j1;
     if jump1 > 0 && jump2 > 0 {
         if jump1 > max_gap || jump2 > max_gap {
-            cigar.push_unchecked(Operation::Del, jump1);
-            cigar.push_unchecked(Operation::Ins, jump2);
-            Ok(-2 * penalties.gap_open - (jump1 + jump2) as i32 * penalties.gap_extend)
+            match jump1.cmp(&jump2) {
+                Ordering::Less => {
+                    cigar.push_unchecked(Operation::Diff, jump1);
+                    cigar.push_unchecked(Operation::Ins, jump2 - jump1);
+                    Ok(-penalties.gap_open
+                        - (jump2 - jump1) as i32 * penalties.gap_extend
+                        - jump1 as i32 * penalties.mismatch)
+                }
+                Ordering::Equal => {
+                    cigar.push_unchecked(Operation::Diff, jump1);
+                    Ok(-(jump1 as i32) * penalties.mismatch)
+                }
+                Ordering::Greater => {
+                    cigar.push_unchecked(Operation::Diff, jump2);
+                    cigar.push_unchecked(Operation::Del, jump1 - jump2);
+                    Ok(-penalties.gap_open
+                        - (jump1 - jump2) as i32 * penalties.gap_extend
+                        - jump2 as i32 * penalties.mismatch)
+                }
+            }
         } else {
             let subseq1 = &seq1[i1 as usize..i2 as usize];
             let subseq2 = &seq2[j1 as usize..j2 as usize];
