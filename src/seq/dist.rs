@@ -72,10 +72,7 @@ fn align_gap(
     let jump1 = i2 - i1;
     let jump2 = j2 - j1;
     if jump1 > 0 && jump2 > 0 {
-        if jump1 == 1 && jump2 == 1 {
-            cigar.push_unchecked(Operation::Diff, 1);
-            Ok(-penalties.mismatch)
-        } else if jump1 > max_gap || jump2 > max_gap {
+        if jump1 > max_gap || jump2 > max_gap {
             cigar.push_unchecked(Operation::Del, jump1);
             cigar.push_unchecked(Operation::Ins, jump2);
             Ok(-2 * penalties.gap_open - (jump1 + jump2) as i32 * penalties.gap_extend)
