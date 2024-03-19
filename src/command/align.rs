@@ -38,7 +38,7 @@ struct Args {
     max_div: f64,
 
     penalties: Penalties,
-    backbone_k: u32,
+    backbone_ks: String,
     accuracy: u8,
     max_gap: u32,
 }
@@ -60,7 +60,7 @@ impl Default for Args {
             max_div: 0.5,
 
             penalties: Default::default(),
-            backbone_k: 25,
+            backbone_ks: "25,51,101".to_string(),
             accuracy: 9,
             max_gap: 500,
         }
@@ -83,12 +83,22 @@ impl Args {
             "Minimizer window ({}) must be between 1 and {}", self.div_w, kmers::MAX_MINIMIZER_W);
         validate_param!(0.0 <= self.max_div && self.max_div <= 1.0,
             "Maximum divergence ({}) must be within [0, 1]", self.max_div);
-        validate_param!(self.backbone_k >= 5, "Backbone alignment k-mer size ({}) must be at least 5", self.backbone_k);
         validate_param!(1 <= self.accuracy && self.accuracy <= wfa::MAX_ACCURACY,
             "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, wfa::MAX_ACCURACY);
 
         self.penalties.validate()?;
         Ok(self)
+    }
+
+    fn get_backbones(&self) -> Result<Vec<u32>, Error> {
+        let backbones = self.backbone_ks.split(',').map(str::parse)
+            .collect::<Result<Vec<u32>, _>>()
+            .map_err(|_| Error::InvalidInput(
+                format!("Cannot parse `-k {}`: must be list of integers separated by comma", self.backbone_ks)))?;
+        validate_param!(!backbones.is_empty(), "Expect at least one backbone k-mer");
+        validate_param!(backbones.iter().all(|&k| k >= 5),
+            "Backbone k-mer sizes must be at least 5 ({:?})", backbones);
+        Ok(backbones)
     }
 }
 
@@ -126,8 +136,9 @@ fn print_help() {
         "    --skip-div".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Do not align sequences with bigger divergence than this [{}].",
         "-D, --max-div".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_div));
-    println!("    {:KEY$} {:VAL$}  k-mer size for backbone alignment [{}].",
-        "-k, --backbone-k".green(), "INT".yellow(), super::fmt_def(defaults.backbone_k));
+    println!("    {:KEY$} {:VAL$}  One or more k-mer size for backbone alignment,\n\
+        {EMPTY}  separated by comma [{}].",
+        "-k, --backbone".green(), "INT".yellow(), super::fmt_def(&defaults.backbone_ks));
     println!("    {:KEY$} {:VAL$}  Do not complete gaps over this size [{}].",
         "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.max_gap)));
     println!("    {:KEY$} {:VAL$}  Alignment accuracy level (1-{}) [{}].",
@@ -177,7 +188,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Long("skip-div") => args.skip_div = true,
             Short('D') | Long("max-div") => args.max_div = parser.value()?.parse()?,
-            Short('k') | Long("backbone") | Long("backbone-k") => args.backbone_k = parser.value()?.parse()?,
+            Short('k') | Long("backbone") | Long("backbone-ks") => args.backbone_ks = parser.value()?.parse()?,
             Short('g') | Long("max-gap") => args.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('a') | Long("accuracy") => args.accuracy = parser.value()?.parse()?,
             Short('M') | Long("mismatch") => args.penalties.mismatch = parser.value()?.parse()?,
@@ -259,8 +270,8 @@ fn write_paf(
     mut f: impl Write,
 ) -> io::Result<()>
 {
-    writeln!(f, "# minimizers={},{}; max_divergence={:.5}; backbone-k={}; accuracy={}; max-gap={}",
-        args.div_k, args.div_w, args.max_div, args.backbone_k, args.accuracy, args.max_gap)?;
+    writeln!(f, "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
+        args.div_k, args.div_w, args.max_div, args.backbone_ks, args.accuracy, args.max_gap)?;
 
     let mut alns_iter = alignments.iter();
     let mut cigar_str = String::new();
@@ -303,6 +314,7 @@ fn write_paf(
 
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let args = parse_args(argv)?.validate()?;
+    let backbones = args.get_backbones()?;
     super::greet();
     let timer = Instant::now();
 
@@ -346,7 +358,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
         Vec::new()
     } else {
         log::debug!("    Find alignments for {} pairs", sub_pairs.len());
-        dist::align_sequences(&seqs, sub_pairs, &args.penalties, args.backbone_k, args.accuracy,
+        dist::align_sequences(&seqs, sub_pairs, &args.penalties, &backbones, args.accuracy,
             args.max_gap, args.threads)?
     };
 

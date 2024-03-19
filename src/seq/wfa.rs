@@ -49,7 +49,7 @@ impl Penalties {
     pub fn align_simple(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> i32 {
         let n = seq1.len();
         let m = seq2.len();
-        assert!(n > 0 && m > 0, "Cannot align empty sequences");
+        debug_assert!(n > 0 && m > 0, "Cannot align empty sequences");
         let diff = n as i32 - m as i32;
         let mut score;
         let (i, j) = if diff < 0 {

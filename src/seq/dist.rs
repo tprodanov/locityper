@@ -3,7 +3,6 @@ use std::{
     path::Path,
     sync::Arc,
     rc::Rc,
-    cmp::Ordering,
 };
 use smallvec::SmallVec;
 use htslib::bam::{
@@ -29,9 +28,9 @@ type KmerCache<'a> = HashMap<&'a [u8], SmallVec<[u32; CAPACITY]>>;
 
 /// Creates a HashMap containing all the k-mers in the sequence.
 /// A good rolling hash function should speed up the code.
-fn cache_kmers(seq: &[u8], k: usize) -> KmerCache {
+fn cache_kmers(seq: &[u8], k: u32) -> KmerCache {
     let mut map = KmerCache::default();
-    for (i, kmer) in seq.windows(k).enumerate() {
+    for (i, kmer) in seq.windows(k as usize).enumerate() {
         map.entry(kmer)
             .or_insert_with(SmallVec::new)
             .push(i as u32);
@@ -73,30 +72,11 @@ fn align_gap(
     let jump1 = i2 - i1;
     let jump2 = j2 - j1;
     if jump1 > 0 && jump2 > 0 {
+        let subseq1 = &seq1[i1 as usize..i2 as usize];
+        let subseq2 = &seq2[j1 as usize..j2 as usize];
         if jump1 > max_gap || jump2 > max_gap {
-            match jump1.cmp(&jump2) {
-                Ordering::Less => {
-                    cigar.push_unchecked(Operation::Diff, jump1);
-                    cigar.push_unchecked(Operation::Ins, jump2 - jump1);
-                    Ok(-penalties.gap_open
-                        - (jump2 - jump1) as i32 * penalties.gap_extend
-                        - jump1 as i32 * penalties.mismatch)
-                }
-                Ordering::Equal => {
-                    cigar.push_unchecked(Operation::Diff, jump1);
-                    Ok(-(jump1 as i32) * penalties.mismatch)
-                }
-                Ordering::Greater => {
-                    cigar.push_unchecked(Operation::Diff, jump2);
-                    cigar.push_unchecked(Operation::Del, jump1 - jump2);
-                    Ok(-penalties.gap_open
-                        - (jump1 - jump2) as i32 * penalties.gap_extend
-                        - jump2 as i32 * penalties.mismatch)
-                }
-            }
+            Ok(penalties.align_simple(subseq1, subseq2, cigar))
         } else {
-            let subseq1 = &seq1[i1 as usize..i2 as usize];
-            let subseq2 = &seq2[j1 as usize..j2 as usize];
             aligner.align(subseq1, subseq2, cigar)
         }
     } else if jump1 > 0 {
@@ -157,50 +137,74 @@ fn align(
     Ok((cigar, score))
 }
 
+fn align_multik(
+    aligner: &Aligner,
+    seq1: &[u8],
+    seq2: &[u8],
+    kmer_matches: &[Vec<(u32, u32)>],
+    backbone_ks: &[u32],
+    max_gap: u32,
+) -> Result<(Cigar, i32), Error>
+{
+    let mut best_cigar = None;
+    let mut best_score = i32::MIN;
+    for (&k, matches) in backbone_ks.iter().zip(kmer_matches) {
+        let (cigar, score) = align(aligner, seq1, seq2, matches, k, max_gap)?;
+        if score > best_score {
+            best_score = score;
+            best_cigar = Some(cigar);
+        }
+    }
+    best_cigar.ok_or_else(|| Error::RuntimeError("No alignment found".to_string()))
+        .map(|cigar| (cigar, best_score))
+}
+
 /// Aligns sequences to each other.
 pub fn align_sequences(
     entries: &[NamedSeq],
     pairs: Vec<(u32, u32)>,
     penalties: &Penalties,
-    backbone_k: u32,
+    backbone_ks: &[u32],
     accuracy: u8,
     max_gap: u32,
     threads: u16,
 ) -> Result<Vec<(Cigar, i32)>, Error>
 {
-    let n = entries.len();
+    let n_entries = entries.len();
     let n_pairs = pairs.len();
-    let mut caches = vec![None; n];
-    let mut kmer_matches = Vec::with_capacity(n_pairs);
-    for &(i, j) in pairs.iter() {
-        let i = i as usize;
-        let j = j as usize;
-        caches[i].get_or_insert_with(|| cache_kmers(entries[i].seq(), backbone_k as usize));
-        caches[j].get_or_insert_with(|| cache_kmers(entries[j].seq(), backbone_k as usize));
-        kmer_matches.push(find_kmer_matches(caches[i].as_ref().unwrap(), caches[j].as_ref().unwrap()));
+    let mut all_kmer_matches = vec![Vec::with_capacity(backbone_ks.len()); n_pairs];
+    for &backbone_k in backbone_ks {
+        let mut caches = vec![None; n_entries];
+        for (&(i, j), kmer_matches) in pairs.iter().zip(all_kmer_matches.iter_mut()) {
+            let i = i as usize;
+            let j = j as usize;
+            caches[i].get_or_insert_with(|| cache_kmers(entries[i].seq(), backbone_k));
+            caches[j].get_or_insert_with(|| cache_kmers(entries[j].seq(), backbone_k));
+            kmer_matches.push(find_kmer_matches(caches[i].as_ref().unwrap(), caches[j].as_ref().unwrap()));
+        }
     }
-    std::mem::drop(caches);
 
     if threads == 1 {
         let mut alns = Vec::with_capacity(n_pairs);
         let aligner = Aligner::new(penalties.clone(), accuracy);
-        for (&(i, j), matches) in pairs.iter().zip(&kmer_matches) {
+        for (&(i, j), matches) in pairs.iter().zip(&all_kmer_matches) {
             let i = i as usize;
             let j = j as usize;
-            alns.push(align(&aligner, entries[i].seq(), entries[j].seq(), matches, backbone_k, max_gap)?);
+            alns.push(align_multik(&aligner, entries[i].seq(), entries[j].seq(), matches, backbone_ks, max_gap)?);
         }
         Ok(alns)
     } else {
-        multithread_align(entries, pairs, kmer_matches, penalties, backbone_k, accuracy, max_gap, threads)
+        multithread_align(entries, pairs, all_kmer_matches, penalties, backbone_ks, accuracy, max_gap, threads)
     }
 }
 
 fn multithread_align(
     entries: &[NamedSeq],
     pairs: Vec<(u32, u32)>,
-    kmer_matches: Vec<Vec<(u32, u32)>>,
+    // [pair_index][backbone_index] -> indices of matches
+    all_kmer_matches: Vec<Vec<Vec<(u32, u32)>>>,
     penalties: &Penalties,
-    backbone_k: u32,
+    backbone_ks: &[u32],
     accuracy: u8,
     max_gap: u32,
     threads: u16,
@@ -208,7 +212,7 @@ fn multithread_align(
 {
     let pairs = Arc::new(pairs);
     let entries = Arc::new(entries.to_vec());
-    let kmer_matches = Arc::new(kmer_matches);
+    let all_kmer_matches = Arc::new(all_kmer_matches);
 
     let threads = usize::from(threads);
     let mut handles = Vec::with_capacity(threads);
@@ -224,15 +228,16 @@ fn multithread_align(
         {
             let pairs = Arc::clone(&pairs);
             let entries = Arc::clone(&entries);
-            let kmer_matches = Arc::clone(&kmer_matches);
+            let all_kmer_matches = Arc::clone(&all_kmer_matches);
             let penalties = penalties.clone();
+            let curr_backbone_ks = backbone_ks.to_vec();
             handles.push(thread::spawn(move || {
                 assert!(start < end);
                 let aligner = Aligner::new(penalties, accuracy);
-                pairs[start..end].iter().zip(kmer_matches[start..end].iter())
+                pairs[start..end].iter().zip(all_kmer_matches[start..end].iter())
                     .map(|(&(i, j), matches)|
-                        align(&aligner, &entries[i as usize].seq(), entries[j as usize].seq(),
-                            matches, backbone_k, max_gap))
+                        align_multik(&aligner, &entries[i as usize].seq(), entries[j as usize].seq(),
+                            matches, &curr_backbone_ks, max_gap))
                     .collect::<Result<Vec<_>, Error>>()
             }));
         }
