@@ -5,18 +5,22 @@ from collections import defaultdict
 import itertools
 import sys
 import operator
+import os
 
 import common
 
 
 def load_distances(discarded_path, paf_path):
     discarded = {}
-    with common.open(discarded_path) as f:
-        for line in f:
-            if line.startswith('#'):
-                continue
-            hap, haps2 = line.strip().split('=')
-            discarded[hap.strip()] = tuple(map(str.strip, haps2.split(',')))
+    if os.path.exists(discarded_path):
+        with common.open(discarded_path) as f:
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                hap, haps2 = line.strip().split('=')
+                discarded[hap.strip()] = tuple(map(str.strip, haps2.split(',')))
+    else:
+        sys.stderr.write(f'Cannot open `{discarded_path}`, assuming there are no discarded haplotypes\n')
 
     def group(hap):
         return (hap,) + discarded.get(hap, ())
@@ -49,7 +53,9 @@ def load_distances(discarded_path, paf_path):
                 distances[hap2a][hap1a] = dist
 
     for hap, length in seq_lengths.items():
-        distances[hap][hap] = (0, length)
+        for hap1, hap2 in itertools.product(group(hap), repeat=2):
+            distances[hap1][hap2] = (0, length)
+            distances[hap2][hap1] = (0, length)
     return { hap: list(dists.items()) for hap, dists in distances.items() }
 
 
@@ -85,8 +91,15 @@ def calc_gt_distances(genotypes, distances, out, max_entries):
         hap_dists = []
         for hap in genotype:
             curr_dists = distances.get(hap)
-            assert curr_dists, f'Unknown haplotype {hap}'
-            hap_dists.append(curr_dists)
+            if curr_dists is None:
+                sys.stderr.write(f'Unknown haplotype {hap}, skipping {gt_str}\n')
+                out.write(f'{gt_str}\t*\tNA\tNA\tNA\tNA\n')
+                hap_dists = None
+                break
+            else:
+                hap_dists.append(curr_dists)
+        if hap_dists is None:
+            continue
 
         pred_dists = {}
         # for dist_combin in itertools.product(*hap_dists):
@@ -107,7 +120,7 @@ def calc_gt_distances(genotypes, distances, out, max_entries):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Calculates distance between a target genotype and all other genotypes',
+        description='Calculating distances between a target genotype and all other genotypes',
         usage='%(prog)s -i alns.paf -d discarded.txt (-g hap1,hap2 | -G genotypes.txt) -o out.csv')
     parser.add_argument('-i', '--input', metavar='FILE',
         help='Input PAF[.gz] file with pairwise distances.')
@@ -130,6 +143,7 @@ def main():
 
     max_entries = args.max_entries or sys.maxsize
     with common.open(args.output, 'w') as out:
+        out.write(f'# {" ".join(sys.argv)}\n')
         out.write('target\tquery\tloo\tedit_dist\taln_size\tdivergence\n')
         calc_gt_distances(genotypes, distances, out, max_entries)
 

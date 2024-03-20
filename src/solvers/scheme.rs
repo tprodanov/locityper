@@ -508,7 +508,7 @@ impl Genotyping {
 
     pub fn issue_warnings(&mut self) {
         self.warnings.clear();
-        const DIST_THRESH: u32 = 50;
+        const DIST_THRESH: u32 = 30;
 
         let ln_prob0 = *self.ln_probs.first().expect("Expected at least one genotype");
         // < 0.01
