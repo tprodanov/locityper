@@ -111,7 +111,7 @@ fn print_help() {
     println!("{}", "Align medium-size sequence to each other.".yellow());
 
     print!("\n{}", "Usage:".bold());
-    println!(" {} -i input.fa -o out.paf [-p name,name | -P pairs.txt | -A] [args]", super::PROGRAM);
+    println!(" {} -i input.fa -o out.paf (-p name,name | -P pairs.txt | -A) [args]", super::PROGRAM);
 
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input FASTA file.",
