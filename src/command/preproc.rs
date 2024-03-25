@@ -109,11 +109,7 @@ impl InputFiles {
     ///
     /// Paired-end (`p`) line may contain either two files or one file with `*` inside, which is replaced with 1 and 2.
     pub fn fill_from_inlist(&mut self) -> Result<(), Error> {
-        let list_filename = match self.in_list.take() {
-            Some(filename) => filename,
-            None => return Ok(()),
-        };
-
+        let Some(list_filename) = self.in_list.take() else { return Ok(()) };
         validate_param!(self.reads1.is_empty() && self.reads2.is_empty() && self.alns.is_empty(),
             "Input list (-I) cannot be used together with other input files (-i/-a).");
         validate_param!(!self.interleaved && !self.no_index,
@@ -1053,10 +1049,9 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
     log::info!("Loading distribution parameters from {}", ext::fmt::path(&similar_path));
     let similar_distr = BgDistr::load_from(&similar_path, &like_dir.join(paths::SUCCESS))?;
     let similar_seq_info = similar_distr.seq_info();
-    let similar_n_reads = match similar_seq_info.total_reads() {
-        Some(count) => count,
-        None => return Err(Error::InvalidInput(format!(
-            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir)))),
+    let Some(similar_n_reads) = similar_seq_info.total_reads() else {
+        return Err(Error::InvalidInput(format!(
+            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir))))
     };
 
     let seq_info = SequencingInfo::new(read_len_from_reads(args, None)?, args.technology, args.explicit_technology)?;

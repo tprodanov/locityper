@@ -374,7 +374,6 @@ impl Likelihoods {
         tag: String,
         genotypes: &[Genotype],
         params: &AssgnParams,
-        contig_distances: &Option<TriangleMatrix<u32>>,
     ) -> Genotyping {
         // ln(1e-5).
         const THRESH: f64 = -11.512925464970229;
@@ -389,21 +388,13 @@ impl Likelihoods {
 
         let mut ln_probs = vec![0.0; n];
         let mut out_genotypes = Vec::with_capacity(n);
-        let mut distances = Vec::with_capacity(n);
         let mut assgn_counts = Vec::with_capacity(n);
         let mut mean_sds = Vec::with_capacity(n);
         let mut i = 0;
         // Use while instead of for, as upper bound can change.
         while i < n {
             let (mean_i, var_i) = self.likelihoods[self.ixs[i]];
-            let gt = genotypes[self.ixs[i]].clone();
-            match (out_genotypes.first(), &contig_distances) {
-                (Some(top_gt), Some(dist_matrix)) =>
-                    distances.push(Some(genotype_distance(top_gt, &gt, dist_matrix))),
-                _ => distances.push(None),
-            }
-            out_genotypes.push(gt);
-
+            out_genotypes.push(genotypes[self.ixs[i]].clone());
             assgn_counts.push(self.assgn_counts[self.ixs[i]].take().expect("Assignment counts undefined"));
             mean_sds.push((mean_i, var_i.sqrt()));
             for j in i + 1..n {
@@ -425,12 +416,13 @@ impl Likelihoods {
         Genotyping {
             genotypes: out_genotypes,
             warnings: Vec::new(),
-            distances, assgn_counts, tag, mean_sds, ln_probs, quality,
+            weighted_dist: None,
+            assgn_counts, tag, mean_sds, ln_probs, quality,
         }
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum GenotypingWarning {
     /// There are very no reads available for genotyping.
     NoReads,
@@ -440,8 +432,6 @@ pub enum GenotypingWarning {
     TooManyReads(u32),
     /// Even the best genotype has very low quality.
     NoProbableGenotype,
-    /// Two predicted genotypes are very far apart.
-    GtsFarApart,
     /// There are many unexplained reads (percentage of unexplained reads).
     UnexplainedReads(f64),
 }
@@ -453,7 +443,6 @@ impl fmt::Display for GenotypingWarning {
             Self::FewReads(count) => write!(f, "FewReads({})", count),
             Self::TooManyReads(count) => write!(f, "TooManyReads({})", count),
             Self::NoProbableGenotype => write!(f, "NoProbableGenotype"),
-            Self::GtsFarApart => write!(f, "GtsFarApart"),
             Self::UnexplainedReads(perc) => write!(f, "UnexplainedReads({:.1}%)", perc),
         }
     }
@@ -477,8 +466,8 @@ pub struct Genotyping {
     mean_sds: Vec<(f64, f64)>,
     /// Normalized ln-probabilities for each genotype.
     ln_probs: Vec<f64>,
-    /// Distances between the top genotype and i-th genotype.
-    distances: Vec<Option<u32>>,
+    /// Weighted distance from the best to all other genotypes.
+    weighted_dist: Option<f64>,
     /// Quality of the top genotype.
     quality: f64,
     /// Warnings, issued for this sample and this locus.
@@ -494,39 +483,44 @@ impl Genotyping {
             assgn_counts: Vec::new(),
             mean_sds: Vec::new(),
             ln_probs: Vec::new(),
-            distances: Vec::new(),
+            weighted_dist: None,
             quality: 0.0,
         }
     }
 
     pub fn print_log(&self) {
         let (mean, sd) = self.mean_sds[0];
-        log::info!("    Best genotype for {}: {},  likelihood = {:.2} ± {:.2}, quality = {:.1}, confidence = {:.4}%",
+        log::info!("    [{}] GT = {},  lik. = {:.2} ± {:.2}, confidence = {:.4}%, weight.dist = {:.4}",
             self.tag, self.genotypes[0], Ln::to_log10(mean), Ln::to_log10(sd),
-            self.quality, 100.0 * self.ln_probs[0].exp());
+            100.0 * self.ln_probs[0].exp(), self.weighted_dist.unwrap_or(f64::NAN));
+        if !self.warnings.is_empty() {
+            let warns_str = self.warnings.iter().map(GenotypingWarning::to_string).collect::<Vec<_>>().join(", ");
+            log::debug!("        Warnings: {}", warns_str);
+        }
     }
 
-    pub fn issue_warnings(&mut self) {
-        self.warnings.clear();
-        const DIST_THRESH: u32 = 30;
+    /// Calculate weighted distance to all other genotypes.
+    pub fn find_weighted_dist(&mut self, dist_matrix: &TriangleMatrix<u32>) {
+        let Some(gt0) = self.genotypes.first() else { return };
+        let mut sum_prob = 0.0;
+        let mut sum_dist = 0.0;
+        for (i, (gt, &ln_prob)) in self.genotypes.iter().zip(&self.ln_probs).enumerate() {
+            let prob = ln_prob.exp();
+            sum_prob += prob;
+            if i > 0 {
+                sum_dist += prob * f64::from(genotype_distance(gt0, gt, dist_matrix));
+            }
+        }
+        self.weighted_dist = Some(sum_dist / sum_prob);
+    }
 
+    pub fn check_first_prob(&mut self) {
         let ln_prob0 = *self.ln_probs.first().expect("Expected at least one genotype");
         // < 0.01
         if ln_prob0.is_nan() || ln_prob0 < -2.0 * Ln::LN10 {
             self.warnings.push(GenotypingWarning::NoProbableGenotype);
             log::warn!("[{}] Best genotype {} is improbable (10^{:.5} = {:.5})",
                 self.tag, self.genotypes[0], Ln::to_log10(ln_prob0), ln_prob0.exp());
-        }
-        for (i, (&ln_prob, &dist)) in self.ln_probs.iter().zip(&self.distances).enumerate() {
-            if let Some(d) = dist {
-                if ln_prob >= ln_prob0 - Ln::LN10 && d > DIST_THRESH {
-                    self.warnings.push(GenotypingWarning::GtsFarApart);
-                    log::warn!("[{}] Distant genotypes {} & {} (minimizer distance = {}) \
-                        have similar probabilities ({:.5} & {:.5})",
-                        self.tag, self.genotypes[0], self.genotypes[i], d, ln_prob0.exp(), self.ln_probs[i].exp());
-                    break;
-                }
-            }
         }
     }
 
@@ -631,21 +625,20 @@ impl Genotyping {
             locus: &self.tag as &str,
             quality: self.quality,
         };
+        if let Some(dist) = self.weighted_dist {
+            res.insert("weight_dist", dist).unwrap();
+        }
 
         if !self.genotypes.is_empty() {
             res.insert("genotype", self.genotypes[0].name()).unwrap();
             let options: Vec<_> = self.genotypes.iter().enumerate().map(|(i, gt)| {
-                let mut obj = json::object! {
+                json::object! {
                     genotype: gt.name(),
                     lik_mean: Ln::to_log10(self.mean_sds[i].0),
                     lik_sd: Ln::to_log10(self.mean_sds[i].1),
                     prob: self.ln_probs[i].exp(),
                     log10_prob: Ln::to_log10(self.ln_probs[i]),
-                };
-                if let Some(d) = self.distances[i] {
-                    obj.insert::<u32>("dist_to_first", d.into()).unwrap();
                 }
-                obj
             }).collect();
             res.insert("options", options).unwrap();
         }
@@ -809,7 +802,7 @@ pub fn solve(
 
     let data = &data;
     let mut genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes,
-        &data.assgn_params, &data.contig_distances);
+        &data.assgn_params);
     if data.assgn_params.out_bams > 0 {
         let bam_dir = locus_dir.join(crate::command::paths::ALNS_DIR);
         ext::sys::mkdir(&bam_dir)?;
@@ -823,10 +816,13 @@ pub fn solve(
             model::bam::write_bam(&bam_path, gt, data, &mut contig_to_tid, assgn_counts)?
         }
     }
-    genotyping.print_log();
-    genotyping.issue_warnings();
+    if let Some(dist_matrix) = &data.contig_distances {
+        genotyping.find_weighted_dist(dist_matrix);
+    }
+    genotyping.check_first_prob();
     genotyping.check_num_of_reads(data.all_alns.reads().len() as u32, bg_distr.depth(), &data.all_contig_infos);
     genotyping.count_unexplained_reads(&data.all_alns, data.assgn_params.unmapped_penalty);
+    genotyping.print_log();
     Ok(genotyping)
 }
 

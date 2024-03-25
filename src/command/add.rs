@@ -435,21 +435,19 @@ fn expand_locus(
 
     let kmer_counts = kmer_getter.fetch([left_seq, right_seq])?;
     // Extend region to the left.
-    let new_start = match find_best_boundary::<true>(left_start, inner_start + 1, &left_vars,
-            kmer_getter.k(), kmer_counts.get(0), args)? {
-        Some(pos) => pos,
-        None => return Err(Error::RuntimeError(format!(
+    let Some(new_start) = find_best_boundary::<true>(left_start, inner_start + 1, &left_vars,
+            kmer_getter.k(), kmer_counts.get(0), args)? else {
+        return Err(Error::RuntimeError(format!(
             "Cannot expand locus {} to the left due to a long variant overlapping boundary.\n    \
-            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name()))),
+            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name())))
     };
 
     // Extend region to the right.
-    let new_end = match find_best_boundary::<false>(inner_end - 1, right_end, &right_vars,
-            kmer_getter.k(), kmer_counts.get(1), args)? {
-        Some(pos) => pos + 1,
-        None => return Err(Error::RuntimeError(format!(
+    let Some(new_end) = find_best_boundary::<false>(inner_end - 1, right_end, &right_vars,
+            kmer_getter.k(), kmer_counts.get(1), args)? else {
+        return Err(Error::RuntimeError(format!(
             "Cannot expand locus {} to the right due to a long variant overlapping boundary.\n    \
-            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name()))),
+            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name())))
     };
     if new_start != inner_start || new_end != inner_end {
         let new_interval = inner_interval.create_at_same_contig(new_start, new_end);

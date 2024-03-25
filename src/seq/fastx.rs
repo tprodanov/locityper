@@ -907,13 +907,12 @@ pub fn set_reference(
         log::warn!("Cannot determine alignment file format {}, assuming CRAM", ext::fmt::path(aln_filename));
     }
 
-    let ref_filename = match ref_filename {
-        Some(val) => val,
-        None => return Err(Error::InvalidInput("Cannot analyze CRAM file without a reference FASTA".to_owned())),
+    let Some(ref_filename) = ref_filename else {
+        return Err(Error::InvalidInput("Cannot analyze CRAM file without a reference FASTA".to_owned()))
     };
     let contigs = match contigs {
         Some(val) => Cow::Borrowed(val),
-        None =>  Cow::Owned(ContigNames::load_indexed_fasta("REF", ref_filename)?.0),
+        None => Cow::Owned(ContigNames::load_indexed_fasta("REF", ref_filename)?.0),
     };
     aln_reader.set_reference(ref_filename)?;
 
