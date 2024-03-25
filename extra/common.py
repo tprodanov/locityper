@@ -14,10 +14,6 @@ def open(filename, mode='r'):
         return builtins.open(filename, mode)
 
 
-def temporary_filename(filename):
-    return os.path.join(os.path.dirname(filename), 'tmp-{}'.format(os.path.basename(filename)))
-
-
 def mkdir(path):
     try:
         os.mkdir(path)

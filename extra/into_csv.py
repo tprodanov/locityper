@@ -33,8 +33,9 @@ def process_sample(sample, sample_dir):
 
             gt = res['genotype']
             qual = math.floor(10 * float(res['quality'])) * 0.1
+            weight_dist = res.get('weight_dist', np.nan)
             warnings = ';'.join(res.get('warnings', '*'))
-            s += f'{gt}\t{qual:.1f}\t{warnings}\n'
+            s += f'{gt}\t{qual:.1f}\t{weight_dist:.5f}\t{warnings}\n'
     return s
 
 
@@ -60,7 +61,7 @@ def main():
 
     out = common.open(args.output, 'w')
     out.write('# {}\n'.format(' '.join(sys.argv)))
-    out.write('sample\tlocus\tgenotype\tquality\twarnings\n')
+    out.write('sample\tlocus\tgenotype\tquality\tweight_dist\twarnings\n')
 
     def callback(s):
         nonlocal finished
