@@ -417,6 +417,7 @@ impl Likelihoods {
             genotypes: out_genotypes,
             warnings: Vec::new(),
             weighted_dist: None,
+            distances: None,
             assgn_counts, tag, mean_sds, ln_probs, quality,
         }
     }
@@ -468,6 +469,8 @@ pub struct Genotyping {
     ln_probs: Vec<f64>,
     /// Weighted distance from the best to all other genotypes.
     weighted_dist: Option<f64>,
+    /// Distance from the secondary to the primary genotype prediction.
+    distances: Option<Vec<u32>>,
     /// Quality of the top genotype.
     quality: f64,
     /// Warnings, issued for this sample and this locus.
@@ -484,6 +487,7 @@ impl Genotyping {
             mean_sds: Vec::new(),
             ln_probs: Vec::new(),
             weighted_dist: None,
+            distances: None,
             quality: 0.0,
         }
     }
@@ -504,14 +508,16 @@ impl Genotyping {
         let Some(gt0) = self.genotypes.first() else { return };
         let mut sum_prob = 0.0;
         let mut sum_dist = 0.0;
+        let mut distances = Vec::with_capacity(self.genotypes.len());
         for (i, (gt, &ln_prob)) in self.genotypes.iter().zip(&self.ln_probs).enumerate() {
             let prob = ln_prob.exp();
             sum_prob += prob;
-            if i > 0 {
-                sum_dist += prob * f64::from(genotype_distance(gt0, gt, dist_matrix));
-            }
+            let dist = if i > 0 { genotype_distance(gt0, gt, dist_matrix) } else { 0 };
+            sum_dist += prob * f64::from(dist);
+            distances.push(dist);
         }
         self.weighted_dist = Some(sum_dist / sum_prob);
+        self.distances = Some(distances);
     }
 
     pub fn check_first_prob(&mut self) {
@@ -632,13 +638,17 @@ impl Genotyping {
         if !self.genotypes.is_empty() {
             res.insert("genotype", self.genotypes[0].name()).unwrap();
             let options: Vec<_> = self.genotypes.iter().enumerate().map(|(i, gt)| {
-                json::object! {
+                let mut obj = json::object! {
                     genotype: gt.name(),
                     lik_mean: Ln::to_log10(self.mean_sds[i].0),
                     lik_sd: Ln::to_log10(self.mean_sds[i].1),
                     prob: self.ln_probs[i].exp(),
                     log10_prob: Ln::to_log10(self.ln_probs[i]),
+                };
+                if let Some(distances) = &self.distances {
+                    obj.insert("dist_to_primary", distances[i]).unwrap();
                 }
+                obj
             }).collect();
             res.insert("options", options).unwrap();
         }
