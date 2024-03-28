@@ -14,6 +14,7 @@ import common
 
 class Distances:
     def __init__(self, discarded_path, paf_path, verbose=False):
+        self.paf_path = paf_path
         discarded = {}
         if os.path.exists(discarded_path):
             with common.open(discarded_path) as f:
@@ -23,7 +24,7 @@ class Distances:
                     hap, haps2 = line.strip().split('=')
                     discarded[hap.strip()] = tuple(map(str.strip, haps2.split(',')))
         elif verbose:
-            sys.stderr.write(f'Cannot open `{discarded_path}`, assuming there are no discarded haplotypes\n')
+            sys.stderr.write(f'Cannot open `{discarded_path}`, assume there are no discarded haplotypes\n')
 
         def group(hap):
             return (hap,) + discarded.get(hap, ())
@@ -93,46 +94,80 @@ class Distances:
     def calc_distance(self, gt1, gt2):
         assert len(gt1) == len(gt2)
         best_div = np.inf
-        best_edit = None
-        best_size = None
+        best_distances = None
 
         for perm2 in itertools.permutations(gt2):
+            distances = []
             sum_edit = 0
             sum_size = 0
             for hap1, hap2 in zip(gt1, perm2):
+                if hap1 is None:
+                    distances.append((None, None))
+                    continue
                 try:
                     edit, size = self.distances[hap1][hap2]
                 except KeyError:
                     sys.stderr.write(f'Cannot calculate distance between {",".join(gt1)} and {",".join(gt2)}'
-                        f' (missing distance {hap1} - {hap2})\n')
+                        f' (missing distance {hap1} - {hap2}) (see {self.paf_path})\n')
                 sum_edit += edit
                 sum_size += size
-            div = sum_edit / sum_size
-            if div < best_div:
+                distances.append((edit, size))
+
+            div = sum_edit / sum_size if sum_size else np.inf
+            if div <= best_div:
                 best_div = div
-                best_edit = sum_edit
-                best_size = sum_size
-        return best_edit, best_size, best_div
+                best_distances = distances
+        return GtDist(best_distances)
 
     def find_closest_loo(self, gt):
-        sum_edit = 0
-        sum_size = 0
         loo_gt = []
+        distances = []
         for hap in gt:
+            if hap is None:
+                loo_gt.append(None)
+                distances.append((None, None))
+                continue
+
+            best_hap = None
             best_div = np.inf
             best_edit = None
-            best_size = None
-            best_hap = None
             for hap2, (edit, size) in self.distances[hap].items():
                 if edit / size < best_div and hap2 not in gt:
                     best_div = edit / size
-                    best_edit = edit
-                    best_size = size
+                    best_edit = (edit, size)
                     best_hap = hap2
-            sum_edit += best_edit
-            sum_size += best_size
             loo_gt.append(best_hap)
-        return loo_gt, sum_edit, sum_size, sum_edit / sum_size
+            distances.append(best_edit)
+        return loo_gt, GtDist(distances)
+
+
+def edit_to_str(edit, size):
+    div = edit / size
+    qv = np.inf if div == 0 else -10 * np.log10(div)
+    return f'{edit}\t{size}\t{div:.9f}\t{qv:.9f}'
+
+
+class GtDist:
+    def __init__(self, distances):
+        self.distances = distances
+
+    def iter_strs(self):
+        sum_edit = 0
+        sum_size = 0
+        all_present = True
+        for edit, size in self.distances:
+            if edit is None:
+                all_present = False
+                yield 'NA\tNA\tNA\tNA'
+            else:
+                sum_edit += edit
+                sum_size += size
+                yield edit_to_str(edit, size)
+
+        if all_present:
+            yield edit_to_str(sum_edit, sum_size)
+        else:
+            yield 'NA\tNA\tNA\tNA'
 
 
 def get_genotype(s, split, sep):

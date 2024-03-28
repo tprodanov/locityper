@@ -68,7 +68,7 @@ impl Default for Args {
             max_expansion: 50000,
             moving_window: 500,
 
-            div_k: 25,
+            div_k: 15,
             div_w: 15,
             unknown_frac: 0.0001,
 
