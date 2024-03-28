@@ -369,14 +369,10 @@ impl Likelihoods {
         self.ixs = new_ixs;
     }
 
-    fn produce_result(
-        &mut self,
-        tag: String,
-        genotypes: &[Genotype],
-        params: &AssgnParams,
-    ) -> Genotyping {
+    fn produce_result(&mut self, data: &Data) -> Genotyping {
         // ln(1e-5).
         const THRESH: f64 = -11.512925464970229;
+        let params = &data.assgn_params;
         let min_output = max(4, params.out_bams);
         let thresh_prob = THRESH.min(params.prob_thresh);
         let attempts = f64::from(params.attempts);
@@ -386,6 +382,7 @@ impl Likelihoods {
             log::warn!("Only {} genotype(s) remaining, quality will be undefined", n);
         }
 
+        let genotypes = &data.genotypes;
         let mut ln_probs = vec![0.0; n];
         let mut out_genotypes = Vec::with_capacity(n);
         let mut assgn_counts = Vec::with_capacity(n);
@@ -417,8 +414,11 @@ impl Likelihoods {
             genotypes: out_genotypes,
             warnings: Vec::new(),
             weighted_dist: None,
+            total_reads: data.all_alns.reads().len() as u32,
             distances: None,
-            assgn_counts, tag, mean_sds, ln_probs, quality,
+            unexpl_reads: None,
+            tag: data.contigs.tag().to_owned(),
+            assgn_counts, mean_sds, ln_probs, quality,
         }
     }
 }
@@ -433,8 +433,6 @@ pub enum GenotypingWarning {
     TooManyReads(u32),
     /// Even the best genotype has very low quality.
     NoProbableGenotype,
-    /// There are many unexplained reads (percentage of unexplained reads).
-    UnexplainedReads(f64),
 }
 
 impl fmt::Display for GenotypingWarning {
@@ -444,7 +442,6 @@ impl fmt::Display for GenotypingWarning {
             Self::FewReads(count) => write!(f, "FewReads({})", count),
             Self::TooManyReads(count) => write!(f, "TooManyReads({})", count),
             Self::NoProbableGenotype => write!(f, "NoProbableGenotype"),
-            Self::UnexplainedReads(perc) => write!(f, "UnexplainedReads({:.1}%)", perc),
         }
     }
 }
@@ -471,6 +468,9 @@ pub struct Genotyping {
     weighted_dist: Option<f64>,
     /// Distance from the secondary to the primary genotype prediction.
     distances: Option<Vec<u32>>,
+    total_reads: u32,
+    /// Fraction of unexplained reads.
+    unexpl_reads: Option<u32>,
     /// Quality of the top genotype.
     quality: f64,
     /// Warnings, issued for this sample and this locus.
@@ -488,6 +488,8 @@ impl Genotyping {
             ln_probs: Vec::new(),
             weighted_dist: None,
             distances: None,
+            total_reads: 0,
+            unexpl_reads: None,
             quality: 0.0,
         }
     }
@@ -603,10 +605,8 @@ impl Genotyping {
 
     /// Checks reads that are much less likely at some other contig compared to the predicted genotype.
     pub fn count_unexplained_reads(&mut self, all_alns: &AllAlignments, unmapped_penalty: f64) {
-        const UNEXPLAINED_FRAC: f64 = 0.5;
         // Correct for rounding errors.
         let unmapped_penalty = unmapped_penalty + 1e-8;
-
         let mut unexplained = 0_u32;
         let gt = &self.genotypes[0];
         for read in all_alns.reads() {
@@ -616,23 +616,21 @@ impl Genotyping {
                 unexplained += 1;
             }
         }
-        let n_reads = all_alns.reads().len();
-        if unexplained >= 20 && f64::from(unexplained) > n_reads as f64 * UNEXPLAINED_FRAC {
-            let unexpl_perc = 100.0 * f64::from(unexplained) / n_reads as f64;
-            log::warn!("[{}] Best genotype does not explain {}/{} reads ({:.1}%)",
-                self.tag, unexplained, n_reads, unexpl_perc);
-            self.warnings.push(GenotypingWarning::UnexplainedReads(unexpl_perc));
-        }
+        self.unexpl_reads = Some(unexplained);
     }
 
     /// Converts genotyping result into JSON format.
     pub fn to_json(&self) -> json::JsonValue {
         let mut res = json::object! {
             locus: &self.tag as &str,
+            total_reads: self.total_reads,
             quality: self.quality,
         };
         if let Some(dist) = self.weighted_dist {
             res.insert("weight_dist", dist).unwrap();
+        }
+        if let Some(n) = self.unexpl_reads {
+            res.insert("unexpl_reads", n).unwrap();
         }
 
         if !self.genotypes.is_empty() {
@@ -811,8 +809,7 @@ pub fn solve(
     }
 
     let data = &data;
-    let mut genotyping = likelihoods.produce_result(data.contigs.tag().to_owned(), &data.genotypes,
-        &data.assgn_params);
+    let mut genotyping = likelihoods.produce_result(&data);
     if data.assgn_params.out_bams > 0 {
         let bam_dir = locus_dir.join(crate::command::paths::ALNS_DIR);
         ext::sys::mkdir(&bam_dir)?;
