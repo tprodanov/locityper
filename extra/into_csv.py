@@ -12,6 +12,11 @@ import common
 import into_vcf
 
 
+def get_or_nan(res, key):
+    val = res.get(key)
+    return np.nan if val is None else val
+
+
 def process_sample(sample, sample_dir):
     s = ''
     for entry in os.scandir(os.path.join(sample_dir, 'loci')):
@@ -31,11 +36,17 @@ def process_sample(sample, sample_dir):
                 s += '*\tNA\t*\n'
                 continue
 
-            gt = res['genotype']
-            qual = math.floor(10 * float(res['quality'])) * 0.1
-            weight_dist = res.get('weight_dist', np.nan)
-            warnings = ';'.join(res.get('warnings', '*'))
-            s += f'{gt}\t{qual:.1f}\t{weight_dist:.5f}\t{warnings}\n'
+            try:
+                gt = res['genotype']
+                qual = math.floor(10 * float(res['quality'])) * 0.1
+                total_reads = get_or_nan(res, 'total_reads')
+                weight_dist = get_or_nan(res, 'weight_dist')
+                unexpl_reads = get_or_nan(res, 'unexpl_reads')
+                warnings = ';'.join(res.get('warnings', '*'))
+                s += f'{gt}\t{qual:.1f}\t{total_reads}\t{unexpl_reads}\t{weight_dist:.5f}\t{warnings}\n'
+            except:
+                sys.stderr.write(f'Error analysing {json_filename}\n')
+                raise
     return s
 
 
@@ -61,7 +72,7 @@ def main():
 
     out = common.open(args.output, 'w')
     out.write('# {}\n'.format(' '.join(sys.argv)))
-    out.write('sample\tlocus\tgenotype\tquality\tweight_dist\twarnings\n')
+    out.write('sample\tlocus\tgenotype\tquality\ttotal_reads\tunexpl_reads\tweight_dist\twarnings\n')
 
     def callback(s):
         nonlocal finished

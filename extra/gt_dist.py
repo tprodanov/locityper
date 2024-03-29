@@ -140,6 +140,16 @@ class Distances:
             distances.append(best_edit)
         return loo_gt, GtDist(distances)
 
+    def average_divergence(self):
+        edits = []
+        divs = []
+        for hap1, hap_dists in self.distances.items():
+            for hap2, (edit, size) in hap_dists.items():
+                if hap1 < hap2:
+                    edits.append(edit)
+                    divs.append(edit / size)
+        return np.mean(edits), np.mean(divs)
+
 
 def edit_to_str(edit, size):
     div = edit / size
