@@ -7,6 +7,7 @@ import gzip
 import json
 import multiprocessing
 import math
+import numpy as np
 
 import common
 import into_vcf
