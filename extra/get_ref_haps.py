@@ -43,8 +43,7 @@ def process_dir(dir, locus, out):
             sample_to_haps[sample].append(hap0)
 
     for sample, haps in sample_to_haps.items():
-        for hap in haps:
-            out.write(f'{locus}\t{sample}\t{hap}\n')
+        out.write(f'{locus}\t{sample}\t{",".join(haps)}\n')
 
 
 def main():
@@ -58,7 +57,7 @@ def main():
 
     indir = os.path.join(args.database, 'loci')
     with common.open(args.output, 'w') as out:
-        out.write('locus\tsample\thaplotype\n')
+        out.write('locus\tsample\thaplotypes\n')
         for locus in os.listdir(indir):
             subdir = os.path.join(indir, locus)
             if os.path.exists(os.path.join(subdir, 'success')):
