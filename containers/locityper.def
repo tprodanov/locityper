@@ -1,0 +1,68 @@
+Bootstrap: docker
+From: rust:1.76-slim-bookworm
+
+%labels
+    Author timofey.prodanov@hhu.de
+    Version v0.13.4
+
+%post
+    PREFIX=/usr/local
+
+    SAMTOOLS_VER=1.19
+    MM2_VER=2.26
+    STROBE_VER=0.13.0
+
+    apt-get update
+    apt-get install --assume-yes --no-install-recommends  \
+        curl clang libclang-dev libncurses-dev zlib1g-dev \
+        bzip2 libbz2-dev liblzma-dev make cmake git g++ jellyfish
+
+    mkdir /repos
+    cd /repos
+    curl -L https://github.com/lh3/minimap2/releases/download/v${MM2_VER}/minimap2-${MM2_VER}_x64-linux.tar.bz2 | \
+        tar --no-same-owner -jxvf -
+    cd minimap2-${MM2_VER}_x64-linux
+    cp minimap2 "$PREFIX/bin"
+    cp k8 "$PREFIX/bin"
+    cp paftools.js "$PREFIX/bin"
+
+    cd /repos
+    curl -L https://github.com/samtools/samtools/releases/download/${SAMTOOLS_VER}/samtools-${SAMTOOLS_VER}.tar.bz2 | \
+        tar --no-same-owner -jxvf -
+    cd samtools-${SAMTOOLS_VER}
+    ./configure
+    make
+    make install prefix="$PREFIX"
+
+    cd /repos
+    curl -L https://github.com/ksahlin/strobealign/archive/refs/tags/v${STROBE_VER}.tar.gz | \
+        tar --no-same-owner -zxvf -
+    cd strobealign-${STROBE_VER}
+    cmake -B build -DCMAKE_C_FLAGS="-march=native" -DCMAKE_CXX_FLAGS="-march=native"
+    make -j -C build
+    cp build/strobealign "$PREFIX/bin"
+
+    cd /repos
+    git clone https://github.com/tprodanov/locityper
+    cd locityper
+    git clone https://github.com/smarco/WFA2-lib WFA2
+    cargo install --no-track --verbose --root "${PREFIX}" --path .
+
+    cd /
+    rm -rf /repos
+
+%test
+    samtools --version
+    minimap2 --version
+    strobealign --version
+    jellyfish --version
+    locityper version
+
+%runscript
+    if [ "$#" -ne 0 ] && ( [ "$1" = locityper ] || [ "$1" = samtools ] || [ "$1" = minimap2 ] || \
+            [ "$1" = strobealign ] || [ "$1" = jellyfish ]); then
+        "$@"
+    else
+        locityper "$@"
+    fi
+
