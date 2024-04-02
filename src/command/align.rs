@@ -57,7 +57,7 @@ impl Default for Args {
             skip_div: false,
             div_k: 15,
             div_w: 15,
-            max_div: 1.0,
+            max_div: 0.5,
 
             penalties: Default::default(),
             backbone_ks: "25,51,101".to_string(),
@@ -133,7 +133,7 @@ fn print_help() {
         "-m, --minimizer".green(), "INT INT".yellow(),
         super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
     println!("    {:KEY$} {:VAL$}  Skip divergence calculation.",
-        "    --skip-div".green(), super::flag());
+        "-s, --skip-div".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Do not align sequences with bigger divergence than this [{}].",
         "-D, --max-div".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_div));
     println!("    {:KEY$} {:VAL$}  One or more k-mer size for backbone alignment,\n\
@@ -186,7 +186,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.div_k = parser.value()?.parse()?;
                 args.div_w = parser.value()?.parse()?;
             }
-            Long("skip-div") => args.skip_div = true,
+            Short('s') | Long("skip-div") => args.skip_div = true,
             Short('D') | Long("max-div") => args.max_div = parser.value()?.parse()?,
             Short('k') | Long("backbone") | Long("backbone-ks") => args.backbone_ks = parser.value()?.parse()?,
             Short('g') | Long("max-gap") => args.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
