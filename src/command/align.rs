@@ -55,9 +55,9 @@ impl Default for Args {
             threads: 8,
 
             skip_div: false,
-            div_k: 25,
+            div_k: 15,
             div_w: 15,
-            max_div: 0.5,
+            max_div: 1,
 
             penalties: Default::default(),
             backbone_ks: "25,51,101".to_string(),
