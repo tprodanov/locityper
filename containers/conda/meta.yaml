@@ -21,9 +21,6 @@ requirements:
     - make
     - clangdev
     - llvm-openmp
-  host:
-    - clangdev
-    - llvm-openmp
   run:
     - samtools >=1.18
     - jellyfish >=1.0
@@ -41,4 +38,3 @@ about:
     home: https://github.com/tprodanov/locityper
     license: MIT
     license_file: LICENSE
-          

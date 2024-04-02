@@ -3,7 +3,7 @@ From: rust:1.76-slim-bookworm
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v0.13.4
+    Version v0.14.4
 
 %post
     PREFIX=/usr/local
@@ -65,4 +65,3 @@ From: rust:1.76-slim-bookworm
     else
         locityper "$@"
     fi
-
