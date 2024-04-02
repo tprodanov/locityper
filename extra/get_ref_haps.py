@@ -10,7 +10,7 @@ import sys
 import common
 
 
-def process_dir(dir, locus, out, ploidy):
+def process_dir(dir, locus, out):
     disc_path = os.path.join(dir, 'discarded_haplotypes.txt')
     discarded = []
     if os.path.exists(disc_path):
@@ -62,7 +62,7 @@ def main():
         for locus in os.listdir(indir):
             subdir = os.path.join(indir, locus)
             if os.path.exists(os.path.join(subdir, 'success')):
-                process_dir(subdir, locus, out, args.ploidy)
+                process_dir(subdir, locus, out)
 
 
 if __name__ == '__main__':
