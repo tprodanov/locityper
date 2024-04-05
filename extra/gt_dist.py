@@ -12,25 +12,56 @@ import numpy as np
 import common
 
 
+# Cigar operations, only small subset is allowed.
+op_pattern = re.compile(r'[ID=X]')
+
+def calc_directed_distance(line):
+    cigar = None
+    for entry in line[13:]:
+        if entry.startswith('cg:'):
+            cigar = entry[5:]
+            break
+    assert cigar
+
+    # 1 = query, 2 = reference.
+    # dist12 = number of basepairs, unique to ref.
+    # dist21 = -//-, unique to query.
+    dist12 = 0
+    dist21 = 0
+    n = len(cigar)
+    i = 0
+    for m in re.finditer(op_pattern, cigar):
+        j = m.start()
+        length = int(cigar[i:j])
+        op = cigar[j]
+        if op == 'X':
+            dist12 += length
+            dist21 += length
+        elif op == 'D':
+            dist12 += length
+        elif op == 'I':
+            dist21 += length
+        i = j + 1
+    assert i == n
+    return dist12, dist21
+
+
 class Distances:
-    def __init__(self, discarded_path, paf_path, verbose=False):
+    def __init__(self, discarded_path, paf_path, dir_dist=False):
         self.paf_path = paf_path
-        discarded = {}
+        self.discarded = {}
         if os.path.exists(discarded_path):
             with common.open(discarded_path) as f:
                 for line in f:
                     if line.startswith('#'):
                         continue
                     hap, haps2 = line.strip().split('=')
-                    discarded[hap.strip()] = tuple(map(str.strip, haps2.split(',')))
-        elif verbose:
-            sys.stderr.write(f'Cannot open `{discarded_path}`, assume there are no discarded haplotypes\n')
+                    self.discarded[hap.strip()] = tuple(map(str.strip, haps2.split(',')))
 
-        def group(hap):
-            return (hap,) + discarded.get(hap, ())
-
-        seq_lengths = {}
+        self.lengths = {}
         self.distances = defaultdict(dict)
+        # dir_distances[hap1][hap2] = number of basepairs, unique to hap2 compared to hap1.
+        self.dir_distances = defaultdict(dict) if dir_dist else None
         with common.open(paf_path) as paf:
             for line in paf:
                 if line.startswith('#'):
@@ -39,27 +70,36 @@ class Distances:
                 hap1 = line[0]
                 hap2 = line[5]
 
-                if hap1 not in seq_lengths:
+                if hap1 not in self.lengths:
                     len1 = int(line[1])
-                    for hap1a in group(hap1):
-                        seq_lengths[hap1a] = len1
-                if hap2 not in seq_lengths:
+                    for hap1a in self.group(hap1):
+                        self.lengths[hap1a] = len1
+                if hap2 not in self.lengths:
                     len2 = int(line[6])
-                    for hap2a in group(hap2):
-                        seq_lengths[hap2a] = len2
+                    for hap2a in self.group(hap2):
+                        self.lengths[hap2a] = len2
                 nmatches = int(line[10])
                 aln_size = int(line[11])
                 assert aln_size != 0, f'Missing alignment between {hap1} and {hap2}'
                 assert nmatches <= aln_size
                 dist = (aln_size - nmatches, aln_size)
-                for hap1a, hap2a in itertools.product(group(hap1), group(hap2)):
+                for hap1a, hap2a in itertools.product(self.group(hap1), self.group(hap2)):
                     self.distances[hap1a][hap2a] = dist
                     self.distances[hap2a][hap1a] = dist
 
-        for hap, length in seq_lengths.items():
-            for hap1, hap2 in itertools.product(group(hap), repeat=2):
+                if dir_dist:
+                    dist12, dist21 = calc_directed_distance(line)
+                    for hap1a, hap2a in itertools.product(self.group(hap1), self.group(hap2)):
+                        self.dir_distances[hap1a][hap2a] = dist12
+                        self.dir_distances[hap2a][hap1a] = dist21
+
+        for hap, length in self.lengths.items():
+            for hap1, hap2 in itertools.product(self.group(hap), repeat=2):
                 self.distances[hap1][hap2] = (0, length)
                 self.distances[hap2][hap1] = (0, length)
+                if dir_dist:
+                    self.dir_distances[hap1][hap2] = 0
+                    self.dir_distances[hap2][hap1] = 0
 
         pattern = re.compile(r'[._][1-9]$')
         self.sample_haps = defaultdict(list)
@@ -67,6 +107,13 @@ class Distances:
             m = re.search(pattern, hap)
             if m:
                 self.sample_haps[hap[:m.start()]].append(hap)
+
+    def group(self, hap):
+        return (hap,) + self.discarded.get(hap, ())
+
+    def group_size(self, hap):
+        assert hap in self.lengths
+        return len(self.group(hap))
 
     def get_sample_haplotypes(self, sample):
         return self.sample_haps.get(sample, ())
@@ -237,8 +284,6 @@ def main():
         help='Separator between sample and haplotype [default: %(default)s].')
     parser.add_argument('-n', '--max-entries', metavar='INT',
         help='Output at most INT entries per target genotype [default: all].')
-    parser.add_argument('-v', '--verbose', action='store_true',
-        help='Output more information to stderr.')
     args = parser.parse_args()
 
     genotypes = load_target_genotypes(args)
