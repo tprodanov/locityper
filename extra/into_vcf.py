@@ -10,11 +10,12 @@ from collections import defaultdict
 import multiprocessing
 import functools
 import operator
+from simpleeval import simple_eval
 
 import common
 
 
-def load_predictions(f):
+def load_predictions(f, expr):
     by_locus = defaultdict(dict)
     samples = set()
     for row in common.read_csv(f):
@@ -22,15 +23,15 @@ def load_predictions(f):
         sample = row['sample']
 
         genotype = row['genotype'].split(',')
-        features = [
-            ('qual', float(row['quality'])),
-            ('reads', int(row['total_reads'])),
-            ('unexpl', int(row['unexpl_reads'])),
-            ('wdist', float(row['weight_dist'])),
-        ]
-        warns = row['warnings']
-        if warns != '*':
-            features.append(('warn', warns))
+        features = dict(
+            qual=float(row['quality']),
+            reads=int(row['total_reads']),
+            unexpl=int(row['unexpl_reads']),
+            wdist=float(row['weight_dist']),
+            warn=row['warnings'],
+        )
+        passes = bool(simple_eval(expr, names=features))
+        features['GQ'] = int(passes)
         by_locus[locus][sample] = (genotype, features)
         samples.add(sample)
     return by_locus, sorted(samples)
@@ -70,6 +71,7 @@ def create_vcf_header(chrom_lengths, samples):
     for chrom, length in chrom_lengths:
         header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
     header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
+    header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="0/1 value based on prediction filtering">')
     header.add_line('##FORMAT=<ID=qual,Number=1,Type=Float,Description="Locus genotype quality">')
     header.add_line('##FORMAT=<ID=reads,Number=1,Type=Integer,'
         'Description="Total number of reads used to predict locus genotype">')
@@ -123,7 +125,7 @@ def process_locus(locus, coords, samples, preds, genome_name, output):
 
                 fmt['GT'] = copy_genotype(pred[0], var, genome_name)
                 fmt.phased = True
-                for key, val in pred[1]:
+                for key, val in pred[1].items():
                     fmt[key] = val
             out_vcf.write(newvar)
     pysam.tabix_index(out_filename, preset='vcf', force=True)
@@ -141,11 +143,11 @@ def merge_vars(rec1, rec2, n_samples):
         fmt1 = rec1.samples[sample_ix]
         fmt2 = rec2.samples[sample_ix]
         if fmt1['GT'] != fmt2['GT']:
-            gq1 = (fmt1['qual'], -fmt1['wdist'])
-            gq2 = (fmt2['qual'], -fmt2['wdist'])
+            gq1 = (fmt1['GQ'], fmt1['qual'])
+            gq2 = (fmt1['GQ'], fmt2['qual'])
             if gq1 < gq2:
                 fmt1.clear()
-                for key, val in fmt2.keys():
+                for key, val in fmt2.items():
                     fmt1[key] = val
 
 
@@ -196,6 +198,10 @@ def main():
         help='Reference genome name.')
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
         help='Analyze loci in this many threads [%(default)s].')
+
+    DEF_EXPR = 'warn == "*" and wdist <= 30 and (unexpl < 1000 or unexpl <= reads * 0.2)'
+    parser.add_argument('-f', '--filtering', metavar='STR', default=DEF_EXPR,
+        help='Simple expression to determine if the locus passes filterin. Default = `%(default)s`.')
     parser.add_argument('--subset-loci', metavar='STR', nargs='+',
         help='Limit the analysis to these loci.')
     args = parser.parse_args()
@@ -203,7 +209,7 @@ def main():
     common.mkdir(args.output)
     loci = load_database(args.database, args.subset_loci)
     with common.open(args.input) as f:
-        preds, samples = load_predictions(f)
+        preds, samples = load_predictions(f, args.filtering)
     sys.stderr.write(f'Loaded {len(samples)} samples\n')
     loci_inters = set(loci.keys()) & set(preds.keys())
     if len(loci_inters) < len(loci):
