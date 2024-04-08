@@ -5,10 +5,8 @@ import argparse
 import sys
 import pysam
 import json
-import gzip
 import os
-import collections
-import glob
+from collections import defaultdict
 import multiprocessing
 import functools
 import operator
@@ -16,55 +14,33 @@ import operator
 import common
 
 
-def error(msg):
-    sys.stderr.write(f'ERROR: {msg}\n')
-    exit(1)
-
-
-def load_input(args):
-    paths = []
-    if args.input is not None:
-        in_dirs = args.input
-        if len(in_dirs) == 1 and '*' in in_dirs[0]:
-            in_dirs = glob.glob(in_dirs[0])
-        for path in in_dirs:
-            components = path.split('/')
-            ixs = [i for i, comp in enumerate(components) if comp == '.']
-            if not ixs:
-                error(f'Path `{path}` does not contain "." component')
-            elif len(ixs) > 1:
-                error(f'Path `{path}` contains "." component {len(ixs)} times')
-            i = ixs[0]
-            if i == len(components):
-                error(f'Cannot get sample name from path `{path}`')
-            sample = components[i + 1]
-            paths.append((sample, path))
-    else:
-        with common.open(args.input_list) as f:
-            for line in f:
-                if line.startswith('#'):
-                    continue
-                path, sample = line.strip().split()
-                paths.append((sample, path))
-    if not paths:
-        error(f'Loaded zero samples')
-
+def load_predictions(f):
+    by_locus = defaultdict(dict)
     samples = set()
-    for sample, path in paths:
-        if sample in samples:
-            error(f'Sample {sample} appears twice')
-        elif not os.path.isdir(os.path.join(path, 'loci')):
-            error(f'Directory `{path}` does not contain "loci" subdirectory')
+    for row in common.read_csv(f):
+        locus = row['locus']
+        sample = row['sample']
+
+        genotype = row['genotype'].split(',')
+        features = [
+            ('qual', float(row['quality'])),
+            ('reads', int(row['total_reads'])),
+            ('unexpl', int(row['unexpl_reads'])),
+            ('wdist', float(row['weight_dist'])),
+        ]
+        warns = row['warnings']
+        if warns != '*':
+            features.append(('warn', warns))
+        by_locus[locus][sample] = (genotype, features)
         samples.add(sample)
-    sys.stderr.write(f'Loaded {len(paths)} samples\n')
-    return paths
+    return by_locus, sorted(samples)
 
 
 def load_database(path, subset_loci):
     loci_dir = os.path.join(path, 'loci')
     if not os.path.isdir(loci_dir):
-        error(f'Directory `{path}` does not contain "loci" subdirectory')
-    loci = []
+        common.error(f'Directory `{path}` does not contain "loci" subdirectory')
+    loci = {}
     if subset_loci is not None:
         subset_loci = set(subset_loci)
 
@@ -79,12 +55,12 @@ def load_database(path, subset_loci):
         with open(os.path.join(locus_dir, 'ref.bed')) as f:
             chrom, start, end, name = next(f).strip().split()
         if name != locus:
-            error(f'Locus directory `{locus_dir}` contains locus `{name}` (expected `{locus}`)')
+            common.error(f'Locus directory `{locus_dir}` contains locus `{name}` (expected `{locus}`)')
         start = int(start)
         end = int(end)
         # if chrom not in contigs or end > contigs[chrom].length:
         #     error(f'Chromosome {chrom} is missing or it is too short in the input VCF file')
-        loci.append((locus, chrom, start, end))
+        loci[locus]= (chrom, start, end)
     sys.stderr.write(f'Loaded {len(loci)} loci\n')
     return loci
 
@@ -94,45 +70,22 @@ def create_vcf_header(chrom_lengths, samples):
     for chrom, length in chrom_lengths:
         header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
     header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
-    header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="Genotype quality">')
-    header.add_line('##FORMAT=<ID=GQ0,Number=1,Type=Float,'
-        'Description="Initial genotype quality, not accounting for warnings">')
-    header.add_line('##FORMAT=<ID=WARN,Number=1,Type=String,Description="Genotype warnings">')
+    header.add_line('##FORMAT=<ID=qual,Number=1,Type=Float,Description="Locus genotype quality">')
+    header.add_line('##FORMAT=<ID=reads,Number=1,Type=Integer,'
+        'Description="Total number of reads used to predict locus genotype">')
+    header.add_line('##FORMAT=<ID=unexpl,Number=1,Type=Integer,'
+        'Description="Number of unexplained reads within the locus">')
+    header.add_line('##FORMAT=<ID=wdist,Number=1,Type=Float,'
+        'Description="Weighted distance between primary and non-primary genotype predictions">')
+    header.add_line('##FORMAT=<ID=warn,Number=1,Type=String,Description="Genotype warnings">')
     for sample in samples:
         header.add_sample(sample)
     return header
 
 
-def load_predictions(input_paths, locus):
-    predictions = {}
-    for sample, dirname in input_paths:
-        json_filename = os.path.join(dirname, 'loci', locus, 'res.json.gz')
-        with gzip.open(json_filename, 'rt') as inp:
-            try:
-                res = json.load(inp)
-            except json.decoder.JSONDecodeError:
-                sys.stderr.write(f'Cannot parse json from {json_filename}\n')
-                raise
-            pred = {}
-            if 'genotype' not in res:
-                pred = None
-                continue
-
-            pred['GT'] = res['genotype']
-            gq = np.floor(float(res['quality']) * 10) / 10
-            if 'warnings' in res:
-                pred['GQ'] = 0.0
-                pred['GQ0'] = gq
-                pred['WARN'] = ';'.join(w.split('(', 1)[0] for w in res['warnings'])
-            else:
-                pred['GQ'] = gq
-            predictions[sample] = pred
-    return predictions
-
-
-def copy_genotype(var, pred_gt, genome_name):
+def copy_genotype(pred_gt, var, genome_name):
     out_gt = []
-    for allele in pred_gt.split(','):
+    for allele in pred_gt:
         if len(allele) > 2 and (allele[-2] == '.' or allele[-2] == '_'):
             sample = allele[:-2]
             hap = int(allele[-1])
@@ -148,14 +101,13 @@ def copy_genotype(var, pred_gt, genome_name):
     return out_gt
 
 
-def process_locus(locus, input_paths, genome_name, output):
-    locus, chrom, start, end = locus
-    predictions = load_predictions(input_paths, locus)
+def process_locus(locus, coords, samples, preds, genome_name, output):
+    chrom, start, end = coords
     out_filename = os.path.join(output, f'{locus}.vcf.gz')
 
     global in_vcf
-    header = create_vcf_header(((chrom, in_vcf.header.contigs[chrom].length),),
-        map(operator.itemgetter(0), input_paths))
+    chrom_len = in_vcf.header.contigs[chrom].length
+    header = create_vcf_header(((chrom, chrom_len),), samples)
     with pysam.VariantFile(out_filename, 'wz', header=header) as out_vcf:
         for var in in_vcf.fetch(chrom, start, end):
             newvar = out_vcf.new_record()
@@ -163,15 +115,18 @@ def process_locus(locus, input_paths, genome_name, output):
             newvar.start = var.start
             newvar.alleles = var.alleles
             newvar.id = var.id
-            for sample, pred in predictions.items():
-                fmt = newvar.samples[sample]
-                fmt['GT'] = copy_genotype(var, pred['GT'], genome_name)
+            for i, sample in enumerate(samples):
+                fmt = newvar.samples[i]
+                pred = preds.get(sample)
+                if pred is None:
+                    continue
+
+                fmt['GT'] = copy_genotype(pred[0], var, genome_name)
                 fmt.phased = True
-                for key in ('GQ', 'GQ0', 'WARN'):
-                    if key in pred:
-                        fmt[key] = pred[key]
+                for key, val in pred[1]:
+                    fmt[key] = val
             out_vcf.write(newvar)
-    pysam.tabix_index(out_filename, preset='vcf')
+    pysam.tabix_index(out_filename, preset='vcf', force=True)
     return locus
 
 
@@ -186,21 +141,23 @@ def merge_vars(rec1, rec2, n_samples):
         fmt1 = rec1.samples[sample_ix]
         fmt2 = rec2.samples[sample_ix]
         if fmt1['GT'] != fmt2['GT']:
-            gq1 = (fmt1['GQ'], fmt1.get('GQ0', 0))
-            gq2 = (fmt2['GQ'], fmt2.get('GQ0', 0))
+            gq1 = (fmt1['qual'], -fmt1['wdist'])
+            gq2 = (fmt2['qual'], -fmt2['wdist'])
             if gq1 < gq2:
-                fmt1['GT'] = fmt2['GT']
+                fmt1.clear()
+                for key, val in fmt2.keys():
+                    fmt1[key] = val
 
 
-def merge_vcfs(in_vcf, input_paths, out_dir, loci):
-    chroms = set(map(operator.itemgetter(1), loci))
+def merge_vcfs(in_vcf, samples, out_dir, loci):
+    chroms = set(chrom for chrom, _, _ in loci.values())
     chroms = { chrom: in_vcf.get_tid(chrom) for chrom in chroms }
     chrom_lengths = [(chrom, in_vcf.header.contigs[chrom].length)
         for chrom, _ in sorted(chroms.items(), key=operator.itemgetter(1))]
 
-    n_samples = len(input_paths)
+    n_samples = len(samples)
     records = {}
-    loci.sort(key=lambda tup: (chroms[tup[1]], tup[2], tup[3]))
+    loci = sorted(loci.items(), key=lambda tup: (chroms[tup[1][0]], tup[1][1], tup[1][2]))
     total = 0
     for locus in map(operator.itemgetter(0), loci):
         with pysam.VariantFile(os.path.join(out_dir, f'{locus}.vcf.gz')) as vcf:
@@ -213,26 +170,21 @@ def merge_vcfs(in_vcf, input_paths, out_dir, loci):
                     records[key] = record
     sys.stderr.write(f'    Merged {total} variants\n')
 
-    header = create_vcf_header(chrom_lengths, map(operator.itemgetter(0), input_paths))
+    header = create_vcf_header(chrom_lengths, samples)
     out_filename = os.path.join(out_dir, 'merged.vcf.gz')
     with pysam.VariantFile(out_filename, 'wz', header=header) as out_vcf:
         for key in sorted(records.keys()):
             rec = records[key]
             rec.translate(header)
             out_vcf.write(rec)
-    pysam.tabix_index(out_filename, preset='vcf')
+    pysam.tabix_index(out_filename, preset='vcf', force=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Convert Locityper predictions into VCF file.',
         formatter_class=argparse.RawTextHelpFormatter)
-    in_group = parser.add_mutually_exclusive_group(required=True)
-    in_group.add_argument('-i', '--input', metavar='DIR', nargs='+',
-        help='Path(s) to Locityper analyses. Each directory must contain a `loci` subdir.\n'
-            'Please include "." before the sample name (..././<sample>/...).')
-    in_group.add_argument('-I', '--input-list', metavar='FILE',
-        help='File with two columns: path to Locityper analysis and sample name.\n'
-            'Mutually exclusive with `-i/--input`.')
+    parser.add_argument('-i', '--input', metavar='FILE', required=True,
+        help='CSV file with Locityper predictions.')
     parser.add_argument('-d', '--database', metavar='FILE', required=True,
         help='Path to Locityper database.')
     parser.add_argument('-v', '--variants', metavar='FILE', required=True,
@@ -240,7 +192,7 @@ def main():
             'Must have matching sample names with the loci alleles.')
     parser.add_argument('-o', '--output', metavar='DIR', required=True,
         help='Output directory.')
-    parser.add_argument('-g', '--genome', metavar='STR', required=True,
+    parser.add_argument('-g', '--genome-name', metavar='STR', required=True,
         help='Reference genome name.')
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
         help='Analyze loci in this many threads [%(default)s].')
@@ -249,10 +201,16 @@ def main():
     args = parser.parse_args()
 
     common.mkdir(args.output)
-    input_paths = load_input(args)
     loci = load_database(args.database, args.subset_loci)
+    with common.open(args.input) as f:
+        preds, samples = load_predictions(f)
+    sys.stderr.write(f'Loaded {len(samples)} samples\n')
+    loci_inters = set(loci.keys()) & set(preds.keys())
+    if len(loci_inters) < len(loci):
+        sys.stderr.write('WARN: Genotype predictions missing for {} loci, such as {}\n'.format(
+            len(loci) - len(loci_inters), list(set(loci.keys()) - loci_inters)[:5].join(', ')))
 
-    total = len(loci)
+    total = len(loci_inters)
     finished = 0
     def callback(locus):
         nonlocal finished
@@ -260,15 +218,16 @@ def main():
         sys.stderr.write(f'Finished [{finished:3}/{total}] {locus}\n')
 
     with multiprocessing.Pool(args.threads, initializer=create_thread, initargs=(args.variants,)) as pool:
-        results = [pool.apply_async(process_locus, (locus, input_paths, args.genome, args.output), callback=callback)
-            for locus in loci]
+        results = [pool.apply_async(process_locus,
+            (locus, loci[locus], samples, preds[locus], args.genome_name, args.output), callback=callback)
+            for locus in loci_inters]
         for res in results:
             res.get()
         pool.close()
         pool.join()
 
     sys.stderr.write('Merging variants\n')
-    merge_vcfs(pysam.VariantFile(args.variants), input_paths, args.output, loci)
+    merge_vcfs(pysam.VariantFile(args.variants), samples, args.output, loci)
 
 
 if __name__ == '__main__':

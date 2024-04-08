@@ -2,6 +2,7 @@ import sys
 import gzip
 import os
 import builtins
+import csv
 
 
 def open(filename, mode='r'):
@@ -19,3 +20,21 @@ def mkdir(path):
         os.mkdir(path)
     except FileExistsError:
         pass
+
+
+def read_csv(f):
+    """
+    Wrapper over csv.DictReader, that ignores first lines with comments.
+    """
+    fields = None
+    for line in f:
+        if not line.startswith('#'):
+            fields = line.strip().split('\t')
+            break
+    assert fields is not None
+    return csv.DictReader(f, fieldnames=fields, delimiter='\t')
+
+
+def error(msg):
+    sys.stderr.write(f'ERROR: {msg}\n')
+    exit(1)

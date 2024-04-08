@@ -43,7 +43,7 @@ def process_line(line, distances, sample, locus, genotype, loo, out):
     query_dists = distances.calc_distance(target, query).iter_strs()
     loo_dists = distances.find_closest_loo(target)[1].iter_strs() if loo else itertools.repeat(None)
     for i, (s1, s2) in enumerate(zip(query_dists, loo_dists), 1):
-        curr_line = f'{line}\t{"gt" if i == 3 else f"hap{i}"}\t{s1}'
+        curr_line = f'{line}\t{"hap" if i <= 2 else "gt"}\t{s1}'
         if loo:
             curr_line += f'\t{s2}\n'
         else:

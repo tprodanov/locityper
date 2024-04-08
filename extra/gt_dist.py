@@ -50,7 +50,7 @@ class Distances:
     def __init__(self, discarded_path, paf_path, dir_dist=False):
         self.paf_path = paf_path
         self.discarded = {}
-        if os.path.exists(discarded_path):
+        if discarded_path is not None and os.path.exists(discarded_path):
             with common.open(discarded_path) as f:
                 for line in f:
                     if line.startswith('#'):

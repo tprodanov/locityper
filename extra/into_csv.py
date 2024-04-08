@@ -4,13 +4,52 @@ import argparse
 import os
 import sys
 import gzip
+import glob
 import json
 import multiprocessing
 import math
 import numpy as np
 
 import common
-import into_vcf
+
+
+def load_input(args):
+    paths = []
+    if args.input is not None:
+        in_dirs = args.input
+        if len(in_dirs) == 1 and '*' in in_dirs[0]:
+            in_dirs = glob.glob(in_dirs[0])
+        for path in in_dirs:
+            components = path.split('/')
+            ixs = [i for i, comp in enumerate(components) if comp == '.']
+            if not ixs:
+                common.error(f'Path `{path}` does not contain "." component')
+            elif len(ixs) > 1:
+                common.error(f'Path `{path}` contains "." component {len(ixs)} times')
+            i = ixs[0]
+            if i == len(components):
+                common.error(f'Cannot get sample name from path `{path}`')
+            sample = components[i + 1]
+            paths.append((sample, path))
+    else:
+        with common.open(args.input_list) as f:
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                path, sample = line.strip().split()
+                paths.append((sample, path))
+    if not paths:
+        common.error(f'Loaded zero samples')
+
+    samples = set()
+    for sample, path in paths:
+        if sample in samples:
+            common.error(f'Sample {sample} appears twice')
+        elif not os.path.isdir(os.path.join(path, 'loci')):
+            common.error(f'Directory `{path}` does not contain "loci" subdirectory')
+        samples.add(sample)
+    sys.stderr.write(f'Loaded {len(paths)} samples\n')
+    return paths
 
 
 def get_or_nan(res, key):
@@ -67,7 +106,7 @@ def main():
         help='Number of threads [%(default)s].')
     args = parser.parse_args()
 
-    input_paths = into_vcf.load_input(args)
+    input_paths = load_input(args)
     total = len(input_paths)
     finished = 0
 
