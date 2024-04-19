@@ -1,5 +1,7 @@
-use std::fmt::{self, Debug, Display, Formatter};
-use once_cell::sync::OnceCell;
+use std::{
+    fmt::{self, Debug, Display, Formatter},
+    sync::OnceLock,
+};
 use crate::{
     Error,
     bg::ser::JsonSer,
@@ -10,7 +12,7 @@ use super::{DiscretePmf, DiscreteCdf, WithMoments};
 #[derive(Clone)]
 pub struct LinearCache<D> {
     inner: D,
-    cache: Vec<OnceCell<f64>>,
+    cache: Vec<OnceLock<f64>>,
 }
 
 impl<D> LinearCache<D> {
@@ -19,7 +21,7 @@ impl<D> LinearCache<D> {
     pub fn new(inner: D, cache_size: usize) -> Self {
         Self {
             inner,
-            cache: vec![OnceCell::new(); cache_size],
+            cache: vec![OnceLock::new(); cache_size],
         }
     }
 

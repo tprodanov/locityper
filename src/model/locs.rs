@@ -1,13 +1,12 @@
 use std::{
     cmp::min,
     fmt::{self, Write as FmtWrite},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     io::{self, Write},
     collections::hash_map::Entry,
 };
 use htslib::bam;
 use nohash::{IntSet, IntMap};
-use once_cell::sync::OnceCell;
 use crate::{
     err::{Error, add_path},
     seq::{
@@ -52,9 +51,9 @@ impl nohash::IsEnabled for NameHash {}
 pub struct MateData {
     strand: Strand,
     sequence: Vec<u8>,
-    opp_sequence: OnceCell<Vec<u8>>,
+    opp_sequence: OnceLock<Vec<u8>>,
     qualities: Vec<u8>,
-    opp_qualities: OnceCell<Vec<u8>>,
+    opp_qualities: OnceLock<Vec<u8>>,
     unique_kmers: u16,
 }
 
@@ -63,10 +62,10 @@ impl MateData {
         Self {
             strand: Strand::from_record(record),
             sequence: record.seq().as_bytes(),
-            opp_sequence: OnceCell::new(),
+            opp_sequence: OnceLock::new(),
             // Need to do this as otherwise htslib will panic.
             qualities: if record.qual().is_empty() { vec![255; record.seq().len()] } else { record.qual().to_vec() },
-            opp_qualities: OnceCell::new(),
+            opp_qualities: OnceLock::new(),
             unique_kmers: 0,
         }
     }

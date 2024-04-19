@@ -1,7 +1,8 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.14.5-0"
+version = "0.14.9-0"
+rust-version = "1.70"
 edition = "2021"
 
 [dependencies]
@@ -10,7 +11,6 @@ nalgebra = { version = "0.32", default-features = false, features = ["std"] } # 
 statrs = { version = "0.16", default-features = false } # Possibly remove later.
 nohash = { package = "nohash-hasher", version = "0.2.0", default-features = false, features = ["std"] }
 json = { version = "0.12", default-features = false }
-once_cell = { version = "1.17", default-features = false, features = ["std"] }
 bio = { version = "1.1.0", default-features = false } # Remove later.
 fern = { version = "0.6", default-features = false, features = ["colored"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -30,7 +30,7 @@ lazy_static = { version = "1.4", default-features = false }
 const_format = { version = "0.2.30", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 smallvec = { version = "1", default-features = false }
-kodama = { version = "0.3", default-features = false }
+# kodama = { version = "0.3", default-features = false }
 argmin = { version = "0.10", default-features = false }
 argmin-math = { version = "0.4", default-features = false, features = ["vec"] }
 lz4 = { version = "1.24", default-features = false }
