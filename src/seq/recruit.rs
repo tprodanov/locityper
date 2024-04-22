@@ -332,7 +332,7 @@ impl TargetBuilder {
     }
 }
 
-/// Recruitement targets.
+/// Recruitment targets.
 #[derive(Clone)]
 pub struct Targets {
     params: Params,

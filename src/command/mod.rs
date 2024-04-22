@@ -4,6 +4,7 @@ mod preproc;
 mod genotype;
 #[cfg(feature = "align")]
 mod align;
+mod recruit;
 
 use std::{
     fs,
@@ -29,6 +30,7 @@ pub fn run(argv: &[String]) -> Result<(), Error> {
         "a" | "add" => add::run(&argv[2..])?,
         "p" | "preproc" | "preprocess" => preproc::run(&argv[2..])?,
         "g" | "genotype" => genotype::run(&argv[2..])?,
+        "r" | "recruit" => recruit::run(&argv[2..])?,
 
         "aln" | "align" =>
         {
@@ -96,8 +98,10 @@ fn print_help() {
         "g, genotype".red());
 
     println!("\n{}", "[ Other utilities ]".bold());
-    println!("    {:WIDTH$} Align haplotypes to each other",
+    println!("    {:WIDTH$} Align medium-size sequences to each other",
         "   align".red());
+    println!("    {:WIDTH$} Recruit reads to one/multiple loci",
+        "r, recruit".red());
 
     println!("\n{}", "[ General help ]".bold());
     println!("    {:WIDTH$} Show this help message",

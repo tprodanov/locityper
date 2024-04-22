@@ -202,7 +202,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 super::print_version();
                 std::process::exit(0);
             }
-            Short('h') | Long("help") => {
+            Short('h') | Long("help") | Short('H') | Long("full-help") | Long("hidden-help") => {
                 print_help();
                 std::process::exit(0);
             }

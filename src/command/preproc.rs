@@ -337,9 +337,9 @@ fn print_help(extended: bool) {
     println!("{}", "Preprocess WGS dataset.".yellow());
 
     println!("\n{}", "Usage:".bold());
-    println!("    {} preproc -i reads1.fq [reads2.fq]  -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
-    println!("    {} preproc -a reads.bam [--no-index] -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
-    println!("    {} preproc -i/-a <input> -~ similar  -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
+    println!("    {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam [--no-index] | -I in-list) \\", super::PROGRAM);
+    println!("        -j counts.jf -r reference.fa -o out [args]");
+    println!("    {} preproc -i/-a/-I <input> -~ similar -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
