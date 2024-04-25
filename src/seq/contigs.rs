@@ -63,6 +63,16 @@ pub struct ContigNames {
 }
 
 impl ContigNames {
+    /// Create new, empty, contig names.
+    pub fn empty() -> Self {
+        ContigNames {
+            tag: "UNINIT".to_string(),
+            names: Vec::new(),
+            lengths: Vec::new(),
+            name_to_id: HashMap::default(),
+        }
+    }
+
     /// Create contig names from an iterator over pairs (name, length).
     /// Names must not repeat.
     /// First argument: overall name of the contig set.
@@ -274,6 +284,10 @@ impl ContigSet {
             contigs: Arc::new(contigs),
             seqs, kmer_counts,
         })
+    }
+
+    pub fn new(contigs: Arc<ContigNames>, seqs: Vec<Vec<u8>>, kmer_counts: KmerCounts) -> Self {
+        Self { contigs, seqs, kmer_counts }
     }
 
     /// Returns the number of contigs in the set.

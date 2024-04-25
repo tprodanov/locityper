@@ -319,6 +319,19 @@ impl KmerCounts {
         self.max_value
     }
 
+    /// Creates new k-mer counts, where all values are zero.
+    pub fn new_zeroed(k: u32, lengths: impl Iterator<Item = usize>) -> Self {
+        let k_usize = k as usize;
+        let mut counts = Vec::new();
+        for len in lengths {
+            counts.push(vec![0; (len + 1).saturating_sub(k_usize)]);
+        }
+        Self {
+            k, counts,
+            max_value: KmerCount::MAX,
+        }
+    }
+
     /// Returns iterator over k-mer counts for every contig.
     pub fn iter(&self) -> std::slice::Iter<'_, Vec<KmerCount>> {
         self.counts.iter()

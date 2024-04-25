@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{self, BufRead},
+    sync::Arc,
     time::Instant,
     path::{Path, PathBuf},
     cmp::max,
@@ -15,10 +16,11 @@ use crate::{
     },
     seq::{
         recruit,
+        ContigNames, ContigSet,
         fastx::{self, FastxRecord, SingleRecord},
-        kmers::{Kmer, KmerCount},
+        kmers::{Kmer, KmerCount, KmerCounts, JfKmerGetter},
     },
-    bg::TECHNOLOGIES,
+    bg::Technology,
 };
 use colored::Colorize;
 
@@ -32,9 +34,10 @@ struct Args {
     output: Option<String>,
     regions: Option<PathBuf>,
 
-    minimizer_kw: Option<(u8, u8)>,
-    match_frac: Option<f64>,
+    minimizer_kw: (u8, u8),
+    match_frac: f64,
     match_len: u32,
+    preset: Option<String>,
     chunk_length: u64,
     thresh_kmer_count: KmerCount,
 
@@ -54,9 +57,10 @@ impl Default for Args {
             output: None,
             regions: None,
 
-            minimizer_kw: None,
-            match_frac: None,
+            minimizer_kw: (15, 5),
+            match_frac: 0.6,
             match_len: 2000,
+            preset: None,
             chunk_length: 3_000_000,
             thresh_kmer_count: 10,
 
@@ -67,6 +71,21 @@ impl Default for Args {
 }
 
 impl Args {
+    fn update_from_preset(&mut self) -> Result<(), Error> {
+        let Some(preset) = self.preset.as_ref() else { return Ok(()) };
+        let (tech, paired) = match &preset.to_lowercase() as &str {
+            "illumina" | "illumina-pe" | "sr" | "sr-pe" => (Technology::Illumina, true),
+            "illumina-se" | "sr-se" => (Technology::Illumina, false),
+            "hifi" => (Technology::HiFi, false),
+            "pacbio" | "pb" => (Technology::PacBio, false),
+            "ont" | "nanopore" => (Technology::Nanopore, false),
+            _ => return Err(Error::InvalidInput(format!("Unknown preset `{}`", preset))),
+        };
+        self.minimizer_kw = tech.default_minim_size();
+        self.match_frac = tech.default_match_frac(paired);
+        Ok(())
+    }
+
     fn validate(mut self) -> Result<Self, Error> {
         self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
@@ -82,28 +101,6 @@ impl Args {
         }
         Ok(self)
     }
-}
-
-pub(crate) fn fmt_def_minimizers() -> String {
-    super::describe_defaults(
-        TECHNOLOGIES.iter().copied(),
-        |tech| tech.to_string(),
-        |tech| {
-            let (k, w) = tech.default_minim_size();
-            format!("{} {}", k, w)
-        }
-    )
-}
-
-pub(crate) fn fmt_def_match_frac() -> String {
-    super::describe_defaults(
-        TECHNOLOGIES.iter()
-            .flat_map(|&tech| [(tech, false), (tech, true)].into_iter())
-            .filter(|(tech, paired_end)| !paired_end || tech.paired_end_allowed()),
-        |(tech, paired_end)|
-            format!("{}{}", tech, if *paired_end { "-PE" } else if tech.paired_end_allowed() { "-SE" } else { "" }),
-        |(tech, paired_end)| tech.default_match_frac(*paired_end)
-    )
 }
 
 /// Locus name in input/output arguments must be replaced with `{}`.
@@ -170,20 +167,22 @@ fn print_help() {
 
     println!("\n{}", "Read recruitment:".bold());
     println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
-        {EMPTY}  across {} consecutive k-mers.\n\
-        {EMPTY}  Default: {}.",
+        {EMPTY}  across {} consecutive k-mers [{} {}].",
         "-m, --minimizer".green(), "INT INT".yellow(),
-        "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(), fmt_def_minimizers());
+        "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
+        super::fmt_def(defaults.minimizer_kw.0), super::fmt_def(defaults.minimizer_kw.1));
+    println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference [{}].",
+        "-M, --match-frac".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.match_frac));
+    println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
+        "-L, --match-len".green(), "INT".yellow(),
+        super::fmt_def(defaults.match_len));
+    println!("    {:KEY$} {:VAL$}  Parameter preset (illumina|illumina-SE|hifi|pacbio|ont).\n\
+        {EMPTY}  Modifies {} and {}, see {} for default values.",
+        "-x, --preset".green(), "STR".yellow(), "-m".green(), "-M".green(), "locityper genotype".underline());
     println!("    {:KEY$} {:VAL$}  Only use k-mers that appear less than {} times in the\n\
         {EMPTY}  reference genome [{}]. Requires {} argument.",
         "-t, --kmer-thresh".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.thresh_kmer_count),
         "-j".green());
-    println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
-        {EMPTY}  Default: {}.",
-        "-M, --match-frac".green(), "FLOAT".yellow(), fmt_def_match_frac());
-    println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
-        "-L, --match-len".green(), "INT".yellow(),
-        super::fmt_def(defaults.match_len));
     println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this sum length [{}].\n\
         {EMPTY}  Impacts runtime in multi-threaded read recruitment.",
         "-c, --chunk-len".green(), "INT".yellow(),
@@ -235,11 +234,13 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('R') | Long("regions") => args.regions = Some(parser.value()?.parse()?),
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
-                args.minimizer_kw = Some((parser.value()?.parse()?, parser.value()?.parse()?)),
+                args.minimizer_kw = (parser.value()?.parse()?, parser.value()?.parse()?),
+            Short('M') | Long("match-frac") | Long("match-fraction") =>
+                args.match_frac = parser.value()?.parse()?,
+            Short('x') | Long("preset") =>
+                args.preset = Some(parser.value()?.parse()?),
             Short('t') | Long("kmer-thresh") | Long("kmer-threshold") =>
                 args.thresh_kmer_count = parser.value()?.parse()?,
-            Short('M') | Long("match-frac") | Long("match-fraction") =>
-                args.match_frac = Some(parser.value()?.parse()?),
             Short('L') | Long("match-len") | Long("match-length") =>
                 args.match_len = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('c') | Long("chunk") | Long("chunk-len") =>
@@ -436,13 +437,37 @@ fn load_seqs_and_outputs(args: &Args) -> Result<SeqsFiles, Error> {
     }
 }
 
+/// Loads k-mer counts, if needed, and creates recruitment targets.
+fn build_targets(
+    seqs: Vec<Vec<Vec<u8>>>,
+    recr_params: recruit::Params,
+    args: &Args,
+) -> Result<recruit::Targets, Error>
+{
+    let mut target_builder = recruit::TargetBuilder::new(recr_params, args.thresh_kmer_count);
+    let opt_kmer_getter = args.jf_counts.as_ref()
+        .map(|filename| JfKmerGetter::new(args.jellyfish.clone(), filename.to_path_buf())).transpose()?;
+    for locus_seqs in seqs.into_iter() {
+        let kmer_counts = match &opt_kmer_getter {
+            Some(kmer_getter) => kmer_getter.fetch(locus_seqs.clone())?,
+            None => KmerCounts::new_zeroed(u32::from(args.minimizer_kw.0), locus_seqs.iter().map(Vec::len)),
+        };
+        let contig_set = ContigSet::new(Arc::new(ContigNames::empty()), locus_seqs, kmer_counts);
+        target_builder.add(&contig_set, 0.0);
+    }
+    Ok(target_builder.finalize())
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut args = parse_args(argv)?;
     args.in_files.fill_from_inlist()?;
+    args.update_from_preset()?;
     let args = args.validate()?;
+    let recr_params = recruit::Params::new(args.minimizer_kw, args.match_frac, args.match_len)?;
 
     super::greet();
     let (seqs, files) = load_seqs_and_outputs(&args)?;
+    let targets = build_targets(seqs, recr_params, &args)?;
 
     let timer = Instant::now();
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));

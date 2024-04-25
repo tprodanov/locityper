@@ -22,7 +22,7 @@ use crate::{
         kmers::{Kmer, KmerCount},
     },
     bg::{
-        BgDistr, Technology, SequencingInfo,
+        TECHNOLOGIES, BgDistr, Technology, SequencingInfo,
         err_prof::EditDistCache,
     },
     ext::{
@@ -122,6 +122,28 @@ impl Args {
     }
 }
 
+fn fmt_def_minimizers() -> String {
+    super::describe_defaults(
+        TECHNOLOGIES.iter().copied(),
+        |tech| tech.to_string(),
+        |tech| {
+            let (k, w) = tech.default_minim_size();
+            format!("{} {}", k, w)
+        }
+    )
+}
+
+fn fmt_def_match_frac() -> String {
+    super::describe_defaults(
+        TECHNOLOGIES.iter()
+            .flat_map(|&tech| [(tech, false), (tech, true)].into_iter())
+            .filter(|(tech, paired_end)| !paired_end || tech.paired_end_allowed()),
+        |(tech, paired_end)|
+            format!("{}{}", tech, if *paired_end { "-PE" } else if tech.paired_end_allowed() { "-SE" } else { "" }),
+        |(tech, paired_end)| tech.default_match_frac(*paired_end)
+    )
+}
+
 fn print_help(extended: bool) {
     const KEY: usize = 18;
     const VAL: usize = 5;
@@ -178,11 +200,10 @@ fn print_help(extended: bool) {
             {EMPTY}  across {} consecutive k-mers.\n\
             {EMPTY}  Default: {}.",
             "-m, --minimizer".green(), "INT INT".yellow(),
-            "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
-            super::recruit::fmt_def_minimizers());
+            "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(), fmt_def_minimizers());
         println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
             {EMPTY}  Default: {}.",
-            "-M, --match-frac".green(), "FLOAT".yellow(), super::recruit::fmt_def_match_frac());
+            "-M, --match-frac".green(), "FLOAT".yellow(), fmt_def_match_frac());
         println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
             "-L, --match-len".green(), "INT".yellow(),
             super::fmt_def(defaults.match_len));
