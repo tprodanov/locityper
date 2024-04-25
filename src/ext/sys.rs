@@ -198,6 +198,11 @@ pub fn path_append(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     os_string.into()
 }
 
+/// Adds dirname at the start, if any.
+pub fn add_dir(dirname: Option<&Path>, filename: &str) -> PathBuf {
+    dirname.map(|d| d.join(Path::new(filename))).unwrap_or_else(|| PathBuf::from(filename))
+}
+
 /// Create directory, if it does not exist yet.
 pub fn mkdir(path: impl AsRef<Path>) -> Result<(), Error> {
     let path = path.as_ref();

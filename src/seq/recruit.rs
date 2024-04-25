@@ -519,7 +519,7 @@ impl Targets {
         chunk_size: usize,
     ) -> Result<(), Error> {
         let n_workers = usize::from(threads - 1);
-        log::info!("Starting read recruitment with 1 read/write thread, and {} recruitment threads", n_workers);
+        log::info!("Starting read recruitment with 1 read/write thread and {} recruitment threads", n_workers);
         let mut main_worker = MainWorker::<T, _, _>::new(self, reader, writers, n_workers, chunk_size);
         main_worker.run()?;
         main_worker.finish()

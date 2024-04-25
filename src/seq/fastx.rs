@@ -900,7 +900,7 @@ pub fn set_reference(
     aln_filename: &Path,
     aln_reader: &mut impl ExtendedHtslibReader,
     ref_filename: &Option<PathBuf>,
-    contigs: Option<&ContigNames>,
+    ref_contigs: Option<&ContigNames>,
 ) -> Result<(), Error>
 {
     // Possible, that there are no contigs in the BAM/CRAM file: all reads are just stored for compression purposes (?).
@@ -919,7 +919,7 @@ pub fn set_reference(
     let Some(ref_filename) = ref_filename else {
         return Err(Error::InvalidInput("Cannot analyze CRAM file without a reference FASTA".to_owned()))
     };
-    let contigs = match contigs {
+    let ref_contigs = match ref_contigs {
         Some(val) => Cow::Borrowed(val),
         None => Cow::Owned(ContigNames::load_indexed_fasta("REF", ref_filename)?.0),
     };
@@ -931,8 +931,8 @@ pub fn set_reference(
     for (tid, contig) in header.target_names().into_iter().enumerate() {
         let contig = std::str::from_utf8(contig)
             .map_err(|_| Error::Utf8("contig name", contig.to_vec()))?;
-        if let Some(contig_id) = contigs.try_get_id(&contig) {
-            let in_ref_len = u64::from(contigs.get_len(contig_id));
+        if let Some(contig_id) = ref_contigs.try_get_id(&contig) {
+            let in_ref_len = u64::from(ref_contigs.get_len(contig_id));
             let in_bam_len = header.target_len(tid as u32).expect("Unknown contig length");
             if in_ref_len != in_bam_len {
                 if incorrect_len == 0 {

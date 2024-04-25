@@ -115,9 +115,6 @@ impl InputFiles {
         validate_param!(!self.interleaved && !self.no_index,
             "Input list (-I) and --interleaved/--no-index cannot be provided together, please see README");
         let dirname = list_filename.parent();
-        fn add_dir(dirname: Option<&Path>, filename: &str) -> PathBuf {
-            dirname.map(|d| d.join(Path::new(filename))).unwrap_or_else(|| PathBuf::from(filename))
-        }
 
         let mut prev_flag: Option<String> = None;
         for line in ext::sys::open(&list_filename)?.lines() {
@@ -137,18 +134,18 @@ impl InputFiles {
                 "s" => {
                     // validate_param!(!self.interleaved,
                     //     "Cannot provide single-end and paired-end interleaved files together");
-                    self.reads1.push(add_dir(dirname, filename1));
+                    self.reads1.push(ext::sys::add_dir(dirname, filename1));
                 }
                 "pi" => {
                     // validate_param!(self.interleaved || self.reads1.is_empty(),
                     //     "Cannot provide single-end and paired-end interleaved files together");
                     self.interleaved = true;
-                    self.reads1.push(add_dir(dirname, filename1));
+                    self.reads1.push(ext::sys::add_dir(dirname, filename1));
                 }
                 "a" => {
                     // validate_param!(!self.no_index,
                     //     "Cannot provide indexed and non-indexed alignment files together");
-                    self.alns.push(add_dir(dirname, filename1));
+                    self.alns.push(ext::sys::add_dir(dirname, filename1));
                 }
                 "u" => {
                     // validate_param!(self.no_index || self.alns.is_empty(),
@@ -156,7 +153,7 @@ impl InputFiles {
                     // validate_param!(!self.interleaved,
                     //     "Cannot provide single-end and paired-end interleaved files together");
                     self.no_index = true;
-                    self.alns.push(add_dir(dirname, filename1));
+                    self.alns.push(ext::sys::add_dir(dirname, filename1));
                 }
                 "ui" => {
                     // validate_param!(self.no_index || self.alns.is_empty(),
@@ -165,18 +162,18 @@ impl InputFiles {
                     //     "Cannot provide single-end and paired-end interleaved files together");
                     self.no_index = true;
                     self.interleaved = true;
-                    self.alns.push(add_dir(dirname, filename1));
+                    self.alns.push(ext::sys::add_dir(dirname, filename1));
                 }
                 "p" => {
                     if split.len() == 3 {
-                        self.reads1.push(add_dir(dirname, filename1));
-                        self.reads2.push(add_dir(dirname, split[2]));
+                        self.reads1.push(ext::sys::add_dir(dirname, filename1));
+                        self.reads2.push(ext::sys::add_dir(dirname, split[2]));
                     } else {
                         validate_param!(filename1.contains('*'),
                             "Cannot parse line {:?}: paired-end entry requires either two files, or one file with `*`",
                             trimmed_line);
-                        self.reads1.push(add_dir(dirname, &filename1.replace('*', "1")));
-                        self.reads2.push(add_dir(dirname, &filename1.replace('*', "2")));
+                        self.reads1.push(ext::sys::add_dir(dirname, &filename1.replace('*', "1")));
+                        self.reads2.push(ext::sys::add_dir(dirname, &filename1.replace('*', "2")));
                     }
                 }
                 rem => return Err(Error::ParsingError(
@@ -197,9 +194,15 @@ impl InputFiles {
         validate_param!(n1 == 0 || m == 0, "Cannot use reads (-i) and alignments (-a) together");
         validate_param!(implies(self.interleaved, n2 == 0),
             "Second end reads are specified together with --interleaved");
-        validate_param!(implies(ref_required, self.reference.is_some()), "Reference file (-r) is not provided");
-        validate_param!(implies(m > 1, self.no_index),
+            validate_param!(implies(m > 1, self.no_index),
             "Cannot use multilpe indexed BAM/CRAM files (consider --no-index)");
+
+        if ref_required {
+            validate_param!(self.reference.is_some(), "Reference file (-r) is not provided");
+        } else if self.alns.iter().any(|filename| filename.extension()
+                .map(|ext| ext == "cram" || ext == "CRAM").unwrap_or(false)) {
+            validate_param!(self.reference.is_some(), "Input CRAM file (-a) requires a reference file (-r)");
+        }
 
         // Should only be run once, so there is no need for lazy static.
         let re_fastx = RegexBuilder::new(r"\.f(ast)?[aq](\.[^.]{1,3})?$").case_insensitive(true).build().unwrap();
@@ -990,6 +993,7 @@ fn estimate_bg_distrs(
     let mut seq_info: SequencingInfo;
 
     if args.in_files.has_indexed_alignment() {
+        assert!(args.in_files.alns.len() == 1);
         let alns_filename = &args.in_files.alns[0];
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;

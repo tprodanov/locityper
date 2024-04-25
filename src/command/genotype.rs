@@ -38,10 +38,10 @@ use crate::{
     solvers::scheme::{self, Scheme, SchemeParams},
     algo::{HashSet, HashMap},
 };
-use super::{paths, DebugLvl};
+use super::{paths, DebugLvl, preproc::InputFiles};
 
 struct Args {
-    in_files: super::preproc::InputFiles,
+    in_files: InputFiles,
     preproc: Option<PathBuf>,
     databases: Vec<PathBuf>,
     output: Option<PathBuf>,
@@ -105,12 +105,6 @@ impl Args {
     fn validate(mut self) -> Result<Self, Error> {
         self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
-
-        if self.in_files.alns.iter().any(|filename| filename.extension()
-                .map(|ext| ext == "cram" || ext == "CRAM").unwrap_or(false)) {
-            validate_param!(self.in_files.reference.is_some(),
-                "Input CRAM file requires a reference file (see -a/--alignment and -r/--reference)");
-        }
 
         validate_param!(self.thresh_kmer_count > 0, "k-mer threshold must not be zero");
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
@@ -623,50 +617,107 @@ fn load_loci(
     Ok(loci)
 }
 
+/// Add padding to regions, add full short contigs and merge everything within `merge_distance`.
+pub(super) fn postprocess_targets(
+    mut intervals: Vec<Interval>,
+    contigs: &Arc<ContigNames>,
+    padding: u32,
+    alt_contig_len: u32,
+    merge_distance: u32,
+) -> Vec<Interval>
+{
+    for interv in intervals.iter_mut() {
+        *interv = interv.add_padding(padding);
+    }
+    for (id, &len) in contigs.ids().zip(contigs.lengths()) {
+        if len < alt_contig_len {
+            intervals.push(Interval::full_contig(Arc::clone(&contigs), id));
+        }
+    }
+    intervals.sort();
+    let merged = Interval::merge(&intervals, merge_distance);
+    log::debug!("    Fetch reads from {} regions (sum length {:.1} Mb) + unmapped reads", merged.len(),
+        1e-6 * f64::from(merged.iter().map(Interval::len).sum::<u32>()));
+    merged
+}
+
 /// Prepare fetch regions for a list of regions.
 /// Additionally, add all contigs from
 fn create_fetch_targets(
-    reader: &bam::IndexedReader,
+    contigs: &Arc<ContigNames>,
     bg_distr: &BgDistr,
-    filt_loci: &[&LocusData]
+    filt_loci: &[&LocusData],
 ) -> Result<Vec<Interval>, Error>
 {
-    let padding = if let Some(distr) = bg_distr.insert_distr().distr() {
-        distr.quantile(0.999).ceil().min(10_000.0) as u32 + 100
-    } else {
-        1000
-    };
-
-    let contigs = Arc::new(ContigNames::from_bam_header("bam", reader.header())?);
-    let mut regions = Vec::new();
+    let mut intervals = Vec::new();
     for locus in filt_loci {
         let bed_filename = locus.db_locus_dir.join(paths::LOCUS_BED);
         let bed_str = fs::read_to_string(&bed_filename).map_err(add_path!(bed_filename))?;
         match Interval::parse_bed(&mut bed_str.split('\t'), &contigs) {
-            Ok(interv) => {
-                regions.push(interv.add_padding(padding))
-            }
+            Ok(interv) => intervals.push(interv),
             Err(Error::ParsingError(e)) => log::error!(
-                "[{}] Cannot parse locus coordinates: {}, maybe the region is absent from the BAM/CRAM file?",
+                "[{}] Cannot parse locus coordinates: {}, the region may be absent from the BAM/CRAM file",
                 locus.set.tag(), e),
             Err(e) => log::error!("[{}] Cannot parse locus coordinates: {}", locus.set.tag(), e.display()),
         }
     }
 
+    let padding = if let Some(distr) = bg_distr.insert_distr().distr() {
+        distr.quantile(0.999).ceil().min(10_000.0) as u32 + 100
+    } else {
+        1000
+    };
     // Recruit reads from all contigs under 10 Mb.
-    const MAX_CONTIG_SIZE: u32 = 10_000_000;
-    for (id, &len) in contigs.ids().zip(contigs.lengths()) {
-        if len < MAX_CONTIG_SIZE {
-            regions.push(Interval::full_contig(Arc::clone(&contigs), id));
-        }
-    }
-
+    const ALT_CONTIG_LEN: u32 = 10_000_000;
     const MERGE_DISTANCE: u32 = 1000;
-    regions.sort();
-    let merged = Interval::merge(&regions, MERGE_DISTANCE);
-    log::debug!("    Fetch reads from {} regions (sum length {:.1} Mp) + unmapped reads", merged.len(),
-        1e-6 * f64::from(merged.iter().map(Interval::len).sum::<u32>()));
-    Ok(merged)
+    Ok(postprocess_targets(intervals, contigs, padding, ALT_CONTIG_LEN, MERGE_DISTANCE))
+}
+
+/// Check first read in the BAM/CRAM file, and check if it is paired.
+fn identify_pairedness(bam_reader: &mut bam::IndexedReader) -> Result<bool, Error> {
+    bam_reader.fetch(bam::FetchDefinition::All)?;
+    let mut record = bam::Record::new();
+    if bam_reader.read(&mut record).transpose()?.is_none() {
+        Err(Error::InvalidData("Input BAM/CRAM file is empty".to_string()))
+    } else {
+        log::debug!("Input BAM/CRAM file is identified as {}-end",
+            if record.is_paired() { "paired" } else { "unpaired "});
+        Ok(record.is_paired())
+    }
+}
+
+/// Recruit reads to targets, depending on the reader type.
+///
+/// is_paired_end - needed for BAM/CRAM files. If unknown, `identify_pairedness` is called.
+pub(super) fn recruit_to_targets(
+    targets: &recruit::Targets,
+    in_files: &InputFiles,
+    writers: Vec<impl io::Write>,
+    is_paired_end: Option<bool>,
+    chunk_size: usize,
+    threads: u16,
+    get_targets: impl FnOnce(&Arc<ContigNames>) -> Result<Vec<Interval>, Error>,
+) -> Result<(), Error>
+{
+    if in_files.has_indexed_alignment() {
+        assert!(in_files.alns.len() == 1);
+        let bam_filename = in_files.alns[0].to_path_buf();
+        let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
+        fastx::set_reference(&bam_filename, &mut bam_reader, &in_files.reference, None)?;
+        let contigs = Arc::new(ContigNames::from_bam_header("bam", bam_reader.header())?);
+        let fetch_regions = get_targets(&contigs)?;
+        let is_paired_end = is_paired_end.map(Ok).unwrap_or_else(|| identify_pairedness(&mut bam_reader))?;
+
+        let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
+        if is_paired_end {
+            targets.recruit(fastx::PairedBamReader::new(reader), writers, threads, chunk_size)
+        } else {
+            targets.recruit(reader, writers, threads, chunk_size)
+        }
+    } else {
+        fastx::process_readers!(in_files, None; let {} reader;
+            { targets.recruit(reader, writers, threads, chunk_size) })
+    }
 }
 
 /// Recruits reads to all loci, where neither reads nor alignments are available.
@@ -702,23 +753,11 @@ fn recruit_reads(
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
     let targets = target_builder.finalize();
+    let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let chunk_size = max(1, (args.chunk_length as f64 / mean_read_len
-        * (if bg_distr.insert_distr().is_paired_end() { 0.5 } else { 1.0 })) as usize);
-    if args.in_files.has_indexed_alignment() {
-        let bam_filename = args.in_files.alns[0].to_path_buf();
-        let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
-        fastx::set_reference(&bam_filename, &mut bam_reader, &args.in_files.reference, None)?;
-        let fetch_regions = create_fetch_targets(&bam_reader, bg_distr, &filt_loci)?;
-        let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
-        if bg_distr.insert_distr().is_paired_end() {
-            targets.recruit(fastx::PairedBamReader::new(reader), writers, args.threads, chunk_size)?;
-        } else {
-            targets.recruit(reader, writers, args.threads, chunk_size)?;
-        }
-    } else {
-        fastx::process_readers!(args.in_files, None; let {} reader;
-            { targets.recruit(reader, writers, args.threads, chunk_size) })?;
-    }
+        * (if is_paired_end { 0.5 } else { 1.0 })) as usize);
+    recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), chunk_size, args.threads,
+        |contigs| create_fetch_targets(contigs, bg_distr, &filt_loci))?;
 
     for locus in filt_loci.iter() {
         fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)

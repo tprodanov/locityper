@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     cmp::max,
 };
-use regex::Regex;
+use fancy_regex::Regex;
 use crate::{
     algo::{HashMap, HashSet},
     err::{Error, validate_param, add_path},
@@ -16,13 +16,16 @@ use crate::{
     },
     seq::{
         recruit,
-        ContigNames, ContigSet,
+        Interval, ContigNames, ContigSet,
         fastx::{self, FastxRecord, SingleRecord},
         kmers::{Kmer, KmerCount, KmerCounts, JfKmerGetter},
     },
     bg::Technology,
 };
 use colored::Colorize;
+
+const SR_CHUNK_SIZE: u64 = 10_000;
+const LR_CHUNK_SIZE: u64 = 300;
 
 struct Args {
     in_files: super::preproc::InputFiles,
@@ -33,12 +36,13 @@ struct Args {
     seqs_list: Option<PathBuf>,
     output: Option<String>,
     regions: Option<PathBuf>,
+    alt_contig_len: u32,
 
     minimizer_kw: (u8, u8),
     match_frac: f64,
     match_len: u32,
     preset: Option<String>,
-    chunk_length: u64,
+    chunk_size: u64,
     thresh_kmer_count: KmerCount,
 
     threads: u16,
@@ -56,12 +60,13 @@ impl Default for Args {
             seqs_list: None,
             output: None,
             regions: None,
+            alt_contig_len: 10_000_000,
 
             minimizer_kw: (15, 5),
             match_frac: 0.6,
             match_len: 2000,
             preset: None,
-            chunk_length: 3_000_000,
+            chunk_size: SR_CHUNK_SIZE,
             thresh_kmer_count: 10,
 
             threads: 8,
@@ -83,21 +88,24 @@ impl Args {
         };
         self.minimizer_kw = tech.default_minim_size();
         self.match_frac = tech.default_match_frac(paired);
+        if tech != Technology::Illumina {
+            self.chunk_size = LR_CHUNK_SIZE;
+        }
         Ok(())
     }
 
     fn validate(mut self) -> Result<Self, Error> {
         self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
-        if self.in_files.alns.iter().any(|filename| filename.extension()
-                .map(|ext| ext == "cram" || ext == "CRAM").unwrap_or(false)) {
-            validate_param!(self.in_files.reference.is_some(),
-                "Input CRAM file requires a reference file (see -a/--alignment and -r/--reference)");
-        }
 
+        validate_param!(self.chunk_size > 0, "Chunk size must be positive");
         validate_param!(self.thresh_kmer_count > 0, "k-mer threshold must not be zero");
         if self.jf_counts.is_some() {
             self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
+        }
+
+        if self.in_files.has_indexed_alignment() && self.regions.is_none() {
+            log::warn!("It is much more efficient to use indexed BAM/CRAM file (-a) together target regions (-R).");
         }
         Ok(self)
     }
@@ -164,6 +172,9 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Recruit unmapped reads and reads with primary alignments to these\n\
         {EMPTY}  regions (BED). Only relevant for mapped and indexed BAM/CRAM files.",
         "-R, --regions".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Recruit reads mapped to contigs shorter than this [{}].\n\
+        {EMPTY}  Only used together with {} for mapped and indexed BAM/CRAM files.",
+        "    --alt-contig".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.alt_contig_len)), "-R".green());
 
     println!("\n{}", "Read recruitment:".bold());
     println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -176,17 +187,19 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
         "-L, --match-len".green(), "INT".yellow(),
         super::fmt_def(defaults.match_len));
-    println!("    {:KEY$} {:VAL$}  Parameter preset (illumina|illumina-SE|hifi|pacbio|ont).\n\
-        {EMPTY}  Modifies {} and {}, see {} for default values.",
-        "-x, --preset".green(), "STR".yellow(), "-m".green(), "-M".green(), "locityper genotype".underline());
     println!("    {:KEY$} {:VAL$}  Only use k-mers that appear less than {} times in the\n\
         {EMPTY}  reference genome [{}]. Requires {} argument.",
         "-t, --kmer-thresh".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.thresh_kmer_count),
         "-j".green());
-    println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this sum length [{}].\n\
+    println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
         {EMPTY}  Impacts runtime in multi-threaded read recruitment.",
-        "-c, --chunk-len".green(), "INT".yellow(),
-        super::fmt_def(PrettyU64(defaults.chunk_length)));
+        "-c, --chunk-size".green(), "INT".yellow(),
+        super::fmt_def(PrettyU64(defaults.chunk_size)));
+    println!("    {:KEY$} {:VAL$}  Parameter preset (illumina|illumina-SE|hifi|pacbio|ont).\n\
+        {EMPTY}  Modifies {}, {}, see {} for default values.\n\
+        {EMPTY}  Additionally, changes {} to {} for long reads.",
+        "-x, --preset".green(), "STR".yellow(),
+        "-m".green(), "-M".green(), "locityper genotype".underline(), "-c", super::fmt_def(LR_CHUNK_SIZE));
 
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -232,19 +245,18 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Short('l') | Long("seqs-list") => args.seqs_list = Some(parser.value()?.parse()?),
             Short('R') | Long("regions") => args.regions = Some(parser.value()?.parse()?),
+            Long("alt-contig") => args.alt_contig_len = parser.value()?.parse::<PrettyU32>()?.get(),
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
                 args.minimizer_kw = (parser.value()?.parse()?, parser.value()?.parse()?),
-            Short('M') | Long("match-frac") | Long("match-fraction") =>
-                args.match_frac = parser.value()?.parse()?,
-            Short('x') | Long("preset") =>
-                args.preset = Some(parser.value()?.parse()?),
+            Short('M') | Long("match-frac") | Long("match-fraction") => args.match_frac = parser.value()?.parse()?,
+            Short('x') | Long("preset") => args.preset = Some(parser.value()?.parse()?),
             Short('t') | Long("kmer-thresh") | Long("kmer-threshold") =>
                 args.thresh_kmer_count = parser.value()?.parse()?,
             Short('L') | Long("match-len") | Long("match-length") =>
                 args.match_len = parser.value()?.parse::<PrettyU32>()?.get(),
-            Short('c') | Long("chunk") | Long("chunk-len") =>
-                args.chunk_length = parser.value()?.parse::<PrettyU64>()?.get(),
+            Short('c') | Long("chunk") | Long("chunk-size") =>
+                args.chunk_size = parser.value()?.parse::<PrettyU64>()?.get(),
 
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
@@ -283,8 +295,7 @@ fn create_output(filename: impl AsRef<Path>) -> Result<BufFile, Error> {
 
 /// Load sequences and output files according to -S and -o arguments.
 fn load_seqs_all(seqs_all: &Path, output: &str) -> Result<SeqsFiles, Error> {
-    validate_param!(output.contains(BRACKETS),
-        "Output path ({}) must contain {}, when using -S", output, BRACKETS);
+    validate_param!(output.contains(BRACKETS), "When using -S, output path ({}) must contain {}", output, BRACKETS);
     log::info!("Loading all sequences from {}", ext::fmt::path(seqs_all));
 
     // locus -> (seqs, output).
@@ -311,12 +322,14 @@ fn load_seqs_all(seqs_all: &Path, output: &str) -> Result<SeqsFiles, Error> {
 
 /// Load sequences and output files according to a single -s and -o arguments.
 fn load_seqs_single(
-    seqs_filename: &str,
-    output_filename: &str,
+    seqs_filename: impl AsRef<Path>,
+    output_filename: impl AsRef<Path>,
     seqs: &mut Vec<Vec<Vec<u8>>>,
     files: &mut Vec<BufFile>,
 ) -> Result<(), Error>
 {
+    let seqs_filename = seqs_filename.as_ref();
+    let output_filename = output_filename.as_ref();
     let file = create_output(output_filename)?;
     let mut fasta_reader = fastx::Reader::from_path(seqs_filename)?;
     let mut record = FastxRecord::default();
@@ -340,7 +353,7 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error>
     if patterns.len() == 1 && !patterns[0].contains(BRACKETS) {
         let seq_path = &patterns[0];
         validate_param!(!output.contains(BRACKETS),
-            "Single input -s {} does not allow output file with `{}` ({})",
+            "Single input -s {} does not allow output files with `{}` ({})",
             ext::fmt::path(seq_path), BRACKETS, output);
         log::info!("Loading sequences from {}", ext::fmt::path(seq_path));
         load_seqs_single(seq_path, output, &mut seqs, &mut files)?;
@@ -348,8 +361,7 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error>
     }
 
     let mut loci = HashSet::default();
-    validate_param!(output.contains(BRACKETS),
-        "Output path ({}) must contain {}, when using -S", output, BRACKETS);
+    validate_param!(output.contains(BRACKETS), "When using -s, output path ({}) must contain {}", output, BRACKETS);
     for pattern in patterns {
         validate_param!(pattern.contains(BRACKETS), "Paths to sequences ({}) must contain brackets `{}`",
             ext::fmt::path(pattern), BRACKETS);
@@ -359,7 +371,7 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error>
             .and_then(|p| p.into_os_string().into_string().ok())
             .unwrap_or_else(|| pattern.to_owned());
         let glob_pattern = can_pattern.replace(BRACKETS, "*");
-        let regex_pattern = format!("^{}$", can_pattern.replacen(BRACKETS, "([^/\\])+", 1).replace(BRACKETS, "\\1"));
+        let regex_pattern = format!("^{}$", can_pattern.replacen(BRACKETS, r"([^/\\]+)", 1).replace(BRACKETS, "\\1"));
         let regex = Regex::new(&regex_pattern).map_err(|e| Error::RuntimeError(
             format!("Cannot create regex for `{}`: {}", regex_pattern, e)))?;
 
@@ -371,8 +383,13 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error>
                 format!("Glob search failed on pattern `{}`: {}", glob_pattern, e)))?;
             let path_str = path.as_os_str().to_str().ok_or_else(||
                 Error::InvalidData(format!("Filename `{}` cannot be represented with Utf-8", path.display())))?;
-            // cap.extract() returns tuple (full match, fixed-size array of all captures).
-            let Some((_full, [locus])) = regex.captures(path_str).map(|cap| cap.extract()) else { continue };
+
+            let Some(cap1) = regex.captures(path_str)
+                .map_err(|e| Error::RuntimeError(
+                    format!("Failed to run regex `{}` on `{}`: {}", regex_pattern, path_str, e)))?
+                .and_then(|cap| cap.get(1))
+                else { continue };
+            let locus = cap1.as_str();
             if !loci.insert(locus.to_owned()) {
                 return Err(Error::InvalidInput(format!("Two sequence files with locus `{}` matched", locus)));
             }
@@ -384,6 +401,7 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error>
 
 /// Loads files from
 fn load_seqs_list(list_filename: &Path) -> Result<SeqsFiles, Error> {
+    let dirname = list_filename.parent();
     let mut out_filenames = HashSet::default();
     let mut seqs = Vec::new();
     let mut files = Vec::new();
@@ -395,11 +413,11 @@ fn load_seqs_list(list_filename: &Path) -> Result<SeqsFiles, Error> {
             return Err(Error::InvalidData(format!("Invalid line `{}` in {}: exactly two filenames required",
                 line, ext::fmt::path(list_filename))));
         }
-        let seqs_filename = line_split[0];
-        let out_filename = line_split[1];
+        let seqs_filename = ext::sys::add_dir(dirname, line_split[0]);
+        let out_filename = ext::sys::add_dir(dirname, line_split[1]);
         if !out_filenames.insert(out_filename.to_owned()) {
             return Err(Error::InvalidData(format!("Output filename {} appears twice in the list {}",
-                out_filename, ext::fmt::path(list_filename))));
+                ext::fmt::path(out_filename), ext::fmt::path(list_filename))));
         }
         load_seqs_single(seqs_filename, out_filename, &mut seqs, &mut files)?;
     }
@@ -445,8 +463,13 @@ fn build_targets(
 ) -> Result<recruit::Targets, Error>
 {
     let mut target_builder = recruit::TargetBuilder::new(recr_params, args.thresh_kmer_count);
-    let opt_kmer_getter = args.jf_counts.as_ref()
-        .map(|filename| JfKmerGetter::new(args.jellyfish.clone(), filename.to_path_buf())).transpose()?;
+    let opt_kmer_getter = match args.jf_counts.as_ref() {
+        Some(filename) => Some(JfKmerGetter::new(args.jellyfish.clone(), filename.to_path_buf())?),
+        None => {
+            log::warn!("Consider providing reference k-mer counts (-j)");
+            None
+        }
+    };
     for locus_seqs in seqs.into_iter() {
         let kmer_counts = match &opt_kmer_getter {
             Some(kmer_getter) => kmer_getter.fetch(locus_seqs.clone())?,
@@ -458,8 +481,33 @@ fn build_targets(
     Ok(target_builder.finalize())
 }
 
+fn load_target_regions(contigs: &Arc<ContigNames>, args: &Args) -> Result<Vec<Interval>, Error> {
+    match &args.regions {
+        Some(filename) => {
+            let mut intervals = Vec::new();
+            let file = ext::sys::open(filename)?;
+            for line in file.lines() {
+                let line = line.map_err(add_path!(filename))?;
+
+                match Interval::parse_bed(&mut line.trim().split('\t'), &contigs) {
+                    Ok(interv) => intervals.push(interv),
+                    Err(Error::ParsingError(e)) => log::error!(
+                        "Cannot parse BED line `{}`, the region may be absent from the BAM/CRAM file: {}",
+                        line.trim(), e),
+                    Err(e) => log::error!("Cannot parse BED line `{}`: {}", line.trim(), e.display()),
+                }
+            }
+            const PADDING: u32 = 1000;
+            const MERGE_DISTANCE: u32 = 1000;
+            Ok(super::genotype::postprocess_targets(intervals, contigs, PADDING, args.alt_contig_len, MERGE_DISTANCE))
+        }
+        None => Ok(contigs.ids().map(|id| Interval::full_contig(Arc::clone(contigs), id)).collect()),
+    }
+}
+
 pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut args = parse_args(argv)?;
+    let timer = Instant::now();
     args.in_files.fill_from_inlist()?;
     args.update_from_preset()?;
     let args = args.validate()?;
@@ -468,8 +516,9 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     super::greet();
     let (seqs, files) = load_seqs_and_outputs(&args)?;
     let targets = build_targets(seqs, recr_params, &args)?;
+    super::genotype::recruit_to_targets(&targets, &args.in_files, files, None, args.chunk_size as usize, args.threads,
+        |contigs| load_target_regions(contigs, &args))?;
 
-    let timer = Instant::now();
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }

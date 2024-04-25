@@ -1,7 +1,7 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.15.0-alpha.3"
+version = "0.15.0-alpha.4"
 rust-version = "1.70"
 edition = "2021"
 
@@ -26,6 +26,7 @@ lexopt = { version = "0.3", default-features = false }
 colored = { version = "2.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 regex = { version = "1.7", default-features = false, features = ["std", "perf"] }
+fancy-regex = { version = "0.13", default-features = false, features = ["std", "unicode", "perf"] }
 lazy_static = { version = "1.4", default-features = false }
 const_format = { version = "0.2.30", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
