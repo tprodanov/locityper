@@ -61,7 +61,7 @@ struct Args {
     minimizer_kw: Option<(u8, u8)>,
     match_frac: Option<f64>,
     match_len: u32,
-    kmer_thresh_count: KmerCount,
+    thresh_kmer_count: KmerCount,
     chunk_length: u64,
 
     assgn_params: AssgnParams,
@@ -91,7 +91,7 @@ impl Default for Args {
             minimizer_kw: None,
             match_frac: None,
             match_len: 2000,
-            kmer_thresh_count: 5,
+            thresh_kmer_count: 5,
             chunk_length: 3_000_000,
 
             assgn_params: Default::default(),
@@ -112,7 +112,7 @@ impl Args {
                 "Input CRAM file requires a reference file (see -a/--alignment and -r/--reference)");
         }
 
-        validate_param!(self.kmer_thresh_count > 0, "k-mer threshold must not be zero");
+        validate_param!(self.thresh_kmer_count > 0, "k-mer threshold must not be zero");
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
@@ -186,8 +186,8 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
             "-L, --match-len".green(), "INT".yellow(),
             super::fmt_def(defaults.match_len));
-        println!("    {:KEY$} {:VAL$}  Use only k-mers that appear less than {} times off target [{}].",
-            "    --kmer-thresh".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.kmer_thresh_count));
+        println!("    {:KEY$} {:VAL$}  Only use k-mers that appear less than {} times off target [{}].",
+            "    --kmer-thresh".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.thresh_kmer_count));
         println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this sum length [{}].\n\
             {EMPTY}  Impacts runtime in multi-threaded read recruitment.",
             "-c, --chunk-len".green(), "INT".yellow(),
@@ -257,7 +257,7 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
             "    --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
-            "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), "auto".cyan());
+            "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), super::fmt_def("auto"));
         println!("    {:KEY$} {:VAL$}  Normalize depth likelihoods based on sum window weight across\n\
             {EMPTY}  genotype, raised to this power (0 - no normalization) [{}].",
             "    --depth-norm".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_norm_power));
@@ -271,10 +271,10 @@ fn print_help(extended: bool) {
 
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
-        "-@, --threads".green(), "INT".yellow(), defaults.threads.to_string().cyan());
+        "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun all loci ({}); do not rerun\n\
         {EMPTY}  read recruitment ({}); do not rerun completed loci ({}).",
-        "    --rerun".green(), "STR".yellow(), defaults.rerun.to_str().cyan(),
+        "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
         "all".yellow(), "part".yellow(), "none".yellow());
     println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
         {EMPTY}  input and program version.",
@@ -338,7 +338,7 @@ fn parse_args(argv: &[String]) -> Result<Args, Error> {
                 args.match_frac = Some(parser.value()?.parse()?),
             Short('L') | Long("match-len") | Long("match-length") =>
                 args.match_len = parser.value()?.parse::<PrettyU32>()?.get(),
-            Long("kmer-thresh") => args.kmer_thresh_count = parser.value()?.parse()?,
+            Long("kmer-thresh") => args.thresh_kmer_count = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-len") =>
                 args.chunk_length = parser.value()?.parse::<PrettyU64>()?.get(),
 
@@ -669,7 +669,7 @@ fn recruit_reads(
     }
 
     log::info!("Generating recruitment targets");
-    let mut target_builder = recruit::TargetBuilder::new(recr_params, args.kmer_thresh_count);
+    let mut target_builder = recruit::TargetBuilder::new(recr_params, args.thresh_kmer_count);
     let mut writers = Vec::with_capacity(n_filt_loci);
     let mean_read_len = bg_distr.seq_info().mean_read_len();
 

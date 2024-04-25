@@ -404,7 +404,7 @@ fn print_help(extended: bool) {
             "-S, --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
         println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [{}].\n\
             {EMPTY}  Default: half of the mean read length.",
-            "-w, --window".green(), "INT".yellow(), "auto".cyan());
+            "-w, --window".green(), "INT".yellow(), super::fmt_def("auto"));
         println!("    {:KEY$} {:VAL$}  Skip {} bp near the edge of the background region [{}].",
             "    --boundary".green(), "INT".yellow(), "INT".yellow(),
             super::fmt_def(PrettyU32(defaults.bg_params.depth.boundary_size)));

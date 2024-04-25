@@ -200,7 +200,7 @@ impl FastxRecord {
 }
 
 impl SingleRecord for FastxRecord {
-    /// Returns read sequence
+    /// Returns read name.
     fn name(&self) -> &[u8] {
         &self.name
     }
@@ -242,7 +242,8 @@ pub struct Reader<R: BufRead> {
 }
 
 impl Reader<Box<dyn BufRead + Send>> {
-    pub fn from_path(path: &Path) -> Result<Self, Error> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
         Self::new(ext::sys::open(path)?, vec![path.to_path_buf()])
     }
 }
@@ -313,19 +314,27 @@ impl<R: BufRead> Reader<R> {
 }
 
 impl<R: BufRead + Send> Reader<R> {
+    /// Reads the next record and standardizes its sequence.
+    pub fn read_next_standardized(&mut self, record: &mut FastxRecord) -> Result<bool, Error> {
+        if self.read_next(record)? {
+            crate::seq::standardize(&mut record.seq)
+                .map_err(|nt| Error::InvalidData(format!("Invalid nucleotide `{}` ({}) for sequence {}",
+                    char::from(nt), nt, String::from_utf8_lossy(record.name()))))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Reads all sequences into memory.
-    /// Each sequence is standartized and checked for invalid nucleotides.
+    /// Each sequence is standardized and checked for invalid nucleotides.
     pub fn read_all(&mut self) -> Result<Vec<NamedSeq>, Error> {
         let mut record = FastxRecord::default();
         let mut records = Vec::new();
-        while self.read_next(&mut record)? {
+        while self.read_next_standardized(&mut record)? {
             let name = String::from_utf8(record.name().to_vec())
                 .map_err(|_| Error::Utf8("read name", record.name().to_vec()))?;
-            let mut seq = record.seq().to_owned();
-            crate::seq::standardize(&mut seq)
-                .map_err(|nt| Error::InvalidData(format!("Invalid nucleotide `{}` ({}) for sequence {}",
-                    char::from(nt), nt, name)))?;
-            records.push(NamedSeq::new(name, seq));
+            records.push(NamedSeq::new(name, record.seq().to_owned()));
         }
         Ok(records)
     }

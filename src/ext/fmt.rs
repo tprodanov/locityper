@@ -2,14 +2,14 @@ use std::{
     fmt::{self, Display, Debug},
     path::{Path, PathBuf},
     process::Command,
-    ffi::OsStr,
 };
 
 /// Pretty path formatting: replace $HOME with ~, put quotes around if needed.
-pub fn path(path: &Path) -> String {
+pub fn path(path: impl AsRef<Path>) -> String {
     lazy_static::lazy_static!{
         static ref HOME: Option<PathBuf> = std::env::var_os("HOME").map(|s| PathBuf::from(s));
     }
+    let path = path.as_ref();
     if let Some(home) = (*HOME).as_ref() {
         if let Ok(suffix) = path.strip_prefix(home) {
             let tilde_path = Path::new("~").join(suffix);
@@ -37,7 +37,6 @@ pub fn paths(paths: &[impl AsRef<Path>]) -> String {
 pub fn command(cmd: &Command) -> String {
     std::iter::once(cmd.get_program())
         .chain(cmd.get_args())
-        .map(OsStr::as_ref)
         .map(path)
         .collect::<Vec<_>>()
         .join(" ")

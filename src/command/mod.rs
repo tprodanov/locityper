@@ -223,7 +223,7 @@ impl fmt::Debug for Rerun {
 
 /// Debug information at the start of the log.
 fn greet() {
-    let command = std::env::args().map(|arg| ext::fmt::path(Path::new(&arg))).collect::<Vec<_>>().join(" ");
+    let command = std::env::args().map(ext::fmt::path).collect::<Vec<_>>().join(" ");
     log::debug!("{}", command);
     log::debug!("{} v{} @ {}", PROGRAM, VERSION, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
     #[cfg(debug_assertions)] {
@@ -260,7 +260,7 @@ impl From<u8> for DebugLvl {
 //         if i > 0 {
 //             s.push(' ');
 //         }
-//         s.push_str(&ext::fmt::path(Path::new(&arg)));
+//         s.push_str(&ext::fmt::path(&arg));
 //     }
 //     write!(s, "\n{} v{}\n", PROGRAM, VERSION).unwrap();
 //     writeln!(s, "{:?}", chrono::offset::Local::now()).unwrap();
