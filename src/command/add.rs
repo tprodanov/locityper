@@ -443,12 +443,13 @@ fn expand_locus(
     };
 
     // Extend region to the right.
-    let Some(new_end) = find_best_boundary::<false>(inner_end - 1, right_end, &right_vars,
+    let Some(mut new_end) = find_best_boundary::<false>(inner_end - 1, right_end, &right_vars,
             kmer_getter.k(), kmer_counts.get(1), args)? else {
         return Err(Error::RuntimeError(format!(
             "Cannot expand locus {} to the right due to a long variant overlapping boundary.\n    \
             Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name())))
     };
+    new_end += 1;
     if new_start != inner_start || new_end != inner_end {
         let new_interval = inner_interval.create_at_same_contig(new_start, new_end);
         log::info!("    Extending locus by {} bp left and {} bp right -> {}",

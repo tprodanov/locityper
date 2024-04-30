@@ -15,6 +15,8 @@ Locityper is created by
 [Tobias Marschall](https://marschall-lab.github.io/people/tmarschall/) `tobias.marschall[at]hhu.de`
 at the [Marschall Lab](https://marschall-lab.github.io/), [Heinrich Heine University Düsseldorf](hhu.de).
 
+Note: new documentation is currently being written at [locityper.vercel.app](https://locityper.vercel.app).
+
 # Table of contents
 * [Citing Locityper](#citing-locityper)
 * [Installation](#installation)
