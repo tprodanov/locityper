@@ -16,4 +16,6 @@ Locityper is created by
 at the [Marschall Lab](https://marschall-lab.github.io/),
 [Heinrich Heine University Düsseldorf](https://hhu.de).
 
-Please find Locityper documentation at [locityper.vercel.app](https://locityper.vercel.app).
+Please find installation instructions, test dataset and other information at [locityper.vercel.app](https://locityper.vercel.app).
+
+Additional scripts for benchmarking can be found at [github.com/tprodanov/locityper-bench](https://github.com/tprodanov/locityper-bench).
