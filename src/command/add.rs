@@ -43,6 +43,7 @@ struct Args {
     leave_out: HashSet<String>,
     max_expansion: u32,
     moving_window: u32,
+    ignore_overlaps: bool,
 
     div_k: u8,
     div_w: u8,
@@ -67,6 +68,7 @@ impl Default for Args {
             leave_out: Default::default(),
             max_expansion: 50000,
             moving_window: 500,
+            ignore_overlaps: false,
 
             div_k: 15,
             div_w: 15,
@@ -101,8 +103,8 @@ impl Args {
     }
 }
 
-fn print_help(extended: bool) {
-    const KEY: usize = 16;
+fn print_help() {
+    const KEY: usize = 18;
     const VAL: usize = 5;
     const EMPTY: &'static str = str_repeat!(" ", KEY + VAL + 5);
 
@@ -111,10 +113,6 @@ fn print_help(extended: bool) {
 
     print!("\n{}", "Usage:".bold());
     println!(" {} add -d db -r ref.fa -j counts.jf [-v vars.vcf.gz] -l/-L loci [args]", super::PROGRAM);
-    if !extended {
-        println!("\nThis is a {} help message. Please use {} to see the full help.",
-            "short".red(), "-H/--full-help".green());
-    }
 
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Output database directory.",
@@ -136,47 +134,44 @@ fn print_help(extended: bool) {
         {EMPTY}  with path to locus alleles.",
         "-L, --loci".green(), "FILE".yellow(), "-v".green());
 
-    if extended {
-        println!("\n{}", "Allele extraction parameters:".bold());
-        println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
-            "-g, --genome".green(), "STR".yellow());
-        println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp [{}].",
-            "-e, --expand".green(), "INT".yellow(), "INT".yellow(),
-            super::fmt_def(PrettyU32(defaults.max_expansion)));
-        println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
-            {EMPTY}  moving windows of size {} bp [{}].",
-            "-w, --window".green(), "INT".yellow(), "INT".yellow(),
-            super::fmt_def(PrettyU32(defaults.moving_window)));
-        println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per allele [{}]\n\
-            {EMPTY}  (relative to the allele length). Variants that have no known\n\
-            {EMPTY}  variation in the input VCF pangenome are ignored.",
-            "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
-        println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
-            "    --leave-out".green(), "STR+".yellow());
-        println!("    {} {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
-            "-m, --minimizer".green(), "INT INT".yellow(),
-            super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
-    }
+    println!("\n{}", "Allele extraction parameters:".bold());
+    println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
+        "-g, --genome".green(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp [{}].",
+        "-e, --expand".green(), "INT".yellow(), "INT".yellow(),
+        super::fmt_def(PrettyU32(defaults.max_expansion)));
+    println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
+        {EMPTY}  moving windows of size {} bp [{}].",
+        "-w, --window".green(), "INT".yellow(), "INT".yellow(),
+        super::fmt_def(PrettyU32(defaults.moving_window)));
+    println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per allele [{}]\n\
+        {EMPTY}  (relative to the allele length). Variants that have no known\n\
+        {EMPTY}  variation in the input VCF pangenome are ignored.",
+        "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
+    println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
+        "    --leave-out".green(), "STR+".yellow());
+    println!("    {}   {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
+        "-m, --minimizer".green(), "INT INT".yellow(),
+        super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
+    println!("    {:KEY$} {:VAL$}  Ignore overlapping variants. Default: fail with error.\n\
+        {EMPTY}  Of several overlapping variants only the first one is used.",
+        "    --ignore-overl".green(), super::flag());
 
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
-    if extended {
-        println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
-            "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
-    }
+    println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
+        "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
 
     println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
-    println!("    {:KEY$} {:VAL$}  Show {} help message.", "-H, --full-help".green(), "", "extended".red());
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     if argv.is_empty() {
-        print_help(false);
         std::process::exit(1);
     }
     use lexopt::prelude::*;
@@ -215,6 +210,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.div_k = parser.value()?.parse()?;
                 args.div_w = parser.value()?.parse()?;
             }
+            Long("ignore-overl") | Long("ignore-overlaps") => args.ignore_overlaps = true,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
@@ -224,12 +220,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 super::print_version();
                 std::process::exit(0);
             }
-            Short('h') | Long("help") => {
-                print_help(false);
-                std::process::exit(0);
-            }
-            Short('H') | Long("full-help") | Long("hidden-help") => {
-                print_help(true);
+            Short('h') | Long("help") | Short('H') | Long("full-help") | Long("hidden-help") => {
+                print_help();
                 std::process::exit(0);
             }
             _ => Err(arg.unexpected())?,
@@ -737,7 +729,8 @@ fn add_locus(
 
     // Load sequences.
     let allele_seqs = if let Some((vcf_file, hap_names)) = vcf_data {
-        panvcf::reconstruct_sequences(locus.interval(), &ref_seq, vcf_file, hap_names, args.unknown_frac)?
+        panvcf::reconstruct_sequences(locus.interval(), &ref_seq, vcf_file, hap_names,
+            args.unknown_frac, args.ignore_overlaps)?
     } else if let Some(fasta_filename) = alleles_fasta {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let alleles = fasta_reader.read_all()?;

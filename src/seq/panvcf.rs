@@ -15,11 +15,11 @@ use super::NamedSeq;
 
 /// Stores one sample in the VCF file.
 pub struct HaplotypeName {
-    /// HaplotypeName index for this sample.
+    /// Haplotype index for this sample.
     hap_ix: usize,
     /// Shift in index across all remaining haplotypes.
     shift_ix: usize,
-    /// HaplotypeName name.
+    /// Haplotype name.
     name: String,
 }
 
@@ -230,6 +230,7 @@ pub fn reconstruct_sequences(
     vcf_file: &mut bcf::IndexedReader,
     hap_names: &HaplotypeNames,
     unknown_frac: f64,
+    overlaps_allowed: bool,
 ) -> Result<Vec<NamedSeq>, Error>
 {
     assert_eq!(interval.len(), ref_seq.len() as u32);
@@ -240,7 +241,8 @@ pub fn reconstruct_sequences(
 
     let mut seqs = Vec::with_capacity(hap_names.total);
     if let Some(ref_name) = hap_names.ref_name.as_ref() {
-        seqs.push(NamedSeq::new(ref_name.to_owned(), ref_seq.to_vec()));
+        // Sequence will be extended at the end of the function, during suffix extension.
+        seqs.push(NamedSeq::new(ref_name.to_owned(), Vec::with_capacity(ref_seq.len())));
     }
     for sample in hap_names.samples.iter() {
         for haplotype in sample.subnames.iter() {
@@ -249,9 +251,11 @@ pub fn reconstruct_sequences(
     }
     // Number of unknown nucleotides for each sequence.
     let mut unknown_nts = vec![0_u32; hap_names.total];
-
     let header = vcf_file.header();
-    let mut ref_pos = ref_start;
+    let mut ref_pos = vec![ref_start; hap_names.total];
+    let mut total_overlaps = 0;
+    const MAX_OVERLAP_MSGS: u32 = 3;
+
     for var in recs.iter() {
         let alleles = var.alleles();
         // if alleles.iter().copied().any(seq::has_n) {
@@ -268,20 +272,13 @@ pub fn reconstruct_sequences(
         } else if var_start < ref_start || ref_end < var_end {
             return Err(Error::RuntimeError(format!("Variant {} overlaps the boundary of the region {}-{}",
                 format_var(var, header), ref_start + 1, ref_end)));
-        } else if var_start < ref_pos {
-            return Err(Error::InvalidData(format!("Input VCF file contains overlapping variants: see {}. \
-                Consider running `vcfbub -l 0 -i VCF | bgzip > VCF2 && tabix -p vcf VCF2`.",
-                format_var(var, header))));
         }
-        let seq_between_vars = &ref_seq[(ref_pos - ref_start) as usize..(var_start - ref_start) as usize];
 
         let gts = var.genotypes()?;
         for sample in hap_names.samples.iter() {
             let gt = gts.get(sample.sample_id);
             assert_eq!(gt.len(), sample.ploidy);
             for haplotype in sample.subnames.iter() {
-                let mut_seq = seqs[haplotype.shift_ix].seq_mut();
-                mut_seq.extend_from_slice(seq_between_vars);
                 let allele_ix = match gt[haplotype.hap_ix] {
                     GenotypeAllele::Phased(allele_ix) | GenotypeAllele::Unphased(allele_ix) => allele_ix as usize,
                     GenotypeAllele::PhasedMissing | GenotypeAllele::UnphasedMissing =>
@@ -290,17 +287,37 @@ pub fn reconstruct_sequences(
                         0 // Use reference allele
                     }
                 };
+                // Simply do not update `ref_pos`, nothing more to do.
+                if allele_ix == 0 {
+                    continue;
+                }
+
+                let prev_end = ref_pos[haplotype.shift_ix];
+                if var_start < prev_end {
+                    if !overlaps_allowed {
+                        return Err(Error::InvalidData(format!(
+                            "Overlapping variants forbidden ({} for {})", format_var(var, header), haplotype.name)));
+                    } else if total_overlaps < MAX_OVERLAP_MSGS {
+                        log::warn!("One of the overlapping variants ignored for {} ({})",
+                            haplotype.name, format_var(var, header));
+                    }
+                    total_overlaps += 1;
+                    continue;
+                }
+                let mut_seq = seqs[haplotype.shift_ix].seq_mut();
+                mut_seq.extend_from_slice(&ref_seq[(prev_end - ref_start) as usize..(var_start - ref_start) as usize]);
                 mut_seq.extend_from_slice(alleles[allele_ix]);
+                ref_pos[haplotype.shift_ix] = var_end;
             }
         }
-        ref_pos = var_end;
     }
-    let suffix_size = ref_end - ref_pos;
-    if suffix_size > 0 {
-        let suffix_seq = &ref_seq[(ref_pos - ref_start) as usize..];
-        for entry in seqs[hap_names.samples[0].subnames[0].shift_ix..].iter_mut() {
-            entry.seq_mut().extend_from_slice(suffix_seq);
+    for (&prev_end, entry) in ref_pos.iter().zip(seqs.iter_mut()) {
+        if prev_end < ref_end {
+            entry.seq_mut().extend_from_slice(&ref_seq[(prev_end - ref_start) as usize..]);
         }
+    }
+    if total_overlaps > 0 {
+        log::warn!("In total, {} overlapping variants discarded", total_overlaps);
     }
 
     discard_unknown(&mut seqs, &unknown_nts, unknown_frac);
