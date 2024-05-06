@@ -41,7 +41,6 @@ struct Args {
     minimizer_kw: (u8, u8),
     match_frac: f64,
     match_len: u32,
-    preset: Option<String>,
     chunk_size: u64,
     thresh_kmer_count: KmerCount,
 
@@ -65,7 +64,6 @@ impl Default for Args {
             minimizer_kw: (15, 5),
             match_frac: 0.6,
             match_len: 2000,
-            preset: None,
             chunk_size: SR_CHUNK_SIZE,
             thresh_kmer_count: 10,
 
@@ -76,15 +74,17 @@ impl Default for Args {
 }
 
 impl Args {
-    fn update_from_preset(&mut self) -> Result<(), Error> {
-        let Some(preset) = self.preset.as_ref() else { return Ok(()) };
+    fn set_preset(&mut self, preset: String) -> Result<(), lexopt::Error> {
         let (tech, paired) = match &preset.to_lowercase() as &str {
             "illumina" | "illumina-pe" | "sr" | "sr-pe" => (Technology::Illumina, true),
             "illumina-se" | "sr-se" => (Technology::Illumina, false),
             "hifi" => (Technology::HiFi, false),
             "pacbio" | "pb" => (Technology::PacBio, false),
             "ont" | "nanopore" => (Technology::Nanopore, false),
-            _ => return Err(Error::InvalidInput(format!("Unknown preset `{}`", preset))),
+            _ => return Err(lexopt::Error::UnexpectedValue {
+                option: "-x/--preset".to_string(),
+                value: preset.into(),
+            }),
         };
         self.minimizer_kw = tech.default_minim_size();
         self.match_frac = tech.default_match_frac(paired);
@@ -199,7 +199,7 @@ fn print_help() {
         {EMPTY}  Modifies {}, {}, see {} for default values.\n\
         {EMPTY}  Additionally, changes {} to {} for long reads.",
         "-x, --preset".green(), "STR".yellow(),
-        "-m".green(), "-M".green(), "locityper genotype".underline(), "-c", super::fmt_def(LR_CHUNK_SIZE));
+        "-m".green(), "-M".green(), "locityper genotype".underline(), "-c".green(), super::fmt_def(LR_CHUNK_SIZE));
 
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -250,7 +250,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('m') | Long("minimizer") | Long("minimizers") =>
                 args.minimizer_kw = (parser.value()?.parse()?, parser.value()?.parse()?),
             Short('M') | Long("match-frac") | Long("match-fraction") => args.match_frac = parser.value()?.parse()?,
-            Short('x') | Long("preset") => args.preset = Some(parser.value()?.parse()?),
+            Short('x') | Long("preset") => args.set_preset(parser.value()?.parse()?)?,
             Short('t') | Long("kmer-thresh") | Long("kmer-threshold") =>
                 args.thresh_kmer_count = parser.value()?.parse()?,
             Short('L') | Long("match-len") | Long("match-length") =>
@@ -509,7 +509,6 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let mut args = parse_args(argv)?;
     let timer = Instant::now();
     args.in_files.fill_from_inlist()?;
-    args.update_from_preset()?;
     let args = args.validate()?;
     let recr_params = recruit::Params::new(args.minimizer_kw, args.match_frac, args.match_len)?;
 

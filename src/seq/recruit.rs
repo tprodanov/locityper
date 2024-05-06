@@ -384,7 +384,7 @@ impl Targets {
         for minim in minimizers {
             // Optimized Kadane's algorithm for finding max subsum.
             match locus_minimizers.get(minim) {
-                Some(false) => continue,
+                Some(false) => {}
                 Some(true) => {
                     s += SUBSUM_BONUS;
                     if s >= self.params.stretch_score {
