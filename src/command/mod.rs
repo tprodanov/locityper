@@ -75,10 +75,17 @@ fn print_version() {
 }
 
 fn print_citation() {
-    print_version();
-    println!();
     println!("{}", "Thank you for using our tool!".bold());
-    println!("Publication in progress, please check later.");
+    println!();
+
+    const PREPRINT_LINK: &'static str = "https://doi.org/10.1101/2024.05.03.592358";
+    println!("You can find preprint here:");
+    println!("    T. Prodanov, E. Plender, G. Seebohm, S. Meuth, E. Eichler, T. Marschall. \
+        Locityper: targeted");
+    println!("    genotyping of complex polymorphic genes. {} (2024), {}",
+        "bioRxiv".italic(), PREPRINT_LINK);
+    println!();
+    println!("Please check for peer-reviewed publication later!");
 }
 
 fn print_help() {
