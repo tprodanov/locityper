@@ -49,13 +49,14 @@ def find_redundant(loci):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Discard redundant loci, completely contained within other targets.')
+        description='Check for overlaps across target loci.',
+        usage='%(prog)s db [--move]')
     parser.add_argument('input', metavar='DIR',
-        help='Locityper database with target loci.')
+        help='Locityper loci database.')
+    parser.add_argument('-m', '--move', action='store_true', dest='move',
+        help='Move redundant loci to `--output`.')
     parser.add_argument('-o', '--output', metavar='DIR',
         help='Move discarded loci to this directory (default: <input>/redundant).')
-    parser.add_argument('-d', '--dont-move', action='store_false', dest='move',
-        help='Only warn of redundant loci, do not move them.')
     args = parser.parse_args()
 
     loci_dir = os.path.join(args.input, 'loci')
