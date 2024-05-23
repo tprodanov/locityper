@@ -124,10 +124,10 @@ impl Aligner {
         attributes.system.max_alignment_steps = alignment_steps(accuracy);
 
         // High memory for some reason produces alignments with M both for X and =.
-        attributes.memory_mode = match accuracy {
-            x if x < 7 => cwfa::wavefront_memory_t_wavefront_memory_med,
-            8 => cwfa::wavefront_memory_t_wavefront_memory_low,
-            _ => cwfa::wavefront_memory_t_wavefront_memory_ultralow,
+        attributes.memory_mode = if accuracy < 7 {
+            cwfa::wavefront_memory_t_wavefront_memory_med
+        } else {
+            cwfa::wavefront_memory_t_wavefront_memory_ultralow
         };
         // Compute score and CIGAR as well.
         attributes.alignment_scope = cwfa::alignment_scope_t_compute_alignment;
