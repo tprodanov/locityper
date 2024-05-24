@@ -166,7 +166,12 @@ class Distances:
                 best_distances = distances
         return GtDist(best_distances)
 
-    def find_closest_loo(self, gt):
+    def find_closest(self, gt, loo=True, excl_haps=()):
+        """
+        Find closest genotype to `gt`.
+        loo: bool - this is leave-one-out experiment, do not include haplotypes from the same sample.
+        excl_haps: set of excluded haplotype names.
+        """
         loo_gt = []
         distances = []
         for hap in gt:
@@ -179,7 +184,9 @@ class Distances:
             best_div = np.inf
             best_edit = None
             for hap2, (edit, size) in self.distances[hap].items():
-                if edit / size < best_div and hap2 not in gt:
+                if (loo and hap2 in gt) or hap2 in excl_haps:
+                    continue
+                if edit / size < best_div:
                     best_div = edit / size
                     best_edit = (edit, size)
                     best_hap = hap2
