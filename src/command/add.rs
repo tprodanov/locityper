@@ -135,7 +135,7 @@ fn print_help() {
         "-L, --loci".green(), "FILE".yellow(), "-v".green());
 
     println!("\n{}", "Allele extraction parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Reference genome name, default: tries to guess.",
+    println!("    {:KEY$} {:VAL$}  Name of the reference haplotype [default: tries to guess].",
         "-g, --genome".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp [{}].",
         "-e, --expand".green(), "INT".yellow(), "INT".yellow(),
