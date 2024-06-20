@@ -709,6 +709,7 @@ pub(super) fn recruit_to_targets(
         let is_paired_end = is_paired_end.map(Ok).unwrap_or_else(|| identify_pairedness(&mut bam_reader))?;
 
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
+        // Need a lot of if-elses to have compile-time optimizations based on input data and the number of targets :]
         if is_paired_end {
             targets.recruit(fastx::PairedBamReader::new(reader), writers, threads, chunk_size)
         } else {

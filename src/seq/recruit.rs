@@ -188,27 +188,120 @@ const LONG_ZERO_MATCHES: MatchCount = MatchCount {
     },
 };
 
-type MatchesBuffer = IntMap<u16, MatchCount>;
+pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
+    /// How many loci can be processed with this buffer?
+    const MAX_LOCI: usize;
+
+    type Iter<'a>: Iterator<Item = (u16, MatchCount)>;
+
+    fn clear(&mut self);
+
+    fn get_or_insert(&mut self, locus_ix: u16, val: MatchCount) -> &mut MatchCount;
+
+    fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount>;
+
+    fn iter(&self) -> Self::Iter<'_>;
+}
+
+pub(crate) type MatchesMap = IntMap<u16, MatchCount>;
+
+pub(crate) struct MatchesMapIter<'a>(std::collections::hash_map::Iter<'a, u16, MatchCount>);
+
+impl<'a> Iterator for MatchesMapIter<'a> {
+    type Item = (u16, MatchCount);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(&locus_ix, &count)| (locus_ix, count))
+    }
+}
+
+impl MatchesBuffer for MatchesMap {
+    const MAX_LOCI: usize = u16::MAX as usize;
+
+    type Iter<'a> = MatchesMapIter<'a>;
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        IntMap::clear(self);
+    }
+
+    #[inline(always)]
+    fn get_or_insert(&mut self, locus_ix: u16, default: MatchCount) -> &mut MatchCount {
+        self.entry(locus_ix).or_insert(default)
+    }
+
+    #[inline(always)]
+    fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount> {
+        self.get_mut(&locus_ix)
+    }
+
+    #[inline(always)]
+    fn iter(&self) -> MatchesMapIter<'_> {
+        MatchesMapIter(self.iter())
+    }
+}
+
+pub(crate) type SingleMatch = Option<MatchCount>;
+
+pub(crate) struct SingleMatchIter<'a>(std::option::Iter<'a, MatchCount>);
+
+impl<'a> Iterator for SingleMatchIter<'a> {
+    type Item = (u16, MatchCount);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|&count| (0, count))
+    }
+}
+
+impl MatchesBuffer for SingleMatch {
+    const MAX_LOCI: usize = 1;
+
+    type Iter<'a> = SingleMatchIter<'a>;
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        *self = None;
+    }
+
+    #[inline(always)]
+    fn get_or_insert(&mut self, locus_ix: u16, default: MatchCount) -> &mut MatchCount {
+        assert!(locus_ix == 0);
+        self.get_or_insert(default)
+    }
+
+    #[inline(always)]
+    fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount> {
+        assert!(locus_ix == 0);
+        self.as_mut()
+    }
+
+    #[inline(always)]
+    fn iter(&self) -> Self::Iter<'_> {
+        SingleMatchIter(self.iter())
+    }
+}
 
 /// Trait-extension over single/paired reads.
 pub(crate) trait RecruitableRecord : fastx::WritableRecord + Send + 'static {
     /// Recruit a short single-end/paired-end read, or a long read.
     /// `minimizers` and `matches` are buffer structures, that can be freely cleaned and reused.
-    fn recruit(&self,
+    fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
         answer: &mut Answer,
         minimizers: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        matches: &mut M,
     );
 }
 
 impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> RecruitableRecord for T {
     #[inline]
-    fn recruit(&self,
+    fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
         answer: &mut Answer,
         minimizers: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        matches: &mut M,
     ) {
         let seq = self.seq();
         if seq.len() as u32 <= READ_LENGTH_THRESH {
@@ -221,11 +314,11 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
 
 impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> RecruitableRecord for [T; 2] {
     #[inline]
-    fn recruit(&self,
+    fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
         answer: &mut Answer,
         minimizers: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        matches: &mut M,
     ) {
         targets.recruit_read_pair(self[0].seq(), self[1].seq(), answer, minimizers, matches);
     }
@@ -343,12 +436,12 @@ pub struct Targets {
 
 impl Targets {
     /// Record short single-end read to one or more loci.
-    fn recruit_short_read(
+    fn recruit_short_read<M: MatchesBuffer>(
         &self,
         seq: &[u8],
         answer: &mut Answer,
         minimizers: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        matches: &mut M,
     ) {
         minimizers.clear();
         kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
@@ -356,17 +449,16 @@ impl Targets {
 
         matches.clear();
         for minimizer in minimizers.iter() {
-            if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &(locus_ix, is_usable) in loci_ixs.iter() {
-                    let counts = matches.entry(locus_ix).or_insert(SHORT_ZERO_MATCHES);
-                    let counts = unsafe { &mut counts.short };
-                    if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
-                }
+            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
+            for &(locus_ix, is_usable) in loci_ixs.iter() {
+                let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
+                let counts = unsafe { &mut counts.short };
+                if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
             }
         }
 
         answer.clear();
-        for (&locus_ix, &counts) in matches.iter() {
+        for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };
             if self.params.short_read_passes(counts.usable1, counts.unusable1, total) {
                 answer.push(locus_ix);
@@ -398,12 +490,12 @@ impl Targets {
     }
 
     /// Record long single-end read to one or more loci.
-    fn recruit_long_read(
+    fn recruit_long_read<M: MatchesBuffer>(
         &self,
         seq: &[u8],
         answer: &mut Answer,
         minimizers: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        matches: &mut M,
     ) {
         minimizers.clear();
         kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
@@ -411,17 +503,16 @@ impl Targets {
 
         matches.clear();
         for minimizer in minimizers.iter() {
-            if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &(locus_ix, is_usable) in loci_ixs.iter() {
-                    let counts = matches.entry(locus_ix).or_insert(LONG_ZERO_MATCHES);
-                    let counts = unsafe { &mut counts.long };
-                    if is_usable { counts.usable += 1 } else { counts.unusable += 1 };
-                }
+            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
+            for &(locus_ix, is_usable) in loci_ixs.iter() {
+                let counts = matches.get_or_insert(locus_ix, LONG_ZERO_MATCHES);
+                let counts = unsafe { &mut counts.long };
+                if is_usable { counts.usable += 1 } else { counts.unusable += 1 };
             }
         }
 
         answer.clear();
-        for (&locus_ix, &counts) in matches.iter() {
+        for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.long };
             let total_wo_unusable = total_minims - counts.unusable;
             if counts.usable >= self.params.long_read_threshold(min(self.params.stretch_minims, total_wo_unusable)) {
@@ -434,13 +525,13 @@ impl Targets {
 
     /// Record one paired-end read to one or more loci.
     /// The read is recruited when both read mates satisfy the recruitment thresholods.
-    fn recruit_read_pair(
+    fn recruit_read_pair<M: MatchesBuffer>(
         &self,
         seq1: &[u8],
         seq2: &[u8],
         answer: &mut Answer,
         minimizers: &mut Vec<Minimizer>,
-        matches: &mut MatchesBuffer,
+        matches: &mut M,
     ) {
         // Matches have 8-byte values. Reinterpret them as four u16s: (usable1, unusable1, usable2, unusable2).
         matches.clear();
@@ -449,12 +540,11 @@ impl Targets {
         kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total1 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
         for minimizer in minimizers.iter() {
-            if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &(locus_ix, is_usable) in loci_ixs.iter() {
-                    let counts = matches.entry(locus_ix).or_insert(SHORT_ZERO_MATCHES);
-                    let counts = unsafe { &mut counts.short };
-                    if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
-                }
+            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
+            for &(locus_ix, is_usable) in loci_ixs.iter() {
+                let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
+                let counts = unsafe { &mut counts.short };
+                if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
             }
         }
 
@@ -463,19 +553,18 @@ impl Targets {
         kmers::canon_minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, minimizers);
         let total2 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
         for minimizer in minimizers.iter() {
-            if let Some(loci_ixs) = self.minim_to_loci.get(minimizer) {
-                for &(locus_ix, is_usable) in loci_ixs.iter() {
-                    // No reason to insert new loci if they did not match the first read end.
-                    if let Some(counts) = matches.get_mut(&locus_ix) {
-                        let counts = unsafe { &mut counts.short };
-                        if is_usable { counts.usable2 += 1 } else { counts.unusable2 += 1 };
-                    }
+            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
+            for &(locus_ix, is_usable) in loci_ixs.iter() {
+                // No reason to insert new loci if they did not match the first read end.
+                if let Some(counts) = matches.get_mut(locus_ix) {
+                    let counts = unsafe { &mut counts.short };
+                    if is_usable { counts.usable2 += 1 } else { counts.unusable2 += 1 };
                 }
             }
         }
 
         answer.clear();
-        for (&locus_ix, &counts) in matches.iter() {
+        for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };
             if self.params.short_read_passes(counts.usable1, counts.unusable1, total1)
                     && self.params.short_read_passes(counts.usable2, counts.unusable2, total2) {
@@ -484,16 +573,18 @@ impl Targets {
         }
     }
 
-    fn recruit_single_thread<T: RecruitableRecord>(
+    fn recruit_single_thread<T, M>(
         &self,
         mut reader: impl FastxRead<Record = T>,
         writers: &mut [impl io::Write],
     ) -> Result<(), Error>
+    where T: RecruitableRecord,
+          M: MatchesBuffer,
     {
         let mut record = T::default();
         let mut answer = Answer::new();
         let mut buffer1 = Default::default();
-        let mut buffer2 = Default::default();
+        let mut buffer2 = M::default();
 
         let mut stats = Stats::new();
         while reader.read_next(&mut record)? {
@@ -511,34 +602,51 @@ impl Targets {
         Ok(())
     }
 
-    fn recruit_multi_thread<T: RecruitableRecord>(
+    fn recruit_multi_thread<T, M>(
         &self,
         reader: impl FastxRead<Record = T>,
         writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where T: RecruitableRecord,
+          M: MatchesBuffer,
+    {
         let n_workers = usize::from(threads - 1);
         log::info!("Starting read recruitment with 1 read/write thread and {} recruitment threads", n_workers);
-        let mut main_worker = MainWorker::<T, _, _>::new(self, reader, writers, n_workers, chunk_size);
+        let mut main_worker = MainWorker::<T, _, _>::new::<M>(self, reader, writers, n_workers, chunk_size);
         main_worker.run()?;
         main_worker.finish()
     }
 
+    /// How many targets are there in the set?
+    pub fn n_targets(&self) -> usize {
+        self.locus_minimizers.len()
+    }
+
     /// Recruit reads to the targets, possibly in multiple threads.
-    pub(crate) fn recruit<T: RecruitableRecord, W: io::Write>(
+    pub(crate) fn recruit(
         &self,
-        reader: impl FastxRead<Record = T>,
-        mut writers: Vec<W>,
+        reader: impl FastxRead<Record = impl RecruitableRecord>,
+        mut writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
     ) -> Result<(), Error>
     {
         assert_eq!(writers.len(), self.locus_minimizers.len(), "Unexpected number of writers");
+        let single_target = self.n_targets() == 1;
         if threads <= 1 {
-            self.recruit_single_thread(reader, &mut writers)
+            if single_target {
+                self.recruit_single_thread::<_, SingleMatch>(reader, &mut writers)
+            } else {
+                self.recruit_single_thread::<_, MatchesMap>(reader, &mut writers)
+            }
         } else {
-            self.recruit_multi_thread(reader, writers, threads, chunk_size)
+            if single_target {
+                self.recruit_multi_thread::<_, SingleMatch>(reader, writers, threads, chunk_size)
+            } else {
+                self.recruit_multi_thread::<_, MatchesMap>(reader, writers, threads, chunk_size)
+            }
         }
     }
 }
@@ -549,17 +657,17 @@ impl Targets {
 /// and then send shipments back to the main thread.
 type Shipment<T> = Vec<(T, Answer)>;
 
-struct Worker<T> {
+struct Worker<T, M> {
     targets: Targets,
     buffer1: Vec<Minimizer>,
-    buffer2: MatchesBuffer,
+    buffer2: M,
     /// Receives records that need to be recruited.
     receiver: Receiver<Shipment<T>>,
     /// Sends already recruited reads back to the main thread.
     sender: Sender<Shipment<T>>,
 }
 
-impl<T> Worker<T> {
+impl<T, M: Default> Worker<T, M> {
     fn new(targets: Targets, receiver: Receiver<Shipment<T>>, sender: Sender<Shipment<T>>) -> Self {
         Self {
             buffer1: Default::default(),
@@ -569,7 +677,7 @@ impl<T> Worker<T> {
     }
 }
 
-impl<T: RecruitableRecord> Worker<T> {
+impl<T: RecruitableRecord, M: MatchesBuffer> Worker<T, M> {
     fn run(mut self) {
         // Block thread and wait for the shipment.
         while let Ok(mut shipment) = self.receiver.recv() {
@@ -619,7 +727,9 @@ where T: RecruitableRecord,
       R: FastxRead<Record = T>,
       W: io::Write,
 {
-    fn new(targets: &Targets, reader: R, writers: Vec<W>, n_workers: usize, chunk_size: usize) -> Self {
+    fn new<M>(targets: &Targets, reader: R, writers: Vec<W>, n_workers: usize, chunk_size: usize) -> Self
+    where M: MatchesBuffer,
+    {
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
@@ -627,7 +737,7 @@ where T: RecruitableRecord,
         for _ in 0..n_workers {
             let (sender1, receiver1) = mpsc::channel();
             let (sender2, receiver2) = mpsc::channel();
-            let worker = Worker::new(targets.clone(), receiver1, sender2);
+            let worker = Worker::<T, M>::new(targets.clone(), receiver1, sender2);
             senders.push(sender1);
             receivers.push(receiver2);
             handles.push(thread::spawn(|| worker.run()));
