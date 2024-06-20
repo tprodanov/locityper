@@ -4,7 +4,6 @@ use std::{
     fs, thread,
     ffi::OsStr,
     io::{self, Write, BufRead},
-    fmt::Write as FmtWrite,
     cmp::{min, max},
     path::{Path, PathBuf},
     process::{Stdio, Command, ChildStdin},
@@ -20,7 +19,6 @@ use regex::{Regex, RegexBuilder};
 use crate::{
     ext::{
         self,
-        rand::{init_rng, XoshiroRng},
         fmt::PrettyU32,
     },
     err::{Error, validate_param, add_path},
@@ -240,8 +238,6 @@ struct Args {
 
     technology: Technology,
     min_mapq: u8,
-    subsampling_rate: f64,
-    seed: Option<u64>,
 
     threads: u16,
     rerun: super::Rerun,
@@ -255,6 +251,7 @@ struct Args {
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
     max_clipping: f64,
+    run_recruitment: bool,
 
     bg_params: bg::Params,
 }
@@ -270,8 +267,6 @@ impl Default for Args {
 
             technology: Technology::Illumina,
             min_mapq: 20,
-            subsampling_rate: 0.1,
-            seed: None,
 
             threads: 8,
             rerun: super::Rerun::None,
@@ -282,6 +277,7 @@ impl Default for Args {
             jellyfish: PathBuf::from("jellyfish"),
             explicit_technology: false,
             max_clipping: 0.02,
+            run_recruitment: true,
             bg_params: bg::Params::default(),
         }
     }
@@ -308,13 +304,6 @@ impl Args {
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
-
-        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
-            "Subsample rate ({}) must be within (0, 1]", self.subsampling_rate);
-        if self.in_files.has_indexed_alignment() || self.subsampling_rate > 0.99 {
-            self.subsampling_rate = 1.0;
-            self.seed = None;
-        }
 
         if self.technology == Technology::Illumina {
             self.strobealign = ext::sys::find_exe(self.strobealign)?;
@@ -403,8 +392,6 @@ fn print_help(extended: bool) {
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
             "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.bg_params.depth.ploidy));
-        println!("    {:KEY$} {:VAL$}  Subsample input reads by this factor [{}].",
-            "-S, --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
         println!("    {:KEY$} {:VAL$}  Count read depth in windows of this size [{}].\n\
             {EMPTY}  Default: half of the mean read length.",
             "-w, --window".green(), "INT".yellow(), super::fmt_def("auto"));
@@ -430,15 +417,15 @@ fn print_help(extended: bool) {
     }
 
     println!("\n{}", "Execution arguments:".bold());
+    println!("    {:KEY$} {:VAL$}  Skip read recruitment before read mapping.\n\
+        {EMPTY}  Otherwise, read recruitment is executed with default parameters.",
+        "    --skip-recruit".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun everything ({}); do not rerun\n\
         {EMPTY}  read mapping ({}); do not rerun ({}).",
         "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
         "all".yellow(), "part".yellow(), "none".yellow());
-    println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
-        {EMPTY}  input and program version.",
-        "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Save debug CSV files.",
         "    --debug".green(), "INT".yellow());
     if extended {
@@ -497,7 +484,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
 
             Short('p') | Long("ploidy") => args.bg_params.depth.ploidy = parser.value()?.parse()?,
-            Short('S') | Long("subsample") => args.subsampling_rate = parser.value()?.parse()?,
             Short('w') | Long("window") => {
                 let val = parser.value()?;
                 args.bg_params.depth.window_size = if val == "auto" {
@@ -516,6 +502,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.bg_params.depth.tail_var_mult = parser.value()?.parse()?;
             }
 
+            Long("skip-recruit") | Long("skip-recr") | Long("skip-recruitment") => args.run_recruitment = false,
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -525,7 +512,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
-            Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -600,21 +586,12 @@ fn set_mapping_stdin(
     args: &Args,
     contigs: &ContigNames,
     child_stdin: ChildStdin,
-    rng: &mut XoshiroRng,
 ) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
 {
-    let rate = args.subsampling_rate;
-    let mut local_rng = rng.clone();
-    rng.long_jump();
+    // TODO: Can we optimize this?
     let mut writer = io::BufWriter::new(child_stdin);
     let handle = fastx::process_readers!(args.in_files, Some(contigs); let {mut} reader; {
-        thread::spawn(move || {
-            Ok(if rate < 1.0 {
-                reader.subsample(&mut writer, rate, &mut local_rng)?
-            } else {
-                reader.copy(&mut writer)?
-            })
-        })
+        thread::spawn(move || Ok(reader.copy(&mut writer)?))
     });
     Ok(handle)
 }
@@ -658,35 +635,12 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
     command
 }
 
-fn first_step_str(args: &Args) -> String {
-    let mut s = String::new();
-    write!(s, "_subsample_ --rate {}", args.subsampling_rate).unwrap();
-    if let Some(seed) = args.seed {
-        write!(s, " --seed {}", seed).unwrap();
-    }
-
-    s.push_str(" -i ");
-    if args.in_files.reads1.len() > 1 || args.in_files.alns.len() > 1 {
-        s.push_str("...");
-    } else if let Some(filename) = args.in_files.alns.first() {
-        s.push_str(&ext::fmt::path(filename));
-    } else {
-        s.push_str(&ext::fmt::path(&args.in_files.reads1[0]));
-        if let Some(filename) = args.in_files.reads2.first() {
-            s.push_str(&ext::fmt::path(filename));
-        }
-    }
-    s.push_str(" | ");
-    s
-}
-
 /// Mapping parameters will be stored at `analysis/bg/MAPPING_PARAMS`.
 const MAPPING_PARAMS: &'static str = "mapping.json";
 
 struct MappingParams {
     technology: Technology,
     min_mapq: u8,
-    subsampling: f64,
     bg_region: String,
 }
 
@@ -695,7 +649,6 @@ impl MappingParams {
         MappingParams {
             technology: args.technology,
             min_mapq: args.min_mapq,
-            subsampling: args.subsampling_rate,
             bg_region: bg_region.to_string(),
         }
     }
@@ -718,8 +671,6 @@ impl MappingParams {
             Err(format!("Sequencing technologies do not match ({} -> {})", old.technology, self.technology))
         } else if self.min_mapq < old.min_mapq {
             Err(format!("Minimal mapping quality decreased ({} -> {})", old.min_mapq, self.min_mapq))
-        } else if (self.subsampling - old.subsampling).abs() > 1e-8 {
-            Err(format!("Subsampling rate changed ({} -> {})", old.subsampling, self.subsampling))
         } else if self.bg_region != old.bg_region {
             Err(format!("Background region has changed ({} -> {})", old.bg_region, self.bg_region))
         } else {
@@ -733,16 +684,20 @@ impl JsonSer for MappingParams {
         json::object!{
             technology: self.technology.to_str(),
             min_mapq: self.min_mapq,
-            subsampling: self.subsampling,
             bg_region: &self.bg_region as &str,
         }
     }
 
     fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        json_get!(obj => technology (as_str), min_mapq (as_u8), subsampling (as_f64), bg_region (as_str));
+        json_get!(obj => technology (as_str), min_mapq (as_u8), subsampling ? (as_f64), bg_region (as_str));
+        if let Some(rate) = subsampling {
+            if rate < 0.999 {
+                return Err(Error::RuntimeError("Preprocessed reads were subsampled, no longer supported".into()));
+            }
+        }
         let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
         Ok(Self {
-            technology, min_mapq, subsampling,
+            technology, min_mapq,
             bg_region: bg_region.to_owned(),
         })
     }
@@ -783,7 +738,6 @@ fn run_mapping(
     out_dir: &Path,
     out_bam: &Path,
     bg_region: &BgRegion,
-    rng: &mut XoshiroRng,
 ) -> Result<(), Error>
 {
     if !need_mapping(args, out_dir, out_bam, &bg_region.interval)? {
@@ -797,7 +751,7 @@ fn run_mapping(
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
-    let handle = set_mapping_stdin(args, &bg_region.ref_contigs, mapping_stdin.unwrap(), rng)?;
+    let handle = set_mapping_stdin(args, &bg_region.ref_contigs, mapping_stdin.unwrap())?;
 
     let tmp_bed = out_dir.join("tmp.bed");
     let mut bed_file = ext::sys::create_file(&tmp_bed)?;
@@ -818,7 +772,7 @@ fn run_mapping(
         .arg("-o").arg(&tmp_bam)
         .stdin(Stdio::from(mapping_stdout.unwrap()))
         .stdout(Stdio::piped()).stderr(Stdio::piped());
-    log::debug!("    {}{} | {}", first_step_str(&args), ext::fmt::command(&mapping), ext::fmt::command(&samtools));
+    log::debug!("Read mapping: {} | {}", ext::fmt::command(&mapping), ext::fmt::command(&samtools));
     let samtools_child = samtools.spawn().map_err(add_path!(args.samtools))?;
     pipe_guard.push(args.samtools.clone(), samtools_child);
     pipe_guard.wait()?;
@@ -947,7 +901,7 @@ fn estimate_bg_from_paired(
         }
     }
     let depth_distr = ReadDepth::estimate(&depth_alns, &windows,
-        &args.bg_params.depth, args.subsampling_rate, true, &seq_info, opt_out_dir)?;
+        &args.bg_params.depth, true, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -975,7 +929,7 @@ fn estimate_bg_from_unpaired(
         .map(Deref::deref)
         .collect();
     let depth_distr = ReadDepth::estimate(&filt_alns, &windows,
-        &args.bg_params.depth, args.subsampling_rate, true, &seq_info, opt_out_dir)?;
+        &args.bg_params.depth, true, &seq_info, opt_out_dir)?;
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -1019,8 +973,7 @@ fn estimate_bg_distrs(
 
         let bam_filename = out_dir.join("aln.bam");
         log::info!("Mapping reads to the reference in {} threads", args.threads);
-        let mut rng = init_rng(args.seed);
-        run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, bg_region, &mut rng)?;
+        run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, bg_region)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;

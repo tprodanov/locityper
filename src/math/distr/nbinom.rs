@@ -86,13 +86,6 @@ impl NBinom {
     pub fn p(&self) -> f64 {
         self.p
     }
-
-    /// Assuming a situation, where each random value is then used in a separate Binomial trial with `p = rate`,
-    /// new random variable also follows Negative Binomial.
-    /// This distribution is returned by this function.
-    pub fn binomial_subsample(&self, rate: f64) -> Self {
-        Self::new(self.n, self.p / (self.p + rate - self.p * rate))
-    }
 }
 
 impl Debug for NBinom {
@@ -155,25 +148,21 @@ struct NBinomProblem {
     /// Observed mean and variance.
     sample_mean: f64,
     sample_var: f64,
-    /// Subsampling rate.
-    rate: f64,
     /// Regularization factor.
     lambda: f64,
 }
 
 impl NBinomProblem {
-    fn new(sample_mean: f64, sample_var: f64, rate: f64, lambda: f64) -> Self {
-        Self { sample_mean, sample_var, rate, lambda }
+    fn new(sample_mean: f64, sample_var: f64, lambda: f64) -> Self {
+        Self { sample_mean, sample_var, lambda }
     }
 
-    /// See here https://math.stackexchange.com/questions/4700260,
-    /// estimating Negative Binomial parameters from Binomial subsampling.
     fn mean(&self, n: f64, p: f64) -> f64 {
-        self.rate * n * (1.0 - p) / p
+        n * (1.0 - p) / p
     }
 
     fn var(&self, n: f64, p: f64) -> f64 {
-        self.rate * n * (1.0 - p) * (p + self.rate - p * self.rate) / (p * p)
+        n * (1.0 - p) / (p * p)
     }
 }
 
@@ -197,8 +186,6 @@ impl CostFunction for NBinomProblem {
 
 /// L1-regularized parameter estimator for Negative Binomial.
 pub struct RegularizedEstimator {
-    /// Subsampling rate (1 by default = no subsampling).
-    rate: f64,
     /// Regularization factor (1e-6 by default).
     lambda: f64,
 }
@@ -206,19 +193,12 @@ pub struct RegularizedEstimator {
 impl Default for RegularizedEstimator {
     fn default() -> Self {
         Self {
-            rate: 1.0,
             lambda: 1e-5,
         }
     }
 }
 
 impl RegularizedEstimator {
-    pub fn set_subsampling_rate(&mut self, rate: f64) -> &mut Self {
-        assert!(rate > 0.0 && rate <= 1.0, "Subsampling rate ({}) must be within (0, 1].", rate);
-        self.rate = rate;
-        self
-    }
-
     pub fn set_lambda(&mut self, lambda: f64) -> &mut Self {
         assert!(lambda >= 0.0, "Regularization factor ({}) must be non-negative.", lambda);
         self.lambda = lambda;
@@ -234,7 +214,7 @@ impl RegularizedEstimator {
         ];
         let solver = NelderMead::new(start_points)
             .with_sd_tolerance(1e-6).unwrap();
-        let problem = NBinomProblem::new(sample_mean, sample_var, self.rate, self.lambda);
+        let problem = NBinomProblem::new(sample_mean, sample_var, self.lambda);
         let solution = Executor::new(problem, solver)
             .run()
             .expect("Nelder-Mead finished with an error");

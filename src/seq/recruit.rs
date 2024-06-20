@@ -187,6 +187,7 @@ const LONG_ZERO_MATCHES: MatchCount = MatchCount {
     },
 };
 
+/// Based on the number of targets, use different buffer structures.
 pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
     /// How many loci can be processed with this buffer?
     const MAX_LOCI: usize;
@@ -202,6 +203,7 @@ pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
     fn iter(&self) -> Self::Iter<'_>;
 }
 
+/// When there exist more than one target, use IntMap.
 pub(crate) type MatchesMap = IntMap<u16, MatchCount>;
 
 pub(crate) struct MatchesMapIter<'a>(hash_map::Iter<'a, u16, MatchCount>);
@@ -241,6 +243,7 @@ impl MatchesBuffer for MatchesMap {
     }
 }
 
+/// When there exist exactly one target, use simple `Option`.
 pub(crate) type SingleMatch = Option<MatchCount>;
 
 pub(crate) struct SingleMatchIter<'a>(std::option::Iter<'a, MatchCount>);
@@ -266,13 +269,13 @@ impl MatchesBuffer for SingleMatch {
 
     #[inline(always)]
     fn get_or_insert(&mut self, locus_ix: u16, default: MatchCount) -> &mut MatchCount {
-        assert!(locus_ix == 0);
+        debug_assert!(locus_ix == 0);
         self.get_or_insert(default)
     }
 
     #[inline(always)]
     fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount> {
-        assert!(locus_ix == 0);
+        debug_assert!(locus_ix == 0);
         self.as_mut()
     }
 
