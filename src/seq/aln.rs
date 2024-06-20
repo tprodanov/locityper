@@ -19,6 +19,7 @@ use crate::{
 
 /// Newtype over strand: false = negative, true = positive.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Strand {
     Forward,
     Reverse,
@@ -48,6 +49,7 @@ impl fmt::Display for Strand {
 
 /// Read-end: first or second.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ReadEnd {
     First,
     Second,

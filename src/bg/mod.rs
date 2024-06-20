@@ -145,6 +145,7 @@ impl JsonSer for BgDistr {
 
 /// Sequencing technology.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Technology {
     Illumina,
     HiFi,

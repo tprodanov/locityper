@@ -10,6 +10,7 @@ use crate::ext::vec::VecOrNone;
 
 /// Subset of CIGAR operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Operation {
     Match,
     Equal,

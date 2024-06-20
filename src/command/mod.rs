@@ -134,6 +134,7 @@ fn fmt_def_f64(val: f64) -> colored::ColoredString {
 
 /// Re-runing mode.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 enum Rerun {
     /// Complete rerun analysis.
     All,
@@ -240,6 +241,7 @@ fn greet() {
 
 /// How many debug CSV files to save.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum DebugLvl {
     None,
     Some,

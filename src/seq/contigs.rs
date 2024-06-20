@@ -219,6 +219,7 @@ impl fmt::Debug for ContigNames {
 
 /// Version of the reference genome, supported by this program.
 #[derive(Clone, Copy, Debug)]
+#[repr(u8)]
 pub enum GenomeVersion {
     Chm13,
     GRCh38,
