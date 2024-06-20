@@ -4,8 +4,13 @@ pub mod bisect;
 // Use these types instead of the default Hash Map.
 
 pub type Hasher = std::hash::BuildHasherDefault<wyhash::WyHash>;
-pub type HashMap<K, V> = std::collections::HashMap<K, V, Hasher>;
-pub type HashSet<T> = std::collections::HashSet<T, Hasher>;
+// Can easily switch between standard and hashbrown implementations, if needed.
+pub use std::collections::{hash_map, hash_set};
+// pub use hashbrown::{hash_map, hash_set};
+pub type HashMap<K, V> = hash_map::HashMap<K, V, Hasher>;
+pub type HashSet<T> = hash_set::HashSet<T, Hasher>;
+pub type IntMap<K, V> = hash_map::HashMap<K, V, nohash::BuildNoHashHasher<K>>;
+pub type IntSet<T> = hash_set::HashSet<T, nohash::BuildNoHashHasher<T>>;
 
 /// Calculates hash function on given bytes using pre-selected hash function.
 #[inline]

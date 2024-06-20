@@ -5,10 +5,9 @@ use std::{
     ops::Deref,
     io::Write,
 };
-use nohash::IntMap;
 use crate::{
     err::{Error, add_path},
-    algo::{bisect, HashMap},
+    algo::{bisect, HashMap, IntMap},
     ext::{self, vec::F64Ext},
     bg::ser::{JsonSer, json_get},
     math::distr::{

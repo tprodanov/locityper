@@ -3,10 +3,8 @@ use std::{
     fmt::{self, Write as FmtWrite},
     sync::{Arc, OnceLock},
     io::{self, Write},
-    collections::hash_map::Entry,
 };
 use htslib::bam;
-use nohash::{IntSet, IntMap};
 use crate::{
     err::{Error, add_path},
     seq::{
@@ -21,7 +19,7 @@ use crate::{
         err_prof::{ErrorProfile, EditDistCache},
         insertsz::InsertDistr,
     },
-    algo::{bisect, TwoU32, get_hash, HashSet},
+    algo::{bisect, TwoU32, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
     math::Ln,
 };
 

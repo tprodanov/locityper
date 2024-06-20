@@ -5,7 +5,6 @@ use std::{
     rc::Rc,
 };
 use htslib::bam;
-use nohash::IntMap;
 use crate::{
     solvers::scheme,
     seq::{
@@ -18,7 +17,7 @@ use crate::{
         windows::ReadGtAlns,
         assgn::GenotypeAlignments,
     },
-    algo::TwoU32,
+    algo::{TwoU32, IntMap},
 };
 
 /// Updates `contig_to_tid` vector, and returns

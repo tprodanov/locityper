@@ -7,7 +7,6 @@ use std::{
     borrow::Borrow,
     path::Path,
 };
-use nohash::IntMap;
 use crate::{
     err::{Error, add_path},
     seq::{
@@ -16,6 +15,7 @@ use crate::{
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
+    algo::IntMap,
     ext,
 };
 

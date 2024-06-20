@@ -3,11 +3,9 @@
 use std::{
     io, thread,
     cmp::{min, max},
-    collections::hash_map::Entry,
     time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
 };
-use nohash::IntMap;
 use smallvec::{smallvec, SmallVec};
 use crate::{
     err::{Error, validate_param, add_path},
@@ -17,6 +15,7 @@ use crate::{
         fastx::{self, FastxRead, UPDATE_SECS},
     },
     math::RoundDiv,
+    algo::{IntMap, hash_map},
 };
 
 pub type Minimizer = u64;
@@ -205,7 +204,7 @@ pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
 
 pub(crate) type MatchesMap = IntMap<u16, MatchCount>;
 
-pub(crate) struct MatchesMapIter<'a>(std::collections::hash_map::Iter<'a, u16, MatchCount>);
+pub(crate) struct MatchesMapIter<'a>(hash_map::Iter<'a, u16, MatchCount>);
 
 impl<'a> Iterator for MatchesMapIter<'a> {
     type Item = (u16, MatchCount);
@@ -387,7 +386,7 @@ impl TargetBuilder {
                 };
 
                 match self.minim_to_loci.entry(minimizer) {
-                    Entry::Occupied(entry) => {
+                    hash_map::Entry::Occupied(entry) => {
                         let loci_ixs = entry.into_mut();
                         let last = loci_ixs.last_mut().unwrap();
                         if last.0 == locus_ix {
@@ -396,7 +395,7 @@ impl TargetBuilder {
                             loci_ixs.push((locus_ix, is_usable));
                         }
                     }
-                    Entry::Vacant(entry) => { entry.insert(smallvec![(locus_ix, is_usable)]); }
+                    hash_map::Entry::Vacant(entry) => { entry.insert(smallvec![(locus_ix, is_usable)]); }
                 }
                 locus_minimizers.entry(minimizer)
                     .and_modify(|was_usable| *was_usable &= is_usable).or_insert(is_usable);
