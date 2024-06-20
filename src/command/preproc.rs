@@ -801,7 +801,7 @@ fn run_mapping(
 
     let tmp_bed = out_dir.join("tmp.bed");
     let mut bed_file = ext::sys::create_file(&tmp_bed)?;
-    writeln!(bed_file, "{}", bg_region.interval .bed_fmt()).map_err(add_path!(tmp_bed))?;
+    writeln!(bed_file, "{}", bg_region.interval.bed_fmt()).map_err(add_path!(tmp_bed))?;
     std::mem::drop(bed_file);
 
     let tmp_bam = out_dir.join("tmp.bam");
@@ -1079,7 +1079,7 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
     } else {
         log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.reads1));
         args.in_files.reads1.iter()
-            .map(|filename| fastx::count_reads_fastx(filename))
+            .map(|filename| fastx::count_reads_fastx(filename).map(|t| t.0))
             .sum::<Result<u64, _>>()?
     };
     if args.in_files.interleaved {
