@@ -1032,7 +1032,7 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
     } else {
         log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.reads1));
         args.in_files.reads1.iter()
-            .map(|filename| fastx::count_reads_fastx(filename).map(|t| t.0))
+            .map(|filename| fastx::count_reads_fastx(filename).map(|t| t.n_reads()))
             .sum::<Result<u64, _>>()?
     };
     if args.in_files.interleaved {
