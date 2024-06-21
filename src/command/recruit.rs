@@ -461,7 +461,7 @@ fn load_seqs_and_outputs(args: &Args) -> Result<SeqsFiles, Error> {
 /// seqs: collection of loci, each with collection of sequences (each Vec<u8>).
 ///
 /// If Jellyfish counts are provided, masks minimizers based on the k-mer content.
-pub fn build_targets(
+fn build_targets(
     seqs: impl IntoIterator<Item = Vec<Vec<u8>>>,
     recr_params: recruit::Params,
     jf_counts: Option<&PathBuf>,

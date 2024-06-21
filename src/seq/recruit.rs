@@ -463,6 +463,8 @@ impl TargetBuilder {
         let mut too_short_alleles = 0;
         let mut locus_minimizers = IntMap::default();
         for (seq, counts) in contig_set.seqs().iter().zip(kmer_counts.iter()) {
+            assert_eq!((seq.len() + 1).saturating_sub(base_k as usize), counts.len(),
+                "Sequence and k-mer lengths do not match");
             too_short_alleles += u32::from(seq.len() < self.params.match_length as usize);
             let n_counts = counts.len();
             self.buffer.clear();

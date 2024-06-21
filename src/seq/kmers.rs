@@ -297,6 +297,7 @@ fn parse_count(s: &str, max_value: u64) -> Result<KmerCount, std::num::ParseIntE
 }
 
 /// Stores k-mer counts for each input k-mer across a set of sequences.
+#[derive(Clone)]
 pub struct KmerCounts {
     k: u32,
     /// Maximum value that can appear.
@@ -489,6 +490,22 @@ impl KmerCounts {
             k: self.k,
             max_value: self.max_value,
             counts: all_new_counts,
+        }
+    }
+
+    /// Create k-mer counts for a subregion.
+    /// Only works for a single sequence.
+    pub fn subregion(&self, seq_start: u32, seq_end: u32) -> KmerCounts {
+        assert_eq!(self.counts.len(), 1, "k-mer subregion counts can only be calculated for a single sequence");
+        let full_counts = &self.counts[0];
+        let n = full_counts.len() as u32;
+        let end = max(seq_start, (seq_end + 1).saturating_sub(self.k));
+        assert!(end <= n);
+        let sub_counts = full_counts[seq_start as usize..end as usize].to_vec();
+        Self {
+            k: self.k,
+            max_value: self.max_value,
+            counts: vec![sub_counts],
         }
     }
 }

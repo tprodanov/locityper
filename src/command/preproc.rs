@@ -30,7 +30,7 @@ use crate::{
         recruit::{self, RecruitableRecord},
         cigar::{self, Cigar},
         aln::{NamedAlignment, Alignment, ReadEnd},
-        contigs::{ContigNames, GenomeVersion},
+        contigs::{ContigNames, ContigSet, GenomeVersion},
     },
     bg::{
         self, BgDistr, Technology, SequencingInfo,
@@ -588,21 +588,24 @@ fn recruit_reads(
     writer: impl io::Write + Send + 'static,
     seq_info: &SequencingInfo,
     bg_region: &BgRegion,
-    args: &Args,
+    is_paired_end: bool,
 ) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
 {
-    let paired = args.in_files.is_paired_end();
     let minimizer_kw = seq_info.technology().default_minim_size();
-    let match_frac = seq_info.technology().default_match_frac(paired);
+    let match_frac = seq_info.technology().default_match_frac(is_paired_end);
     let recr_params = recruit::Params::new(minimizer_kw, match_frac, recruit::DEFAULT_MATCH_LEN,
         super::recruit::DEFAULT_KMER_THRESH)?;
 
-    let target_seqs = [vec![bg_region.padded_sequence.clone()]];
-    let mut targets = super::recruit::build_targets(target_seqs, recr_params,
-        args.jf_counts.as_ref(), &args.jellyfish)?;
+    let mut target_builder = recruit::TargetBuilder::new(recr_params);
+    let contig_set = ContigSet::new(Arc::new(ContigNames::empty()),
+        vec![bg_region.padded_sequence.clone()], bg_region.padded_kmer_counts.clone());
+    target_builder.add(&contig_set, seq_info.mean_read_len());
+    let mut targets = target_builder.finalize();
     targets.hide_recruited_reads();
+
     const ONE_THREAD: u16 = 1;
-    let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH, seq_info.mean_read_len(), paired);
+    let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH,
+        seq_info.mean_read_len(), is_paired_end);
     Ok(thread::spawn(move ||
         targets.recruit(reader, vec![writer], ONE_THREAD, chunk_size).map(|stats| stats.processed())))
 }
@@ -619,7 +622,7 @@ fn set_mapping_stdin(
     let mut writer = io::BufWriter::new(child_stdin);
     fastx::process_readers!(args.in_files, Some(&bg_region.ref_contigs); let {mut} reader; {
         if args.run_recruitment {
-            recruit_reads(reader, writer, seq_info, bg_region, args)
+            recruit_reads(reader, writer, seq_info, bg_region, args.in_files.is_paired_end())
         } else {
             Ok(thread::spawn(move || reader.copy(&mut writer)))
         }
@@ -926,7 +929,7 @@ fn estimate_bg_from_paired(
 
     let interval = &bg_region.interval;
     let windows = bg::Windows::create(interval, bg_region.region_sequence(),
-        bg_region.kmer_counts.as_ref().unwrap(), &seq_info, &args.bg_params.depth, opt_out_dir)?;
+        &bg_region.kmer_counts, &seq_info, &args.bg_params.depth, opt_out_dir)?;
 
     // Estimate error profile from read pairs with appropriate insert size.
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
@@ -972,7 +975,7 @@ fn estimate_bg_from_unpaired(
     let insert_distr = InsertDistr::undefined();
     let interval = &bg_region.interval;
     let windows = bg::Windows::create(interval, bg_region.region_sequence(),
-        bg_region.kmer_counts.as_ref().unwrap(), &seq_info, &args.bg_params.depth, opt_out_dir)?;
+        &bg_region.kmer_counts, &seq_info, &args.bg_params.depth, opt_out_dir)?;
     let err_prof = ErrorProfile::estimate(&alns, interval, &windows, opt_out_dir)?;
     let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
     edit_dist_cache.print_log(seq_info.mean_read_len());
@@ -1121,9 +1124,10 @@ struct BgRegion {
     padded_interval: Interval,
     padded_sequence: Vec<u8>,
 
-    /// k-mer counts on the background region.
-    /// Should be `Some` once initialization finishes.
-    kmer_counts: Option<KmerCounts>,
+    /// k-mer counts on the padded sequence.
+    padded_kmer_counts: KmerCounts,
+    /// k-mer counts on the unpadded background region.
+    kmer_counts: KmerCounts,
 }
 
 impl BgRegion {
@@ -1137,14 +1141,15 @@ impl BgRegion {
 
         let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;
         let padded_sequence = padded_interval.fetch_seq(&mut ref_fasta)?;
-        let mut reg = Self {
-            ref_contigs, interval, padded_interval, padded_sequence,
-            kmer_counts: None,
-        };
+
         log::info!("Calculating k-mer counts on the background region");
-        let kmer_counts = kmer_getter.fetch([reg.region_sequence().to_vec()])?;
-        reg.kmer_counts = Some(kmer_counts);
-        Ok(reg)
+        let padded_kmer_counts = kmer_getter.fetch([padded_sequence.clone()])?;
+        let kmer_counts = padded_kmer_counts.subregion(
+            interval.start() - padded_interval.start(), interval.end() - padded_interval.start());
+        Ok(Self {
+            ref_contigs, interval, padded_interval, padded_sequence,
+            padded_kmer_counts, kmer_counts,
+        })
     }
 
     /// Returns region sequence without padding.
