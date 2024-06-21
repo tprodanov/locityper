@@ -698,7 +698,7 @@ pub(super) fn recruit_to_targets(
     threads: u16,
     chunk_size: usize,
     get_targets: impl FnOnce(&Arc<ContigNames>) -> Result<Vec<Interval>, Error>,
-) -> Result<recruit::Stats, Error>
+) -> Result<recruit::Progress, Error>
 {
     if in_files.has_indexed_alignment() {
         assert!(in_files.alns.len() == 1);

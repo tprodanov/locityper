@@ -12,7 +12,7 @@ use crate::{
     seq::{
         ContigSet,
         kmers::{self, Kmer, KmerCount},
-        fastx::{self, FastxRead, UPDATE_SECS},
+        fastx::{self, FastxRead},
     },
     math::RoundDiv,
     algo::{IntMap, hash_map},
@@ -127,44 +127,101 @@ impl Params {
     }
 }
 
+// Write log messages at most every ten seconds.
+pub const UPDATE_SECS: u64 = 10;
+
+// Check timer every `UPDATE_COUNT` processed reads.
+const UPDATE_COUNT: u64 = 10_000;
+
 /// Recruitment statistics: how long did it take, how many reads processed and how many recruited.
-pub struct Stats {
+pub struct Progress {
     timer: Instant,
     recruited: u64,
     processed: u64,
     /// Last log message was at this duration since start.
     last_msg: Duration,
+    /// Show recruited reads, not only processed.
+    show_recruited: bool,
 }
 
-impl Stats {
-    fn new() -> Self {
+impl Progress {
+    pub fn new(show_recruited: bool) -> Self {
         Self {
             timer: Instant::now(),
             recruited: 0,
             processed: 0,
             last_msg: Duration::default(),
+            show_recruited,
+        }
+    }
+
+    /// Create new progress logger, where the number of recruited reads is shown.
+    pub fn new_recruitment() -> Self {
+        Self::new(true)
+    }
+
+    /// Create new progress logger, where the number of recruited reads is not shown.
+    pub fn new_simple() -> Self {
+        Self::new(false)
+    }
+
+    /// Add the number of recruited reads.
+    /// Must be run before processed reads are added.
+    #[inline(always)]
+    pub fn add_recruited(&mut self, count: impl Into<u64>) {
+        self.recruited += count.into();
+    }
+
+    /// Increment the number of processed reads by 1.
+    /// Should be run after the number of recruited reads is updated.
+    #[inline]
+    pub fn inc_processed(&mut self) {
+        self.processed += 1;
+        if self.processed % UPDATE_COUNT == 0 {
+            self.timed_print_message();
+        }
+    }
+
+    /// Add the number of processed reads.
+    /// Should be run after the number of recruited reads is updated.
+    #[inline]
+    pub fn add_processed(&mut self, count: u64) {
+        let old_val = self.processed;
+        self.processed += count;
+        if old_val / UPDATE_COUNT < self.processed / UPDATE_COUNT {
+            self.timed_print_message();
         }
     }
 
     /// Prints log message if enough time has passed.
-    fn timed_print_log(&mut self) {
+    fn timed_print_message(&mut self) {
         let elapsed = self.timer.elapsed();
         if (elapsed - self.last_msg).as_secs() >= UPDATE_SECS {
-            self.print_log_always(elapsed);
+            let processed = self.processed as f64;
+            let speed = 1e-3 * processed / elapsed.as_secs_f64();
+            if self.show_recruited {
+                log::debug!("    Recruited {:11} /{:8.0}k reads, {:5.1}k reads/s",
+                    self.recruited, 1e-3 * processed, speed);
+            } else {
+                log::debug!("    Processed {:8.0}k reads, {:5.1}k reads/s", 1e-3 * processed, speed);
+            }
+            self.last_msg = elapsed;
         }
     }
 
-    fn print_log_always(&mut self, elapsed: Duration) {
+    /// Print final message.
+    pub fn final_message(&mut self) {
+        let elapsed = self.timer.elapsed();
         let processed = self.processed as f64;
         let speed = 1e-3 * processed / elapsed.as_secs_f64();
-        log::debug!("    Recruited {:11} /{:8.0}k reads, {:5.1}k reads/s", self.recruited, 1e-3 * processed, speed);
-        self.last_msg = elapsed;
-    }
-
-    fn finish(&mut self) {
-        let elapsed = self.timer.elapsed();
-        self.print_log_always(elapsed);
-        log::info!("Finished recruitment in {}", crate::ext::fmt::Duration(elapsed));
+        let total_time = crate::ext::fmt::Duration(elapsed);
+        if self.show_recruited {
+            log::debug!("    Recruited {} / {}k reads ({:.4}%) in {} ({:5.1}k reads/s)",
+                self.recruited, 1e-3 * processed, 100.0 * self.recruited as f64 / processed,
+                total_time, speed);
+        } else {
+            log::debug!("    Processed {} reads in {} ({:5.1}k reads/s)", self.processed, total_time, speed);
+        }
     }
 
     /// Total number of recruited reads.
@@ -455,6 +512,7 @@ impl TargetBuilder {
             params: self.params,
             minim_to_loci: self.minim_to_loci,
             locus_minimizers: self.locus_minimizers,
+            show_recruited: true,
         }
     }
 }
@@ -466,9 +524,16 @@ pub struct Targets {
     /// Minimizers appearing across the targets.
     minim_to_loci: MinimToLoci,
     locus_minimizers: Vec<IntMap<Minimizer, bool>>,
+
+    show_recruited: bool,
 }
 
 impl Targets {
+    /// During progress messages, do not show recruited reads, only processed (relevant for preprocessing).
+    pub fn hide_recruited_reads(&mut self) {
+        self.show_recruited = false;
+    }
+
     /// Record short single-end read to one or more loci.
     fn recruit_short_read<M: MatchesBuffer>(
         &self,
@@ -611,7 +676,7 @@ impl Targets {
         &self,
         mut reader: impl FastxRead<Record = T>,
         writers: &mut [impl io::Write],
-    ) -> Result<Stats, Error>
+    ) -> Result<Progress, Error>
     where T: RecruitableRecord,
           M: MatchesBuffer,
     {
@@ -620,20 +685,17 @@ impl Targets {
         let mut buffer1 = Default::default();
         let mut buffer2 = M::default();
 
-        let mut stats = Stats::new();
+        let mut progress = Progress::new(self.show_recruited);
         while reader.read_next(&mut record)? {
             record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
             for &locus_ix in answer.iter() {
                 record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
             }
-            stats.recruited += u64::from(!answer.is_empty());
-            stats.processed += 1;
-            if stats.processed % 10000 == 0 {
-                stats.timed_print_log();
-            }
+            progress.add_recruited(!answer.is_empty());
+            progress.inc_processed();
         }
-        stats.finish();
-        Ok(stats)
+        progress.final_message();
+        Ok(progress)
     }
 
     fn recruit_multi_thread<T, M>(
@@ -642,7 +704,7 @@ impl Targets {
         writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
-    ) -> Result<Stats, Error>
+    ) -> Result<Progress, Error>
     where T: RecruitableRecord,
           M: MatchesBuffer,
     {
@@ -666,7 +728,7 @@ impl Targets {
         mut writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
-    ) -> Result<Stats, Error>
+    ) -> Result<Progress, Error>
     {
         assert_eq!(writers.len(), self.locus_minimizers.len(), "Unexpected number of writers");
         let single_target = self.n_targets() == 1;
@@ -749,7 +811,7 @@ struct MainWorker<T, R: FastxRead<Record = T>, W> {
     /// Does the worker currently recruit reads?
     is_busy: Vec<bool>,
     /// Recruitment statistics.
-    stats: Stats,
+    progress: Progress,
 
     /// Chunks of reads that were read from the reader and are ready to be analyzed.
     to_send: Vec<Shipment<T>>,
@@ -762,7 +824,13 @@ where T: RecruitableRecord,
       R: FastxRead<Record = T>,
       W: io::Write,
 {
-    fn new<M>(targets: &Targets, reader: R, writers: Vec<W>, n_workers: usize, chunk_size: usize) -> Self
+    fn new<M>(
+        targets: &Targets,
+        reader: R,
+        writers: Vec<W>,
+        n_workers: usize,
+        chunk_size: usize,
+    ) -> Self
     where M: MatchesBuffer,
     {
         let mut senders = Vec::with_capacity(n_workers);
@@ -779,9 +847,9 @@ where T: RecruitableRecord,
         }
         Self {
             writers, senders, receivers, handles, chunk_size,
+            progress: Progress::new(targets.show_recruited),
             reader: Some(reader),
             is_busy: vec![false; n_workers],
-            stats: Stats::new(),
             to_send: Vec::new(),
             to_write: Vec::new(),
         }
@@ -834,8 +902,7 @@ where T: RecruitableRecord,
             return Ok(())
         }
         while let Some(mut shipment) = self.to_write.pop() {
-            write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
-            self.stats.timed_print_log();
+            write_shipment(&mut self.writers, &shipment, &mut self.progress)?;
             fill_shipment(&mut self.reader, &mut shipment)?;
             if !shipment.is_empty() {
                 self.to_send.push(shipment);
@@ -869,25 +936,24 @@ where T: RecruitableRecord,
     }
 
     /// Finish the main thread: write all remaining shipments to the output files, and stop worker threads.
-    fn finish(mut self) -> Result<Stats, Error> {
+    fn finish(mut self) -> Result<Progress, Error> {
         assert!(self.reader.is_none() && self.to_send.is_empty());
         for shipment in self.to_write.into_iter() {
-            write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
+            write_shipment(&mut self.writers, &shipment, &mut self.progress)?;
         }
         for (&is_busy, receiver) in self.is_busy.iter().zip(&self.receivers) {
             if is_busy {
                 // Block thread and wait for the task completion.
                 let shipment = receiver.recv().expect("Recruitment worker has failed!");
-                write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
-                self.stats.timed_print_log();
+                write_shipment(&mut self.writers, &shipment, &mut self.progress)?;
             }
         }
         std::mem::drop(self.senders);
         for handle in self.handles.into_iter() {
             handle.join().expect("Process failed for unknown reason");
         }
-        self.stats.finish();
-        Ok(self.stats)
+        self.progress.final_message();
+        Ok(self.progress)
     }
 }
 
@@ -922,15 +988,15 @@ where T: Clone + Default,
 }
 
 /// Writes recruited records to the output files.
-fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, stats: &mut Stats) -> Result<(), Error>
+fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, progress: &mut Progress) -> Result<(), Error>
 where T: fastx::WritableRecord,
 {
-    stats.processed += shipment.len() as u64;
     for (record, answer) in shipment.iter() {
-        stats.recruited += u64::from(!answer.is_empty());
+        progress.add_recruited(!answer.is_empty());
         for &locus_ix in answer.iter() {
             record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
         }
     }
+    progress.add_processed(shipment.len() as u64);
     Ok(())
 }

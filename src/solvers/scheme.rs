@@ -33,7 +33,7 @@ use crate::{
     err::{Error, validate_param, add_path},
     seq::{
         contigs::{ContigNames, Genotype},
-        fastx::UPDATE_SECS,
+        recruit::UPDATE_SECS,
     },
     model::{
         self,

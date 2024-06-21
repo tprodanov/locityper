@@ -598,7 +598,9 @@ fn recruit_reads(
         super::recruit::DEFAULT_KMER_THRESH)?;
 
     let target_seqs = [vec![bg_region.padded_sequence.clone()]];
-    let targets = super::recruit::build_targets(target_seqs, recr_params, args.jf_counts.as_ref(), &args.jellyfish)?;
+    let mut targets = super::recruit::build_targets(target_seqs, recr_params,
+        args.jf_counts.as_ref(), &args.jellyfish)?;
+    targets.hide_recruited_reads();
     const ONE_THREAD: u16 = 1;
     let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH, seq_info.mean_read_len(), paired);
     Ok(thread::spawn(move ||
@@ -624,7 +626,7 @@ fn set_mapping_stdin(
     })
 }
 
-fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: &Path) -> Command {
+fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: &Path, threads: u16) -> Command {
     let mut command;
     if seq_info.technology() == Technology::Illumina {
         // Strobealign for short reads.
@@ -635,7 +637,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "-U",          // Do not output unmapped reads,
             "-f", "0.001", // Discard more minimizers to speed up alignment,
             "--eqx",       // Output X/= instead of M operations,
-            "-t", &args.threads.to_string(), // Specify the number of threads,
+            "-t", &threads.to_string(), // Specify the number of threads,
             "-r", &format!("{:.0}", seq_info.mean_read_len()), // Provide mean read length.
             "--no-progress",
             ]);
@@ -652,7 +654,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "--secondary=no", // Do not output secondary alignments,
             "-f", "0.001", // Discard more minimizers to speed up alignment,
             "--eqx",       // Output X/= instead of M operations,
-            "-t", &args.threads.to_string(), // Specify the number of threads,
+            "-t", &threads.to_string(), // Specify the number of threads,
             ]);
     }
     // Provide paths to the reference and pipe reads.
@@ -797,7 +799,8 @@ fn run_mapping(
     }
 
     let start = Instant::now();
-    let mut mapping = create_mapping_command(args, seq_info, ref_filename);
+    let mapping_threads = max(1, args.threads - args.run_recruitment as u16);
+    let mut mapping = create_mapping_command(args, seq_info, ref_filename, mapping_threads);
     let mapping_exe = PathBuf::from(mapping.get_program().to_owned());
     let mut mapping_child = mapping.spawn().map_err(add_path!(mapping_exe))?;
     let mapping_stdin = mapping_child.stdin.take();

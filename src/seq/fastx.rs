@@ -5,17 +5,18 @@ use std::{
     io::{self, BufRead},
     cmp::min,
     path::{Path, PathBuf},
-    time::{Instant, Duration},
     process::{Command, Stdio},
 };
 use htslib::bam;
 use crate::{
     ext,
-    seq::{self, Interval, ContigNames},
+    seq::{
+        self, Interval, ContigNames, NamedSeq,
+        recruit::Progress,
+    },
     algo::HashSet,
     err::{Error, add_path},
 };
-use super::NamedSeq;
 
 // ------------------------------------------- Helper functions -------------------------------------------
 
@@ -158,12 +159,13 @@ pub trait FastxRead: Send {
     /// Writes input stream to output.
     fn copy(&mut self, writer: &mut impl io::Write) -> Result<u64, Error> {
         let mut record = Self::Record::default();
-        let mut logger = ProcLogger::new();
+        let mut progress = Progress::new_simple();
         while self.read_next(&mut record)? {
-            logger.inc();
+            progress.inc_processed();
             record.write_to(writer).map_err(add_path!(!))?;
         }
-        Ok(logger.reads)
+        progress.final_message();
+        Ok(progress.processed())
     }
 }
 
@@ -437,39 +439,6 @@ impl<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> FastxR
     /// Returns the first filename.
     fn filenames(&self) -> &[PathBuf] {
         &self.filenames
-    }
-}
-
-// Write log messages at most every ten seconds.
-pub const UPDATE_SECS: u64 = 10;
-
-struct ProcLogger {
-    timer: Instant,
-    last_msg: Duration,
-    reads: u64,
-}
-
-impl ProcLogger {
-    fn new() -> Self {
-        Self {
-            timer: Instant::now(),
-            last_msg: Duration::default(),
-            reads: 0,
-        }
-    }
-
-    #[inline]
-    fn inc(&mut self) {
-        self.reads += 1;
-        if self.reads % 100_000 == 0 {
-            let elapsed = self.timer.elapsed();
-            if (elapsed - self.last_msg).as_secs() >= UPDATE_SECS {
-                self.last_msg = elapsed;
-                let reads_f64 = self.reads as f64;
-                let speed = 1e-3 * f64::from(reads_f64) / elapsed.as_secs_f64();
-                log::debug!("    Processed {:7.1}M reads, {:4.0}k reads/s", 1e-6 * reads_f64, speed);
-            }
-        }
     }
 }
 
