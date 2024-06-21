@@ -20,6 +20,10 @@ use crate::{
 
 pub type Minimizer = u64;
 
+/// Default length, over which a long read must match the target
+/// (shorter matches with more minimizer matches will pass as well).
+pub const DEFAULT_MATCH_LEN: u32 = 2000;
+
 /// Reads shorter than 500 bp are considered short, larger - long.
 /// Note that there must be < 256 minimizers per read end.
 const READ_LENGTH_THRESH: u32 = 500;
@@ -44,6 +48,9 @@ pub struct Params {
     match_frac: f64,
     match_length: u32,
 
+    /// Use k-mers with multiplicity LESS than this number.
+    thresh_kmer_count: KmerCount,
+
     /// Approximate number of minimizers in a stretch of `match_length`.
     stretch_minims: u32,
     /// If each matching k-mer has bonus +1 and each non-matching is penalized by -1,
@@ -58,6 +65,7 @@ impl Params {
         (minimizer_k, minimizer_w): (u8, u8),
         match_frac: f64,
         match_length: u32,
+        thresh_kmer_count: KmerCount,
     ) -> Result<Self, Error>
     {
         validate_param!(0 < minimizer_k && minimizer_k <= Minimizer::MAX_KMER_SIZE,
@@ -77,6 +85,7 @@ impl Params {
             log::warn!("Matching stretch length ({}) is too small, it is not be used for short reads in any case",
             match_length);
         }
+        validate_param!(thresh_kmer_count > 0, "k-mer threshold must be positive");
 
         let mut thresholds = [0; STORE_THRESHOLDS];
         for i in 0..STORE_THRESHOLDS {
@@ -90,7 +99,10 @@ impl Params {
             * (f64::from(SUBSUM_BONUS + SUBSUM_PENALTY) * match_frac - f64::from(SUBSUM_PENALTY));
         assert!(stretch_score > 0.0);
         let stretch_score = stretch_score.ceil() as u32;
-        Ok(Self { minimizer_k, minimizer_w, match_frac, match_length, stretch_minims, stretch_score, thresholds })
+        Ok(Self {
+            minimizer_k, minimizer_w, match_frac, match_length, thresh_kmer_count,
+            stretch_minims, stretch_score, thresholds,
+        })
     }
 
     /// Returns true if the read has enough matching minimizers to be recruited.
@@ -103,10 +115,20 @@ impl Params {
     fn long_read_threshold(&self, n_minims: u32) -> u32 {
         max(1, (f64::from(n_minims) * self.match_frac).ceil() as u32)
     }
+
+    /// k-mer size within the minimizers.
+    pub fn minimizer_k(&self) -> u8 {
+        self.minimizer_k
+    }
+
+    /// Window size for the minimizers.
+    pub fn minimizer_w(&self) -> u8 {
+        self.minimizer_w
+    }
 }
 
 /// Recruitment statistics: how long did it take, how many reads processed and how many recruited.
-struct Stats {
+pub struct Stats {
     timer: Instant,
     recruited: u64,
     processed: u64,
@@ -143,6 +165,18 @@ impl Stats {
         let elapsed = self.timer.elapsed();
         self.print_log_always(elapsed);
         log::info!("Finished recruitment in {}", crate::ext::fmt::Duration(elapsed));
+    }
+
+    /// Total number of recruited reads.
+    #[inline]
+    pub fn recruited(&self) -> u64 {
+        self.recruited
+    }
+
+    /// Total number of processed reads.
+    #[inline]
+    pub fn processed(&self) -> u64 {
+        self.processed
     }
 }
 
@@ -336,7 +370,6 @@ type Answer = Vec<u16>;
 /// Target builder. Can be converted to targets using `finalize()`.
 pub struct TargetBuilder {
     params: Params,
-    thresh_kmer_count: KmerCount,
     total_seqs: u32,
     buffer: Vec<(u32, Minimizer)>,
 
@@ -348,10 +381,9 @@ pub struct TargetBuilder {
 
 impl TargetBuilder {
     /// Creates a new targets builder.
-    /// Discard k-mers that appear off target more than `thresh_kmer_count` times.
-    pub fn new(params: Params, thresh_kmer_count: KmerCount) -> Self {
+    pub fn new(params: Params) -> Self {
         Self {
-            params, thresh_kmer_count,
+            params,
             total_seqs: 0,
             buffer: Vec::new(),
             minim_to_loci: Default::default(),
@@ -382,10 +414,10 @@ impl TargetBuilder {
                 let pos = pos as usize;
                 let is_usable = if u32::from(self.params.minimizer_k) <= base_k {
                     // Check Jellyfish k-mer that is centered around k-mer at `pos`.
-                    counts[min(pos.saturating_sub(shift), n_counts - 1)] < self.thresh_kmer_count
+                    counts[min(pos.saturating_sub(shift), n_counts - 1)] < self.params.thresh_kmer_count
                 } else {
                     // Compare first and last Jellyfish k-mers contained in the k-mer at `pos`.
-                    counts[pos] < self.thresh_kmer_count && counts[pos + shift] < self.thresh_kmer_count
+                    counts[pos] < self.params.thresh_kmer_count && counts[pos + shift] < self.params.thresh_kmer_count
                 };
 
                 match self.minim_to_loci.entry(minimizer) {
@@ -579,7 +611,7 @@ impl Targets {
         &self,
         mut reader: impl FastxRead<Record = T>,
         writers: &mut [impl io::Write],
-    ) -> Result<(), Error>
+    ) -> Result<Stats, Error>
     where T: RecruitableRecord,
           M: MatchesBuffer,
     {
@@ -601,7 +633,7 @@ impl Targets {
             }
         }
         stats.finish();
-        Ok(())
+        Ok(stats)
     }
 
     fn recruit_multi_thread<T, M>(
@@ -610,7 +642,7 @@ impl Targets {
         writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
-    ) -> Result<(), Error>
+    ) -> Result<Stats, Error>
     where T: RecruitableRecord,
           M: MatchesBuffer,
     {
@@ -627,13 +659,14 @@ impl Targets {
     }
 
     /// Recruit reads to the targets, possibly in multiple threads.
+    /// Returns the number of recruited reads and the total number of reads.
     pub(crate) fn recruit(
         &self,
         reader: impl FastxRead<Record = impl RecruitableRecord>,
         mut writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
-    ) -> Result<(), Error>
+    ) -> Result<Stats, Error>
     {
         assert_eq!(writers.len(), self.locus_minimizers.len(), "Unexpected number of writers");
         let single_target = self.n_targets() == 1;
@@ -661,20 +694,20 @@ type Shipment<T> = Vec<(T, Answer)>;
 
 struct Worker<T, M> {
     targets: Targets,
-    buffer1: Vec<Minimizer>,
-    buffer2: M,
     /// Receives records that need to be recruited.
     receiver: Receiver<Shipment<T>>,
     /// Sends already recruited reads back to the main thread.
     sender: Sender<Shipment<T>>,
+    buffer1: Vec<Minimizer>,
+    buffer2: M,
 }
 
 impl<T, M: Default> Worker<T, M> {
     fn new(targets: Targets, receiver: Receiver<Shipment<T>>, sender: Sender<Shipment<T>>) -> Self {
         Self {
+            targets, receiver, sender,
             buffer1: Default::default(),
             buffer2: Default::default(),
-            targets, receiver, sender,
         }
     }
 }
@@ -836,7 +869,7 @@ where T: RecruitableRecord,
     }
 
     /// Finish the main thread: write all remaining shipments to the output files, and stop worker threads.
-    fn finish(mut self) -> Result<(), Error> {
+    fn finish(mut self) -> Result<Stats, Error> {
         assert!(self.reader.is_none() && self.to_send.is_empty());
         for shipment in self.to_write.into_iter() {
             write_shipment(&mut self.writers, &shipment, &mut self.stats)?;
@@ -854,7 +887,7 @@ where T: RecruitableRecord,
             handle.join().expect("Process failed for unknown reason");
         }
         self.stats.finish();
-        Ok(())
+        Ok(self.stats)
     }
 }
 
@@ -878,6 +911,7 @@ where T: Default,
     Ok(())
 }
 
+#[inline]
 fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> Result<Shipment<T>, Error>
 where T: Clone + Default,
       R: FastxRead<Record = T>,

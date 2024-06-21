@@ -4,6 +4,7 @@ use std::{
     fs, thread,
     ffi::OsStr,
     io::{self, Write, BufRead},
+    fmt::Write as FmtWrite,
     cmp::{min, max},
     path::{Path, PathBuf},
     process::{Stdio, Command, ChildStdin},
@@ -26,6 +27,7 @@ use crate::{
         Interval,
         kmers::{JfKmerGetter, KmerCounts},
         fastx::{self, FastxRead},
+        recruit::{self, RecruitableRecord},
         cigar::{self, Cigar},
         aln::{NamedAlignment, Alignment, ReadEnd},
         contigs::{ContigNames, GenomeVersion},
@@ -39,7 +41,7 @@ use crate::{
     },
     math::implies,
 };
-use super::paths;
+use super::{paths, genotype};
 
 fn check_filename(
     filename: &Path,
@@ -330,8 +332,8 @@ fn print_help(extended: bool) {
 
     println!("\n{}", "Usage:".bold());
     println!("    {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam [--no-index] | -I in-list) \\", super::PROGRAM);
-    println!("        -j counts.jf -r reference.fa -o out [args]");
-    println!("    {} preproc -i/-a/-I <input> -~ similar -j counts.jf -r reference.fa -o out [args]", super::PROGRAM);
+    println!("        -r reference.fa -j counts.jf -o out [args]");
+    println!("    {} preproc -i/-a/-I <input> -~ similar -r reference.fa -j counts.jf -o out [args]", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
@@ -581,19 +583,45 @@ fn select_bg_interval(
         ext::fmt::path(ref_filename))))
 }
 
+fn recruit_reads(
+    reader: impl FastxRead<Record = impl RecruitableRecord> + 'static,
+    writer: impl io::Write + Send + 'static,
+    seq_info: &SequencingInfo,
+    bg_region: &BgRegion,
+    args: &Args,
+) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
+{
+    let paired = args.in_files.is_paired_end();
+    let minimizer_kw = seq_info.technology().default_minim_size();
+    let match_frac = seq_info.technology().default_match_frac(paired);
+    let recr_params = recruit::Params::new(minimizer_kw, match_frac, recruit::DEFAULT_MATCH_LEN,
+        super::recruit::DEFAULT_KMER_THRESH)?;
+
+    let target_seqs = [vec![bg_region.padded_sequence.clone()]];
+    let targets = super::recruit::build_targets(target_seqs, recr_params, args.jf_counts.as_ref(), &args.jellyfish)?;
+    const ONE_THREAD: u16 = 1;
+    let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH, seq_info.mean_read_len(), paired);
+    Ok(thread::spawn(move ||
+        targets.recruit(reader, vec![writer], ONE_THREAD, chunk_size).map(|stats| stats.processed())))
+}
+
 /// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
 fn set_mapping_stdin(
-    args: &Args,
-    contigs: &ContigNames,
     child_stdin: ChildStdin,
+    seq_info: &SequencingInfo,
+    bg_region: &BgRegion,
+    args: &Args,
 ) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
 {
     // TODO: Can we optimize this?
     let mut writer = io::BufWriter::new(child_stdin);
-    let handle = fastx::process_readers!(args.in_files, Some(contigs); let {mut} reader; {
-        thread::spawn(move || Ok(reader.copy(&mut writer)?))
-    });
-    Ok(handle)
+    fastx::process_readers!(args.in_files, Some(&bg_region.ref_contigs); let {mut} reader; {
+        if args.run_recruitment {
+            recruit_reads(reader, writer, seq_info, bg_region, args)
+        } else {
+            Ok(thread::spawn(move || reader.copy(&mut writer)))
+        }
+    })
 }
 
 fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: &Path) -> Command {
@@ -633,6 +661,30 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
+}
+
+fn first_step_str(args: &Args, bg_region: &BgRegion) -> String {
+    let mut s = String::new();
+    if args.run_recruitment {
+        write!(s, "_recruit_ --target {}", bg_region.interval).unwrap();
+    } else {
+        s.push_str("_interleave_");
+    }
+
+    s.push_str(" -i ");
+    if args.in_files.reads1.len() > 1 || args.in_files.alns.len() > 1 {
+        s.push_str("...");
+    } else if let Some(filename) = args.in_files.alns.first() {
+        s.push_str(&ext::fmt::path(filename));
+    } else {
+        s.push_str(&ext::fmt::path(&args.in_files.reads1[0]));
+        if let Some(filename) = args.in_files.reads2.first() {
+            s.push(' ');
+            s.push_str(&ext::fmt::path(filename));
+        }
+    }
+    s.push_str(" | ");
+    s
 }
 
 /// Mapping parameters will be stored at `analysis/bg/MAPPING_PARAMS`.
@@ -751,7 +803,7 @@ fn run_mapping(
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
-    let handle = set_mapping_stdin(args, &bg_region.ref_contigs, mapping_stdin.unwrap())?;
+    let handle = set_mapping_stdin(mapping_stdin.unwrap(), seq_info, bg_region, args)?;
 
     let tmp_bed = out_dir.join("tmp.bed");
     let mut bed_file = ext::sys::create_file(&tmp_bed)?;
@@ -772,7 +824,8 @@ fn run_mapping(
         .arg("-o").arg(&tmp_bam)
         .stdin(Stdio::from(mapping_stdout.unwrap()))
         .stdout(Stdio::piped()).stderr(Stdio::piped());
-    log::debug!("Read mapping: {} | {}", ext::fmt::command(&mapping), ext::fmt::command(&samtools));
+    log::debug!("    {}{} | {}", first_step_str(&args, bg_region),
+        ext::fmt::command(&mapping), ext::fmt::command(&samtools));
     let samtools_child = samtools.spawn().map_err(add_path!(args.samtools))?;
     pipe_guard.push(args.samtools.clone(), samtools_child);
     pipe_guard.wait()?;
@@ -835,7 +888,7 @@ fn load_alns(
     Ok((alns, paired_counts[1] > 0))
 }
 
-const MEAN_LEN_RECORDS: usize = 5000;
+const MEAN_LEN_RECORDS: usize = 10000;
 
 /// Calculate mean read length from existing alignments.
 fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
@@ -1032,7 +1085,7 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
     } else {
         log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.reads1));
         args.in_files.reads1.iter()
-            .map(|filename| fastx::count_reads_fastx(filename).map(|t| t.n_reads()))
+            .map(|filename| fastx::count_reads_fastx(filename))
             .sum::<Result<u64, _>>()?
     };
     if args.in_files.interleaved {

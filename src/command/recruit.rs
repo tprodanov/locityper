@@ -24,8 +24,10 @@ use crate::{
 };
 use colored::Colorize;
 
-const SR_CHUNK_SIZE: u64 = 10_000;
-const LR_CHUNK_SIZE: u64 = 300;
+const SR_CHUNK_SIZE: usize = 10_000;
+const LR_CHUNK_SIZE: usize = 300;
+
+pub const DEFAULT_KMER_THRESH: KmerCount = 10;
 
 struct Args {
     in_files: super::preproc::InputFiles,
@@ -41,7 +43,7 @@ struct Args {
     minimizer_kw: (u8, u8),
     match_frac: f64,
     match_len: u32,
-    chunk_size: u64,
+    chunk_size: usize,
     thresh_kmer_count: KmerCount,
 
     threads: u16,
@@ -63,9 +65,9 @@ impl Default for Args {
 
             minimizer_kw: (15, 5),
             match_frac: 0.6,
-            match_len: 2000,
+            match_len: recruit::DEFAULT_MATCH_LEN,
             chunk_size: SR_CHUNK_SIZE,
-            thresh_kmer_count: 10,
+            thresh_kmer_count: DEFAULT_KMER_THRESH,
 
             threads: 8,
             jellyfish: PathBuf::from("jellyfish"),
@@ -99,7 +101,6 @@ impl Args {
         self.threads = max(self.threads, 1);
 
         validate_param!(self.chunk_size > 0, "Chunk size must be positive");
-        validate_param!(self.thresh_kmer_count > 0, "k-mer threshold must not be zero");
         if self.jf_counts.is_some() {
             self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         }
@@ -194,7 +195,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Recruit reads in chunks of this size [{}].\n\
         {EMPTY}  Impacts runtime in multi-threaded read recruitment.",
         "-c, --chunk-size".green(), "INT".yellow(),
-        super::fmt_def(PrettyU64(defaults.chunk_size)));
+        super::fmt_def(PrettyU64(defaults.chunk_size as u64)));
     println!("    {:KEY$} {:VAL$}  Parameter preset (illumina|illumina-SE|hifi|pacbio|ont).\n\
         {EMPTY}  Modifies {}, {}, see {} for default values.\n\
         {EMPTY}  Additionally, changes {} to {} for long reads.",
@@ -256,7 +257,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('L') | Long("match-len") | Long("match-length") =>
                 args.match_len = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('c') | Long("chunk") | Long("chunk-size") =>
-                args.chunk_size = parser.value()?.parse::<PrettyU64>()?.get(),
+                args.chunk_size = parser.value()?.parse::<PrettyU64>()?.get() as usize,
 
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
@@ -455,16 +456,22 @@ fn load_seqs_and_outputs(args: &Args) -> Result<SeqsFiles, Error> {
     }
 }
 
-/// Loads k-mer counts, if needed, and creates recruitment targets.
-fn build_targets(
-    seqs: Vec<Vec<Vec<u8>>>,
+/// Creates recruitment targets based on the input sequences.
+///
+/// seqs: collection of loci, each with collection of sequences (each Vec<u8>).
+///
+/// If Jellyfish counts are provided, masks minimizers based on the k-mer content.
+pub fn build_targets(
+    seqs: impl IntoIterator<Item = Vec<Vec<u8>>>,
     recr_params: recruit::Params,
-    args: &Args,
+    jf_counts: Option<&PathBuf>,
+    jellyfish: &PathBuf,
 ) -> Result<recruit::Targets, Error>
 {
-    let mut target_builder = recruit::TargetBuilder::new(recr_params, args.thresh_kmer_count);
-    let opt_kmer_getter = match args.jf_counts.as_ref() {
-        Some(filename) => Some(JfKmerGetter::new(args.jellyfish.clone(), filename.to_path_buf())?),
+    let minimizer_k = recr_params.minimizer_k();
+    let mut target_builder = recruit::TargetBuilder::new(recr_params);
+    let opt_kmer_getter = match jf_counts {
+        Some(filename) => Some(JfKmerGetter::new(jellyfish.clone(), filename.to_path_buf())?),
         None => {
             log::warn!("Consider providing reference k-mer counts (-j)");
             None
@@ -473,7 +480,7 @@ fn build_targets(
     for locus_seqs in seqs.into_iter() {
         let kmer_counts = match &opt_kmer_getter {
             Some(kmer_getter) => kmer_getter.fetch(locus_seqs.clone())?,
-            None => KmerCounts::new_zeroed(u32::from(args.minimizer_kw.0), locus_seqs.iter().map(Vec::len)),
+            None => KmerCounts::new_zeroed(u32::from(minimizer_k), locus_seqs.iter().map(Vec::len)),
         };
         let contig_set = ContigSet::new(Arc::new(ContigNames::empty()), locus_seqs, kmer_counts);
         target_builder.add(&contig_set, 0.0);
@@ -510,12 +517,12 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let timer = Instant::now();
     args.in_files.fill_from_inlist()?;
     let args = args.validate()?;
-    let recr_params = recruit::Params::new(args.minimizer_kw, args.match_frac, args.match_len)?;
+    let recr_params = recruit::Params::new(args.minimizer_kw, args.match_frac, args.match_len, args.thresh_kmer_count)?;
 
     super::greet();
     let (seqs, files) = load_seqs_and_outputs(&args)?;
-    let targets = build_targets(seqs, recr_params, &args)?;
-    super::genotype::recruit_to_targets(&targets, &args.in_files, files, None, args.chunk_size as usize, args.threads,
+    let targets = build_targets(seqs, recr_params, args.jf_counts.as_ref(), &args.jellyfish)?;
+    super::genotype::recruit_to_targets(&targets, &args.in_files, files, None, args.threads, args.chunk_size,
         |contigs| load_target_regions(contigs, &args))?;
 
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));

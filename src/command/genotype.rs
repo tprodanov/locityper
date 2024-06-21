@@ -40,6 +40,8 @@ use crate::{
 };
 use super::{paths, DebugLvl, preproc::InputFiles};
 
+pub const DEFAULT_CHUNK_LENGTH: u64 = 3_000_000;
+
 struct Args {
     in_files: InputFiles,
     preproc: Option<PathBuf>,
@@ -90,9 +92,9 @@ impl Default for Args {
 
             minimizer_kw: None,
             match_frac: None,
-            match_len: 2000,
+            match_len: recruit::DEFAULT_MATCH_LEN,
             thresh_kmer_count: 5,
-            chunk_length: 3_000_000,
+            chunk_length: DEFAULT_CHUNK_LENGTH,
 
             assgn_params: Default::default(),
             scheme_params: Default::default(),
@@ -106,7 +108,6 @@ impl Args {
         self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
 
-        validate_param!(self.thresh_kmer_count > 0, "k-mer threshold must not be zero");
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
@@ -694,10 +695,10 @@ pub(super) fn recruit_to_targets(
     in_files: &InputFiles,
     writers: Vec<impl io::Write>,
     is_paired_end: Option<bool>,
-    chunk_size: usize,
     threads: u16,
+    chunk_size: usize,
     get_targets: impl FnOnce(&Arc<ContigNames>) -> Result<Vec<Interval>, Error>,
-) -> Result<(), Error>
+) -> Result<recruit::Stats, Error>
 {
     if in_files.has_indexed_alignment() {
         assert!(in_files.alns.len() == 1);
@@ -721,6 +722,11 @@ pub(super) fn recruit_to_targets(
     }
 }
 
+/// Calculate chunk size based on the chunk length (sum bp, processed in one chunk) and mean read length.
+pub fn calculate_chunk_size(chunk_length: u64, mean_read_len: f64, is_paired_end: bool) -> usize {
+    max(1, (chunk_length as f64 / mean_read_len * (if is_paired_end { 0.5 } else { 1.0 })) as usize)
+}
+
 /// Recruits reads to all loci, where neither reads nor alignments are available.
 fn recruit_reads(
     loci: &[LocusData],
@@ -742,7 +748,7 @@ fn recruit_reads(
     }
 
     log::info!("Generating recruitment targets");
-    let mut target_builder = recruit::TargetBuilder::new(recr_params, args.thresh_kmer_count);
+    let mut target_builder = recruit::TargetBuilder::new(recr_params);
     let mut writers = Vec::with_capacity(n_filt_loci);
     let mean_read_len = bg_distr.seq_info().mean_read_len();
 
@@ -755,9 +761,8 @@ fn recruit_reads(
     }
     let targets = target_builder.finalize();
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
-    let chunk_size = max(1, (args.chunk_length as f64 / mean_read_len
-        * (if is_paired_end { 0.5 } else { 1.0 })) as usize);
-    recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), chunk_size, args.threads,
+    let chunk_size = calculate_chunk_size(args.chunk_length, mean_read_len, is_paired_end);
+    recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), args.threads, chunk_size,
         |contigs| create_fetch_targets(contigs, bg_distr, &filt_loci))?;
 
     for locus in filt_loci.iter() {
@@ -986,7 +991,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let recr_params = recruit::Params::new(
         args.minimizer_kw.unwrap_or_else(|| tech.default_minim_size()),
         args.match_frac.unwrap_or_else(|| tech.default_match_frac(bg_distr.insert_distr().is_paired_end())),
-        args.match_len)?;
+        args.match_len, args.thresh_kmer_count)?;
 
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;

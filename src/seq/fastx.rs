@@ -473,90 +473,32 @@ impl ProcLogger {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct SumLength {
-    n_reads: u64,
-    sum_length: u64,
-}
-
-impl SumLength {
-    /// Number of reads in the input file.
-    #[inline]
-    pub fn n_reads(&self) -> u64 {
-        self.n_reads
-    }
-
-    /// Sum length of all sequences in the input file.
-    #[inline]
-    pub fn sum_length(&self) -> u64 {
-        self.sum_length
-    }
-}
-
-fn count_reads_fasta(mut stream: impl BufRead) -> io::Result<SumLength> {
+fn count_reads_fasta(mut stream: impl BufRead) -> io::Result<u64> {
+    let mut count = 0;
     let mut line = Vec::with_capacity(4096);
-    // Check first line for carriage return.
-    let has_carriage_return = if stream.read_until(b'\n', &mut line)? > 0 {
-        line.len() >= 2 && line[line.len() - 2] == b'\r'
-    } else {
-        return Ok(SumLength::default());
-    };
-
-    // Already read one line.
-    let mut n_reads: u64 = 1;
-    let mut sum_length: u64 = 0;
-    let mut n_seq_lines: u64 = 0;
-
-    line.clear();
-    while stream.read_until(b'\n', &mut line)? > 0 {
-        if line[0] == b'>' {
-            n_reads += 1;
-        } else {
-            sum_length += line.len() as u64;
-            n_seq_lines += 1;
-        }
+    while stream.read_until(b'>', &mut line)? > 0 {
+        count += 1;
         line.clear();
     }
-    // Do not count \n.
-    sum_length = sum_length.checked_sub(n_seq_lines).expect("Sequences are too short");
-    if has_carriage_return {
-        // Do not count \r.
-        sum_length = sum_length.checked_sub(n_seq_lines).expect("Sequences are too short");
-    }
-    Ok(SumLength { n_reads, sum_length })
+    Ok(count)
 }
 
-fn count_reads_fastq(mut stream: impl BufRead) -> io::Result<SumLength> {
-    let mut n_reads: u64 = 0;
-    let mut sum_length: u64 = 0;
-
-    let mut name = Vec::with_capacity(4096);
-    let mut seq = Vec::with_capacity(4096);
-    let mut buffer = Vec::with_capacity(4096);
-    while stream.read_until(b'\n', &mut name)? > 0 {
-        name.clear();
-        seq.clear();
-        buffer.clear();
-
-        n_reads += 1;
-        stream.read_until(b'\n', &mut seq)?;
-        sum_length += seq.len() as u64;
-        stream.read_until(b'\n', &mut buffer)?;
-        stream.read_until(b'\n', &mut buffer)?;
+fn count_reads_fastq(mut stream: impl BufRead) -> io::Result<u64> {
+    let mut count = 0;
+    let mut line = Vec::with_capacity(4096);
+    while stream.read_until(b'\n', &mut line)? > 0 {
+        count += 1;
+        line.clear();
     }
-
-    // Remove \n count times.
-    sum_length = sum_length.checked_sub(n_reads).expect("Sequences are too short");
-    if seq.len() >= 2 && seq[seq.len() - 2] == b'\r' {
-        // Assume that all sequences end with \r, remove corresponding number of characters.
-        sum_length = sum_length.checked_sub(n_reads).expect("Sequences are too short");
+    if count % 4 != 0 {
+        log::warn!("Number of lines in FASTQ file does not divide 4 (mod = {})", count % 4);
     }
-    Ok(SumLength { n_reads, sum_length })
+    Ok(count / 4)
 }
 
-/// Count the number of FASTA/FASTQ reads in the stream, as well as the total number of basepairs.
+/// Count the number of FASTA/FASTQ reads in the stream.
 /// NOTE: Fasta and Fastq reads should not be present in the same file.
-pub fn count_reads_fastx(path: &Path) -> Result<SumLength, Error> {
+pub fn count_reads_fastx(path: &Path) -> Result<u64, Error> {
     let mut stream = ext::sys::open(path)?;
     let mut first_byte = [0_u8; 1];
     if stream.read(&mut first_byte).map_err(add_path!(path))? == 1 {
@@ -569,7 +511,7 @@ pub fn count_reads_fastx(path: &Path) -> Result<SumLength, Error> {
             }
         }.map_err(add_path!(path))
     } else {
-        Ok(SumLength::default())
+        Ok(0)
     }
 }
 
