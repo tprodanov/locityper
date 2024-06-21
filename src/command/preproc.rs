@@ -242,6 +242,9 @@ struct Args {
     min_mapq: u8,
 
     threads: u16,
+    recr_threads: f64,
+    run_recruitment: bool,
+
     rerun: super::Rerun,
     strobealign: PathBuf,
     minimap: PathBuf,
@@ -253,7 +256,6 @@ struct Args {
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
     max_clipping: f64,
-    run_recruitment: bool,
 
     bg_params: bg::Params,
 }
@@ -271,6 +273,9 @@ impl Default for Args {
             min_mapq: 20,
 
             threads: 8,
+            recr_threads: 0.4,
+            run_recruitment: true,
+
             rerun: super::Rerun::None,
             debug: false,
             strobealign: PathBuf::from("strobealign"),
@@ -279,7 +284,6 @@ impl Default for Args {
             jellyfish: PathBuf::from("jellyfish"),
             explicit_technology: false,
             max_clipping: 0.02,
-            run_recruitment: true,
             bg_params: bg::Params::default(),
         }
     }
@@ -303,6 +307,12 @@ impl Args {
                 log::warn!("Running in single-end mode.");
             }
         }
+
+        validate_param!(self.recr_threads >= 0.0, "Number of recruitment threads ({}) must be non-negative",
+            self.recr_threads);
+        validate_param!(self.recr_threads < 1.0 || self.recr_threads.fract() < 1e-8,
+            "Number of recruitment threads ({}) must be either integer, or smaller than 1",
+            self.recr_threads);
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
@@ -378,6 +388,14 @@ fn print_help(extended: bool) {
         "-b, --bg-region".green(), "STR".yellow());
 
     if extended {
+        println!("\n{}", "Read recruitment:".bold());
+        println!("    {:KEY$} {:VAL$}  Skip read recruitment before read mapping.\n\
+            {EMPTY}  Otherwise, read recruitment is executed with default parameters.",
+            "    --skip-recruit".green(), super::flag());
+        println!("    {:KEY$} {:VAL$}  Number of threads, used for read recruitment [{}].\n\
+            {EMPTY}  Fraction of the total number of threads, if under 1.",
+            "    --recr-threads".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.recr_threads));
+
         println!("\n{}", "Insert size and error profile estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
             "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.min_mapq));
@@ -419,9 +437,6 @@ fn print_help(extended: bool) {
     }
 
     println!("\n{}", "Execution arguments:".bold());
-    println!("    {:KEY$} {:VAL$}  Skip read recruitment before read mapping.\n\
-        {EMPTY}  Otherwise, read recruitment is executed with default parameters.",
-        "    --skip-recruit".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun everything ({}); do not rerun\n\
@@ -508,6 +523,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
+            Long("recr-threads") | Long("recruit-threads") => args.recr_threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Long("debug") => args.debug = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
@@ -589,6 +605,7 @@ fn recruit_reads(
     seq_info: &SequencingInfo,
     bg_region: &BgRegion,
     is_paired_end: bool,
+    recr_threads: u16,
 ) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
 {
     let minimizer_kw = seq_info.technology().default_minim_size();
@@ -603,11 +620,10 @@ fn recruit_reads(
     let mut targets = target_builder.finalize();
     targets.hide_recruited_reads();
 
-    const ONE_THREAD: u16 = 1;
     let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH,
         seq_info.mean_read_len(), is_paired_end);
     Ok(thread::spawn(move ||
-        targets.recruit(reader, vec![writer], ONE_THREAD, chunk_size).map(|stats| stats.processed())))
+        targets.recruit(reader, vec![writer], recr_threads, chunk_size).map(|stats| stats.processed())))
 }
 
 /// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
@@ -615,6 +631,7 @@ fn set_mapping_stdin(
     child_stdin: ChildStdin,
     seq_info: &SequencingInfo,
     bg_region: &BgRegion,
+    recr_threads: u16,
     args: &Args,
 ) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
 {
@@ -622,7 +639,7 @@ fn set_mapping_stdin(
     let mut writer = io::BufWriter::new(child_stdin);
     fastx::process_readers!(args.in_files, Some(&bg_region.ref_contigs); let {mut} reader; {
         if args.run_recruitment {
-            recruit_reads(reader, writer, seq_info, bg_region, args.in_files.is_paired_end())
+            recruit_reads(reader, writer, seq_info, bg_region, args.in_files.is_paired_end(), recr_threads)
         } else {
             Ok(thread::spawn(move || reader.copy(&mut writer)))
         }
@@ -785,6 +802,25 @@ fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: &Interva
     }
 }
 
+/// Split total number of threads into the recruitment and mapping threads.
+fn split_n_threads(args: &Args) -> (u16, u16) {
+    if !args.run_recruitment {
+        let mapping_threads = max(1, args.threads);
+        log::info!("Mapping reads to the reference in {} threads", mapping_threads);
+        return (0, mapping_threads);
+    }
+
+    let recr_threads = if args.recr_threads < 1.0 {
+        max(1, (f64::from(args.threads) * args.recr_threads).round() as u16)
+    } else {
+        max(1, min(args.threads.saturating_sub(1), args.recr_threads.round() as u16))
+    };
+    let mapping_threads = max(1, args.threads.saturating_sub(recr_threads));
+    log::info!("Recruiting and mapping reads to the reference in {} and {} threads, respectively",
+        recr_threads, mapping_threads);
+    (recr_threads, mapping_threads)
+}
+
 /// Map reads to the whole reference genome, and then take only reads mapped to the corresponding BED file.
 /// Subsample reads if the corresponding rate is less than 1.
 /// Return the total number of reads/read pairs.
@@ -801,15 +837,14 @@ fn run_mapping(
         return Ok(());
     }
 
-    let start = Instant::now();
-    let mapping_threads = max(1, args.threads - args.run_recruitment as u16);
+    let (recr_threads, mapping_threads) = split_n_threads(args);
     let mut mapping = create_mapping_command(args, seq_info, ref_filename, mapping_threads);
     let mapping_exe = PathBuf::from(mapping.get_program().to_owned());
     let mut mapping_child = mapping.spawn().map_err(add_path!(mapping_exe))?;
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
-    let handle = set_mapping_stdin(mapping_stdin.unwrap(), seq_info, bg_region, args)?;
+    let handle = set_mapping_stdin(mapping_stdin.unwrap(), seq_info, bg_region, recr_threads, args)?;
 
     let tmp_bed = out_dir.join("tmp.bed");
     let mut bed_file = ext::sys::create_file(&tmp_bed)?;
@@ -835,7 +870,6 @@ fn run_mapping(
     let samtools_child = samtools.spawn().map_err(add_path!(args.samtools))?;
     pipe_guard.push(args.samtools.clone(), samtools_child);
     pipe_guard.wait()?;
-    log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     let total_reads = handle.join()
         .map_err(|e| Error::RuntimeError(format!("Read mapping failed: {:?}", e)))??;
     seq_info.set_total_reads(total_reads);
@@ -1031,7 +1065,6 @@ fn estimate_bg_distrs(
         log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
 
         let bam_filename = out_dir.join("aln.bam");
-        log::info!("Mapping reads to the reference in {} threads", args.threads);
         run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, bg_region)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));

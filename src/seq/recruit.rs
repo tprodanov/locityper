@@ -216,8 +216,8 @@ impl Progress {
         let speed = 1e-3 * processed / elapsed.as_secs_f64();
         let total_time = crate::ext::fmt::Duration(elapsed);
         if self.show_recruited {
-            log::debug!("    Recruited {} / {}k reads ({:.4}%) in {} ({:5.1}k reads/s)",
-                self.recruited, 1e-3 * processed, 100.0 * self.recruited as f64 / processed,
+            log::debug!("    Recruited {} / {} reads ({:.4}%) in {} ({:5.1}k reads/s)",
+                self.recruited, self.processed, 100.0 * self.recruited as f64 / processed,
                 total_time, speed);
         } else {
             log::debug!("    Processed {} reads in {} ({:5.1}k reads/s)", self.processed, total_time, speed);
