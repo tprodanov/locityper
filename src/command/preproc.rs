@@ -273,7 +273,7 @@ impl Default for Args {
             min_mapq: 20,
 
             threads: 8,
-            recr_threads: 0.4,
+            recr_threads: 0.5,
             run_recruitment: true,
 
             rerun: super::Rerun::None,
@@ -810,11 +810,12 @@ fn split_n_threads(args: &Args) -> (u16, u16) {
         return (0, mapping_threads);
     }
 
-    let recr_threads = if args.recr_threads < 1.0 {
-        max(1, (f64::from(args.threads) * args.recr_threads).round() as u16)
+    let mut recr_threads = if args.recr_threads < 1.0 {
+        (f64::from(args.threads) * args.recr_threads).round()
     } else {
-        max(1, min(args.threads.saturating_sub(1), args.recr_threads.round() as u16))
-    };
+        args.recr_threads.round()
+    } as u16;
+    recr_threads = max(1, min(recr_threads, args.threads.saturating_sub(1)));
     let mapping_threads = max(1, args.threads.saturating_sub(recr_threads));
     log::info!("Recruiting and mapping reads to the reference in {} and {} threads, respectively",
         recr_threads, mapping_threads);
