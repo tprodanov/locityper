@@ -354,6 +354,8 @@ pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
 
     fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount>;
 
+    fn is_empty(&self) -> bool;
+
     fn iter(&self) -> Self::Iter<'_>;
 }
 
@@ -389,6 +391,11 @@ impl MatchesBuffer for MatchesMap {
     #[inline(always)]
     fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount> {
         self.get_mut(&locus_ix)
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 
     #[inline(always)]
@@ -431,6 +438,11 @@ impl MatchesBuffer for SingleMatch {
     fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount> {
         debug_assert!(locus_ix == 0);
         self.as_mut()
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.is_none()
     }
 
     #[inline(always)]
@@ -695,8 +707,9 @@ impl Targets {
         minimizers: &mut Vec<Minimizer>,
         matches: &mut M,
     ) {
-        // Matches have 8-byte values. Reinterpret them as four u16s: (usable1, unusable1, usable2, unusable2).
+        answer.clear();
         matches.clear();
+
         // First mate.
         minimizers.clear();
         kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, minimizers);
@@ -709,6 +722,8 @@ impl Targets {
                 if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
             }
         }
+
+        if matches.is_empty() { return; }
 
         // Second mate.
         minimizers.clear();
@@ -725,7 +740,7 @@ impl Targets {
             }
         }
 
-        answer.clear();
+
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };
             if self.params.short_read_passes(counts.usable1, counts.unusable1, total1)
