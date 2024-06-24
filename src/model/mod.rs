@@ -6,7 +6,7 @@ pub mod bam;
 
 use crate::{
     math::Ln,
-    err::{Error, validate_param},
+    err::{validate_param},
 };
 use windows::WeightCalculator;
 
@@ -93,7 +93,7 @@ const AUTO_TWEAK_MULT: f64 = 0.5;
 const AUTO_TWEAK_MAX: u32 = 200;
 
 impl Params {
-    pub fn validate(&mut self) -> Result<(), Error> {
+    pub fn validate(&mut self) -> crate::Result<()> {
         validate_param!(self.boundary_size > 0, "Boundary size ({}) cannot be zero.", self.boundary_size);
         validate_param!(!self.prob_diff.is_nan() && self.prob_diff.is_finite(),
             "Unexpected probability difference ({:.4}) value", self.prob_diff);
@@ -134,7 +134,7 @@ impl Params {
         Ok(())
     }
 
-    pub fn set_tweak_size(&mut self, window_size: u32) -> Result<(), Error> {
+    pub fn set_tweak_size(&mut self, window_size: u32) -> crate::Result<()> {
         if self.tweak.is_none() {
             self.tweak = Some((
                 (window_size as f64 * AUTO_TWEAK_MULT).round() as u32)

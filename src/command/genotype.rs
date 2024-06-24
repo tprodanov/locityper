@@ -11,7 +11,7 @@ use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use htslib::bam::{self, Read as BamRead};
 use crate::{
-    err::{Error, validate_param, add_path},
+    err::{Error, error, validate_param, add_path},
     math::{
         Ln,
         distr::WithQuantile,
@@ -104,7 +104,7 @@ impl Default for Args {
 
 impl Args {
     /// Validate arguments, modifying some, if needed.
-    fn validate(mut self) -> Result<Self, Error> {
+    fn validate(mut self) -> crate::Result<Self> {
         self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
 
@@ -312,7 +312,7 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
-fn parse_args(argv: &[String]) -> Result<Args, Error> {
+fn parse_args(argv: &[String]) -> crate::Result<Args> {
     if argv.is_empty() {
         print_help(false);
         std::process::exit(1);
@@ -465,7 +465,7 @@ fn locus_name_matches<'a>(path: &'a Path, subset_loci: &HashSet<String>) -> Opti
 /// Repeated lines <locus> <genotype> are not allowed.
 ///
 /// Output dictionary: `locus -> { genotype -> ln-prior }`.
-fn load_priors(path: &Path) -> Result<HashMap<String, HashMap<String, f64>>, Error> {
+fn load_priors(path: &Path) -> crate::Result<HashMap<String, HashMap<String, f64>>> {
     let mut res: HashMap<String, HashMap<String, f64>> = HashMap::default();
     for line in ext::sys::open(path)?.lines() {
         let line = line.map_err(add_path!(path))?;
@@ -474,24 +474,24 @@ fn load_priors(path: &Path) -> Result<HashMap<String, HashMap<String, f64>>, Err
         }
         let cols: Vec<_> = line.trim_end().split_whitespace().collect();
         if cols.len() < 3 {
-            return Err(Error::InvalidData(format!(
-                "Cannot parse genotype priors: invalid line {:?} (expected at least 3 columns)", line)));
+            return Err(error!(InvalidData,
+                "Cannot parse genotype priors: invalid line {:?} (expected at least 3 columns)", line));
         }
         let locus = cols[0];
         let gt = cols[1];
         let prior: f64 = cols[2].parse()
             .map(Ln::from_log10)
-            .map_err(|_| Error::InvalidData(format!("Cannot parse genotype priors: offending line {:?}", line)))?;
+            .map_err(|_| error!(InvalidData, "Cannot parse genotype priors: offending line {:?}", line))?;
         if prior > 0.0 {
-            return Err(Error::InvalidData(format!(
-                "Cannot parse genotype priors: offending line {:?} (priors must be in log-10 space)", line)));
+            return Err(error!(InvalidData,
+                "Cannot parse genotype priors: offending line {:?} (priors must be in log-10 space)", line));
         }
 
         if let Some(old_prior) = res.entry(locus.to_owned()).or_default().insert(gt.to_owned(), prior) {
             if old_prior != prior {
-                return Err(Error::InvalidData(format!(
+                return Err(error!(InvalidData,
                     "Cannot parse genotype priors: locus {} genotype {} contains two priors ({} and {})",
-                    locus, gt, Ln::from_log10(old_prior), Ln::from_log10(prior))));
+                    locus, gt, Ln::from_log10(old_prior), Ln::from_log10(prior)));
             }
         }
     }
@@ -528,7 +528,7 @@ impl LocusData {
 }
 
 /// Removes all files with `.gz` extension, as well as `alns` directory, if it exists.
-fn clean_dir(dir: &Path, n_warnings: &mut usize) -> Result<(), Error> {
+fn clean_dir(dir: &Path, n_warnings: &mut usize) -> crate::Result<()> {
     let gz_files = ext::sys::filenames_with_ext(dir, "gz")?;
     let alns_dir = dir.join(paths::ALNS_DIR);
     let alns_exist = alns_dir.exists();
@@ -559,7 +559,7 @@ fn load_loci(
     out_path: &Path,
     subset_loci: &HashSet<String>,
     rerun: super::Rerun,
-) -> Result<Vec<LocusData>, Error>
+) -> crate::Result<Vec<LocusData>>
 {
     log::info!("Loading database");
     let out_loci_dir = out_path.join(paths::LOCI_DIR);
@@ -648,7 +648,7 @@ fn create_fetch_targets(
     contigs: &Arc<ContigNames>,
     bg_distr: &BgDistr,
     filt_loci: &[&LocusData],
-) -> Result<Vec<Interval>, Error>
+) -> crate::Result<Vec<Interval>>
 {
     let mut intervals = Vec::new();
     for locus in filt_loci {
@@ -675,11 +675,11 @@ fn create_fetch_targets(
 }
 
 /// Check first read in the BAM/CRAM file, and check if it is paired.
-fn identify_pairedness(bam_reader: &mut bam::IndexedReader) -> Result<bool, Error> {
+fn identify_pairedness(bam_reader: &mut bam::IndexedReader) -> crate::Result<bool> {
     bam_reader.fetch(bam::FetchDefinition::All)?;
     let mut record = bam::Record::new();
     if bam_reader.read(&mut record).transpose()?.is_none() {
-        Err(Error::InvalidData("Input BAM/CRAM file is empty".to_string()))
+        Err(error!(InvalidData, "Input BAM/CRAM file is empty"))
     } else {
         log::debug!("Input BAM/CRAM file is identified as {}-end",
             if record.is_paired() { "paired" } else { "unpaired "});
@@ -697,8 +697,8 @@ pub(super) fn recruit_to_targets(
     is_paired_end: Option<bool>,
     threads: u16,
     chunk_size: usize,
-    get_targets: impl FnOnce(&Arc<ContigNames>) -> Result<Vec<Interval>, Error>,
-) -> Result<recruit::Progress, Error>
+    get_targets: impl FnOnce(&Arc<ContigNames>) -> crate::Result<Vec<Interval>>,
+) -> crate::Result<recruit::Progress>
 {
     if in_files.has_indexed_alignment() {
         assert!(in_files.alns.len() == 1);
@@ -733,7 +733,7 @@ fn recruit_reads(
     bg_distr: &BgDistr,
     args: &Args,
     recr_params: recruit::Params,
-) -> Result<(), Error>
+) -> crate::Result<()>
 {
     let filt_loci: Vec<&LocusData> = loci.iter()
         .filter(|locus| !locus.reads_filename.exists() && !locus.aln_filename.exists())
@@ -813,7 +813,7 @@ fn create_mapping_command(
     cmd
 }
 
-fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> Result<(), Error> {
+fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> crate::Result<()> {
     if locus.aln_filename.exists() {
         log::info!("    Skipping read mapping");
         return Ok(());
@@ -855,7 +855,7 @@ fn generate_genotypes(
     contigs: &ContigNames,
     opt_priors: Option<&HashMap<String, f64>>,
     ploidy: usize,
-) -> Result<(Vec<Genotype>, Vec<f64>), Error>
+) -> crate::Result<(Vec<Genotype>, Vec<f64>)>
 {
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
@@ -865,10 +865,10 @@ fn generate_genotypes(
         for (s, &prior) in priors_map.iter() {
             let gt = Genotype::parse(s, contigs)?;
             if prior > 0.0 || prior.is_nan() {
-                return Err(Error::InvalidInput(format!("Invalid prior {} for genotype {}", prior, s)));
+                return Err(error!(InvalidInput, "Invalid prior {} for genotype {}", prior, s));
             } else if gt.ploidy() != ploidy {
-                return Err(Error::InvalidInput(format!(
-                    "Cannot load prior for genotype {} (expected ploidy {})", s, ploidy)));
+                return Err(error!(InvalidInput,
+                    "Cannot load prior for genotype {} (expected ploidy {})", s, ploidy));
             } else if prior.is_finite() {
                 genotypes.push(gt);
                 priors.push(prior);
@@ -892,7 +892,7 @@ fn analyze_locus(
     opt_priors: Option<&HashMap<String, f64>>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
-) -> Result<(), Error>
+) -> crate::Result<()>
 {
     log::info!("{} {}", "Analyzing".bold(), locus.set.tag().bold());
     let timer = Instant::now();
@@ -939,7 +939,7 @@ fn analyze_locus(
         let contig_ids: Vec<ContigId> = contigs.ids().collect();
         let (genotypes, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
         if genotypes.is_empty() {
-            return Err(Error::RuntimeError(format!("No available genotypes for locus {}", locus.set.tag())));
+            return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
 
         let dist_filename = locus.db_locus_dir.join(paths::DISTANCES);
@@ -973,7 +973,7 @@ fn analyze_locus(
     Ok(())
 }
 
-pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let mut args = parse_args(argv)?;
     args.in_files.fill_from_inlist()?;
     let mut args = args.validate()?;

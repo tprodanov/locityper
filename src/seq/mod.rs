@@ -18,7 +18,7 @@ pub use fastx::write_fasta;
 
 use std::io::{Read, Seek};
 use bio::io::fasta;
-use crate::err::{Error, add_path};
+use crate::err::{error, add_path};
 
 /// Make nucleotide sequence standard: only letters A,C,G,T,N.
 pub fn standardize(seq: &mut [u8]) -> Result<(), u8> {
@@ -142,18 +142,18 @@ pub fn fetch_seq(
     contig: &str,
     start: u64,
     end: u64,
-) -> Result<Vec<u8>, Error> {
+) -> crate::Result<Vec<u8>> {
     assert!(start < end, "Cannot fetch sequence for an empty interval {}:{}-{}", contig, start + 1, end);
     fasta.fetch(contig, start.into(), end.into()).map_err(add_path!(!))?;
     let len = (end - start) as usize;
     let mut seq = Vec::with_capacity(len);
     fasta.read(&mut seq).map_err(add_path!(!))?;
     if seq.len() != len {
-        return Err(Error::RuntimeError(format!("Fetched sequence of incorrect size ({}) for interval {}:{}-{} ({} bp)",
-        seq.len(), contig, start + 1, end, len)));
+        return Err(error!(RuntimeError, "Fetched sequence of incorrect size ({}) for interval {}:{}-{} ({} bp)",
+        seq.len(), contig, start + 1, end, len));
     }
 
-    crate::seq::standardize(&mut seq).map_err(|nt| Error::InvalidData(format!(
-        "Unknown nucleotide `{}` ({}) in {}:{}-{}", char::from(nt), nt, contig, start + 1, end)))?;
+    crate::seq::standardize(&mut seq).map_err(|nt| error!(InvalidData,
+        "Unknown nucleotide `{}` ({}) in {}:{}-{}", char::from(nt), nt, contig, start + 1, end))?;
     Ok(seq)
 }

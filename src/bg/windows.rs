@@ -6,7 +6,7 @@ use std::{
 use super::depth::ReadDepthParams;
 use crate::{
     model::windows::WindowGetter,
-    err::{Error, add_path},
+    err::{error, add_path},
     seq::{self, Interval, kmers::KmerCounts},
     ext,
 };
@@ -125,7 +125,7 @@ impl Windows {
         seq_info: &super::SequencingInfo,
         params: &ReadDepthParams,
         out_dir: Option<&Path>,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         assert_eq!(interval.len() as usize, ref_seq.len(),
             "ReadDepth: interval and reference sequence have different lengths!");
@@ -159,7 +159,7 @@ impl Windows {
                 0.01 * params.uniq_kmer_perc, io::sink()).map_err(add_path!(!))?
         };
         if selected == 0 {
-            Err(Error::RuntimeError("Retained 0 windows after filtering".to_owned()))
+            Err(error!(RuntimeError, "Retained 0 windows after filtering"))
         } else {
             Ok(Self { windows, window_getter, window_size, neighb_size })
         }

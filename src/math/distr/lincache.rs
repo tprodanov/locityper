@@ -3,7 +3,7 @@ use std::{
     sync::OnceLock,
 };
 use crate::{
-    Error,
+    err::error,
     bg::ser::JsonSer,
 };
 use super::{DiscretePmf, DiscreteCdf, WithMoments};
@@ -88,13 +88,13 @@ impl<D: JsonSer> JsonSer for LinearCache<D> {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
         if !obj.has_key("distr") {
-            return Err(Error::JsonLoad(format!("LinearCache: Failed to parse '{}': missing 'distr' field!", obj)));
+            return Err(error!(JsonLoad, "LinearCache: Failed to parse '{}': missing 'distr' field!", obj));
         }
         let distr = D::load(&obj["distr"])?;
-        let size = obj["size"].as_usize().ok_or_else(|| Error::JsonLoad(format!(
-            "LinearCache: Failed to parse '{}': missing or incorrect 'size' field!", obj)))?;
+        let size = obj["size"].as_usize().ok_or_else(|| error!(JsonLoad,
+            "LinearCache: Failed to parse '{}': missing or incorrect 'size' field!", obj))?;
         Ok(Self::new(distr, size))
     }
 }

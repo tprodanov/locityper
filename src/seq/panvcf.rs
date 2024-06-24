@@ -6,7 +6,7 @@ use htslib::bcf::{
     record::{Record, GenotypeAllele},
 };
 use crate::{
-    Error,
+    err::{Error, error},
     seq::Interval,
     ext::vec::F64Ext,
     algo::HashSet,
@@ -66,7 +66,7 @@ impl HaplotypeNames {
         reader: &mut impl bcf::Read,
         ref_name: &str,
         leave_out: &HashSet<String>,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         let mut discarded = 0;
         let mut left_out = Vec::new();
@@ -83,7 +83,7 @@ impl HaplotypeNames {
 
         let mut samples = Vec::new();
         let record = reader.records().next()
-            .ok_or_else(|| Error::InvalidData("Input VCF file does not contain any records".to_owned()))??;
+            .ok_or_else(|| error!(InvalidData, "Input VCF file does not contain any records"))??;
         let genotypes = record.genotypes()?;
         for (sample_id, sample) in reader.header().samples().into_iter().enumerate() {
             let sample = std::str::from_utf8(sample).map_err(|_| Error::Utf8("VCF sample name", sample.to_vec()))?;
@@ -95,9 +95,9 @@ impl HaplotypeNames {
                 continue;
             }
             if ploidy == 0 {
-                return Err(Error::InvalidData(format!("Sample {} has zero ploidy", sample)));
+                return Err(error!(InvalidData, "Sample {} has zero ploidy", sample));
             } else if ploidy > 255 {
-                return Err(Error::InvalidData(format!("Sample {} has extremely high ploidy", sample)));
+                return Err(error!(InvalidData, "Sample {} has extremely high ploidy", sample));
             }
             let mut subnames = Vec::with_capacity(ploidy);
             for hap_ix in 0..ploidy {
@@ -108,7 +108,7 @@ impl HaplotypeNames {
                     continue;
                 }
                 if !hap_names.insert(haplotype.clone()) {
-                    return Err(Error::InvalidData(format!("Duplicate haplotype name ({})", haplotype)));
+                    return Err(error!(InvalidData, "Duplicate haplotype name ({})", haplotype));
                 }
                 subnames.push(HaplotypeName {
                     hap_ix,
@@ -133,7 +133,7 @@ impl HaplotypeNames {
             log::warn!("Zero matches between leave-out and VCF samples");
         }
         if samples.is_empty() {
-            return Err(Error::InvalidData("Loaded zero haplotypes".to_owned()));
+            return Err(error!(InvalidData, "Loaded zero haplotypes"));
         }
         Ok(Self { ref_name, samples, total })
     }
@@ -153,7 +153,7 @@ impl HaplotypeNames {
 pub fn filter_variants(
     reader: &mut impl bcf::Read,
     hap_names: &HaplotypeNames,
-) -> Result<Vec<Record>, Error>
+) -> crate::Result<Vec<Record>>
 {
     let mut vars = Vec::new();
     for rec in reader.records() {
@@ -163,15 +163,15 @@ pub fn filter_variants(
         for sample in hap_names.samples.iter() {
             let gt = gts.get(sample.sample_id);
             if gt.len() != sample.ploidy {
-                return Err(Error::InvalidData(format!("Variant {} in sample {} has ploidy {} (expected {})",
-                    format_var(&var, reader.header()), sample.name, gt.len(), sample.ploidy)));
+                return Err(error!(InvalidData, "Variant {} in sample {} has ploidy {} (expected {})",
+                    format_var(&var, reader.header()), sample.name, gt.len(), sample.ploidy));
             }
             // Check only last allele in the genotype, as only last allele has phasing marking,
             // (see https://docs.rs/rust-htslib/latest/rust_htslib/bcf/record/struct.Genotypes.html).
             match gt[sample.ploidy - 1] {
                 GenotypeAllele::Unphased(_) | GenotypeAllele::UnphasedMissing if sample.ploidy > 1 =>
-                    return Err(Error::InvalidData(format!("Variant {} is unphased in sample {}",
-                        format_var(&var, reader.header()), sample.name))),
+                    return Err(error!(InvalidData, "Variant {} is unphased in sample {}",
+                        format_var(&var, reader.header()), sample.name)),
                 _ => {}
             }
             has_variation |= sample.subnames.iter().any(|haplotype|
@@ -231,7 +231,7 @@ pub fn reconstruct_sequences(
     hap_names: &HaplotypeNames,
     unknown_frac: f64,
     overlaps_allowed: bool,
-) -> Result<Vec<NamedSeq>, Error>
+) -> crate::Result<Vec<NamedSeq>>
 {
     assert_eq!(interval.len(), ref_seq.len() as u32);
     let (ref_start, ref_end) = interval.range();
@@ -259,8 +259,8 @@ pub fn reconstruct_sequences(
     for var in recs.iter() {
         let alleles = var.alleles();
         // if alleles.iter().copied().any(seq::has_n) {
-        //     return Err(Error::InvalidData(format!("Input VCF file contains Ns in one of the alleles of {}",
-        //         format_var(var, header))));
+        //     return Err(error!(InvalidData, "Input VCF file contains Ns in one of the alleles of {}",
+        //         format_var(var, header)));
         // }
         let var_start = u32::try_from(var.pos()).unwrap();
         let ref_len = alleles[0].len() as u32;
@@ -270,8 +270,8 @@ pub fn reconstruct_sequences(
         } else if ref_end <= var_start {
             break;
         } else if var_start < ref_start || ref_end < var_end {
-            return Err(Error::RuntimeError(format!("Variant {} overlaps the boundary of the region {}-{}",
-                format_var(var, header), ref_start + 1, ref_end)));
+            return Err(error!(RuntimeError, "Variant {} overlaps the boundary of the region {}-{}",
+                format_var(var, header), ref_start + 1, ref_end));
         }
 
         let gts = var.genotypes()?;
@@ -295,8 +295,8 @@ pub fn reconstruct_sequences(
                 let prev_end = ref_pos[haplotype.shift_ix];
                 if var_start < prev_end {
                     if !overlaps_allowed {
-                        return Err(Error::InvalidData(format!(
-                            "Overlapping variants forbidden ({} for {})", format_var(var, header), haplotype.name)));
+                        return Err(error!(InvalidData,
+                            "Overlapping variants forbidden ({} for {})", format_var(var, header), haplotype.name));
                     } else if total_overlaps < MAX_OVERLAP_MSGS {
                         log::warn!("One of the overlapping variants ignored for {} ({})",
                             haplotype.name, format_var(var, header));

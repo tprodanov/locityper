@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 use crate::{
-    err::add_path,
+    err::{error, add_path},
     math::RoundDiv,
     seq::{NamedSeq, kmers},
     ext::{TriangleMatrix, fmt},
@@ -126,16 +126,16 @@ pub fn load_divergences<R>(
     mut f: R,
     filename: &Path,
     n: usize,
-) -> Result<(u8, u8, TriangleMatrix<u32>), crate::Error>
+) -> crate::Result<(u8, u8, TriangleMatrix<u32>)>
 where R: VarintReader<Error = io::Error>,
 {
     let k = f.read().map_err(add_path!(filename))?;
     let w = f.read().map_err(add_path!(filename))?;
     let m = f.read_u32_varint().map_err(add_path!(filename))?;
     if n != m as usize {
-        return Err(crate::Error::InvalidData(
-            format!("Cannot read distances from {}: invalid number of haplotypes (expected {}, found {})",
-            fmt::path(filename), n, m)));
+        return Err(error!(InvalidData,
+            "Cannot read distances from {}: invalid number of haplotypes (expected {}, found {})",
+            fmt::path(filename), n, m));
     }
 
     let total = TriangleMatrix::<()>::expected_len(n);

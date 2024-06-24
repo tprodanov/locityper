@@ -16,21 +16,21 @@ pub use self::stoch::{GreedySolver, SimAnneal};
 pub use self::gurobi::GurobiSolver;
 #[cfg(feature = "highs")]
 pub use self::highs::HighsSolver;
-use crate::Error;
+use crate::err::error;
 
 pub trait SetParams {
     /// Sets solver parameters.
     /// Each element: string `key=value`.
-    fn set_params(&mut self, params: &[String]) -> Result<(), Error> {
+    fn set_params(&mut self, params: &[String]) -> crate::Result<()> {
         for param in params {
-            let (key, value) = param.split_once('=').ok_or_else(|| Error::InvalidInput(
-                    format!("Cannot parse parameter {:?} (must contain =)", param)))?;
+            let (key, value) = param.split_once('=')
+                .ok_or_else(|| error!(InvalidInput, "Cannot parse parameter {:?} (must contain =)", param))?;
             self.set_param(key.trim(), value.trim())?;
         }
         Ok(())
     }
 
-    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error>;
+    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()>;
 }
 
 /// General trait for all solvers.
@@ -41,7 +41,7 @@ pub trait Solver: Send + Sync + SetParams + CloneSolver + Display {
         &self,
         gt_alns: &'a GenotypeAlignments,
         rng: &mut XoshiroRng,
-    ) -> Result<ReadAssignment<'a>, Error>;
+    ) -> crate::Result<ReadAssignment<'a>>;
 
     /// Distribute reads between several haplotypes in the best way.
     ///
@@ -50,7 +50,7 @@ pub trait Solver: Send + Sync + SetParams + CloneSolver + Display {
         &self,
         gt_alns: &'a GenotypeAlignments,
         rng: &mut XoshiroRng,
-    ) -> Result<ReadAssignment<'a>, Error>
+    ) -> crate::Result<ReadAssignment<'a>>
     {
         if gt_alns.trivial() {
             Ok(ReadAssignment::new(gt_alns, |_| unreachable!("There are no non-trivial reads")))

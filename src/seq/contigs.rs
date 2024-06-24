@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use htslib::bam;
 use bio::io::fasta;
 use crate::{
-    err::{Error, add_path},
+    err::{Error, error, add_path},
     ext,
     seq::{
         fastx,
@@ -78,8 +78,8 @@ impl ContigNames {
     /// First argument: overall name of the contig set.
     pub fn new<T: TryInto<u32> + std::fmt::Display + Copy>(
         tag: impl Into<String>,
-        mut it: impl Iterator<Item = Result<(String, T), Error>>
-    ) -> Result<Self, Error>
+        mut it: impl Iterator<Item = crate::Result<(String, T)>>
+    ) -> crate::Result<Self>
     {
         let mut names = Vec::new();
         let mut lengths = Vec::new();
@@ -87,7 +87,7 @@ impl ContigNames {
 
         while let Some((name, length)) = it.next().transpose()? {
             let length: u32 = length.try_into()
-                .map_err(|_| Error::InvalidData(format!("Contig {} is too long ({} bp)", name, length)))?;
+                .map_err(|_| error!(InvalidData, "Contig {} is too long ({} bp)", name, length))?;
             let contig_id = ContigId::new(names.len());
             if let Some(prev_id) = name_to_id.insert(name.clone(), contig_id) {
                 panic!("Contig {} appears twice in the contig list ({} and {})!", name, prev_id, contig_id);
@@ -98,10 +98,10 @@ impl ContigNames {
 
         const MAX_CONTIGS: usize = (std::u16::MAX as usize - 1) / 2;
         if names.is_empty() {
-            return Err(Error::InvalidData("Contig set is empty".to_owned()));
+            return Err(error!(InvalidData, "Contig set is empty"));
         } else if names.len() >= MAX_CONTIGS {
-            return Err(Error::InvalidData(format!("Too many contigs ({}), can support at most {}",
-                names.len(), MAX_CONTIGS)));
+            return Err(error!(InvalidData, "Too many contigs ({}), can support at most {}",
+                names.len(), MAX_CONTIGS));
         }
 
         names.shrink_to_fit();
@@ -115,12 +115,12 @@ impl ContigNames {
 
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
-    pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> Result<Self, Error> {
+    pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> crate::Result<Self> {
         Self::new(tag, index.sequences().into_iter().map(|seq| Ok((seq.name, seq.len))))
     }
 
     /// Creates contig names from BAM header.
-    pub fn from_bam_header(tag: impl Into<String>, header: &bam::HeaderView) -> Result<Self, Error> {
+    pub fn from_bam_header(tag: impl Into<String>, header: &bam::HeaderView) -> crate::Result<Self> {
         Self::new(tag, (0..header.target_count()).map(|i| {
             let byte_name = header.tid2name(i);
             let name = String::from_utf8(byte_name.to_vec())
@@ -133,7 +133,7 @@ impl ContigNames {
     pub fn load_indexed_fasta(
         tag: impl Into<String>,
         filename: &Path,
-    ) -> Result<(Self, fasta::IndexedReader<File>), Error>
+    ) -> crate::Result<(Self, fasta::IndexedReader<File>)>
     {
         let fasta = fasta::IndexedReader::from_file(&filename)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
@@ -269,7 +269,7 @@ impl ContigSet {
         tag: impl Into<String>,
         fasta_filename: &Path,
         kmers_filename: &Path,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let mut named_seqs = fasta_reader.read_all()?;
@@ -366,10 +366,10 @@ impl Genotype {
     }
 
     /// Parses genotype (contig names through comma).
-    pub fn parse(s: &str, contigs: &ContigNames) -> Result<Self, Error> {
+    pub fn parse(s: &str, contigs: &ContigNames) -> crate::Result<Self> {
         let ids = s.split(',').map(|name| contigs.try_get_id(name)
-            .ok_or_else(|| Error::ParsingError(format!("Unknown contig {:?}", name))))
-            .collect::<Result<GtStorage, Error>>()?;
+            .ok_or_else(|| error!(ParsingError, "Unknown contig {:?}", name)))
+            .collect::<crate::Result<GtStorage>>()?;
         assert!(!ids.is_empty(), "Empty genotypes are not allowed");
         Ok(Self {
             ids,

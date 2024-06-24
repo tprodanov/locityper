@@ -11,7 +11,7 @@ use crate::{
         kmers::KmerCounts,
     },
     bg::ReadDepth,
-    err::{Error, add_path, validate_param},
+    err::{error, add_path, validate_param},
     ext::vec::IterExt,
 };
 use super::{
@@ -168,7 +168,7 @@ pub struct WeightCalculator {
 }
 
 impl WeightCalculator {
-    pub fn new(breakpoint: f64, power: f64) -> Result<Self, Error> {
+    pub fn new(breakpoint: f64, power: f64) -> crate::Result<Self> {
         validate_param!(0.0 < breakpoint && breakpoint < 1.0,
             "Weight breakpoint ({}) must be within (0, 1)", breakpoint);
         validate_param!(power > 0.5 && power <= 50.0, "Weight power ({}) should be within [0.5, 50].", power);
@@ -245,15 +245,15 @@ impl ContigInfo {
         depth: &ReadDepth,
         params: &super::Params,
         dbg_writer: &mut impl Write,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         let contig_len = seq.len() as u32;
         let contig_name = contigs.get_name(contig_id);
         let window = depth.window_size();
         let neighb_size = depth.neighb_size();
         if contig_len < window + 2 * params.boundary_size {
-            return Err(Error::RuntimeError(format!("Contig {} is too short (len = {})",
-                contigs.get_name(contig_id), contig_len)));
+            return Err(error!(RuntimeError, "Contig {} is too short (len = {})",
+                contigs.get_name(contig_id), contig_len));
         }
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
         let n_windows = (contig_len - 2 * params.boundary_size) / window;
@@ -293,7 +293,7 @@ impl ContigInfo {
         depth: &ReadDepth,
         params: &super::Params,
         mut dbg_writer: impl Write,
-    ) -> Result<Vec<Arc<ContigInfo>>, Error>
+    ) -> crate::Result<Vec<Arc<ContigInfo>>>
     {
         let contigs = set.contigs();
         let seqs = set.seqs();

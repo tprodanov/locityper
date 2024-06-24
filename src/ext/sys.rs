@@ -14,10 +14,10 @@ use flate2::{
     Compression,
 };
 use colored::Colorize;
-use crate::err::{Error, add_path};
+use crate::err::{Error, error, add_path};
 
 /// Finds an executable, and returns Error, if executable is not available.
-pub fn find_exe(p: impl AsRef<Path>) -> Result<PathBuf, Error> {
+pub fn find_exe(p: impl AsRef<Path>) -> crate::Result<PathBuf> {
     which::which(p.as_ref()).map_err(|_| Error::NoExec(p.as_ref().to_owned()))
 }
 
@@ -25,7 +25,7 @@ pub fn find_exe(p: impl AsRef<Path>) -> Result<PathBuf, Error> {
 fn decompress_stream(
     mut stream: BufReader<impl Read + Send + 'static>,
     filename: &Path,
-) -> Result<Box<dyn BufRead + Send>, Error>
+) -> crate::Result<Box<dyn BufRead + Send>>
 {
     assert!(stream.buffer().is_empty());
     let buffer = stream.fill_buf().map_err(add_path!(filename))?;
@@ -44,7 +44,7 @@ fn decompress_stream(
 
 /// Returns stdin if filename is `-`.
 /// Otherwise, tries to guess input format (gzip OR lz4 OR no compression).
-pub fn open(filename: &Path) -> Result<Box<dyn BufRead + Send>, Error> {
+pub fn open(filename: &Path) -> crate::Result<Box<dyn BufRead + Send>> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         decompress_stream(BufReader::new(stdin()), filename)
     } else {
@@ -61,7 +61,7 @@ pub struct FileChain {
 }
 
 impl FileChain {
-    pub fn new(filenames: &[PathBuf]) -> Result<Self, Error> {
+    pub fn new(filenames: &[PathBuf]) -> crate::Result<Self> {
         Ok(Self {
             stream: open(&filenames[0])?,
             future_files: filenames[1..].iter().rev().cloned().collect(),
@@ -105,17 +105,17 @@ impl BufRead for FileChain {
 }
 
 /// Loads full JSON contents from a file.
-pub fn load_json(filename: &Path) -> Result<json::JsonValue, Error> {
+pub fn load_json(filename: &Path) -> crate::Result<json::JsonValue> {
     let stream = open(filename)?;
     let contents = io::read_to_string(stream).map_err(add_path!(filename))?;
-    json::parse(&contents).map_err(|_| Error::InvalidData(
-        format!("Failed parsing {}: invalid JSON format", filename.display())))
+    json::parse(&contents).map_err(|_| error!(InvalidData,
+        "Failed parsing {}: invalid JSON format", filename.display()))
 }
 
 pub type GzFile = BufWriter<GzEncoder<File>>;
 
 /// Creates a gzip compressed file.
-pub fn create_gzip(filename: &Path) -> Result<GzFile, Error> {
+pub fn create_gzip(filename: &Path) -> crate::Result<GzFile> {
     let file = File::create(filename).map_err(add_path!(filename))?;
     Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
 }
@@ -144,7 +144,7 @@ impl<W: Write> Write for AutoFinishLz4<W> {
 }
 
 /// Creates an lz4 compressed file.
-fn create_lz4(filename: &Path, level: u32) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
+fn create_lz4(filename: &Path, level: u32) -> crate::Result<AutoFinishLz4<BufWriter<File>>> {
     let file = create_file(filename)?;
     let encoder = lz4::EncoderBuilder::new().level(level).build(file).map_err(add_path!(filename))?;
     Ok(AutoFinishLz4 {
@@ -152,18 +152,18 @@ fn create_lz4(filename: &Path, level: u32) -> Result<AutoFinishLz4<BufWriter<Fil
     })
 }
 
-pub fn create_lz4_slow(filename: &Path) -> Result<AutoFinishLz4<BufWriter<File>>, Error> {
+pub fn create_lz4_slow(filename: &Path) -> crate::Result<AutoFinishLz4<BufWriter<File>>> {
     create_lz4(filename, 7)
 }
 
 /// Creates buffered output file.
-pub fn create_file(filename: &Path) -> Result<BufWriter<File>, Error> {
+pub fn create_file(filename: &Path) -> crate::Result<BufWriter<File>> {
     File::create(filename).map_err(add_path!(filename))
         .map(|w| BufWriter::with_capacity(131_072, w)) // Set buffer capacity to 128 kb.
 }
 
 /// Based on extension, create file.
-pub fn create(filename: &Path) -> Result<Box<dyn Write>, Error> {
+pub fn create(filename: &Path) -> crate::Result<Box<dyn Write>> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         Ok(Box::new(BufWriter::new(stdout())))
     } else {
@@ -177,7 +177,7 @@ pub fn create(filename: &Path) -> Result<Box<dyn Write>, Error> {
 
 /// Finds all filenames with appropriate extension in the directory.
 /// Extension should not include `.`, for example `filenames_with_ext(dir, "csv")`.
-pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> Result<Vec<PathBuf>, Error> {
+pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> crate::Result<Vec<PathBuf>> {
     let mut res = Vec::new();
     for entry in fs::read_dir(dir).map_err(add_path!(dir))? {
         let entry = entry.map_err(add_path!(!))?;
@@ -204,7 +204,7 @@ pub fn add_dir(dirname: Option<&Path>, filename: &str) -> PathBuf {
 }
 
 /// Create directory, if it does not exist yet.
-pub fn mkdir(path: impl AsRef<Path>) -> Result<(), Error> {
+pub fn mkdir(path: impl AsRef<Path>) -> crate::Result<()> {
     let path = path.as_ref();
     if !path.exists() {
         fs::create_dir(path).map_err(add_path!(path))
@@ -215,7 +215,7 @@ pub fn mkdir(path: impl AsRef<Path>) -> Result<(), Error> {
 
 /// Directly concantenates files, without trying to decompress them.
 /// Therefore, if input files are already gzipped, output writer should be plain, without compression.
-pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut writer: impl Write) -> Result<(), Error> {
+pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut writer: impl Write) -> crate::Result<()> {
     for filename in filenames {
         let mut reader = File::open(&filename).map_err(add_path!(filename))?;
         io::copy(&mut reader, &mut writer).map_err(add_path!(filename))?;
@@ -338,7 +338,7 @@ impl PipeGuard {
 
     /// Waits for each process from end to start.
     /// If all processed finished successfully, returns output of the last process.
-    pub fn wait(mut self) -> Result<Output, Error> {
+    pub fn wait(mut self) -> crate::Result<Output> {
         for (child, output) in self.children.iter_mut().rev().zip(self.outputs.iter_mut().rev()) {
             if let Some(child) = child.take() {
                 *output = child.wait_with_output();

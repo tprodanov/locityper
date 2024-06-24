@@ -18,7 +18,7 @@ use crate::{
         wfa::{Aligner, Penalties},
         cigar::{Cigar, CigarItem, Operation},
     },
-    Error,
+    err::{Error, error},
     algo::HashMap,
     math::RoundDiv,
 };
@@ -65,7 +65,7 @@ fn align_gap(
     aligner: &Aligner,
     max_gap: u32,
     cigar: &mut Cigar,
-) -> Result<i32, Error>
+) -> crate::Result<i32>
 {
     let penalties = aligner.penalties();
     debug_assert!(i1 <= i2 && j1 <= j2);
@@ -99,7 +99,7 @@ fn align(
     kmer_matches: &[(u32, u32)],
     backbone_k: u32,
     max_gap: u32,
-) -> Result<(Cigar, i32), Error>
+) -> crate::Result<(Cigar, i32)>
 {
     let sparse_aln = bio::alignment::sparse::lcskpp(&kmer_matches, backbone_k as usize);
     let mut cigar = Cigar::new();
@@ -144,7 +144,7 @@ fn align_multik(
     kmer_matches: &[Vec<(u32, u32)>],
     backbone_ks: &[u32],
     max_gap: u32,
-) -> Result<(Cigar, i32), Error>
+) -> crate::Result<(Cigar, i32)>
 {
     let mut best_cigar = None;
     let mut best_score = i32::MIN;
@@ -155,7 +155,7 @@ fn align_multik(
             best_cigar = Some(cigar);
         }
     }
-    best_cigar.ok_or_else(|| Error::RuntimeError("No alignment found".to_string()))
+    best_cigar.ok_or_else(|| error!(RuntimeError, "No alignment found"))
         .map(|cigar| (cigar, best_score))
 }
 
@@ -168,7 +168,7 @@ pub fn align_sequences(
     accuracy: u8,
     max_gap: u32,
     threads: u16,
-) -> Result<Vec<(Cigar, i32)>, Error>
+) -> crate::Result<Vec<(Cigar, i32)>>
 {
     let n_entries = entries.len();
     let n_pairs = pairs.len();
@@ -208,7 +208,7 @@ fn multithread_align(
     accuracy: u8,
     max_gap: u32,
     threads: u16,
-) -> Result<Vec<(Cigar, i32)>, Error>
+) -> crate::Result<Vec<(Cigar, i32)>>
 {
     let pairs = Arc::new(pairs);
     let entries = Arc::new(entries.to_vec());
@@ -238,7 +238,7 @@ fn multithread_align(
                     .map(|(&(i, j), matches)|
                         align_multik(&aligner, &entries[i as usize].seq(), entries[j as usize].seq(),
                             matches, &curr_backbone_ks, max_gap))
-                    .collect::<Result<Vec<_>, Error>>()
+                    .collect::<crate::Result<Vec<_>>>()
             }));
         }
         start = end;
@@ -308,7 +308,7 @@ pub fn write_all(
     alns: TriangleMatrix<(Cigar, i32)>,
     backbone_k: u32,
     accuracy: u8,
-) -> Result<TriangleMatrix<f64>, Error> {
+) -> crate::Result<TriangleMatrix<f64>> {
     let header = create_bam_header(entries, backbone_k, accuracy);
     let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
     writer.set_compression_level(bam::CompressionLevel::Maximum)?;
@@ -326,9 +326,9 @@ pub fn write_all(
         for (j, query) in (i + 1..).zip(&entries[i + 1..]) {
             let (cigar, score) = &alns[(i, j)];
             if query.len() != cigar.query_len() || rlen != cigar.ref_len() {
-                return Err(Error::RuntimeError(format!(
+                return Err(error!(RuntimeError,
                     "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
-                    query.name(), query.len(), refer.name(), rlen, cigar.query_len(), cigar.ref_len())));
+                    query.name(), query.len(), refer.name(), rlen, cigar.query_len(), cigar.ref_len()));
             }
 
             let (nmatches, total_size) = cigar.frac_matches();
@@ -353,7 +353,7 @@ pub fn write_all(
 
 /// Loads edit distances between all contigs based on a BAM file.
 /// All contigs must be present in the BAM file.
-pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> Result<TriangleMatrix<u32>, Error> {
+pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> crate::Result<TriangleMatrix<u32>> {
     let path = path.as_ref();
     let mut reader = bam::Reader::from_path(&path)?;
     let mut record = bam::Record::new();
@@ -374,22 +374,23 @@ pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> Res
         if i >= j {
             continue;
         }
-        let edit_dist: u32 = match record.aux(b"NM").map_err(|_| Error::InvalidData(format!(
-                "BAM file {} does not contain NM field", ext::fmt::path(&path))))? {
+        let edit_dist: u32 = match record.aux(b"NM")
+            .map_err(|_| error!(InvalidData, "BAM file {} does not contain NM field", ext::fmt::path(&path)))?
+        {
             Aux::I8(val) => val.try_into().unwrap(),
             Aux::U8(val) => val.into(),
             Aux::I16(val) => val.try_into().unwrap(),
             Aux::U16(val) => val.into(),
             Aux::I32(val) => val.try_into().unwrap(),
             Aux::U32(val) => val,
-            _ => return Err(Error::InvalidData(format!("Invalid value for NM field in {}", ext::fmt::path(&path)))),
+            _ => return Err(error!(InvalidData, "Invalid value for NM field in {}", ext::fmt::path(&path))),
         };
         matrix[(i, j)] = edit_dist;
     }
     if let Some(k) = matrix.iter().position(|&val| val == u32::MAX) {
         let (i, j) = matrix.from_linear_index(k);
-        Err(Error::InvalidData(format!("BAM file {} does not contain alignment between contigs {} and {}",
-            ext::fmt::path(&path), contigs.get_name(ContigId::new(i)), contigs.get_name(ContigId::new(j)))))
+        Err(error!(InvalidData, "BAM file {} does not contain alignment between contigs {} and {}",
+            ext::fmt::path(&path), contigs.get_name(ContigId::new(i)), contigs.get_name(ContigId::new(j))))
     } else {
         Ok(matrix)
     }

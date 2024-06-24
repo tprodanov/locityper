@@ -11,7 +11,7 @@ use varint_rs::{VarintWriter, VarintReader};
 use crate::{
     seq::{self, ContigNames, ContigId},
     algo::HashMap,
-    err::{Error, add_path},
+    err::{Error, error, add_path},
     bg::ser::json_get,
     ext::sys::PipeGuard,
 };
@@ -420,16 +420,16 @@ impl KmerCounts {
     }
 
     /// Checks the number of and sizes of contigs.
-    pub fn validate(&self, contigs: &ContigNames) -> Result<(), Error> {
+    pub fn validate(&self, contigs: &ContigNames) -> crate::Result<()> {
         if self.counts.len() != contigs.len() {
-            return Err(Error::InvalidData(format!("k-mer counts contain {} contigs, while there should be {} contigs",
-                self.counts.len(), contigs.len())));
+            return Err(error!(InvalidData, "k-mer counts contain {} contigs, while there should be {} contigs",
+                self.counts.len(), contigs.len()));
         }
         for (i, (counts, len)) in self.counts.iter().zip(contigs.lengths()).enumerate() {
             let expected = (len + 1).saturating_sub(self.k);
             if expected != counts.len() as u32 {
-                return Err(Error::InvalidData(format!("k-mer counts contain {} k-mers for contig {} (expected {})",
-                    counts.len(), contigs.get_name(ContigId::new(i)), expected)));
+                return Err(error!(InvalidData, "k-mer counts contain {} k-mers for contig {} (expected {})",
+                    counts.len(), contigs.get_name(ContigId::new(i)), expected));
             }
         }
         Ok(())
@@ -525,7 +525,7 @@ pub struct JfKmerGetter {
 impl JfKmerGetter {
     /// Creates a new jellyfish k-mer getter.
     /// Arguments: `jellyfish` executable and database. Database filename must be in the form `*/<kmer-size>.*`.
-    pub fn new(jf_exe: PathBuf, jf_counts: PathBuf) -> Result<Self, Error> {
+    pub fn new(jf_exe: PathBuf, jf_counts: PathBuf) -> crate::Result<Self> {
         let header = parse_jellyfish_header(&jf_counts)?;
         json_get!(&header => canonical (as_bool), key_len (as_u32), counter_len (as_u32));
         if !canonical {
@@ -533,20 +533,20 @@ impl JfKmerGetter {
                 Consider using canonical counts (jellyfish --canonical)");
         }
         if key_len % 2 != 0 {
-            return Err(Error::InvalidData("Cannot parse jellyfish counts file: key length is odd".to_owned()));
+            return Err(error!(InvalidData, "Cannot parse jellyfish counts file: key length is odd"));
         }
         let k = key_len / 2;
         if k % 2 != 1 {
-            return Err(Error::InvalidData(
-                format!("Jellyfish counts are calculated for an even k size ({}), odd k is required", k)));
+            return Err(error!(InvalidData,
+                "Jellyfish counts are calculated for an even k size ({}), odd k is required", k));
         } else if k > u32::from(u128::MAX_KMER_SIZE) {
-            return Err(Error::InvalidData(format!(
-                "Jellyfish counts are calculated for too big k ({}), at most {} can be used", k, u128::MAX_KMER_SIZE)));
+            return Err(error!(InvalidData,
+                "Jellyfish counts are calculated for too big k ({}), at most {} can be used", k, u128::MAX_KMER_SIZE));
         }
         log::info!("Detected jellyfish k-mer size: {}", k);
         if counter_len > 8 {
-            return Err(Error::InvalidData(
-                format!("Jellyfish was run with {}-byte counters, at most 8-byte counters are allowed", counter_len)));
+            return Err(error!(InvalidData,
+                "Jellyfish was run with {}-byte counters, at most 8-byte counters are allowed", counter_len));
         }
 
         // Calculate maximum k-mer count based on (i) counter length (in bytes) in the counts file,
@@ -567,7 +567,7 @@ impl JfKmerGetter {
 
     /// Runs jellyfish to return k-mer counts across all sequences.
     /// Sequences are consumed, as they are passed to another thread.
-    pub fn fetch(&self, seqs: impl IntoIterator<Item = Vec<u8>> + Send + 'static) -> Result<KmerCounts, Error> {
+    pub fn fetch(&self, seqs: impl IntoIterator<Item = Vec<u8>> + Send + 'static) -> crate::Result<KmerCounts> {
         let mut child = Command::new(&self.jf_exe)
             .args(&["query", "-s", "/dev/stdin"]).arg(&self.jf_counts)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -575,11 +575,11 @@ impl JfKmerGetter {
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
         let pipe_guard = PipeGuard::new(self.jf_exe.clone(), child);
         let k_usize = self.k as usize;
-        let handle = std::thread::spawn(move || -> Result<Vec<usize>, Error> {
+        let handle = std::thread::spawn(move || -> crate::Result<Vec<usize>> {
             let mut n_kmers = Vec::new();
             for seq in seqs.into_iter() {
                 if seq::has_n(&seq) {
-                    return Err(Error::RuntimeError(format!("Cannot count k-mers for sequence with Ns")));
+                    return Err(error!(RuntimeError, "Cannot count k-mers for sequence with Ns"));
                 }
                 n_kmers.push((seq.len() + 1).saturating_sub(k_usize));
                 seq::write_fasta(&mut child_stdin, b"", &seq).map_err(add_path!(!))?;
@@ -600,12 +600,12 @@ impl JfKmerGetter {
             let mut curr_counts = Vec::with_capacity(n as usize);
             for _ in 0..n {
                 let line = jf_lines.next()
-                    .ok_or_else(|| Error::ParsingError("Not enough k-mer counts!".to_owned()))?;
+                    .ok_or_else(|| error!(ParsingError, "Not enough k-mer counts!"))?;
                 let count = line.split_once(' ')
                     .map(|tup| tup.1)
                     .and_then(|s| parse_count(s, self.max_value).ok())
                     .ok_or_else(||
-                        Error::ParsingError(format!("Failed to parse Jellyfish output line '{}'", line)))?;
+                        error!(ParsingError, "Failed to parse Jellyfish output line '{}'", line))?;
                 // Assume that each k-mer appears at least 1.
                 curr_counts.push(max(count, 1));
             }
@@ -618,18 +618,18 @@ impl JfKmerGetter {
                 k: self.k,
                 max_value: KmerCount::try_from(self.max_value).unwrap(),
             }),
-            _ => Err(Error::InvalidData("Too many k-mer counts!".to_owned())),
+            _ => Err(error!(InvalidData, "Too many k-mer counts!")),
         }
     }
 }
 
 /// Parses Jellyfish counts file header and returns json object.
-fn parse_jellyfish_header(filename: &std::path::Path) -> Result<json::JsonValue, Error> {
+fn parse_jellyfish_header(filename: &std::path::Path) -> crate::Result<json::JsonValue> {
     let mut reader = io::BufReader::new(fs::File::open(filename).map_err(add_path!(filename))?);
     let mut buffer = Vec::new();
     // Skip until JSON starts.
     if reader.read_until(b'{', &mut buffer).map_err(add_path!(filename))? == 0 {
-        return Err(Error::InvalidData("Cannot parse jellyfish counts file: empty file".to_owned()));
+        return Err(error!(InvalidData, "Cannot parse jellyfish counts file: empty file"));
     }
     buffer.clear();
     buffer.push(b'{');
@@ -638,12 +638,12 @@ fn parse_jellyfish_header(filename: &std::path::Path) -> Result<json::JsonValue,
     let mut depth = 1;
     while depth > 0 {
         if reader.read_until(b'}', &mut buffer).map_err(add_path!(filename))? == 0 {
-            return Err(Error::InvalidData("Cannot parse jellyfish counts file: Header stops unexpectedly".to_owned()));
+            return Err(error!(InvalidData, "Cannot parse jellyfish counts file: Header stops unexpectedly"));
         }
         depth += buffer[prev_len..].iter().filter(|&&ch| ch == b'{').count() - 1;
         prev_len = buffer.len();
     }
     let json_str = std::str::from_utf8(&buffer).map_err(|_| Error::Utf8("Jellyfish header", buffer.clone()))?;
     json::parse(json_str).map_err(|_|
-        Error::InvalidData("Cannot parse jellyfish counts file: header contains invalid JSON".to_owned()))
+        error!(InvalidData, "Cannot parse jellyfish counts file: header contains invalid JSON"))
 }

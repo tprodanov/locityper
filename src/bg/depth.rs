@@ -19,7 +19,7 @@ use crate::{
             nbinom::{NBinom, RegularizedEstimator},
         },
     },
-    err::{Error, validate_param, add_path},
+    err::{validate_param, add_path},
     model::windows::WindowGetter,
 };
 
@@ -186,7 +186,7 @@ impl Default for ReadDepthParams {
 
 impl ReadDepthParams {
     /// Validate all parameter values.
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> crate::Result<()> {
         validate_param!(self.ploidy > 0, "Ploidy cannot be zero");
         validate_param!(1.0 < self.uniq_kmer_perc && self.uniq_kmer_perc <= 100.0,
             "Unique k-mer percentile ({}) must be within (1, 100].", self.uniq_kmer_perc);
@@ -308,7 +308,7 @@ impl ReadDepth {
         is_paired_end: bool,
         seq_info: &super::SequencingInfo,
         out_dir: Option<&Path>,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         let depth = count_reads(alignments.iter().copied(), windows.len(), windows.window_getter());
         let (depth, gc_contents) = if let Some(dir) = out_dir {
@@ -397,7 +397,7 @@ impl JsonSer for ReadDepth {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
         json_get!(obj => ploidy (as_u8), window (as_u32), neighb (as_u32));
         let mut n_params = vec![0.0; GC_BINS];
         let mut p_params = vec![0.0; GC_BINS];

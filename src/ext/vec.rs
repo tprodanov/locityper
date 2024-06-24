@@ -1,6 +1,6 @@
 use std::{
     fmt::{self, Write},
-    ops::{AddAssign},
+    ops::AddAssign,
 };
 
 /// Static methods extending slices.

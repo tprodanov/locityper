@@ -6,7 +6,7 @@ use std::{
 };
 use htslib::bam;
 use crate::{
-    err::{Error, add_path},
+    err::{Error, error, add_path},
     seq::{
         self,
         Interval, ContigId, ContigNames, ContigSet,
@@ -137,7 +137,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
         edit_dist_cache: &'a EditDistCache,
-    ) -> Result<Self, Error> {
+    ) -> crate::Result<Self> {
         let mut record = bam::Record::new();
         // Reader would return None if there are no more records.
         let has_more = reader.read(&mut record).transpose()?.is_some();
@@ -162,7 +162,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         alns: &mut Vec<Alignment>,
         read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
-    ) -> Result<Option<f64>, Error>
+    ) -> crate::Result<Option<f64>>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name = std::str::from_utf8(self.record.qname())
@@ -175,14 +175,14 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             read_data.name.push_str(name);
             read_data.name_hash = name_hash;
         } else if name_hash != read_data.name_hash {
-            return Err(Error::InvalidData(format!("Read {} does not have a second read end", name)));
+            return Err(error!(InvalidData, "Read {} does not have a second read end", name));
         }
         if self.record.seq().is_empty() {
             if self.record.qname().is_empty() {
-                return Err(Error::InvalidData(
-                    "Alignment file contains absolutely empty read (no read name or sequence)".to_owned()));
+                return Err(error!(InvalidData,
+                    "Alignment file contains absolutely empty read (no read name or sequence)"));
             }
-            return Err(Error::InvalidData(format!("Read {} does not have read sequence", read_data.name)));
+            return Err(error!(InvalidData, "Read {} does not have read sequence", read_data.name));
         }
         let old_option = read_data.mates[read_end.ix()].replace(MateData::new(&self.record));
         assert!(old_option.is_none(), "Mate data defined twice");
@@ -743,7 +743,7 @@ impl AllAlignments {
         params: &super::Params,
         mut dbg_writer1: impl Write,
         mut dbg_writer2: impl Write,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         log::info!("    Loading read alignments");
         let contigs = contig_set.contigs();
@@ -811,9 +811,10 @@ impl AllAlignments {
         }
         log::debug!("    {}", counts.to_string(reads.len(), is_paired_end));
         if collisions > 2 && collisions * 100 > counts.total {
-            return Err(Error::RuntimeError(format!("Too many hash collisions ({})", collisions)));
+            Err(error!(RuntimeError, "Too many hash collisions ({})", collisions))
+        } else {
+            Ok(Self { reads, unused_reads })
         }
-        Ok(Self { reads, unused_reads })
     }
 
     /// Reads that are used in the model.

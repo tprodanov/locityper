@@ -9,7 +9,7 @@ use std::{
 use fancy_regex::Regex;
 use crate::{
     algo::{HashMap, HashSet},
-    err::{Error, validate_param, add_path},
+    err::{Error, error, validate_param, add_path},
     ext::{
         self,
         fmt::{PrettyU32, PrettyU64},
@@ -96,7 +96,7 @@ impl Args {
         Ok(())
     }
 
-    fn validate(mut self) -> Result<Self, Error> {
+    fn validate(mut self) -> crate::Result<Self> {
         self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
 
@@ -283,7 +283,7 @@ type BufFile = io::BufWriter<fs::File>;
 type SeqsFiles = (Vec<Vec<Vec<u8>>>, Vec<BufFile>);
 
 /// Creates plain-text output file with large buffer,
-fn create_output(filename: impl AsRef<Path>) -> Result<BufFile, Error> {
+fn create_output(filename: impl AsRef<Path>) -> crate::Result<BufFile> {
     let filename = filename.as_ref();
     if let Some(dir) = filename.parent() {
         fs::create_dir_all(dir).map_err(add_path!(dir))?;
@@ -295,7 +295,7 @@ fn create_output(filename: impl AsRef<Path>) -> Result<BufFile, Error> {
 }
 
 /// Load sequences and output files according to -S and -o arguments.
-fn load_seqs_all(seqs_all: &Path, output: &str) -> Result<SeqsFiles, Error> {
+fn load_seqs_all(seqs_all: &Path, output: &str) -> crate::Result<SeqsFiles> {
     validate_param!(output.contains(BRACKETS), "When using -S, output path ({}) must contain {}", output, BRACKETS);
     log::info!("Loading all sequences from {}", ext::fmt::path(seqs_all));
 
@@ -307,8 +307,8 @@ fn load_seqs_all(seqs_all: &Path, output: &str) -> Result<SeqsFiles, Error> {
         let name = std::str::from_utf8(record.name())
             .map_err(|_| Error::Utf8("read name", record.name().to_vec()))?;
         let (locus, _) = name.split_once('*').ok_or_else(||
-                Error::InvalidData(format!("Invalid record name `{}` for -S {}. Symbol `*` required",
-                name, ext::fmt::path(seqs_all))))?;
+                error!(InvalidData, "Invalid record name `{}` for -S {}. Symbol `*` required",
+                name, ext::fmt::path(seqs_all)))?;
         let seq = record.seq().to_vec();
         match map.get_mut(locus) {
             None => {
@@ -327,7 +327,7 @@ fn load_seqs_single(
     output_filename: impl AsRef<Path>,
     seqs: &mut Vec<Vec<Vec<u8>>>,
     files: &mut Vec<BufFile>,
-) -> Result<(), Error>
+) -> crate::Result<()>
 {
     let seqs_filename = seqs_filename.as_ref();
     let output_filename = output_filename.as_ref();
@@ -348,7 +348,7 @@ fn load_seqs_single(
 }
 
 /// Load sequences and output files according to -s and -o arguments with brackets.
-fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error> {
+fn load_seqs_glob(patterns: &[String], output: &str) -> crate::Result<SeqsFiles> {
     let mut seqs = Vec::new();
     let mut files = Vec::new();
     if patterns.len() == 1 && !patterns[0].contains(BRACKETS) {
@@ -373,26 +373,26 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error>
             .unwrap_or_else(|| pattern.to_owned());
         let glob_pattern = can_pattern.replace(BRACKETS, "*");
         let regex_pattern = format!("^{}$", can_pattern.replacen(BRACKETS, r"([^/\\]+)", 1).replace(BRACKETS, "\\1"));
-        let regex = Regex::new(&regex_pattern).map_err(|e| Error::RuntimeError(
-            format!("Cannot create regex for `{}`: {}", regex_pattern, e)))?;
+        let regex = Regex::new(&regex_pattern).map_err(|e| error!(RuntimeError,
+            "Cannot create regex for `{}`: {}", regex_pattern, e))?;
 
         log::info!("Searching for files `{}`", glob_pattern);
-        let glob_iter = glob::glob(&glob_pattern).map_err(|e| Error::RuntimeError(
-            format!("Cannot create glob pattern for `{}`: {}", glob_pattern, e)))?;
+        let glob_iter = glob::glob(&glob_pattern).map_err(|e| error!(RuntimeError,
+            "Cannot create glob pattern for `{}`: {}", glob_pattern, e))?;
         for entry in glob_iter {
-            let path = entry.map_err(|e| Error::RuntimeError(
-                format!("Glob search failed on pattern `{}`: {}", glob_pattern, e)))?;
+            let path = entry.map_err(|e| error!(RuntimeError,
+                "Glob search failed on pattern `{}`: {}", glob_pattern, e))?;
             let path_str = path.as_os_str().to_str().ok_or_else(||
-                Error::InvalidData(format!("Filename `{}` cannot be represented with Utf-8", path.display())))?;
+                error!(InvalidData, "Filename `{}` cannot be represented with Utf-8", path.display()))?;
 
             let Some(cap1) = regex.captures(path_str)
-                .map_err(|e| Error::RuntimeError(
-                    format!("Failed to run regex `{}` on `{}`: {}", regex_pattern, path_str, e)))?
+                .map_err(|e| error!(RuntimeError,
+                    "Failed to run regex `{}` on `{}`: {}", regex_pattern, path_str, e))?
                 .and_then(|cap| cap.get(1))
                 else { continue };
             let locus = cap1.as_str();
             if !loci.insert(locus.to_owned()) {
-                return Err(Error::InvalidInput(format!("Two sequence files with locus `{}` matched", locus)));
+                return Err(error!(InvalidInput, "Two sequence files with locus `{}` matched", locus));
             }
             load_seqs_single(path_str, &output.replace(BRACKETS, locus), &mut seqs, &mut files)?;
         }
@@ -401,7 +401,7 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> Result<SeqsFiles, Error>
 }
 
 /// Loads files from
-fn load_seqs_list(list_filename: &Path) -> Result<SeqsFiles, Error> {
+fn load_seqs_list(list_filename: &Path) -> crate::Result<SeqsFiles> {
     let dirname = list_filename.parent();
     let mut out_filenames = HashSet::default();
     let mut seqs = Vec::new();
@@ -411,14 +411,14 @@ fn load_seqs_list(list_filename: &Path) -> Result<SeqsFiles, Error> {
         let line = line.map_err(add_path!(list_filename))?;
         let line_split: smallvec::SmallVec<[&str; 3]> = line.trim().split_whitespace().collect();
         if line_split.len() != 2 {
-            return Err(Error::InvalidData(format!("Invalid line `{}` in {}: exactly two filenames required",
-                line, ext::fmt::path(list_filename))));
+            return Err(error!(InvalidData, "Invalid line `{}` in {}: exactly two filenames required",
+                line, ext::fmt::path(list_filename)));
         }
         let seqs_filename = ext::sys::add_dir(dirname, line_split[0]);
         let out_filename = ext::sys::add_dir(dirname, line_split[1]);
         if !out_filenames.insert(out_filename.to_owned()) {
-            return Err(Error::InvalidData(format!("Output filename {} appears twice in the list {}",
-                ext::fmt::path(out_filename), ext::fmt::path(list_filename))));
+            return Err(error!(InvalidData, "Output filename {} appears twice in the list {}",
+                ext::fmt::path(out_filename), ext::fmt::path(list_filename)));
         }
         load_seqs_single(seqs_filename, out_filename, &mut seqs, &mut files)?;
     }
@@ -426,7 +426,7 @@ fn load_seqs_list(list_filename: &Path) -> Result<SeqsFiles, Error> {
 }
 
 /// Based on the input arguments -s/-S, -o and -l, (list of list of sequences, output files).
-fn load_seqs_and_outputs(args: &Args) -> Result<SeqsFiles, Error> {
+fn load_seqs_and_outputs(args: &Args) -> crate::Result<SeqsFiles> {
     let (seqs, files) = match &args.seqs_list {
         Some(filename) => {
             validate_param!(args.seqs.is_empty() && args.seqs_all.is_none() && args.output.is_none(),
@@ -435,7 +435,7 @@ fn load_seqs_and_outputs(args: &Args) -> Result<SeqsFiles, Error> {
         }
         None => {
             let out_filename = args.output.as_ref()
-                .ok_or_else(|| Error::InvalidInput("Output path (-o) must be provided".to_string()))?;
+                .ok_or_else(|| error!(InvalidInput, "Output path (-o) must be provided"))?;
             match &args.seqs_all {
                 Some(filename) => {
                     validate_param!(args.seqs.is_empty(), "Arguments -s and -S are mutually exclusive");
@@ -450,7 +450,7 @@ fn load_seqs_and_outputs(args: &Args) -> Result<SeqsFiles, Error> {
     };
     assert_eq!(seqs.len(), files.len());
     if seqs.is_empty() {
-        Err(Error::InvalidInput("No input sequences loaded".to_string()))
+        Err(error!(InvalidInput, "No input sequences loaded"))
     } else {
         Ok((seqs, files))
     }
@@ -466,7 +466,7 @@ fn build_targets(
     recr_params: recruit::Params,
     jf_counts: Option<&PathBuf>,
     jellyfish: &PathBuf,
-) -> Result<recruit::Targets, Error>
+) -> crate::Result<recruit::Targets>
 {
     let minimizer_k = recr_params.minimizer_k();
     let mut target_builder = recruit::TargetBuilder::new(recr_params);
@@ -488,7 +488,7 @@ fn build_targets(
     Ok(target_builder.finalize())
 }
 
-fn load_target_regions(contigs: &Arc<ContigNames>, args: &Args) -> Result<Vec<Interval>, Error> {
+fn load_target_regions(contigs: &Arc<ContigNames>, args: &Args) -> crate::Result<Vec<Interval>> {
     match &args.regions {
         Some(filename) => {
             let mut intervals = Vec::new();
@@ -512,7 +512,7 @@ fn load_target_regions(contigs: &Arc<ContigNames>, args: &Args) -> Result<Vec<In
     }
 }
 
-pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let mut args = parse_args(argv)?;
     let timer = Instant::now();
     args.in_files.fill_from_inlist()?;

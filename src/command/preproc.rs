@@ -22,7 +22,7 @@ use crate::{
         self,
         fmt::PrettyU32,
     },
-    err::{Error, validate_param, add_path},
+    err::{Error, error, validate_param, add_path},
     seq::{
         Interval,
         kmers::{JfKmerGetter, KmerCounts},
@@ -49,7 +49,7 @@ fn check_filename(
     exp_format: &'static str,
     shouldnt_match: &Regex,
     wrong_format: &'static str,
-) -> Result<(), Error> {
+) -> crate::Result<()> {
     if filename == OsStr::new("-") || filename.starts_with("/dev") {
         log::error!("Stdin and other /dev/* files may not be supported. Continuing for now");
         return Ok(());
@@ -62,9 +62,9 @@ fn check_filename(
 
     if let Some(s) = filename.to_str() {
         if shouldnt_match.is_match(s) {
-            return Err(Error::InvalidInput(format!(
+            return Err(error!(InvalidInput,
                 "Incorrect file format for {} (expected {}, found {}). Please check -i and -a arguments",
-                ext::fmt::path(filename), exp_format, wrong_format)));
+                ext::fmt::path(filename), exp_format, wrong_format));
         } else if !should_match.is_match(s) {
             log::warn!("Could not guess file format for {} (expected {}). Can lead to problems later",
                 ext::fmt::path(filename), exp_format);
@@ -108,7 +108,7 @@ impl InputFiles {
     /// `a` (alignment), `u` (unmapped BAM/CRAM file) and `ui` (unmapped interleaved BAM/CRAM file).
     ///
     /// Paired-end (`p`) line may contain either two files or one file with `*` inside, which is replaced with 1 and 2.
-    pub fn fill_from_inlist(&mut self) -> Result<(), Error> {
+    pub fn fill_from_inlist(&mut self) -> crate::Result<()> {
         let Some(list_filename) = self.in_list.take() else { return Ok(()) };
         validate_param!(self.reads1.is_empty() && self.reads2.is_empty() && self.alns.is_empty(),
             "Input list (-I) cannot be used together with other input files (-i/-a).");
@@ -176,15 +176,14 @@ impl InputFiles {
                         self.reads2.push(ext::sys::add_dir(dirname, &filename1.replace('*', "2")));
                     }
                 }
-                rem => return Err(Error::ParsingError(
-                    format!("Cannot parse line {:?}: unexpected flag {}", trimmed_line, rem))),
+                rem => return Err(error!(ParsingError, "Cannot parse line {:?}: unexpected flag {}", trimmed_line, rem)),
             }
             prev_flag = Some(flag);
         }
         Ok(())
     }
 
-    pub fn validate(&self, ref_required: bool) -> Result<(), Error> {
+    pub fn validate(&self, ref_required: bool) -> crate::Result<()> {
         let n1 = self.reads1.len();
         let n2 = self.reads2.len();
         let m = self.alns.len();
@@ -291,7 +290,7 @@ impl Default for Args {
 
 impl Args {
     /// Validate arguments, modifying some, if needed.
-    fn validate(mut self) -> Result<Self, Error> {
+    fn validate(mut self) -> crate::Result<Self> {
         self.in_files.validate(true)?;
         self.threads = max(self.threads, 1);
 
@@ -566,22 +565,22 @@ fn select_bg_interval(
     ref_filename: &Path,
     contigs: &Arc<ContigNames>,
     bg_region: &Option<String>
-) -> Result<Interval, Error>
+) -> crate::Result<Interval>
 {
     if let Some(s) = bg_region {
-        let region = Interval::parse(s, contigs).map_err(|_| Error::InvalidInput(
-            format!("Reference genome {} does not contain region {}", ext::fmt::path(ref_filename), s)))?;
+        let region = Interval::parse(s, contigs).map_err(|_| error!(InvalidInput,
+            "Reference genome {} does not contain region {}", ext::fmt::path(ref_filename), s))?;
         return if contigs.in_bounds(&region) {
             Ok(region)
         } else {
-            Err(Error::InvalidInput(format!("Region {} is out of bounds", s)))
+            Err(error!(InvalidInput, "Region {} is out of bounds", s))
         };
     }
 
     let genome = GenomeVersion::guess(contigs)
-        .ok_or_else(|| Error::RuntimeError(
+        .ok_or_else(|| error!(RuntimeError,
             "Could not recognize reference genome. Please provide background region (-b) explicitely, \
-            preferably >3 Mb long and without significant duplications".to_owned()))?;
+            preferably >3 Mb long and without significant duplications"))?;
     let region = default_region(genome);
     log::info!("Recognized {} reference genome, using background region {}", genome, region);
     // Try to crop `chr` if region cannot be found.
@@ -590,13 +589,13 @@ fn select_bg_interval(
             if contigs.in_bounds(&region) {
                 return Ok(region);
             } else {
-                return Err(Error::InvalidInput(format!("Region {} is too long for the reference genome", region)));
+                return Err(error!(InvalidInput, "Region {} is too long for the reference genome", region));
             }
         }
     }
-    Err(Error::InvalidInput(format!("Reference genome {} does not contain any of the default background regions. \
+    Err(error!(InvalidInput, "Reference genome {} does not contain any of the default background regions. \
         Please provide background region (-b) explicitely, preferably >3 Mb long and without significant duplications",
-        ext::fmt::path(ref_filename))))
+        ext::fmt::path(ref_filename)))
 }
 
 fn recruit_reads(
@@ -606,7 +605,7 @@ fn recruit_reads(
     bg_region: &BgRegion,
     is_paired_end: bool,
     recr_threads: u16,
-) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
+) -> crate::Result<thread::JoinHandle<Result<u64, Error>>>
 {
     let minimizer_kw = seq_info.technology().default_minim_size();
     let match_frac = seq_info.technology().default_match_frac(is_paired_end);
@@ -633,7 +632,7 @@ fn set_mapping_stdin(
     bg_region: &BgRegion,
     recr_threads: u16,
     args: &Args,
-) -> Result<thread::JoinHandle<Result<u64, Error>>, Error>
+) -> crate::Result<thread::JoinHandle<Result<u64, Error>>>
 {
     // TODO: Can we optimize this?
     let mut writer = io::BufWriter::new(child_stdin);
@@ -762,11 +761,11 @@ impl JsonSer for MappingParams {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
         json_get!(obj => technology (as_str), min_mapq (as_u8), subsampling ? (as_f64), bg_region (as_str));
         if let Some(rate) = subsampling {
             if rate < 0.999 {
-                return Err(Error::RuntimeError("Preprocessed reads were subsampled, no longer supported".into()));
+                return Err(error!(RuntimeError, "Preprocessed reads were subsampled, no longer supported"));
             }
         }
         let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
@@ -779,7 +778,7 @@ impl JsonSer for MappingParams {
 
 /// Returns true if read mapping can be skipped.
 /// Panics if output BAM file exists, but cannot be used.
-fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: &Interval) -> Result<bool, Error> {
+fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: &Interval) -> crate::Result<bool> {
     let params_path = out_dir.join(MAPPING_PARAMS);
     let curr_params = MappingParams::new(args, bg_region);
     if !out_bam.exists() {
@@ -832,7 +831,7 @@ fn run_mapping(
     out_dir: &Path,
     out_bam: &Path,
     bg_region: &BgRegion,
-) -> Result<(), Error>
+) -> crate::Result<()>
 {
     if !need_mapping(args, out_dir, out_bam, &bg_region.interval)? {
         return Ok(());
@@ -872,7 +871,7 @@ fn run_mapping(
     pipe_guard.push(args.samtools.clone(), samtools_child);
     pipe_guard.wait()?;
     let total_reads = handle.join()
-        .map_err(|e| Error::RuntimeError(format!("Read mapping failed: {:?}", e)))??;
+        .map_err(|e| error!(RuntimeError, "Read mapping failed: {:?}", e))??;
     seq_info.set_total_reads(total_reads);
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
     fs::remove_file(&tmp_bed).map_err(add_path!(tmp_bed))?;
@@ -893,7 +892,7 @@ fn load_alns(
     cigar_getter: impl Fn(&bam::Record) -> Option<Cigar>,
     contigs: &Arc<ContigNames>,
     args: &Args
-) -> Result<(Vec<NamedAlignment>, bool), Error>
+) -> crate::Result<(Vec<NamedAlignment>, bool)>
 {
     let min_mapq = args.min_mapq;
     let max_clipping = args.max_clipping;
@@ -917,10 +916,10 @@ fn load_alns(
         }
     }
     if paired_counts[0] > 0 && paired_counts[1] > 0 {
-        return Err(Error::InvalidData(format!("BAM file contains both paired and unpaired reads")));
+        return Err(error!(InvalidData, "BAM file contains both paired and unpaired reads"));
     }
     if alns.is_empty() {
-        return Err(Error::InvalidData(format!("BAM file contains no reads in the target region")));
+        return Err(error!(InvalidData, "BAM file contains no reads in the target region"));
     }
     log::debug!("    Loaded {} alignments, discarded {}", alns.len(), ignored);
     if wo_cigar > 0 {
@@ -940,7 +939,7 @@ fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
 }
 
 /// Calculate mean read length from input reads.
-fn read_len_from_reads(args: &Args, contigs: Option<&ContigNames>) -> Result<f64, Error> {
+fn read_len_from_reads(args: &Args, contigs: Option<&ContigNames>) -> crate::Result<f64> {
     log::info!("Calculating mean read length");
     fastx::process_readers!(args.in_files, contigs; let {mut} reader;
         { fastx::mean_read_len(&mut reader, MEAN_LEN_RECORDS) })
@@ -952,7 +951,7 @@ fn estimate_bg_from_paired(
     args: &Args,
     opt_out_dir: Option<&Path>,
     bg_region: &BgRegion,
-) -> Result<BgDistr, Error>
+) -> crate::Result<BgDistr>
 {
     // Group reads into pairs, and estimate insert size from them.
     let pair_ixs = insertsz::group_mates(&alns)?;
@@ -1005,7 +1004,7 @@ fn estimate_bg_from_unpaired(
     args: &Args,
     opt_out_dir: Option<&Path>,
     bg_region: &BgRegion,
-) -> Result<BgDistr, Error>
+) -> crate::Result<BgDistr>
 {
     let insert_distr = InsertDistr::undefined();
     let interval = &bg_region.interval;
@@ -1032,7 +1031,7 @@ fn estimate_bg_distrs(
     args: &Args,
     out_dir: &Path,
     bg_region: &BgRegion,
-) -> Result<BgDistr, Error>
+) -> crate::Result<BgDistr>
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
     let ref_filename = args.in_files.reference.as_ref().unwrap();
@@ -1056,8 +1055,7 @@ fn estimate_bg_distrs(
             |record| Cigar::infer_ext_cigar(record, padded_seq, padded_start),
             &bg_region.ref_contigs, args)?;
         if aln_is_paired_end && !args.technology.paired_end_allowed() {
-            return Err(Error::InvalidInput(format!("Paired end reads are not supported by {}",
-                args.technology.long_name())));
+            return Err(error!(InvalidInput, "Paired end reads are not supported by {}", args.technology.long_name()));
         }
         seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.technology, args.explicit_technology)?;
     } else {
@@ -1077,12 +1075,12 @@ fn estimate_bg_distrs(
         };
         (alns, aln_is_paired_end) = load_alns(&mut bam_reader, get_cigar, &bg_region.ref_contigs, args)?;
         if aln_is_paired_end != args.in_files.is_paired_end() {
-            return Err(Error::RuntimeError(format!(
+            return Err(error!(RuntimeError,
                 "Input data is {}-end, while alignment file is {}-end. \
                 Perhaps preprocessing was run multiple times with different inputs?",
                 if args.in_files.is_paired_end() { "paired" } else { "single" },
                 if aln_is_paired_end { "paired" } else { "single" },
-            )));
+            ));
         }
     }
 
@@ -1094,28 +1092,28 @@ fn estimate_bg_distrs(
 }
 
 /// Assume that this WGS dataset is similar to another dataset, and use its parameters.
-fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
+fn estimate_like(args: &Args, like_dir: &Path) -> crate::Result<BgDistr> {
     let similar_path = like_dir.join(paths::BG_DISTR);
     log::info!("Loading distribution parameters from {}", ext::fmt::path(&similar_path));
     let similar_distr = BgDistr::load_from(&similar_path, &like_dir.join(paths::SUCCESS))?;
     let similar_seq_info = similar_distr.seq_info();
     let Some(similar_n_reads) = similar_seq_info.total_reads() else {
-        return Err(Error::InvalidInput(format!(
-            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir))))
+        return Err(error!(InvalidInput,
+            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir)))
     };
 
     let seq_info = SequencingInfo::new(read_len_from_reads(args, None)?, args.technology, args.explicit_technology)?;
     if similar_seq_info.technology() != seq_info.technology() {
-        return Err(Error::InvalidInput(format!(
+        return Err(error!(InvalidInput,
             "Cannot use similar dataset {}: different sequencing technology ({} and {})",
-            ext::fmt::path(like_dir), similar_seq_info.technology(), seq_info.technology())));
+            ext::fmt::path(like_dir), similar_seq_info.technology(), seq_info.technology()));
     } else if similar_distr.insert_distr().is_paired_end() != args.in_files.is_paired_end() {
-        return Err(Error::InvalidInput(format!(
-            "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(like_dir))));
+        return Err(error!(InvalidInput,
+            "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(like_dir)));
     } else if !seq_info.technology().is_read_len_similar(seq_info.mean_read_len(), similar_seq_info.mean_read_len()) {
-        return Err(Error::InvalidInput(format!(
+        return Err(error!(InvalidInput,
             "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",
-            ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len())));
+            ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len()));
     }
     let mut total_reads = if !args.in_files.alns.is_empty() {
         log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.alns));
@@ -1138,8 +1136,8 @@ fn estimate_like(args: &Args, like_dir: &Path) -> Result<BgDistr, Error> {
     // NOTE: total reads are deliberately not provided to `seq_info`, so as not to propagate errors.
     let rate = total_reads as f64 / similar_n_reads as f64;
     if rate < 0.1 {
-        return Err(Error::InvalidInput(format!(
-            "Read depth changed too much (by a factor of {:.4}), please estimate parameters anew", rate)))
+        return Err(error!(InvalidInput,
+            "Read depth changed too much (by a factor of {:.4}), please estimate parameters anew", rate))
     } else if (rate - 1.0).abs() < 0.01 {
         log::debug!("    Almost identical read depth");
     } else {
@@ -1165,7 +1163,7 @@ struct BgRegion {
 }
 
 impl BgRegion {
-    fn new(args: &Args) -> Result<Self, Error> {
+    fn new(args: &Args) -> crate::Result<Self> {
         let ref_filename = args.in_files.reference.as_ref().unwrap();
         let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
         let ref_contigs = Arc::new(ref_contigs);
@@ -1194,7 +1192,7 @@ impl BgRegion {
     }
 }
 
-pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let mut args = parse_args(argv)?;
     args.in_files.fill_from_inlist()?;
     let args = args.validate()?;

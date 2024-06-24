@@ -7,7 +7,7 @@ use rand::{
     seq::SliceRandom,
 };
 use crate::{
-    err::{Error, validate_param},
+    err::{error, validate_param},
     ext::rand::XoshiroRng,
     model::assgn::{GenotypeAlignments, ReadAssignment, ReassignmentTarget},
 };
@@ -55,7 +55,7 @@ impl GreedySolver {
         self.best_start = best_start;
     }
 
-    pub fn set_sample_size(&mut self, sample_size: usize) -> Result<(), Error> {
+    pub fn set_sample_size(&mut self, sample_size: usize) -> crate::Result<()> {
         validate_param!(sample_size != 0, "Greedy solver: sample size must be positive");
         self.sample_size = sample_size;
         Ok(())
@@ -72,7 +72,7 @@ impl Solver for GreedySolver {
         &self,
         gt_alns: &'a GenotypeAlignments,
         rng: &mut XoshiroRng,
-    ) -> Result<ReadAssignment<'a>, Error>
+    ) -> crate::Result<ReadAssignment<'a>>
     {
         let non_trivial_ixs = gt_alns.non_trivial_reads();
         let sample_size = min(self.sample_size, non_trivial_ixs.len());
@@ -112,14 +112,14 @@ impl Solver for GreedySolver {
 
 impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
-    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
+    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()> {
         match &key.to_lowercase() as &str {
             "best" | "beststart" | "best_start" => self.set_best_start(val.parse()
-                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?),
+                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?),
             "sample" => self.set_sample_size(val.parse()
-                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
+                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?)?,
             "plato" => self.set_plato_size(val.parse()
-                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?),
+                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?),
             _ => log::error!("Greedy solver: unknown parameter {:?}", key),
         }
         Ok(())
@@ -158,14 +158,14 @@ impl Default for SimAnneal {
 }
 
 impl SimAnneal {
-    pub fn set_init_prob(&mut self, init_prob: f64) -> Result<(), Error> {
+    pub fn set_init_prob(&mut self, init_prob: f64) -> crate::Result<()> {
         validate_param!(init_prob > 0.0 && init_prob <= 1.0,
             "Initial probability ({}) must be within (0, 1]", init_prob);
         self.init_prob = init_prob;
         Ok(())
     }
 
-    pub fn set_anneal_steps(&mut self, anneal_steps: usize) -> Result<(), Error> {
+    pub fn set_anneal_steps(&mut self, anneal_steps: usize) -> crate::Result<()> {
         validate_param!(anneal_steps > 0, "Number of annealing steps ({}) must be positive", anneal_steps);
         self.anneal_steps = anneal_steps;
         Ok(())
@@ -182,7 +182,7 @@ impl Solver for SimAnneal {
         &self,
         gt_alns: &'a GenotypeAlignments,
         rng: &mut XoshiroRng,
-    ) -> Result<ReadAssignment<'a>, Error>
+    ) -> crate::Result<ReadAssignment<'a>>
     {
         // 0 - index of the best alignment.
         // let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
@@ -228,14 +228,14 @@ impl Solver for SimAnneal {
 
 impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
-    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
+    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()> {
         match &key.to_lowercase() as &str {
             "steps" | "annealsteps" | "anneal_steps" => self.set_anneal_steps(val.parse()
-                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
+                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?)?,
             "init" | "init_prob" | "initprob" => self.set_init_prob(val.parse()
-                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?)?,
+                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?)?,
             "plato" => self.set_plato_size(val.parse()
-                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}={}'", key, val)))?),
+                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?),
             _ => log::error!("Sim.Annealing: unknown parameter {:?}", key),
         }
         Ok(())

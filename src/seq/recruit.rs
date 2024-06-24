@@ -8,7 +8,7 @@ use std::{
 };
 use smallvec::{smallvec, SmallVec};
 use crate::{
-    err::{Error, validate_param, add_path},
+    err::{validate_param, add_path},
     seq::{
         ContigSet,
         kmers::{self, Kmer, KmerCount},
@@ -66,7 +66,7 @@ impl Params {
         match_frac: f64,
         match_length: u32,
         thresh_kmer_count: KmerCount,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         validate_param!(0 < minimizer_k && minimizer_k <= Minimizer::MAX_KMER_SIZE,
             "Minimizer kmer-size must be within [1, {}]", Minimizer::MAX_KMER_SIZE);
@@ -678,7 +678,7 @@ impl Targets {
         &self,
         mut reader: impl FastxRead<Record = T>,
         writers: &mut [impl io::Write],
-    ) -> Result<Progress, Error>
+    ) -> crate::Result<Progress>
     where T: RecruitableRecord,
           M: MatchesBuffer,
     {
@@ -706,7 +706,7 @@ impl Targets {
         writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
-    ) -> Result<Progress, Error>
+    ) -> crate::Result<Progress>
     where T: RecruitableRecord,
           M: MatchesBuffer,
     {
@@ -730,7 +730,7 @@ impl Targets {
         mut writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
-    ) -> Result<Progress, Error>
+    ) -> crate::Result<Progress>
     {
         assert_eq!(writers.len(), self.locus_minimizers.len(), "Unexpected number of writers");
         let single_target = self.n_targets() == 1;
@@ -858,7 +858,7 @@ where T: RecruitableRecord,
     }
 
     /// Starts the process: provides the first task to each worker.
-    fn start(&mut self) -> Result<(), Error> {
+    fn start(&mut self) -> crate::Result<()> {
         for (is_busy, sender) in self.is_busy.iter_mut().zip(&self.senders) {
             let shipment = read_new_shipment(&mut self.reader, self.chunk_size)?;
             if !shipment.is_empty() {
@@ -899,7 +899,7 @@ where T: RecruitableRecord,
         any_action
     }
 
-    fn write_read_iteration(&mut self) -> Result<(), Error> {
+    fn write_read_iteration(&mut self) -> crate::Result<()> {
         if self.reader.is_none() {
             return Ok(())
         }
@@ -924,7 +924,7 @@ where T: RecruitableRecord,
 
     /// Main part of the multi-thread recruitment.
     /// Iterates until there are any shipments left to read from the input files.
-    fn run(&mut self) -> Result<(), Error> {
+    fn run(&mut self) -> crate::Result<()> {
         self.start()?;
         while self.reader.is_some() || !self.to_send.is_empty() {
             self.write_read_iteration()?;
@@ -938,7 +938,7 @@ where T: RecruitableRecord,
     }
 
     /// Finish the main thread: write all remaining shipments to the output files, and stop worker threads.
-    fn finish(mut self) -> Result<Progress, Error> {
+    fn finish(mut self) -> crate::Result<Progress> {
         assert!(self.reader.is_none() && self.to_send.is_empty());
         for shipment in self.to_write.into_iter() {
             write_shipment(&mut self.writers, &shipment, &mut self.progress)?;
@@ -961,7 +961,7 @@ where T: RecruitableRecord,
 
 /// Fills `shipment` from the reader.
 /// Output shipment may be empty, if the stream has ended.
-fn fill_shipment<T, R>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T>) -> Result<(), Error>
+fn fill_shipment<T, R>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T>) -> crate::Result<()>
 where T: Default,
       R: FastxRead<Record = T>,
 {
@@ -980,7 +980,7 @@ where T: Default,
 }
 
 #[inline]
-fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> Result<Shipment<T>, Error>
+fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> crate::Result<Shipment<T>>
 where T: Clone + Default,
       R: FastxRead<Record = T>,
 {
@@ -990,7 +990,7 @@ where T: Clone + Default,
 }
 
 /// Writes recruited records to the output files.
-fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, progress: &mut Progress) -> Result<(), Error>
+fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, progress: &mut Progress) -> crate::Result<()>
 where T: fastx::WritableRecord,
 {
     for (record, answer) in shipment.iter() {

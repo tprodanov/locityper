@@ -10,7 +10,7 @@ use crate::{
     ext::rand::XoshiroRng,
 };
 
-fn define_model(gt_alns: &GenotypeAlignments) -> Result<(Model, Vec<Var>), Error> {
+fn define_model(gt_alns: &GenotypeAlignments) -> crate::Result<(Model, Vec<Var>)> {
     let mut env = Env::empty()?;
     env.set(parameter::IntParam::OutputFlag, 0)?;
     let mut model = Model::with_env("", &env.start()?)?;
@@ -85,7 +85,7 @@ fn get_assignments<'a>(
     gt_alns: &'a GenotypeAlignments,
     model: &Model,
     assignment_vars: &[Var],
-) -> Result<ReadAssignment<'a>, Error> {
+) -> crate::Result<ReadAssignment<'a>> {
     let vals = model.get_obj_attr_batch(attr::X, assignment_vars.iter().copied())?;
     let mut i = 0;
     let assgns = ReadAssignment::try_new::<_, Error>(gt_alns, |locs| {
@@ -109,7 +109,7 @@ impl super::Solver for GurobiSolver {
         &self,
         gt_alns: &'a GenotypeAlignments,
         rng: &mut XoshiroRng,
-    ) -> Result<ReadAssignment<'a>, Error>
+    ) -> crate::Result<ReadAssignment<'a>>
     {
         let (mut model, vars) = define_model(gt_alns)?;
         model.set_param(parameter::IntParam::Seed, rng.gen::<i32>().abs())?;
@@ -129,7 +129,7 @@ impl super::Solver for GurobiSolver {
 }
 
 impl super::SetParams for GurobiSolver {
-    fn set_param(&mut self, key: &str, _val: &str) -> Result<(), Error> {
+    fn set_param(&mut self, key: &str, _val: &str) -> crate::Result<()> {
         log::error!("Gurobi solver: unknown parameter {:?}", key);
         Ok(())
     }

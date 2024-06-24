@@ -9,7 +9,7 @@ pub mod command;
 
 mod err;
 // mod test;
-pub use err::Error;
+pub use err::{Error, Result};
 
 fn init_logger() {
     use fern::{

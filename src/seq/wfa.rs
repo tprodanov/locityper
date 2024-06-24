@@ -2,7 +2,7 @@
 use std::ffi::c_char;
 use crate::{
     seq::cigar::{Cigar, Operation},
-    err::{Error, validate_param},
+    err::{error, validate_param},
 };
 
 #[cfg(feature = "align")]
@@ -37,7 +37,7 @@ impl Default for Penalties {
 }
 
 impl Penalties {
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> crate::Result<()> {
         validate_param!(self.mismatch >= 0, "Mismatch penalty ({}) must be non-negative", self.mismatch);
         validate_param!(self.gap_open >= 0, "Gap opening penalty ({}) must be non-negative", self.gap_open);
         validate_param!(self.gap_extend >= 0, "Gap extension penalty ({}) must be non-negative", self.gap_extend);
@@ -152,7 +152,7 @@ impl Aligner {
 
     /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
     /// If the alignment is dropped, returns VERY approximate alignment.
-    pub fn align(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> Result<i32, Error> {
+    pub fn align(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> crate::Result<i32> {
         let status = unsafe { cwfa::wavefront_align(
             self.inner,
             seq1.as_ptr() as *const c_char,
@@ -173,9 +173,9 @@ impl Aligner {
                 std::slice::from_raw_parts((*c_cigar).operations as *const u8, end_offset - begin_offset)
             };
             for &ch in cigar_slice {
-                let op = op_from_char(ch).map_err(|_| Error::RuntimeError(format!(
+                let op = op_from_char(ch).map_err(|_| error!(RuntimeError,
                     "Could not align two sequences: violating CIGAR character `{}` ({}) in {:?}. Sequences: {} and {}",
-                    char::from(ch), ch, cigar_slice, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2))))?;
+                    char::from(ch), ch, cigar_slice, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2)))?;
                 cigar.push_checked(op, 1);
             }
         }

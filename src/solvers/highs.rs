@@ -27,7 +27,7 @@ impl Default for HighsSolver {
 }
 
 impl HighsSolver {
-    pub fn set_mode(&mut self, mode: &str) -> Result<(), Error> {
+    pub fn set_mode(&mut self, mode: &str) -> crate::Result<()> {
         validate_param!(mode == "choose" || mode == "simplex" || mode == "ipm",
             "{} solver: unknown mode {:?}", HIGHS_NAME, mode);
         self.mode = mode.to_owned();
@@ -105,7 +105,7 @@ impl super::Solver for HighsSolver {
         &self,
         gt_alns: &'a GenotypeAlignments,
         _rng: &mut XoshiroRng
-    ) -> Result<ReadAssignment<'a>, Error> {
+    ) -> crate::Result<ReadAssignment<'a>> {
         let problem = self.define_model(gt_alns);
         let mut model = problem.optimise(Sense::Maximise);
         model.set_option("parallel", "off");
@@ -134,7 +134,7 @@ impl super::Solver for HighsSolver {
 }
 
 impl super::SetParams for HighsSolver {
-    fn set_param(&mut self, key: &str, val: &str) -> Result<(), Error> {
+    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()> {
         if key == "mode" || key == "type" {
             self.set_mode(val)?;
         } else {

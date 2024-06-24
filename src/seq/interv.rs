@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 use const_format::formatcp;
 use bio::io::fasta;
 use crate::{
-    Error,
+    err::error,
     ext::fmt::PrettyU32,
 };
 use super::{ContigId, ContigNames};
@@ -73,40 +73,40 @@ impl Interval {
             min(self.end + padding, self.contigs.get_len(self.contig_id)))
     }
 
-    fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
+    fn from_captures(s: &str, captures: &regex::Captures<'_>, contigs: &Arc<ContigNames>) -> crate::Result<Self> {
         let contig_id = contigs.try_get_id(&captures[1])
-            .ok_or_else(|| Error::ParsingError(format!("Unknown contig {:?}", &captures[1])))?;
+            .ok_or_else(|| error!(ParsingError, "Unknown contig {:?}", &captures[1]))?;
         let start: PrettyU32 = captures[2].parse()
-            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
+            .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?;
         let end: PrettyU32 = captures[3].parse()
-            .map_err(|_| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
+            .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?;
         Ok(Self::new(Arc::clone(contigs), contig_id, start.get() - 1, end.get()))
     }
 
     /// Parses interval from string "name:start-end", where start is 1-based, inclusive.
-    pub fn parse(s: &str, contigs: &Arc<ContigNames>) -> Result<Self, Error> {
+    pub fn parse(s: &str, contigs: &Arc<ContigNames>) -> crate::Result<Self> {
         lazy_static! {
             static ref RE: Regex = Regex::new(INTERVAL_PATTERN).unwrap();
         }
-        let captures = RE.captures(s).ok_or_else(|| Error::ParsingError(format!("Cannot parse interval '{}'", s)))?;
+        let captures = RE.captures(s).ok_or_else(|| error!(ParsingError, "Cannot parse interval '{}'", s))?;
         Self::from_captures(s, &captures, contigs)
     }
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
     /// Start is 0-based, inclusive, end is 0-based, non-inclusive.
-    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> Result<Self, Error>
+    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> crate::Result<Self>
     where I: Iterator<Item = &'a str>,
     {
         let contig_name = split.next()
-            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?;
+            .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?;
         let contig_id = contigs.try_get_id(contig_name)
-            .ok_or_else(|| Error::ParsingError(format!("Unknown contig {:?}", contig_name)))?;
+            .ok_or_else(|| error!(ParsingError, "Unknown contig {:?}", contig_name))?;
         let start = split.next()
-            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?
-            .parse::<u32>().map_err(|e| Error::ParsingError(format!("Cannot parse BED line: {}", e)))?;
+            .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?
+            .parse::<u32>().map_err(|e| error!(ParsingError, "Cannot parse BED line: {}", e))?;
         let end = split.next()
-            .ok_or_else(|| Error::ParsingError("Cannot parse BED line, not enough columns".to_owned()))?
-            .parse::<u32>().map_err(|e| Error::ParsingError(format!("Cannot parse BED line: {}", e)))?;
+            .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?
+            .parse::<u32>().map_err(|e| error!(ParsingError, "Cannot parse BED line: {}", e))?;
         Ok(Self::new(Arc::clone(contigs), contig_id, start, end))
     }
 
@@ -216,7 +216,7 @@ impl Interval {
     }
 
     /// Fetches sequence of the interval from an indexed fasta reader.
-    pub fn fetch_seq(&self, fasta: &mut fasta::IndexedReader<impl Read + Seek>) -> Result<Vec<u8>, Error> {
+    pub fn fetch_seq(&self, fasta: &mut fasta::IndexedReader<impl Read + Seek>) -> crate::Result<Vec<u8>> {
         super::fetch_seq(fasta, self.contig_name(), u64::from(self.start), u64::from(self.end))
     }
 
@@ -286,14 +286,14 @@ impl<'a> fmt::Display for BedFormat<'a> {
 }
 
 /// Tests if the locus name is allowed.
-pub fn check_locus_name(name: &str) -> Result<(), Error> {
+pub fn check_locus_name(name: &str) -> crate::Result<()> {
     lazy_static! {
         static ref NAME_RE: Regex = Regex::new(NAME_PATTERN).unwrap();
     }
     if NAME_RE.is_match(&name) {
         Ok(())
     } else {
-        Err(Error::ParsingError(format!("Locus name '{}' contains forbidden symbols", name)))
+        Err(error!(ParsingError, "Locus name '{}' contains forbidden symbols", name))
     }
 }
 
@@ -308,18 +308,18 @@ pub struct NamedInterval {
 impl NamedInterval {
     /// Create a named interval.
     /// If name is not provided, set it to `contig:start-end`.
-    pub fn new(name: String, interval: Interval) -> Result<Self, Error> {
+    pub fn new(name: String, interval: Interval) -> crate::Result<Self> {
         check_locus_name(&name)?;
         Ok(Self { name, interval })
     }
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
     /// Start is 0-based, inclusive, end is 0-based, non-inclusive.
-    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> Result<Self, Error>
+    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> crate::Result<Self>
     where I: Iterator<Item = &'a str>,
     {
         let interval = Interval::parse_bed(split, contigs)?;
-        let name = split.next().ok_or_else(|| Error::InvalidData("Fourth column must contain locus name".to_owned()))?;
+        let name = split.next().ok_or_else(|| error!(InvalidData, "Fourth column must contain locus name"))?;
         Self::new(name.to_owned(), interval)
     }
 

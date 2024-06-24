@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 use crate::{
-    err::{Error, add_path},
+    err::{add_path},
     seq::{
         Interval,
         aln::NamedAlignment,
@@ -154,7 +154,7 @@ impl ErrorProfile {
         region: &Interval,
         windows: &super::Windows,
         out_dir: Option<&Path>,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         log::info!("Estimating read error profiles from {} reads", alns.len());
         let mut total_counts = OperCounts::<u64>::default();
@@ -221,7 +221,7 @@ impl JsonSer for ErrorProfile {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
         json_get!(obj => matches (as_f64), mismatches (as_f64), insertions (as_f64),
             deletions (as_f64), clipping (as_f64),
             alpha (as_f64), beta (as_f64));

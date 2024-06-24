@@ -5,7 +5,7 @@ use std::{
     fmt::Write as FmtWrite,
 };
 use crate::{
-    err::{Error, add_path, validate_param},
+    err::{error, add_path, validate_param},
     ext::{
         self,
         TriangleMatrix,
@@ -68,7 +68,7 @@ impl Default for Args {
 }
 
 impl Args {
-    fn validate(self) -> Result<Self, Error> {
+    fn validate(self) -> crate::Result<Self> {
         validate_param!(self.input.is_some(), "Input FASTA file is not provided (see -i/--input)");
         validate_param!(self.output.is_some(), "Output PAF path is not provided (see -o/--output)");
 
@@ -90,11 +90,11 @@ impl Args {
         Ok(self)
     }
 
-    fn get_backbones(&self) -> Result<Vec<u32>, Error> {
+    fn get_backbones(&self) -> crate::Result<Vec<u32>> {
         let backbones = self.backbone_ks.split(',').map(str::parse)
             .collect::<Result<Vec<u32>, _>>()
-            .map_err(|_| Error::InvalidInput(
-                format!("Cannot parse `-k {}`: must be list of integers separated by comma", self.backbone_ks)))?;
+            .map_err(|_| error!(InvalidInput,
+                "Cannot parse `-k {}`: must be list of integers separated by comma", self.backbone_ks))?;
         validate_param!(!backbones.is_empty(), "Expect at least one backbone k-mer");
         validate_param!(backbones.iter().all(|&k| k >= 5),
             "Backbone k-mer sizes must be at least 5 ({:?})", backbones);
@@ -212,23 +212,22 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
-fn parse_pair(split_pair: &[&str], name2id: &HashMap<&str, u32>) -> Result<(u32, u32), Error> {
+fn parse_pair(split_pair: &[&str], name2id: &HashMap<&str, u32>) -> crate::Result<(u32, u32)> {
     if split_pair.len() != 2 {
-        return Err(Error::InvalidInput(format!("Cannot parse pair `{:?}`: exactly two names required",
-            split_pair)));
+        return Err(error!(InvalidInput, "Cannot parse pair `{:?}`: exactly two names required",
+            split_pair));
     }
-    let id1 = *name2id.get(split_pair[0]).ok_or_else(|| Error::InvalidInput(
-        format!("Cannot find sequence `{}`", split_pair[0])))?;
-    let id2 = *name2id.get(split_pair[1]).ok_or_else(|| Error::InvalidInput(
-        format!("Cannot find sequence `{}`", split_pair[1])))?;
+    let id1 = *name2id.get(split_pair[0])
+        .ok_or_else(|| error!(InvalidInput, "Cannot find sequence `{}`", split_pair[0]))?;
+    let id2 = *name2id.get(split_pair[1])
+        .ok_or_else(|| error!(InvalidInput, "Cannot find sequence `{}`", split_pair[1]))?;
     if id1 == id2 {
-        return Err(Error::InvalidInput(
-            format!("Cannot align sequence to itself ({})", split_pair[0])));
+        return Err(error!(InvalidInput, "Cannot align sequence to itself ({})", split_pair[0]));
     }
     Ok((id2, id1))
 }
 
-fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> Result<Vec<(u32, u32)>, Error> {
+fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> {
     if args.all_pairs {
         return Ok(TriangleMatrix::indices(seqs.len()).map(|(i, j)| (i as u32, j as u32)).collect())
     }
@@ -236,8 +235,7 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> Result<Vec<(u32, u32)>, Error> 
     let mut name2id = HashMap::<&str, u32>::with_capacity_and_hasher(seqs.len(), Hasher::default());
     for (i, entry) in seqs.iter().enumerate() {
         if name2id.insert(entry.name(), i as u32).is_some() {
-            return Err(Error::InvalidInput(
-                format!("Duplicate sequence {} in the input FASTA file", entry.name())));
+            return Err(error!(InvalidInput, "Duplicate sequence {} in the input FASTA file", entry.name()));
         }
     }
     let mut pairs = Vec::new();
@@ -312,7 +310,7 @@ fn write_paf(
     Ok(())
 }
 
-pub(super) fn run(argv: &[String]) -> Result<(), Error> {
+pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let args = parse_args(argv)?.validate()?;
     let backbones = args.get_backbones()?;
     super::greet();
@@ -322,7 +320,7 @@ pub(super) fn run(argv: &[String]) -> Result<(), Error> {
     let seqs = fasta_reader.read_all()?;
     let pairs = load_pairs(&args, &seqs)?;
     if pairs.is_empty() {
-        return Err(Error::InvalidInput("No alignments to compute".to_string()));
+        return Err(error!(InvalidInput, "No alignments to compute"));
     }
     log::info!("Align {} pairs across {} sequences", pairs.len(), seqs.len());
 

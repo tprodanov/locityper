@@ -15,13 +15,13 @@ use std::{
 use colored::Colorize;
 use crate::{
     ext,
-    err::{Error, add_path},
+    err::{add_path},
 };
 
 pub const PROGRAM: &'static str = env!("CARGO_PKG_NAME");
 pub const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-pub fn run(argv: &[String]) -> Result<(), Error> {
+pub fn run(argv: &[String]) -> crate::Result<()> {
     if argv.len() <= 1 {
         print_help();
         std::process::exit(1);
@@ -168,8 +168,8 @@ impl Rerun {
     ///     if all: always returns true and always clears output directory.
     ///
     /// If directory already existed, run `clean(dir)`.
-    fn prepare_and_clean_dir<F>(self, dir: &Path, clean: F) -> Result<bool, Error>
-    where F: FnOnce(&Path) -> Result<(), Error>,
+    fn prepare_and_clean_dir<F>(self, dir: &Path, clean: F) -> crate::Result<bool>
+    where F: FnOnce(&Path) -> crate::Result<()>,
     {
         if !dir.exists() {
             ext::sys::mkdir(dir)?;
@@ -199,7 +199,7 @@ impl Rerun {
         Ok(need_rerun)
     }
 
-    fn prepare_dir(self, dir: &Path) -> Result<bool, Error> {
+    fn prepare_dir(self, dir: &Path) -> crate::Result<bool> {
         self.prepare_and_clean_dir(dir, |_| Ok(()))
     }
 }
@@ -263,7 +263,7 @@ impl From<u8> for DebugLvl {
 }
 
 // /// Writes command line arguments, current version and time.
-// fn write_command(filename: impl AsRef<Path>) -> Result<(), Error> {
+// fn write_command(filename: impl AsRef<Path>) -> crate::Result<()> {
 //     let mut s = String::new();
 //     for (i, arg) in std::env::args().enumerate() {
 //         if i > 0 {
@@ -276,7 +276,7 @@ impl From<u8> for DebugLvl {
 //     fs::write(&filename, s).map_err(add_path!(filename))
 // }
 
-fn write_success_file(filename: impl AsRef<Path>) -> Result<(), Error> {
+fn write_success_file(filename: impl AsRef<Path>) -> crate::Result<()> {
     fs::write(&filename, const_format::formatcp!("v{}\n", VERSION)).map_err(add_path!(filename))
 }
 

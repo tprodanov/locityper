@@ -6,7 +6,7 @@ use std::{
     io::Write,
 };
 use crate::{
-    err::{Error, add_path},
+    err::{add_path, error},
     algo::{bisect, HashMap, IntMap},
     ext::{self, vec::F64Ext},
     bg::ser::{JsonSer, json_get},
@@ -22,15 +22,15 @@ use crate::{
 ///
 /// Input: vector of primary alignments.
 /// There can be at most one first and one second mate for each name.
-pub fn group_mates<'a>(alns: &'a [NamedAlignment]) -> Result<Vec<(usize, usize)>, Error> {
+pub fn group_mates<'a>(alns: &'a [NamedAlignment]) -> crate::Result<Vec<(usize, usize)>> {
     let mut pairs: HashMap<&'a [u8], [Option<usize>; 2]> =
         HashMap::with_capacity_and_hasher(alns.len() / 2, Default::default());
     for (i, aln) in alns.iter().enumerate() {
         let ix = aln.read_end().ix();
         // Insert alignment and return Error, if there already was an alignment there.
         if pairs.entry(aln.name()).or_default()[ix].replace(i).is_some() {
-            return Err(Error::InvalidData(format!("Read {} has several {} mates",
-                aln.name_utf8(), if ix == 0 { "first" } else { "second" })));
+            return Err(error!(InvalidData, "Read {} has several {} mates",
+                aln.name_utf8(), if ix == 0 { "first" } else { "second" }));
         }
     }
     Ok(pairs.into_values().filter_map(|[opt_i, opt_j]| opt_i.zip(opt_j)).collect())
@@ -74,7 +74,7 @@ impl InsertDistr {
         alignments: &[NamedAlignment],
         pair_ixs: &[(usize, usize)],
         out_dir: Option<&Path>,
-    ) -> Result<Self, Error>
+    ) -> crate::Result<Self>
     {
         // Counts reads with insert size over 500 kb as certainly unpaired.
         const MAX_REASONABLE_INSERT: u32 = 500_000;
@@ -84,9 +84,10 @@ impl InsertDistr {
         const INS_QUANTILE_MULT: f64 = 3.0;
 
         if pair_ixs.is_empty() {
-            return Err(Error::InvalidData("BAM records are supposed to be paired!".to_owned()));
+            return Err(error!(InvalidData, "BAM records are supposed to be paired!"));
         } else if pair_ixs.len() < 1000 {
-            return Err(Error::InvalidData("Not enough paired reads to calculate insert size distribution".to_owned()));
+            return Err(error!(InvalidData, "Not enough paired reads ({}) to calculate insert size distribution",
+                pair_ixs.len()));
         }
         log::info!("Estimating insert size distribution from {} read pairs", pair_ixs.len());
         let mut insert_sizes = Vec::<f64>::new();
@@ -195,7 +196,7 @@ impl JsonSer for InsertDistr {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
         if obj.is_empty() {
             return Ok(Self::undefined());
         }

@@ -138,3 +138,13 @@ macro_rules! add_path {
     };
 }
 pub(crate) use add_path;
+
+macro_rules! error {
+    ($var:ident, $($arg:expr),+ $(,)?) => {
+        $crate::Error::$var(format!($($arg),+))
+    }
+}
+pub(crate) use error;
+
+/// Wrapper around the standard result.
+pub type Result<T> = std::result::Result<T, Error>;

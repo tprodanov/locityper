@@ -19,7 +19,7 @@ use std::{
 };
 use crate::{
     ext,
-    err::{Error, validate_param, add_path},
+    err::{Error, validate_param, add_path, error},
 };
 use self::ser::json_get;
 
@@ -47,7 +47,7 @@ impl Default for Params {
 
 impl Params {
     /// Validate all parameter values.
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> crate::Result<()> {
         for &pval in &[self.insert_pval, self.edit_pval] {
             validate_param!(0.0 < pval && pval < 0.5,
                 "p-value threshold ({}) must be in (0, 0.5)", pval);
@@ -79,7 +79,7 @@ impl BgDistr {
         Self { seq_info, insert_distr, err_prof, depth }
     }
 
-    pub fn load_from(path: &Path, success_file: &Path) -> Result<Self, Error> {
+    pub fn load_from(path: &Path, success_file: &Path) -> crate::Result<Self> {
         if !success_file.exists() {
             log::warn!("File {} does not exist, possibly preprocessing was not completed",
                 ext::fmt::path(success_file));
@@ -126,7 +126,7 @@ impl JsonSer for BgDistr {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
         if obj.has_key("seq_info") && obj.has_key("bg_depth")
                 && obj.has_key("insert_distr") && obj.has_key("error_profile") {
             Ok(Self {
@@ -136,9 +136,8 @@ impl JsonSer for BgDistr {
                 depth: ReadDepth::load(&obj["bg_depth"])?,
             })
         } else {
-            Err(Error::JsonLoad(format!(
-                "BgDistr: Failed to parse '{}': missing 'seq_info', 'bg_depth', \
-                    'insert_distr' or 'error_profile' keys!", obj)))
+            Err(error!(JsonLoad, "BgDistr: Failed to parse '{}': missing 'seq_info', 'bg_depth', \
+                'insert_distr' or 'error_profile' keys!", obj))
         }
     }
 }
@@ -269,18 +268,18 @@ pub struct SequencingInfo {
 
 impl SequencingInfo {
     /// Creates sequencing info. Does not return Error if `warn`, even if the read length is suspicious.
-    pub fn new(read_len: f64, technology: Technology, warn: bool) -> Result<Self, Error> {
+    pub fn new(read_len: f64, technology: Technology, warn: bool) -> crate::Result<Self> {
         let (min_mean_len, max_mean_len) = technology.expect_mean_length();
         if read_len < min_mean_len || read_len > max_mean_len {
             if warn {
                 log::warn!("Unusual mean read length ({:.0}) for the {} sequencing technology",
                     read_len, technology.long_name());
             } else {
-                return Err(Error::InvalidInput(format!(
+                return Err(error!(InvalidInput,
                     "Unusual mean read length ({:.0}) for the {} sequencing technology.\n\
                     Please specify technology using `--technology` argument \
                     (`--technology illumina` overrides this error)",
-                    read_len, technology.long_name())));
+                    read_len, technology.long_name()));
             }
         }
         Ok(Self {
@@ -315,7 +314,7 @@ impl JsonSer for SequencingInfo {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
         json_get!(obj => read_len (as_f64), technology (as_str), total_reads? (as_u64));
         let technology = Technology::from_str(technology).map_err(|e| Error::JsonLoad(e))?;
         Ok(Self { read_len, technology, total_reads })

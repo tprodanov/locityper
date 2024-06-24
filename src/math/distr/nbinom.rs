@@ -8,7 +8,7 @@ use argmin::{
     solver::neldermead::NelderMead,
 };
 use crate::{
-    Error,
+    err::error,
     bg::ser::JsonSer,
 };
 use super::{DiscretePmf, DiscreteCdf, WithMoments, LinearCache};
@@ -108,11 +108,11 @@ impl JsonSer for NBinom {
         }
     }
 
-    fn load(obj: &json::JsonValue) -> Result<Self, Error> {
-        let n = obj["n"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
-            "NBinom: Failed to parse '{}': missing or incorrect 'n' field!", obj)))?;
-        let p = obj["p"].as_f64().ok_or_else(|| Error::JsonLoad(format!(
-            "NBinom: Failed to parse '{}': missing or incorrect 'p' field!", obj)))?;
+    fn load(obj: &json::JsonValue) -> crate::Result<Self> {
+        let n = obj["n"].as_f64().ok_or_else(|| error!(JsonLoad,
+            "NBinom: Failed to parse '{}': missing or incorrect 'n' field!", obj))?;
+        let p = obj["p"].as_f64().ok_or_else(|| error!(JsonLoad,
+            "NBinom: Failed to parse '{}': missing or incorrect 'p' field!", obj))?;
         Ok(Self::new(n, p))
     }
 }

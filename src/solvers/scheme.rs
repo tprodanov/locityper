@@ -30,7 +30,7 @@ use crate::{
         self, Ln, Phred, RoundDiv,
         // distr::WithMoments,
     },
-    err::{Error, validate_param, add_path},
+    err::{error, validate_param, add_path},
     seq::{
         contigs::{ContigNames, Genotype},
         recruit::UPDATE_SECS,
@@ -159,7 +159,7 @@ pub struct Scheme {
 }
 
 impl Scheme {
-    pub fn create(params: &SchemeParams) -> Result<Self, Error> {
+    pub fn create(params: &SchemeParams) -> crate::Result<Self> {
         let mut filter = false;
         let mut stages = Vec::new();
         for (i, stage) in params.stages.split(',').enumerate() {
@@ -176,17 +176,17 @@ impl Scheme {
                     #[cfg(feature = "highs")]
                     { (Box::new(super::HighsSolver::default()), &params.highs_params) }
                     #[cfg(not(feature = "highs"))]
-                    { return Err(Error::RuntimeError(
-                        "HiGHS solver is disabled. Please recompile with `highs` feature.".to_owned())) }
+                    { return Err(error!(RuntimeError,
+                        "HiGHS solver is disabled. Please recompile with `highs` feature.")) }
                 }
                 "gurobi" => {
                     #[cfg(feature = "gurobi")]
                     { (Box::new(super::GurobiSolver::default()), &params.gurobi_params) }
                     #[cfg(not(feature = "gurobi"))]
-                    { return Err(Error::RuntimeError(
-                        "Gurobi solver is disabled. Please recompile with `gurobi` feature.".to_owned())) }
+                    { return Err(error!(RuntimeError,
+                        "Gurobi solver is disabled. Please recompile with `gurobi` feature.")) }
                 }
-                _ => return Err(Error::InvalidInput(format!("Unknown solver {:?}", stage))),
+                _ => return Err(error!(InvalidInput, "Unknown solver {:?}", stage)),
             };
             solver.set_params(solver_params)?;
             stages.push(solver);
@@ -666,7 +666,7 @@ fn solve_single_thread(
     mut sol_writer: impl Write,
     mut depth_writer: Option<GzFile>,
     mut aln_writer: Option<GzFile>,
-) -> Result<(), Error>
+) -> crate::Result<()>
 {
     let total_genotypes = data.genotypes.len();
     let mut logger = Logger::new(&data.scheme, total_genotypes);
@@ -727,18 +727,18 @@ fn csv_filenames(prefix: &Path, threads: usize) -> Vec<PathBuf> {
 }
 
 /// Opens one gzip file for each filename.
-fn open_gzips(filenames: &[PathBuf]) -> Result<Vec<GzFile>, Error> {
+fn open_gzips(filenames: &[PathBuf]) -> crate::Result<Vec<GzFile>> {
     filenames.iter().map(|path| ext::sys::create_gzip(path)).collect()
 }
 
 /// If there is more than one file, consecutively append all of them to the first file, and keep only the first one.
-fn merge_files(filenames: &[PathBuf]) -> Result<(), Error> {
+fn merge_files(filenames: &[PathBuf]) -> crate::Result<()> {
     if filenames.len() > 1 {
         // By this point, all depth_writers should be already dropped.
         let mut file1 = std::fs::OpenOptions::new().append(true).open(&filenames[0]).map_err(add_path!(filenames[0]))?;
         ext::sys::concat_files(filenames[1..].iter(), &mut file1)?;
         filenames[1..].iter().map(|path| std::fs::remove_file(path).map_err(add_path!(path)))
-            .collect::<Result<(), Error>>()?;
+            .collect::<crate::Result<()>>()?;
     }
     Ok(())
 }
@@ -748,7 +748,7 @@ pub fn solve(
     bg_distr: &BgDistr,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
-) -> Result<Genotyping, Error>
+) -> crate::Result<Genotyping>
 {
     let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
@@ -842,7 +842,7 @@ struct MainWorker {
     data: Arc<Data>,
     senders: Vec<Sender<Task>>,
     receivers: Vec<Receiver<Solution>>,
-    handles: Vec<thread::JoinHandle<Result<Vec<u8>, Error>>>,
+    handles: Vec<thread::JoinHandle<crate::Result<Vec<u8>>>>,
 }
 
 impl MainWorker {
@@ -886,7 +886,7 @@ impl MainWorker {
         mut sol_writer: impl Write,
         rng: &mut impl Rng,
         likelihoods: &mut Likelihoods,
-    ) -> Result<(), Error>
+    ) -> crate::Result<()>
     {
         let n_workers = self.handles.len();
         let data = self.data.deref();
@@ -958,7 +958,7 @@ struct Worker {
 }
 
 impl Worker {
-    fn run(mut self) -> Result<Vec<u8>, Error> {
+    fn run(mut self) -> crate::Result<Vec<u8>> {
         let data = self.data.deref();
         let scheme = data.scheme.deref();
         let attempts = data.assgn_params.attempts;
