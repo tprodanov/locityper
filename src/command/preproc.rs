@@ -269,7 +269,7 @@ impl Default for Args {
             bg_region: None,
 
             technology: Technology::Illumina,
-            min_mapq: 20,
+            min_mapq: 30,
 
             threads: 8,
             recr_threads: 0.5,

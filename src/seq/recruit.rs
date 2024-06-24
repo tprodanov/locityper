@@ -278,12 +278,75 @@ const LONG_ZERO_MATCHES: MatchCount = MatchCount {
     },
 };
 
+/// To which loci is the read recruited?
+pub(crate) trait Answer: Default + Clone + Sync + Send + 'static {
+    type Iter<'a>: Iterator<Item = u16>;
+
+    fn clear(&mut self);
+
+    fn push(&mut self, locus_ix: u16);
+
+    fn not_empty(&self) -> bool;
+
+    /// Iterate over recruited loci.
+    fn iter(&self) -> Self::Iter<'_>;
+}
+
+impl Answer for Vec<u16> {
+   type Iter<'a> = std::iter::Copied<std::slice::Iter<'a, u16>>;
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.clear();
+    }
+
+    #[inline(always)]
+    fn push(&mut self, locus_ix: u16) {
+        self.push(locus_ix);
+    }
+
+    #[inline(always)]
+    fn not_empty(&self) -> bool {
+        !self.is_empty()
+    }
+
+    #[inline(always)]
+    fn iter(&self) -> Self::Iter<'_> {
+        (self as &[u16]).iter().copied()
+    }
+}
+
+/// Store answer for a single locus.
+impl Answer for bool {
+    type Iter<'a> = std::option::IntoIter<u16>;
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        *self = false;
+    }
+
+    #[inline(always)]
+    fn push(&mut self, locus_ix: u16) {
+        debug_assert!(locus_ix == 0);
+        *self = true;
+    }
+
+    #[inline(always)]
+    fn not_empty(&self) -> bool {
+        *self
+    }
+
+    #[inline(always)]
+    fn iter(&self) -> Self::Iter<'_> {
+        (if *self { Some(0) } else { None }).into_iter()
+    }
+}
+
 /// Based on the number of targets, use different buffer structures.
 pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
-    /// How many loci can be processed with this buffer?
-    const MAX_LOCI: usize;
-
     type Iter<'a>: Iterator<Item = (u16, MatchCount)>;
+
+    type Answer: Answer;
 
     fn clear(&mut self);
 
@@ -309,9 +372,9 @@ impl<'a> Iterator for MatchesMapIter<'a> {
 }
 
 impl MatchesBuffer for MatchesMap {
-    const MAX_LOCI: usize = u16::MAX as usize;
-
     type Iter<'a> = MatchesMapIter<'a>;
+
+    type Answer = Vec<u16>;
 
     #[inline(always)]
     fn clear(&mut self) {
@@ -349,9 +412,9 @@ impl<'a> Iterator for SingleMatchIter<'a> {
 }
 
 impl MatchesBuffer for SingleMatch {
-    const MAX_LOCI: usize = 1;
-
     type Iter<'a> = SingleMatchIter<'a>;
+
+    type Answer = bool;
 
     #[inline(always)]
     fn clear(&mut self) {
@@ -382,7 +445,7 @@ pub(crate) trait RecruitableRecord : fastx::WritableRecord + Send + 'static {
     /// `minimizers` and `matches` are buffer structures, that can be freely cleaned and reused.
     fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
-        answer: &mut Answer,
+        answer: &mut M::Answer,
         minimizers: &mut Vec<Minimizer>,
         matches: &mut M,
     );
@@ -392,7 +455,7 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
     #[inline]
     fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
-        answer: &mut Answer,
+        answer: &mut M::Answer,
         minimizers: &mut Vec<Minimizer>,
         matches: &mut M,
     ) {
@@ -409,7 +472,7 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
     #[inline]
     fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
-        answer: &mut Answer,
+        answer: &mut M::Answer,
         minimizers: &mut Vec<Minimizer>,
         matches: &mut M,
     ) {
@@ -421,8 +484,6 @@ const CAPACITY: usize = 4;
 /// Key: minimizer,
 /// value: vector of loci indices, where the minimizer appears + is k-mer usable (not common).
 type MinimToLoci = IntMap<Minimizer, SmallVec<[(u16, bool); CAPACITY]>>;
-/// Vector of loci indices, to which the read was recruited.
-type Answer = Vec<u16>;
 
 /// Target builder. Can be converted to targets using `finalize()`.
 pub struct TargetBuilder {
@@ -540,7 +601,7 @@ impl Targets {
     fn recruit_short_read<M: MatchesBuffer>(
         &self,
         seq: &[u8],
-        answer: &mut Answer,
+        answer: &mut M::Answer,
         minimizers: &mut Vec<Minimizer>,
         matches: &mut M,
     ) {
@@ -594,7 +655,7 @@ impl Targets {
     fn recruit_long_read<M: MatchesBuffer>(
         &self,
         seq: &[u8],
-        answer: &mut Answer,
+        answer: &mut M::Answer,
         minimizers: &mut Vec<Minimizer>,
         matches: &mut M,
     ) {
@@ -630,7 +691,7 @@ impl Targets {
         &self,
         seq1: &[u8],
         seq2: &[u8],
-        answer: &mut Answer,
+        answer: &mut M::Answer,
         minimizers: &mut Vec<Minimizer>,
         matches: &mut M,
     ) {
@@ -683,17 +744,17 @@ impl Targets {
           M: MatchesBuffer,
     {
         let mut record = T::default();
-        let mut answer = Answer::new();
+        let mut answer = M::Answer::default();
         let mut buffer1 = Default::default();
         let mut buffer2 = M::default();
 
         let mut progress = Progress::new(self.show_recruited);
         while reader.read_next(&mut record)? {
             record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
-            for &locus_ix in answer.iter() {
+            for locus_ix in answer.iter() {
                 record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
             }
-            progress.add_recruited(!answer.is_empty());
+            progress.add_recruited(answer.not_empty());
             progress.inc_processed();
         }
         progress.final_message();
@@ -712,7 +773,7 @@ impl Targets {
     {
         let n_workers = usize::from(threads - 1);
         log::info!("Starting read recruitment with 1 read/write thread and {} recruitment threads", n_workers);
-        let mut main_worker = MainWorker::<T, _, _>::new::<M>(self, reader, writers, n_workers, chunk_size);
+        let mut main_worker = MainWorker::<T, _, _, M>::new(self, reader, writers, n_workers, chunk_size);
         main_worker.run()?;
         main_worker.finish()
     }
@@ -754,20 +815,25 @@ impl Targets {
 /// Is send between threads: main thread reads records and sends the vector to workers.
 /// In the meantime, workers receive records and fills corresponding answers (recruitment targets for the record),
 /// and then send shipments back to the main thread.
-type Shipment<T> = Vec<(T, Answer)>;
+type Shipment<T, A> = Vec<(T, A)>;
 
-struct Worker<T, M> {
+struct Worker<T, M: MatchesBuffer> {
     targets: Targets,
     /// Receives records that need to be recruited.
-    receiver: Receiver<Shipment<T>>,
+    receiver: Receiver<Shipment<T, M::Answer>>,
     /// Sends already recruited reads back to the main thread.
-    sender: Sender<Shipment<T>>,
+    sender: Sender<Shipment<T, M::Answer>>,
     buffer1: Vec<Minimizer>,
     buffer2: M,
 }
 
-impl<T, M: Default> Worker<T, M> {
-    fn new(targets: Targets, receiver: Receiver<Shipment<T>>, sender: Sender<Shipment<T>>) -> Self {
+impl<T, M: MatchesBuffer> Worker<T, M> {
+    fn new(
+        targets: Targets,
+        receiver: Receiver<Shipment<T, M::Answer>>,
+        sender: Sender<Shipment<T, M::Answer>>,
+    ) -> Self
+    {
         Self {
             targets, receiver, sender,
             buffer1: Default::default(),
@@ -793,18 +859,21 @@ impl<T: RecruitableRecord, M: MatchesBuffer> Worker<T, M> {
 }
 
 /// Worker in the main thread, that organizes other workers, as well as reads/writes reads.
-struct MainWorker<T, R: FastxRead<Record = T>, W> {
+struct MainWorker<T, R, W, M>
+where R: FastxRead<Record = T>,
+      M: MatchesBuffer,
+{
     /// Fasta/q reader.
     /// Becomes `None`, once the stream has ended.
     reader: Option<R>,
     /// Fasta/q writers for each of the loci.
     writers: Vec<W>,
     /// Senders from the main thread to the workers. Sends reads to be analyzed.
-    senders: Vec<Sender<Shipment<T>>>,
+    senders: Vec<Sender<Shipment<T, M::Answer>>>,
     /// Receivers from workers to the main thread. Receives
     /// - analyzed reads with possible recruited loci,
     /// - bool: true if any of the reads were recruited.
-    receivers: Vec<Receiver<Shipment<T>>>,
+    receivers: Vec<Receiver<Shipment<T, M::Answer>>>,
     /// Thread handles.
     handles: Vec<thread::JoinHandle<()>>,
 
@@ -816,24 +885,24 @@ struct MainWorker<T, R: FastxRead<Record = T>, W> {
     progress: Progress,
 
     /// Chunks of reads that were read from the reader and are ready to be analyzed.
-    to_send: Vec<Shipment<T>>,
+    to_send: Vec<Shipment<T, M::Answer>>,
     /// Chunks of reads that were analyzed and need to be writter to the writers.
-    to_write: Vec<Shipment<T>>,
+    to_write: Vec<Shipment<T, M::Answer>>,
 }
 
-impl<T, R, W> MainWorker<T, R, W>
+impl<T, R, W, M> MainWorker<T, R, W, M>
 where T: RecruitableRecord,
       R: FastxRead<Record = T>,
       W: io::Write,
+      M: MatchesBuffer
 {
-    fn new<M>(
+    fn new(
         targets: &Targets,
         reader: R,
         writers: Vec<W>,
         n_workers: usize,
         chunk_size: usize,
     ) -> Self
-    where M: MatchesBuffer,
     {
         let mut senders = Vec::with_capacity(n_workers);
         let mut receivers = Vec::with_capacity(n_workers);
@@ -961,9 +1030,10 @@ where T: RecruitableRecord,
 
 /// Fills `shipment` from the reader.
 /// Output shipment may be empty, if the stream has ended.
-fn fill_shipment<T, R>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T>) -> crate::Result<()>
+fn fill_shipment<T, R, A>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T, A>) -> crate::Result<()>
 where T: Default,
       R: FastxRead<Record = T>,
+      A: Answer,
 {
     let reader = opt_reader.as_mut().expect("fill_shipment: reader must not be None");
     let mut new_len = 0;
@@ -980,9 +1050,13 @@ where T: Default,
 }
 
 #[inline]
-fn read_new_shipment<T, R>(opt_reader: &mut Option<R>, chunk_size: usize) -> crate::Result<Shipment<T>>
+fn read_new_shipment<T, R, A>(
+    opt_reader: &mut Option<R>,
+    chunk_size: usize,
+) -> crate::Result<Shipment<T, A>>
 where T: Clone + Default,
       R: FastxRead<Record = T>,
+      A: Answer,
 {
     let mut shipment = vec![Default::default(); chunk_size];
     fill_shipment(opt_reader, &mut shipment)?;
@@ -990,12 +1064,17 @@ where T: Clone + Default,
 }
 
 /// Writes recruited records to the output files.
-fn write_shipment<T>(writers: &mut [impl io::Write], shipment: &Shipment<T>, progress: &mut Progress) -> crate::Result<()>
+fn write_shipment<T, A>(
+    writers: &mut [impl io::Write],
+    shipment: &Shipment<T, A>,
+    progress: &mut Progress,
+) -> crate::Result<()>
 where T: fastx::WritableRecord,
+      A: Answer,
 {
     for (record, answer) in shipment.iter() {
-        progress.add_recruited(!answer.is_empty());
-        for &locus_ix in answer.iter() {
+        progress.add_recruited(answer.not_empty());
+        for locus_ix in answer.iter() {
             record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
         }
     }
