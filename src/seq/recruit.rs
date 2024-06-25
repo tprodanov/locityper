@@ -407,19 +407,8 @@ impl MatchesBuffer for MatchesMap {
 /// When there exist exactly one target, use simple `Option`.
 pub(crate) type SingleMatch = Option<MatchCount>;
 
-pub(crate) struct SingleMatchIter<'a>(std::option::Iter<'a, MatchCount>);
-
-impl<'a> Iterator for SingleMatchIter<'a> {
-    type Item = (u16, MatchCount);
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|&count| (0, count))
-    }
-}
-
 impl MatchesBuffer for SingleMatch {
-    type Iter<'a> = SingleMatchIter<'a>;
+    type Iter<'a> = std::option::IntoIter<(u16, MatchCount)>;
 
     type Answer = bool;
 
@@ -447,7 +436,7 @@ impl MatchesBuffer for SingleMatch {
 
     #[inline(always)]
     fn iter(&self) -> Self::Iter<'_> {
-        SingleMatchIter(self.iter())
+        self.map(|count| (0, count)).into_iter()
     }
 }
 

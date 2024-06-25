@@ -10,8 +10,7 @@ use std::{
 use crate::{
     err::{add_path},
     seq::{
-        Interval,
-        aln::NamedAlignment,
+        aln::{NamedAlignment, OpCounter},
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
@@ -88,14 +87,11 @@ impl OperCounts<u64> {
         let del_prob = self.deletions as f64 / sum_len;
         let match_prob = 1.0 - mism_prob - ins_prob - del_prob;
 
-        log::info!("    {:12} matches    ({:.6})",
-            self.matches, match_prob);
-        log::info!("    {:12} mismatches ({:.6})",
-            self.mismatches, mism_prob);
-        log::info!("    {:12} insertions ({:.6})",
-            self.insertions, ins_prob);
-        log::info!("    {:12} deletions  ({:.6})",
-            self.deletions, del_prob);
+        log::info!("    {:12} matches    ({:.6})", self.matches, match_prob);
+        log::info!("    {:12} mismatches ({:.6})", self.mismatches, mism_prob);
+        log::info!("    {:12} insertions ({:.6})", self.insertions, ins_prob);
+        log::info!("    {:12} deletions  ({:.6})", self.deletions, del_prob);
+        log::info!("    {:12} clippings  ({:.6})", self.clipping, self.clipping as f64 / sum_len);
         assert!(match_prob > 0.5, "Match probability ({:.5}) must be over 50%", match_prob);
         assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
             "Error probabilities do not sum to one");
@@ -151,8 +147,8 @@ impl ErrorProfile {
     /// If `out_dir` is Some, write debug information.
     pub fn estimate<'a>(
         alns: &[impl Borrow<NamedAlignment>],
-        region: &Interval,
-        windows: &super::Windows,
+        op_counter: &OpCounter,
+        windows: Option<&super::Windows>,
         out_dir: Option<&Path>,
     ) -> crate::Result<Self>
     {
@@ -162,10 +158,10 @@ impl ErrorProfile {
         let mut edit_distances = IntMap::<EditDist, u64>::default();
         for aln in alns.iter() {
             let aln = aln.borrow();
-            if !windows.keep_window(aln.interval().middle()) {
+            if !windows.map(|ws| ws.keep_window(aln.interval().middle())).unwrap_or(true) {
                 continue;
             }
-            let counts = aln.count_region_operations(region);
+            let counts = op_counter.count(aln);
             total_counts += &counts;
             edit_distances.entry(counts.edit_distance())
                 .and_modify(|counter| *counter += 1)
@@ -232,7 +228,7 @@ impl JsonSer for ErrorProfile {
     }
 }
 
-/// For each read length, stores ONE edit distance.
+/// For each read length, stores ONE edit distance (see EditDistCache).
 pub struct SingleEditDistCache {
     /// Distribution of edit distance (n = read length).
     edit_distr: BetaBinomial,

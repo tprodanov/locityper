@@ -185,11 +185,11 @@ impl Alignment {
     }
 
     /// Returns insert size (distance between smallest start and largest end).
-    /// Panics if two mates are not on the same strand.
+    /// Returns u32::MAX if two mates are not on the same strand.
     #[inline]
     pub fn insert_size(&self, mate: &Alignment) -> u32 {
         self.interval.furthest_distance(&mate.interval)
-            .expect("Alignments must be on the same contig")
+            .unwrap_or(u32::MAX)
     }
 
     /// Returns false for `FR/RF` and true for `FF/RR`.
@@ -279,6 +279,39 @@ impl Alignment {
             first = false;
         }
         counts
+    }
+
+    /// Simply counts operations in the alignment.
+    pub fn count_operations(&self) -> OperCounts<u32> {
+        let mut counts = OperCounts::default();
+        for item in self.cigar.iter() {
+            let oplen = item.len();
+            match item.operation() {
+                Operation::Equal => counts.matches += oplen,
+                Operation::Diff => counts.mismatches += oplen,
+                Operation::Del => counts.deletions += oplen,
+                Operation::Ins => counts.insertions += oplen,
+                Operation::Soft => counts.clipping += oplen,
+                op => panic!("Unsupported CIGAR operation {}", op),
+            }
+        }
+        counts
+    }
+}
+
+/// Simple structure, that counts either in a specified region, or across the full alignment.
+pub enum OpCounter {
+    Bounded(Interval),
+    Unbounded,
+}
+
+impl OpCounter {
+    #[inline]
+    pub fn count(&self, aln: &Alignment) -> OperCounts<u32> {
+        match &self {
+            Self::Bounded(interval) => aln.count_region_operations(interval),
+            Self::Unbounded => aln.count_operations(),
+        }
     }
 }
 

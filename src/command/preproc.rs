@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
     str::FromStr,
 };
+use bio::io::fasta;
 use colored::Colorize;
 use const_format::str_repeat;
 use htslib::bam;
@@ -20,7 +21,7 @@ use regex::{Regex, RegexBuilder};
 use crate::{
     ext::{
         self,
-        fmt::PrettyU32,
+        fmt::{PrettyU32, PrettyU64},
     },
     err::{Error, error, validate_param, add_path},
     seq::{
@@ -29,11 +30,11 @@ use crate::{
         fastx::{self, FastxRead},
         recruit::{self, RecruitableRecord},
         cigar::{self, Cigar},
-        aln::{NamedAlignment, Alignment, ReadEnd},
+        aln::{NamedAlignment, Alignment, ReadEnd, OpCounter},
         contigs::{ContigNames, ContigSet, GenomeVersion},
     },
     bg::{
-        self, BgDistr, Technology, SequencingInfo,
+        self, BgDistr, Technology, SequencingInfo, Windows,
         insertsz::{self, InsertDistr},
         err_prof::{ErrorProfile, SingleEditDistCache},
         depth::ReadDepth,
@@ -235,6 +236,7 @@ struct Args {
     jf_counts: Option<PathBuf>,
     output: Option<PathBuf>,
     similar_dataset: Option<PathBuf>,
+    similar_proc_length: u64,
     bg_region: Option<String>,
 
     technology: Technology,
@@ -242,7 +244,7 @@ struct Args {
 
     threads: u16,
     recr_threads: f64,
-    run_recruitment: bool,
+    skip_recruitment: bool,
 
     rerun: super::Rerun,
     strobealign: PathBuf,
@@ -266,14 +268,15 @@ impl Default for Args {
             jf_counts: None,
             output: None,
             similar_dataset: None,
+            similar_proc_length: 30_000_000,
             bg_region: None,
 
             technology: Technology::Illumina,
             min_mapq: 30,
 
             threads: 8,
-            recr_threads: 0.5,
-            run_recruitment: true,
+            recr_threads: 0.4,
+            skip_recruitment: false,
 
             rerun: super::Rerun::None,
             debug: false,
@@ -307,11 +310,15 @@ impl Args {
             }
         }
 
-        validate_param!(self.recr_threads >= 0.0, "Number of recruitment threads ({}) must be non-negative",
-            self.recr_threads);
-        validate_param!(self.recr_threads < 1.0 || self.recr_threads.fract() < 1e-8,
-            "Number of recruitment threads ({}) must be either integer, or smaller than 1",
-            self.recr_threads);
+        if self.similar_dataset.is_some() {
+            self.skip_recruitment = true;
+        } else {
+            validate_param!(self.recr_threads >= 0.0, "Number of recruitment threads ({}) must be non-negative",
+                self.recr_threads);
+            validate_param!(self.recr_threads < 1.0 || self.recr_threads.fract() < 1e-8,
+                "Number of recruitment threads ({}) must be either integer, or smaller than 1",
+                self.recr_threads);
+        }
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
@@ -380,7 +387,7 @@ fn print_help(extended: bool) {
         {EMPTY}    hifi         : PacBio HiFi,\n\
         {EMPTY}  pb  | pacbio   : PacBio CLR,\n\
         {EMPTY}  ont | nanopore : Oxford Nanopore.",
-        "-t, --technology".green(), "STR".yellow(), super::fmt_def(defaults.technology));
+        "-t, --tech".green(), "STR".yellow(), super::fmt_def(defaults.technology));
     println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region,\n\
         {EMPTY}  preferably >3 Mb and without many duplications.\n\
         {EMPTY}  Default regions are defined for CHM13, GRCh38 and GRCh37.",
@@ -407,6 +414,10 @@ fn print_help(extended: bool) {
             "    --pval-thresh".green(), "FLOAT FLOAT".yellow(),
             super::fmt_def_f64(defaults.bg_params.insert_pval),
             super::fmt_def_f64(defaults.bg_params.edit_pval));
+        println!("    {:KEY$} {:VAL$}  For preprocessing using similar dataset ({}),\n\
+            {EMPTY}  map reads with this total length to the reference [{}].",
+            "    --proc-length".green(), "INT".yellow(), "-~".green(),
+            super::fmt_def(PrettyU64(defaults.similar_proc_length)));
 
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
@@ -517,8 +528,10 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.bg_params.depth.min_tail_obs = parser.value()?.parse()?;
                 args.bg_params.depth.tail_var_mult = parser.value()?.parse()?;
             }
+            Long("proc-length") | Long("proc-len")
+                => args.similar_proc_length = parser.value()?.parse::<PrettyU64>()?.get(),
 
-            Long("skip-recruit") | Long("skip-recr") | Long("skip-recruitment") => args.run_recruitment = false,
+            Long("skip-recruit") | Long("skip-recr") | Long("skip-recruitment") => args.skip_recruitment = true,
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -628,19 +641,24 @@ fn recruit_reads(
 /// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
 fn set_mapping_stdin(
     child_stdin: ChildStdin,
+    ref_contigs: &Arc<ContigNames>,
     seq_info: &SequencingInfo,
-    bg_region: &BgRegion,
+    bg_region: Option<&BgRegion>,
     recr_threads: u16,
     args: &Args,
 ) -> crate::Result<thread::JoinHandle<Result<u64, Error>>>
 {
     // TODO: Can we optimize this?
     let mut writer = io::BufWriter::new(child_stdin);
-    fastx::process_readers!(args.in_files, Some(&bg_region.ref_contigs); let {mut} reader; {
-        if args.run_recruitment {
-            recruit_reads(reader, writer, seq_info, bg_region, args.in_files.is_paired_end(), recr_threads)
-        } else {
+    fastx::process_readers!(args.in_files, Some(ref_contigs); let {mut} reader; {
+        if args.similar_dataset.is_some() {
+            let proc_length = args.similar_proc_length;
+            Ok(thread::spawn(move || reader.copy_first(&mut writer, proc_length)))
+        } else if args.skip_recruitment {
             Ok(thread::spawn(move || reader.copy(&mut writer)))
+        } else {
+            recruit_reads(reader, writer, seq_info, bg_region.expect("Background region must be defined"),
+                args.in_files.is_paired_end(), recr_threads)
         }
     })
 }
@@ -684,12 +702,14 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
     command
 }
 
-fn first_step_str(args: &Args, bg_region: &BgRegion) -> String {
+fn first_step_str(args: &Args, bg_region: Option<&BgRegion>) -> String {
     let mut s = String::new();
-    if args.run_recruitment {
-        write!(s, "_recruit_ --target {}", bg_region.interval).unwrap();
-    } else {
+    if args.similar_dataset.is_some() {
+        write!(s, "_head_ --sum-len {}", PrettyU64(args.similar_proc_length)).unwrap();
+    } else if args.skip_recruitment {
         s.push_str("_interleave_");
+    } else {
+        write!(s, "_recruit_ --target {}", bg_region.unwrap().interval).unwrap();
     }
 
     s.push_str(" -i ");
@@ -718,11 +738,11 @@ struct MappingParams {
 }
 
 impl MappingParams {
-    fn new(args: &Args, bg_region: &Interval) -> Self {
+    fn new(args: &Args, bg_region: Option<&Interval>) -> Self {
         MappingParams {
             technology: args.technology,
             min_mapq: args.min_mapq,
-            bg_region: bg_region.to_string(),
+            bg_region: bg_region.map(Interval::to_string).unwrap_or_else(|| "None".to_owned()),
         }
     }
 
@@ -731,7 +751,7 @@ impl MappingParams {
     /// Otherwise, returns `Err` with explanation.
     fn compare(&self, path: &Path) -> Result<(), String> {
         if !path.exists() {
-            log::error!("Cannot find previous mapping parameters at {}. Continuing anyway", ext::fmt::path(path));
+            log::warn!("Cannot find previous mapping parameters at {}. Continuing anyway", ext::fmt::path(path));
             return Ok(())
         }
         let old = match ext::sys::load_json(&path).map_err(Error::from).and_then(|json| MappingParams::load(&json)) {
@@ -778,7 +798,7 @@ impl JsonSer for MappingParams {
 
 /// Returns true if read mapping can be skipped.
 /// Panics if output BAM file exists, but cannot be used.
-fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: &Interval) -> crate::Result<bool> {
+fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: Option<&Interval>) -> crate::Result<bool> {
     let params_path = out_dir.join(MAPPING_PARAMS);
     let curr_params = MappingParams::new(args, bg_region);
     if !out_bam.exists() {
@@ -794,7 +814,7 @@ fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: &Interva
         Err(s) => {
             log::error!("Problem comparing read mapping parameters against {}", ext::fmt::path(&params_path));
             log::error!("    {}", s);
-            log::error!("Please use `--rerun full`, or remove file {} to force partial analysis",
+            log::error!("Please use `--rerun full`, or remove file {} to override this error",
                 ext::fmt::path(&params_path));
             std::process::exit(1)
         }
@@ -803,7 +823,7 @@ fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: &Interva
 
 /// Split total number of threads into the recruitment and mapping threads.
 fn split_n_threads(args: &Args) -> (u16, u16) {
-    if !args.run_recruitment {
+    if args.skip_recruitment {
         let mapping_threads = max(1, args.threads);
         log::info!("Mapping reads to the reference in {} threads", mapping_threads);
         return (0, mapping_threads);
@@ -828,12 +848,13 @@ fn run_mapping(
     args: &Args,
     seq_info: &mut SequencingInfo,
     ref_filename: &Path,
+    ref_contigs: &Arc<ContigNames>,
     out_dir: &Path,
     out_bam: &Path,
-    bg_region: &BgRegion,
+    bg_region: Option<&BgRegion>,
 ) -> crate::Result<()>
 {
-    if !need_mapping(args, out_dir, out_bam, &bg_region.interval)? {
+    if !need_mapping(args, out_dir, out_bam, bg_region.map(|data| &data.interval))? {
         return Ok(());
     }
 
@@ -844,12 +865,16 @@ fn run_mapping(
     let mapping_stdin = mapping_child.stdin.take();
     let mapping_stdout = mapping_child.stdout.take();
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
-    let handle = set_mapping_stdin(mapping_stdin.unwrap(), seq_info, bg_region, recr_threads, args)?;
+    let handle = set_mapping_stdin(mapping_stdin.unwrap(), ref_contigs, seq_info, bg_region, recr_threads, args)?;
 
-    let tmp_bed = out_dir.join("tmp.bed");
-    let mut bed_file = ext::sys::create_file(&tmp_bed)?;
-    writeln!(bed_file, "{}", bg_region.interval.bed_fmt()).map_err(add_path!(tmp_bed))?;
-    std::mem::drop(bed_file);
+    let mut tmp_bed = None;
+    if let Some(bg_data) = bg_region {
+        let filename = out_dir.join("tmp.bed");
+        let mut bed_file = ext::sys::create_file(&filename)?;
+        writeln!(bed_file, "{}", bg_data.interval.bed_fmt()).map_err(add_path!(filename))?;
+        std::mem::drop(bed_file);
+        tmp_bed = Some(filename);
+    }
 
     let tmp_bam = out_dir.join("tmp.bam");
     let mut samtools = Command::new(&args.samtools);
@@ -860,9 +885,11 @@ fn run_mapping(
             // + ignore secondary & supplementary alignments + ignore failed checks.
             "-F", "3852",
             "-q", &args.min_mapq.to_string(),
-            ])
-        .arg("-L").arg(&tmp_bed)
-        .arg("-o").arg(&tmp_bam)
+            ]);
+    if let Some(filename) = &tmp_bed {
+        samtools.arg("-L").arg(filename);
+    }
+    samtools.arg("-o").arg(&tmp_bam)
         .stdin(Stdio::from(mapping_stdout.unwrap()))
         .stdout(Stdio::piped()).stderr(Stdio::piped());
     log::debug!("    {}{} | {}", first_step_str(&args, bg_region),
@@ -874,7 +901,9 @@ fn run_mapping(
         .map_err(|e| error!(RuntimeError, "Read mapping failed: {:?}", e))??;
     seq_info.set_total_reads(total_reads);
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
-    fs::remove_file(&tmp_bed).map_err(add_path!(tmp_bed))?;
+    if let Some(filename) = tmp_bed {
+        fs::remove_file(&filename).map_err(add_path!(filename))?;
+    }
     Ok(())
 }
 
@@ -928,11 +957,10 @@ fn load_alns(
     Ok((alns, paired_counts[1] > 0))
 }
 
-const MEAN_LEN_RECORDS: usize = 10000;
-
 /// Calculate mean read length from existing alignments.
 fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
-    let n = min(alns.len(), MEAN_LEN_RECORDS);
+    const N_RECORDS: usize = 10000;
+    let n = min(alns.len(), N_RECORDS);
     alns[..n].iter()
         .map(|aln| f64::from(aln.cigar().query_len()))
         .sum::<f64>() / n as f64
@@ -940,17 +968,37 @@ fn read_len_from_alns(alns: &[NamedAlignment]) -> f64 {
 
 /// Calculate mean read length from input reads.
 fn read_len_from_reads(args: &Args, contigs: Option<&ContigNames>) -> crate::Result<f64> {
+    const MIN_RECORDS: u64 = 200;
+    const MIN_SUM_LEN: u64 = 3_000_000;
     log::info!("Calculating mean read length");
     fastx::process_readers!(args.in_files, contigs; let {mut} reader;
-        { fastx::mean_read_len(&mut reader, MEAN_LEN_RECORDS) })
+        { fastx::mean_read_len(&mut reader, MIN_RECORDS, MIN_SUM_LEN) })
+}
+
+fn get_windows(
+    seq_info: &SequencingInfo,
+    bg_region: Option<&BgRegion>,
+    opt_out_dir: Option<&Path>,
+    args: &Args,
+) -> crate::Result<(OpCounter, Option<Windows>)>
+{
+    if let Some(bg_data) = bg_region {
+        Ok((
+            OpCounter::Bounded(bg_data.interval.clone()),
+            Some(Windows::create(&bg_data.interval, bg_data.region_sequence(),
+                &bg_data.kmer_counts, &seq_info, &args.bg_params.depth, opt_out_dir)?)
+        ))
+    } else {
+        Ok((OpCounter::Unbounded, None))
+    }
 }
 
 fn estimate_bg_from_paired(
     alns: Vec<NamedAlignment>,
     seq_info: SequencingInfo,
-    args: &Args,
     opt_out_dir: Option<&Path>,
-    bg_region: &BgRegion,
+    bg_region: Option<&BgRegion>,
+    args: &Args,
 ) -> crate::Result<BgDistr>
 {
     // Group reads into pairs, and estimate insert size from them.
@@ -960,10 +1008,6 @@ fn estimate_bg_from_paired(
     let (min_insert, max_insert) = insert_distr.confidence_interval(conf_lvl);
     log::info!("    Allowed insert size: [{}, {}]  ({}%-confidence interval)",
         min_insert, max_insert, crate::math::fmt_signif(100.0 * conf_lvl, 5));
-
-    let interval = &bg_region.interval;
-    let windows = bg::Windows::create(interval, bg_region.region_sequence(),
-        &bg_region.kmer_counts, &seq_info, &args.bg_params.depth, opt_out_dir)?;
 
     // Estimate error profile from read pairs with appropriate insert size.
     let mut errprof_alns = Vec::with_capacity(pair_ixs.len() * 2);
@@ -976,7 +1020,9 @@ fn estimate_bg_from_paired(
             errprof_alns.push(second);
         }
     }
-    let err_prof = ErrorProfile::estimate(&errprof_alns, interval, &windows, opt_out_dir)?;
+
+    let (op_counter, opt_windows) = get_windows(&seq_info, bg_region, opt_out_dir, args)?;
+    let err_prof = ErrorProfile::estimate(&errprof_alns, &op_counter, opt_windows.as_ref(), opt_out_dir)?;
     let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
     edit_dist_cache.print_log(seq_info.mean_read_len());
 
@@ -985,44 +1031,50 @@ fn estimate_bg_from_paired(
     for chunk in errprof_alns.chunks_exact(2) {
         let aln1 = chunk[0];
         let aln2 = chunk[1];
-        let dist1 = aln1.count_region_operations(interval).edit_distance();
-        let dist2 = aln2.count_region_operations(interval).edit_distance();
+        let dist1 = op_counter.count(aln1).edit_distance();
+        let dist2 = op_counter.count(aln2).edit_distance();
         if dist1.edit() <= edit_dist_cache.get(dist1.read_len())
-                && dist2.edit() <= edit_dist_cache.get(dist2.read_len()) {
+            && dist2.edit() <= edit_dist_cache.get(dist2.read_len())
+        {
             depth_alns.push(aln1.deref());
             depth_alns.push(aln2.deref());
         }
     }
-    let depth_distr = ReadDepth::estimate(&depth_alns, &windows,
-        &args.bg_params.depth, true, &seq_info, opt_out_dir)?;
+    let depth_distr = if let Some(windows) = opt_windows {
+        ReadDepth::estimate(&depth_alns, &windows, &args.bg_params.depth, true, &seq_info, opt_out_dir)?
+    } else {
+        ReadDepth::empty()
+    };
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
 fn estimate_bg_from_unpaired(
     alns: Vec<NamedAlignment>,
     seq_info: SequencingInfo,
-    args: &Args,
     opt_out_dir: Option<&Path>,
-    bg_region: &BgRegion,
+    bg_region: Option<&BgRegion>,
+    args: &Args,
 ) -> crate::Result<BgDistr>
 {
     let insert_distr = InsertDistr::undefined();
-    let interval = &bg_region.interval;
-    let windows = bg::Windows::create(interval, bg_region.region_sequence(),
-        &bg_region.kmer_counts, &seq_info, &args.bg_params.depth, opt_out_dir)?;
-    let err_prof = ErrorProfile::estimate(&alns, interval, &windows, opt_out_dir)?;
+    let (op_counter, opt_windows) = get_windows(&seq_info, bg_region, opt_out_dir, args)?;
+    let err_prof = ErrorProfile::estimate(&alns, &op_counter, opt_windows.as_ref(), opt_out_dir)?;
     let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
     edit_dist_cache.print_log(seq_info.mean_read_len());
 
     let filt_alns: Vec<&Alignment> = alns.iter()
         .filter(|aln| {
-            let dist = aln.count_region_operations(interval).edit_distance();
+            let dist = op_counter.count(aln).edit_distance();
             dist.edit() <= edit_dist_cache.get(dist.read_len())
         })
         .map(Deref::deref)
         .collect();
-    let depth_distr = ReadDepth::estimate(&filt_alns, &windows,
-        &args.bg_params.depth, true, &seq_info, opt_out_dir)?;
+
+    let depth_distr = if let Some(windows) = opt_windows {
+        ReadDepth::estimate(&filt_alns, &windows, &args.bg_params.depth, false, &seq_info, opt_out_dir)?
+    } else {
+        ReadDepth::empty()
+    };
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -1030,7 +1082,8 @@ fn estimate_bg_from_unpaired(
 fn estimate_bg_distrs(
     args: &Args,
     out_dir: &Path,
-    bg_region: &BgRegion,
+    ref_contigs: &Arc<ContigNames>,
+    bg_region: Option<&BgRegion>,
 ) -> crate::Result<BgDistr>
 {
     let opt_out_dir = if args.debug { Some(out_dir) } else { None };
@@ -1044,27 +1097,28 @@ fn estimate_bg_distrs(
         let alns_filename = &args.in_files.alns[0];
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
         let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
-        fastx::set_reference(alns_filename, &mut bam_reader, &args.in_files.reference, Some(&bg_region.ref_contigs))?;
+        fastx::set_reference(alns_filename, &mut bam_reader, &args.in_files.reference, Some(ref_contigs))?;
 
-        let interval = &bg_region.interval;
+        let bg_data = bg_region.expect("Background region must be defined");
+        let interval = &bg_data.interval;
 
-        let padded_start = bg_region.padded_interval.start();
-        let padded_seq = &bg_region.padded_sequence;
+        let padded_start = bg_data.padded_interval.start();
+        let padded_seq = &bg_data.padded_sequence;
         bam_reader.fetch((interval.contig_name(), i64::from(interval.start()), i64::from(interval.end())))?;
         (alns, aln_is_paired_end) = load_alns(&mut bam_reader,
             |record| Cigar::infer_ext_cigar(record, padded_seq, padded_start),
-            &bg_region.ref_contigs, args)?;
+            ref_contigs, args)?;
         if aln_is_paired_end && !args.technology.paired_end_allowed() {
             return Err(error!(InvalidInput, "Paired end reads are not supported by {}", args.technology.long_name()));
         }
         seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.technology, args.explicit_technology)?;
     } else {
-        seq_info = SequencingInfo::new(read_len_from_reads(args, Some(&bg_region.ref_contigs))?,
+        seq_info = SequencingInfo::new(read_len_from_reads(args, Some(ref_contigs))?,
             args.technology, args.explicit_technology)?;
         log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
 
         let bam_filename = out_dir.join("aln.bam");
-        run_mapping(args, &mut seq_info, &ref_filename, &out_dir, &bam_filename, bg_region)?;
+        run_mapping(args, &mut seq_info, &ref_filename, ref_contigs, &out_dir, &bam_filename, bg_region)?;
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
@@ -1073,7 +1127,7 @@ fn estimate_bg_distrs(
             assert!(!cigar.has_hard_clipping(), "Cannot process primary alignments with hard clipping");
             Some(cigar)
         };
-        (alns, aln_is_paired_end) = load_alns(&mut bam_reader, get_cigar, &bg_region.ref_contigs, args)?;
+        (alns, aln_is_paired_end) = load_alns(&mut bam_reader, get_cigar, ref_contigs, args)?;
         if aln_is_paired_end != args.in_files.is_paired_end() {
             return Err(error!(RuntimeError,
                 "Input data is {}-end, while alignment file is {}-end. \
@@ -1085,9 +1139,9 @@ fn estimate_bg_distrs(
     }
 
     if aln_is_paired_end {
-        estimate_bg_from_paired(alns, seq_info, args, opt_out_dir, bg_region)
+        estimate_bg_from_paired(alns, seq_info, opt_out_dir, bg_region, args)
     } else {
-        estimate_bg_from_unpaired(alns, seq_info, args, opt_out_dir, bg_region)
+        estimate_bg_from_unpaired(alns, seq_info, opt_out_dir, bg_region, args)
     }
 }
 
@@ -1149,7 +1203,6 @@ fn estimate_like(args: &Args, like_dir: &Path) -> crate::Result<BgDistr> {
 
 /// Information about the background region.
 struct BgRegion {
-    ref_contigs: Arc<ContigNames>,
     /// Background region.
     interval: Interval,
     /// Background region + padding.
@@ -1163,25 +1216,25 @@ struct BgRegion {
 }
 
 impl BgRegion {
-    fn new(args: &Args) -> crate::Result<Self> {
-        let ref_filename = args.in_files.reference.as_ref().unwrap();
-        let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
-        let ref_contigs = Arc::new(ref_contigs);
+    fn new(
+        args: &Args,
+        ref_filename: &Path,
+        ref_contigs: &Arc<ContigNames>,
+        ref_fasta: &mut fasta::IndexedReader<impl io::Read + io::Seek>,
+    ) -> crate::Result<Self>
+    {
         let interval = select_bg_interval(&ref_filename, &ref_contigs, &args.bg_region)?;
         const PADDING: u32 = 50_000;
         let padded_interval = interval.add_padding(PADDING);
 
         let kmer_getter = JfKmerGetter::new(args.jellyfish.clone(), args.jf_counts.clone().unwrap())?;
-        let padded_sequence = padded_interval.fetch_seq(&mut ref_fasta)?;
+        let padded_sequence = padded_interval.fetch_seq(ref_fasta)?;
 
         log::info!("Calculating k-mer counts on the background region");
         let padded_kmer_counts = kmer_getter.fetch([padded_sequence.clone()])?;
         let kmer_counts = padded_kmer_counts.subregion(
             interval.start() - padded_interval.start(), interval.end() - padded_interval.start());
-        Ok(Self {
-            ref_contigs, interval, padded_interval, padded_sequence,
-            padded_kmer_counts, kmer_counts,
-        })
+        Ok(Self { interval, padded_interval, padded_sequence, padded_kmer_counts, kmer_counts })
     }
 
     /// Returns region sequence without padding.
@@ -1205,12 +1258,21 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     }
     ext::sys::mkdir(out_dir)?;
 
-    let bg_distr = if let Some(similar_dataset) = args.similar_dataset.as_ref() {
-        estimate_like(&args, similar_dataset)?
+    let ref_filename = args.in_files.reference.as_ref().unwrap();
+    let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
+    let ref_contigs = Arc::new(ref_contigs);
+
+    let bg_region = if args.similar_dataset.is_none() {
+        Some(BgRegion::new(&args, &ref_filename, &ref_contigs, &mut ref_fasta)?)
     } else {
-        let bg_region = BgRegion::new(&args)?;
-        estimate_bg_distrs(&args, &out_dir, &bg_region)?
+        None
     };
+    let bg_distr = estimate_bg_distrs(&args, &out_dir, &ref_contigs, bg_region.as_ref())?;
+    // let bg_distr = if let Some(similar_dataset) = args.similar_dataset.as_ref() {
+    //     estimate_like(&args, similar_dataset)?
+    // } else {
+    //     estimate_bg_distrs(&args, &out_dir, &mut bg_region)?
+    // };
 
     let distr_filename = out_dir.join(paths::BG_DISTR);
     let mut distr_file = ext::sys::create_gzip(&distr_filename)?;

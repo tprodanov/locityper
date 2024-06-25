@@ -100,10 +100,13 @@ fn equal_names_fast(name1: &[u8], name2: &[u8]) -> bool {
 
 /// Single-end or paired-end record that can be written to a file.
 pub trait WritableRecord: Clone + Default {
+    /// Number of fragments.
+    const N_FRAGMENTS: u8;
+
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()>;
 
-    /// Returns sum length and the number of fragments (1 or 2).
-    fn sum_len(&self) -> (u32, u32);
+    /// Returns sum length.
+    fn sum_len(&self) -> u32;
 }
 
 /// Single read sequence.
@@ -121,15 +124,15 @@ pub trait SingleRecord: WritableRecord {
 }
 
 impl<T: SingleRecord + WritableRecord> WritableRecord for [T; 2] {
+    const N_FRAGMENTS: u8 = 2 * T::N_FRAGMENTS;
+
     /// Writes two FASTQ/FASTA records one after another.
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
         self.iter().map(|rec| rec.write_to(f)).collect()
     }
 
-    fn sum_len(&self) -> (u32, u32) {
-        let (s1, t1) = self[0].sum_len();
-        let (s2, t2) = self[1].sum_len();
-        (s1 + s2, t1 + t2)
+    fn sum_len(&self) -> u32 {
+        self[0].sum_len() + self[1].sum_len()
     }
 }
 
@@ -154,6 +157,24 @@ pub trait FastxRead: Send {
             }
         }
         Ok(count)
+    }
+
+    /// Copied first records to the writer, until sum length does not exceed a given value.
+    /// All remaining records are then skipped.
+    fn copy_first(&mut self, writer: &mut impl io::Write, sum_length: u64) -> crate::Result<u64> {
+        let mut record = Self::Record::default();
+        let mut progress = Progress::new_simple();
+        let mut s = 0;
+        while self.read_next(&mut record)? {
+            progress.inc_processed();
+            record.write_to(writer).map_err(add_path!(!))?;
+            s += u64::from(record.sum_len());
+            if s >= sum_length {
+                break;
+            }
+        }
+        progress.final_message();
+        Ok(progress.processed())
     }
 
     /// Writes input stream to output.
@@ -200,6 +221,8 @@ impl SingleRecord for FastxRecord {
 }
 
 impl WritableRecord for FastxRecord {
+    const N_FRAGMENTS: u8 = 1;
+
     /// Write single record to FASTA/FASTQ file.
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
         if self.qual.is_empty() {
@@ -209,8 +232,8 @@ impl WritableRecord for FastxRecord {
         }
     }
 
-    fn sum_len(&self) -> (u32, u32) {
-        (self.seq.len() as u32, 1)
+    fn sum_len(&self) -> u32 {
+        self.seq.len() as u32
     }
 }
 
@@ -567,6 +590,8 @@ impl SingleRecord for BamRecord {
 }
 
 impl WritableRecord for BamRecord {
+    const N_FRAGMENTS: u8 = 1;
+
     /// Write single record to FASTA/FASTQ file.
     fn write_to(&self, f: &mut impl io::Write) -> io::Result<()> {
         let mut qual = self.inner.qual();
@@ -605,8 +630,8 @@ impl WritableRecord for BamRecord {
         f.write_all(b"\n")
     }
 
-    fn sum_len(&self) -> (u32, u32) {
-        (self.seq.len() as u32, 1)
+    fn sum_len(&self) -> u32 {
+        self.seq.len() as u32
     }
 }
 
@@ -813,19 +838,19 @@ impl FastxRead for PairedBamReader {
     }
 }
 
-/// Calculates average read length across the first `n_records`.
-pub fn mean_read_len<T, R>(reader: &mut R, n_records: usize) -> crate::Result<f64>
+/// Calculates average read length.
+/// Stops when read at least `min_records` reads with sum length of `min_sum_len`.
+pub fn mean_read_len<T, R>(reader: &mut R, min_records: u64, min_sum_len: u64) -> crate::Result<f64>
 where T: WritableRecord,
       R: FastxRead<Record = T>,
 {
     let mut record = Default::default();
-    let mut s: u64 = 0;
     let mut n: u64 = 0;
+    let mut s: u64 = 0;
     while reader.read_next(&mut record)? {
-        let (l, t) = record.sum_len();
-        s += u64::from(l);
-        n += u64::from(t);
-        if n >= n_records as u64 {
+        n += u64::from(T::N_FRAGMENTS);
+        s += u64::from(record.sum_len());
+        if n >= min_records && s >= min_sum_len {
             break;
         }
     }

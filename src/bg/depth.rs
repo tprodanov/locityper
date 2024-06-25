@@ -298,6 +298,16 @@ fn get_depth_and_gc(
 }
 
 impl ReadDepth {
+    /// Creates empty, unusable, read depth instance.
+    pub fn empty() -> Self {
+        Self {
+            ploidy: 0,
+            window_size: 0,
+            neighb_size: 0,
+            distributions: Vec::new(),
+        }
+    }
+
     /// Estimates read depth from primary alignments.
     ///
     /// Write debug information if `out_dir` is Some.
