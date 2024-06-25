@@ -156,7 +156,7 @@ impl ErrorProfile {
         let mut total_counts = OperCounts::<u64>::default();
         // HashMap, keys: (edit_dist, read_len), values: number of appearances.
         let mut edit_distances = IntMap::<EditDist, u64>::default();
-        for aln in alns.iter() {
+        for aln in alns {
             let aln = aln.borrow();
             if !windows.map(|ws| ws.keep_window(aln.interval().middle())).unwrap_or(true) {
                 continue;
@@ -173,7 +173,12 @@ impl ErrorProfile {
         let triples: Vec<_> = edit_distances.iter()
             .map(|(&EditDist { edit, read_len }, &count)| (min(edit, read_len), read_len, count as f64))
             .collect();
-        let edit_distr = BetaBinomial::max_lik_estimate(&triples);
+
+        // When finding Beta-Binomial distribution, add Uniform distribution with multiplier
+        // UNIF_NOMINATOR / n_reads.
+        const UNIF_NOMINATOR: f64 = 3.0;
+        let unif_coef = f64::min(UNIF_NOMINATOR / alns.len() as f64, 0.1);
+        let edit_distr = BetaBinomial::max_lik_estimate(&triples, unif_coef);
 
         if let Some(dir) = out_dir {
             let dbg_filename = dir.join("edit_dist.csv.gz");

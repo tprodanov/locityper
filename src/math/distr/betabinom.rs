@@ -102,24 +102,36 @@ impl BetaBinomial {
     }
 
     /// Use Nelder-Mead to find max-likelihood `alpha` & `beta` for an observed vector of tuples `(k, n, weight)`.
-    pub fn max_lik_estimate(observations: &[(u32, u32, f64)]) -> Self {
+    pub fn max_lik_estimate(observations: &[(u32, u32, f64)], unif_coef: f64) -> Self {
         let start_points = vec![
             vec![0.7,  50.0],
             vec![0.3, 100.0],
             vec![0.5,  10.0],
         ];
-        let solver = NelderMead::new(start_points)
-            .with_sd_tolerance(1e-6).unwrap();
-        let solution = Executor::new(MLEProblem { observations }, solver)
-            .run()
-            .expect("Nelder-Mead finished with an error");
+        let problem = MLEProblem {
+            observations,
+            bb_mult: (-unif_coef).ln_1p(),
+            unif_mult: unif_coef.ln(),
+        };
+        let solver = NelderMead::new(start_points).with_sd_tolerance(1e-6).unwrap();
+        let solution = Executor::new(problem, solver)
+            .run().expect("Nelder-Mead finished with an error");
         let param = solution.state.get_param().expect("Nelder-Mead failed to find appropriate N.Binom. parameters");
         Self::new(param[0], param[1])
     }
 }
 
+impl fmt::Debug for BetaBinomial {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "BetaBinom({}, {})", self.alpha, self.beta)
+    }
+}
+
 struct MLEProblem<'a> {
     observations: &'a [(u32, u32, f64)],
+    /// Sum Beta-Binomial and Uniform distributions with corresponding weights (ln-space).
+    bb_mult: f64,
+    unif_mult: f64,
 }
 
 impl<'a> CostFunction for MLEProblem<'a> {
@@ -128,7 +140,7 @@ impl<'a> CostFunction for MLEProblem<'a> {
 
     fn cost(&self, param: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
         const LARGE_NUM: f64 = 1e30;
-        const PARAM_LIMIT: f64 = 100000.0;
+        const PARAM_LIMIT: f64 = 100_000.0;
         let alpha = param[0];
         let beta = param[1];
         if alpha <= 0.0 || beta <= 0.0 || alpha >= PARAM_LIMIT || beta >= PARAM_LIMIT {
@@ -136,14 +148,9 @@ impl<'a> CostFunction for MLEProblem<'a> {
         } else {
             let beta_binom = BetaBinomial::new(alpha, beta);
             Ok(-self.observations.iter()
-                .map(|&(k, n, weight)| weight * beta_binom.ln_pmf(k, n))
-                .sum::<f64>())
+                .map(|&(k, n, weight)|
+                    weight * Ln::add(self.bb_mult + beta_binom.ln_pmf(k, n), self.unif_mult)
+                ).sum::<f64>())
         }
-    }
-}
-
-impl fmt::Debug for BetaBinomial {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "BetaBinom({}, {})", self.alpha, self.beta)
     }
 }
