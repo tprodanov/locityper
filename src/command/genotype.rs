@@ -712,13 +712,13 @@ pub(super) fn recruit_to_targets(
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
         // Need a lot of if-elses to have compile-time optimizations based on input data and the number of targets :]
         if is_paired_end {
-            targets.recruit(fastx::PairedBamReader::new(reader), writers, threads, chunk_size)
+            targets.recruit(fastx::PairedBamReader::new(reader), writers, threads, chunk_size, None)
         } else {
-            targets.recruit(reader, writers, threads, chunk_size)
+            targets.recruit(reader, writers, threads, chunk_size, None)
         }
     } else {
         fastx::process_readers!(in_files, None; let {} reader;
-            { targets.recruit(reader, writers, threads, chunk_size) })
+            { targets.recruit(reader, writers, threads, chunk_size, None) })
     }
 }
 

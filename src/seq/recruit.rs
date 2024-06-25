@@ -7,6 +7,7 @@ use std::{
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
 };
 use smallvec::{smallvec, SmallVec};
+use rand::Rng;
 use crate::{
     err::{validate_param, add_path},
     seq::{
@@ -16,6 +17,7 @@ use crate::{
     },
     math::RoundDiv,
     algo::{IntMap, hash_map},
+    ext::rand::XoshiroRng,
 };
 
 pub type Minimizer = u64;
@@ -581,6 +583,43 @@ impl TargetBuilder {
     }
 }
 
+/// Trait for either subsampling, or using all reads.
+pub trait Sampling {
+    fn next(&mut self) -> bool;
+}
+
+pub struct All;
+
+impl Sampling for All {
+    #[inline(always)]
+    fn next(&mut self) -> bool { true }
+}
+
+pub struct Subsampling {
+    /// Probability of success, relative to the maximal integer.
+    /// Taken from `rand::distributions::Bernoulli`.
+    p_int: u64,
+    rng: XoshiroRng,
+}
+
+impl Subsampling {
+    pub fn new(p: f64, rng: XoshiroRng) -> Self {
+        const SCALE: f64 = 2.0 * (1u64 << 63) as f64;
+        assert!(0.0 < p && p < 1.0, "Subsampling rate ({}) must be in (0, 1)", p);
+        Self {
+            p_int: (p * SCALE) as u64,
+            rng,
+        }
+    }
+}
+
+impl Sampling for Subsampling {
+    #[inline(always)]
+    fn next(&mut self) -> bool {
+        self.rng.gen::<u64>() < self.p_int
+    }
+}
+
 /// Recruitment targets.
 #[derive(Clone)]
 pub struct Targets {
@@ -742,7 +781,8 @@ impl Targets {
     fn recruit_single_thread<T, M>(
         &self,
         mut reader: impl FastxRead<Record = T>,
-        writers: &mut [impl io::Write],
+        mut writers: Vec<impl io::Write>,
+        mut sampling: impl Sampling,
     ) -> crate::Result<Progress>
     where T: RecruitableRecord,
           M: MatchesBuffer,
@@ -754,11 +794,13 @@ impl Targets {
 
         let mut progress = Progress::new(self.show_recruited);
         while reader.read_next(&mut record)? {
-            record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
-            for locus_ix in answer.iter() {
-                record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
+            if sampling.next() {
+                record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
+                for locus_ix in answer.iter() {
+                    record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
+                }
+                progress.add_recruited(answer.not_empty());
             }
-            progress.add_recruited(answer.not_empty());
             progress.inc_processed();
         }
         progress.final_message();
@@ -771,6 +813,7 @@ impl Targets {
         writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
+        sampling: impl Sampling,
     ) -> crate::Result<Progress>
     where T: RecruitableRecord,
           M: MatchesBuffer,
@@ -778,13 +821,8 @@ impl Targets {
         let n_workers = usize::from(threads - 1);
         log::info!("Starting read recruitment with 1 read/write thread and {} recruitment threads", n_workers);
         let mut main_worker = MainWorker::<T, _, _, M>::new(self, reader, writers, n_workers, chunk_size);
-        main_worker.run()?;
+        main_worker.run(sampling)?;
         main_worker.finish()
-    }
-
-    /// How many targets are there in the set?
-    pub fn n_targets(&self) -> usize {
-        self.locus_minimizers.len()
     }
 
     /// Recruit reads to the targets, possibly in multiple threads.
@@ -792,26 +830,61 @@ impl Targets {
     pub(crate) fn recruit(
         &self,
         reader: impl FastxRead<Record = impl RecruitableRecord>,
-        mut writers: Vec<impl io::Write>,
+        writers: Vec<impl io::Write>,
         threads: u16,
         chunk_size: usize,
+        subsampling: Option<(f64, XoshiroRng)>,
     ) -> crate::Result<Progress>
     {
         assert_eq!(writers.len(), self.locus_minimizers.len(), "Unexpected number of writers");
-        let single_target = self.n_targets() == 1;
-        if threads <= 1 {
-            if single_target {
-                self.recruit_single_thread::<_, SingleMatch>(reader, &mut writers)
-            } else {
-                self.recruit_single_thread::<_, MatchesMap>(reader, &mut writers)
-            }
-        } else {
-            if single_target {
-                self.recruit_multi_thread::<_, SingleMatch>(reader, writers, threads, chunk_size)
-            } else {
-                self.recruit_multi_thread::<_, MatchesMap>(reader, writers, threads, chunk_size)
-            }
+
+        // As read recruitment is very expensive, split into 8 implementations
+        // based on the input parameters.
+        match (threads, self.n_targets(), subsampling) {
+            (1, 1, None) =>
+                self.recruit_single_thread::<_, SingleMatch>(reader, writers, All),
+            (1, 1, Some((p, rng))) =>
+                self.recruit_single_thread::<_, SingleMatch>(reader, writers, Subsampling::new(p, rng)),
+            (1, _, None) =>
+                self.recruit_single_thread::<_, MatchesMap>(reader, writers, All),
+            (1, _, Some((p, rng))) =>
+                self.recruit_single_thread::<_, MatchesMap>(reader, writers, Subsampling::new(p, rng)),
+            (_, 1, None) =>
+                self.recruit_multi_thread::<_, SingleMatch>(reader, writers,
+                    threads, chunk_size, All),
+            (_, 1, Some((p, rng))) =>
+                self.recruit_multi_thread::<_, SingleMatch>(reader, writers,
+                    threads, chunk_size, Subsampling::new(p, rng)),
+            (_, _, None) =>
+                self.recruit_multi_thread::<_, MatchesMap>(reader, writers,
+                    threads, chunk_size, All),
+            (_, _, Some((p, rng))) =>
+                self.recruit_multi_thread::<_, MatchesMap>(reader, writers,
+                    threads, chunk_size, Subsampling::new(p, rng)),
         }
+        // if let Some((rate, rng)) = subsampling {
+
+        // }
+        // let sampling = All;
+
+        // if threads <= 1 {
+        //     if single_target {
+        //         self.recruit_single_thread::<_, SingleMatch>(reader, writers, sampling)
+        //     } else {
+        //         self.recruit_single_thread::<_, MatchesMap>(reader, writers, sampling)
+        //     }
+        // } else {
+        //     if single_target {
+        //         self.recruit_multi_thread::<_, SingleMatch>(reader, writers, threads, chunk_size, sampling)
+        //     } else {
+        //         self.recruit_multi_thread::<_, MatchesMap>(reader, writers, threads, chunk_size, sampling)
+        //     }
+        // }
+    }
+
+    /// How many targets are there in the set?
+    pub fn n_targets(&self) -> usize {
+        self.locus_minimizers.len()
     }
 }
 
@@ -819,7 +892,11 @@ impl Targets {
 /// Is send between threads: main thread reads records and sends the vector to workers.
 /// In the meantime, workers receive records and fills corresponding answers (recruitment targets for the record),
 /// and then send shipments back to the main thread.
-type Shipment<T, A> = Vec<(T, A)>;
+#[derive(Clone)]
+struct Shipment<T, A> {
+    data: Vec<(T, A)>,
+    total: u32,
+}
 
 struct Worker<T, M: MatchesBuffer> {
     targets: Targets,
@@ -850,8 +927,8 @@ impl<T: RecruitableRecord, M: MatchesBuffer> Worker<T, M> {
     fn run(mut self) {
         // Block thread and wait for the shipment.
         while let Ok(mut shipment) = self.receiver.recv() {
-            assert!(!shipment.is_empty());
-            for (record, answer) in shipment.iter_mut() {
+            debug_assert!(!shipment.data.is_empty());
+            for (record, answer) in shipment.data.iter_mut() {
                 record.recruit(&self.targets, answer, &mut self.buffer1, &mut self.buffer2);
             }
             if let Err(_) = self.sender.send(shipment) {
@@ -931,10 +1008,10 @@ where T: RecruitableRecord,
     }
 
     /// Starts the process: provides the first task to each worker.
-    fn start(&mut self) -> crate::Result<()> {
+    fn start(&mut self, sampling: &mut impl Sampling) -> crate::Result<()> {
         for (is_busy, sender) in self.is_busy.iter_mut().zip(&self.senders) {
-            let shipment = read_new_shipment(&mut self.reader, self.chunk_size)?;
-            if !shipment.is_empty() {
+            let shipment = read_new_shipment(&mut self.reader, self.chunk_size, sampling)?;
+            if !shipment.data.is_empty() {
                 *is_busy = true;
                 sender.send(shipment).expect("Recruitment worker has failed!");
             }
@@ -972,14 +1049,14 @@ where T: RecruitableRecord,
         any_action
     }
 
-    fn write_read_iteration(&mut self) -> crate::Result<()> {
+    fn write_read_iteration(&mut self, sampling: &mut impl Sampling) -> crate::Result<()> {
         if self.reader.is_none() {
             return Ok(())
         }
         while let Some(mut shipment) = self.to_write.pop() {
             write_shipment(&mut self.writers, &shipment, &mut self.progress)?;
-            fill_shipment(&mut self.reader, &mut shipment)?;
-            if !shipment.is_empty() {
+            fill_shipment(&mut self.reader, &mut shipment, sampling)?;
+            if !shipment.data.is_empty() {
                 self.to_send.push(shipment);
             }
             if self.reader.is_none() {
@@ -987,8 +1064,8 @@ where T: RecruitableRecord,
             }
         }
         if self.to_send.is_empty() {
-            let shipment = read_new_shipment(&mut self.reader, self.chunk_size)?;
-            if !shipment.is_empty() {
+            let shipment = read_new_shipment(&mut self.reader, self.chunk_size, sampling)?;
+            if !shipment.data.is_empty() {
                 self.to_send.push(shipment);
             }
         }
@@ -997,10 +1074,10 @@ where T: RecruitableRecord,
 
     /// Main part of the multi-thread recruitment.
     /// Iterates until there are any shipments left to read from the input files.
-    fn run(&mut self) -> crate::Result<()> {
-        self.start()?;
+    fn run(&mut self, mut sampling: impl Sampling) -> crate::Result<()> {
+        self.start(&mut sampling)?;
         while self.reader.is_some() || !self.to_send.is_empty() {
-            self.write_read_iteration()?;
+            self.write_read_iteration(&mut sampling)?;
             // There were no updates, and there are shipments ready to be sent.
             if !self.recv_send_iteration() && !self.to_send.is_empty() {
                 const SLEEP: Duration = Duration::from_micros(100);
@@ -1034,22 +1111,31 @@ where T: RecruitableRecord,
 
 /// Fills `shipment` from the reader.
 /// Output shipment may be empty, if the stream has ended.
-fn fill_shipment<T, R, A>(opt_reader: &mut Option<R>, shipment: &mut Shipment<T, A>) -> crate::Result<()>
-where T: Default,
-      R: FastxRead<Record = T>,
-      A: Answer,
+fn fill_shipment<T, R, A>(
+    opt_reader: &mut Option<R>,
+    shipment: &mut Shipment<T, A>,
+    sampling: &mut impl Sampling,
+) -> crate::Result<()>
+where R: FastxRead<Record = T>,
 {
     let reader = opt_reader.as_mut().expect("fill_shipment: reader must not be None");
+    let mut total = 0;
     let mut new_len = 0;
-    for (record, _) in shipment.iter_mut() {
-        if reader.read_next(record)? {
-            new_len += 1;
-        } else {
-            shipment.truncate(new_len);
-            *opt_reader = None;
-            break;
+
+    'outer: for (record, _) in shipment.data.iter_mut() {
+        while reader.read_next(record)? {
+            total += 1;
+            if sampling.next() {
+                new_len += 1;
+                continue 'outer;
+            }
         }
+        // Reader has ended.
+        shipment.data.truncate(new_len);
+        *opt_reader = None;
+        break;
     }
+    shipment.total = total;
     Ok(())
 }
 
@@ -1057,13 +1143,17 @@ where T: Default,
 fn read_new_shipment<T, R, A>(
     opt_reader: &mut Option<R>,
     chunk_size: usize,
+    sampling: &mut impl Sampling,
 ) -> crate::Result<Shipment<T, A>>
 where T: Clone + Default,
+      A: Clone + Default,
       R: FastxRead<Record = T>,
-      A: Answer,
 {
-    let mut shipment = vec![Default::default(); chunk_size];
-    fill_shipment(opt_reader, &mut shipment)?;
+    let mut shipment = Shipment {
+        data: vec![Default::default(); chunk_size],
+        total: 0,
+    };
+    fill_shipment(opt_reader, &mut shipment, sampling)?;
     Ok(shipment)
 }
 
@@ -1076,12 +1166,12 @@ fn write_shipment<T, A>(
 where T: fastx::WritableRecord,
       A: Answer,
 {
-    for (record, answer) in shipment.iter() {
+    for (record, answer) in shipment.data.iter() {
         progress.add_recruited(answer.not_empty());
         for locus_ix in answer.iter() {
             record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
         }
     }
-    progress.add_processed(shipment.len() as u64);
+    progress.add_processed(u64::from(shipment.total));
     Ok(())
 }

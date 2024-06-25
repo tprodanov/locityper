@@ -651,7 +651,8 @@ fn recruit_reads(
     let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH,
         seq_info.mean_read_len(), is_paired_end);
     Ok(thread::spawn(move ||
-        targets.recruit(reader, vec![writer], recr_threads, chunk_size).map(|stats| Some(stats.processed()))))
+        targets.recruit(reader, vec![writer], recr_threads, chunk_size, None)
+            .map(|stats| Some(stats.processed()))))
 }
 
 /// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
@@ -1208,7 +1209,8 @@ fn read_count_fraction(
     if args.in_files.interleaved {
         total_reads /= 2;
     }
-    log::debug!("    Current dataset: {} reads, previous dataset: {} reads", total_reads, similar_n_reads);
+    log::debug!("    Current dataset: {:.0} reads, previous dataset: {:.0} reads",
+        1e-3 * total_reads as f64, 1e-3 * similar_n_reads as f64);
     // NOTE: total reads are deliberately not provided to `seq_info`, so as not to propagate errors.
     Ok(total_reads as f64 / similar_n_reads as f64)
 }
