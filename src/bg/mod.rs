@@ -79,10 +79,12 @@ impl BgDistr {
         Self { seq_info, insert_distr, err_prof, depth }
     }
 
-    pub fn load_from(path: &Path, success_file: &Path) -> crate::Result<Self> {
-        if !success_file.exists() {
-            log::warn!("File {} does not exist, possibly preprocessing was not completed",
-                ext::fmt::path(success_file));
+    pub fn load_from(path: &Path, success_file: Option<&Path>) -> crate::Result<Self> {
+        if let Some(filename) = success_file {
+            if !filename.exists() {
+                log::warn!("File {} does not exist, possibly preprocessing was not completed",
+                   ext::fmt::path(filename));
+            }
         }
         let mut stream = ext::sys::open(&path)?;
         let mut s = String::new();
@@ -264,6 +266,8 @@ pub struct SequencingInfo {
     technology: Technology,
     /// Total number of reads/read pairs in the input file.
     total_reads: Option<u64>,
+    /// Full input file size.
+    file_size: Option<u64>,
 }
 
 impl SequencingInfo {
@@ -284,6 +288,7 @@ impl SequencingInfo {
         Ok(Self {
             read_len, technology,
             total_reads: None,
+            file_size: None,
         })
     }
 
@@ -302,6 +307,14 @@ impl SequencingInfo {
     pub fn total_reads(&self) -> Option<u64> {
         self.total_reads
     }
+
+    pub fn set_file_size(&mut self, size: u64) {
+        self.file_size = Some(size);
+    }
+
+    pub fn file_size(&self) -> Option<u64> {
+        self.file_size
+    }
 }
 
 impl JsonSer for SequencingInfo {
@@ -310,12 +323,13 @@ impl JsonSer for SequencingInfo {
             read_len: self.read_len,
             technology: self.technology.to_str(),
             total_reads: self.total_reads,
+            file_size: self.file_size,
         }
     }
 
     fn load(obj: &json::JsonValue) -> crate::Result<Self> {
-        json_get!(obj => read_len (as_f64), technology (as_str), total_reads? (as_u64));
+        json_get!(obj => read_len (as_f64), technology (as_str), total_reads? (as_u64), file_size? (as_u64));
         let technology = Technology::from_str(technology).map_err(|e| Error::JsonLoad(e))?;
-        Ok(Self { read_len, technology, total_reads })
+        Ok(Self { read_len, technology, total_reads, file_size })
     }
 }

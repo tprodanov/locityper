@@ -229,23 +229,26 @@ impl InputFiles {
         assert!(!self.has_indexed_alignment());
         !self.reads2.is_empty() || self.interleaved
     }
-}
 
-/// Default minimal MAPQ.
-const DEF_MIN_MAPQ: u8 = 30;
-/// Default minimal MAPQ when similar dataset is used.
-const DEF_SIMIL_MIN_MAPQ: u8 = 60;
+    /// Returns sum file size across first and second reads, as well as alignments.
+    pub fn sum_file_size(&self) -> crate::Result<u64> {
+        let mut s = 0;
+        for filename in self.reads1.iter().chain(&self.reads2).chain(&self.alns) {
+            s += fs::metadata(filename).map_err(add_path!(filename))?.len();
+        }
+        Ok(s)
+    }
+}
 
 struct Args {
     in_files: InputFiles,
     jf_counts: Option<PathBuf>,
     output: Option<PathBuf>,
     similar_dataset: Option<PathBuf>,
-    similar_proc_length: u64,
     bg_region: Option<String>,
 
     technology: Technology,
-    min_mapq: Option<u8>,
+    min_mapq: u8,
 
     threads: u16,
     recr_threads: f64,
@@ -257,6 +260,7 @@ struct Args {
     samtools: PathBuf,
     jellyfish: PathBuf,
     debug: bool,
+    debug_head: Option<u64>,
     /// Was technology explicitely provided?
     explicit_technology: bool,
     /// When calculating insert size distributions and read error profiles,
@@ -273,11 +277,10 @@ impl Default for Args {
             jf_counts: None,
             output: None,
             similar_dataset: None,
-            similar_proc_length: 30_000_000,
             bg_region: None,
 
             technology: Technology::Illumina,
-            min_mapq: None,
+            min_mapq: 30,
 
             threads: 8,
             recr_threads: 0.4,
@@ -285,6 +288,7 @@ impl Default for Args {
 
             rerun: super::Rerun::None,
             debug: false,
+            debug_head: None,
             strobealign: PathBuf::from("strobealign"),
             minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
@@ -315,17 +319,15 @@ impl Args {
             }
         }
 
-        if self.similar_dataset.is_some() {
+        if self.debug_head.is_some() {
             self.skip_recruitment = true;
-        } else {
+        }
+        if !self.skip_recruitment {
             validate_param!(self.recr_threads >= 0.0, "Number of recruitment threads ({}) must be non-negative",
                 self.recr_threads);
             validate_param!(self.recr_threads < 1.0 || self.recr_threads.fract() < 1e-8,
                 "Number of recruitment threads ({}) must be either integer, or smaller than 1",
                 self.recr_threads);
-        }
-        if self.min_mapq.is_none() {
-            self.min_mapq = Some(if self.similar_dataset.is_none() { DEF_MIN_MAPQ } else { DEF_SIMIL_MIN_MAPQ });
         }
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
@@ -411,10 +413,8 @@ fn print_help(extended: bool) {
             "    --recr-threads".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.recr_threads));
 
         println!("\n{}", "Insert size and error profile estimation:".bold());
-        println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].\n\
-            {EMPTY}  If {} is set, default is {}.",
-            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(),
-            super::fmt_def(DEF_MIN_MAPQ), "-~".green(), super::fmt_def(DEF_SIMIL_MIN_MAPQ));
+        println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
+            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.min_mapq));
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
             "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(defaults.max_clipping));
@@ -450,12 +450,9 @@ fn print_help(extended: bool) {
             "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
             super::fmt_def(defaults.bg_params.depth.min_tail_obs),
             super::fmt_def_f64(defaults.bg_params.depth.tail_var_mult));
-
-        println!("\n{}", "Preprocessing using similar dataset:".bold());
-        println!("    {:KEY$} {:VAL$}  When preprocessing using similar dataset ({}),\n\
-            {EMPTY}  map reads with this sum length to the reference [{}].",
-            "    --proc-length".green(), "INT".yellow(), "-~".green(),
-            super::fmt_def(PrettyU64(defaults.similar_proc_length)));
+        println!("    {:KEY$} {:VAL$}  Estimate read depth by comparing file sizes\n\
+            {EMPTY}  with similar dataset ({}). {}.",
+            "    --filesize".green(), super::flag(), "-~".green(), "Use with extreme care".red());
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -468,6 +465,11 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Save debug CSV files.",
         "    --debug".green(), "INT".yellow());
     if extended {
+        println!("    {:KEY$} {:VAL$}  Instead of the full preprocessing, map first {} reads to the\n\
+            {EMPTY}  reference and extract insert sizes and error profiles from them.\n\
+            {EMPTY}  Can be used to validate similar dataset preprocessing ({}).\n\
+            {EMPTY}  Recommended to use together with {}.",
+            "    --debug-head".green(), "INT".yellow(), "INT".yellow(), "-~".green(), "-q 60".underline());
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
         println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
@@ -515,7 +517,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('~') | Long("like") => args.similar_dataset = Some(parser.value()?.parse()?),
             Short('b') | Long("bg") | Long("bg-region") => args.bg_region = Some(parser.value()?.parse()?),
 
-            Short('q') | Long("min-mapq") | Long("min-mq") => args.min_mapq = Some(parser.value()?.parse()?),
+            Short('q') | Long("min-mapq") | Long("min-mq") => args.min_mapq = parser.value()?.parse()?,
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
             Long("pval-thresh") | Long("pval-threshold") | Long("pvalue-threshold") => {
                 args.bg_params.insert_pval = parser.value()?.parse()?;
@@ -540,8 +542,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.bg_params.depth.min_tail_obs = parser.value()?.parse()?;
                 args.bg_params.depth.tail_var_mult = parser.value()?.parse()?;
             }
-            Long("proc-length") | Long("proc-len")
-                => args.similar_proc_length = parser.value()?.parse::<PrettyU64>()?.get(),
+            Long("debug-head") => args.debug_head = Some(parser.value()?.parse::<PrettyU64>()?.get()),
 
             Long("skip-recruit") | Long("skip-recr") | Long("skip-recruitment") => args.skip_recruitment = true,
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
@@ -630,7 +631,7 @@ fn recruit_reads(
     bg_region: &BgRegion,
     is_paired_end: bool,
     recr_threads: u16,
-) -> crate::Result<thread::JoinHandle<Result<u64, Error>>>
+) -> crate::Result<thread::JoinHandle<Result<Option<u64>, Error>>>
 {
     let minimizer_kw = seq_info.technology().default_minim_size();
     let match_frac = seq_info.technology().default_match_frac(is_paired_end);
@@ -647,7 +648,7 @@ fn recruit_reads(
     let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH,
         seq_info.mean_read_len(), is_paired_end);
     Ok(thread::spawn(move ||
-        targets.recruit(reader, vec![writer], recr_threads, chunk_size).map(|stats| stats.processed())))
+        targets.recruit(reader, vec![writer], recr_threads, chunk_size).map(|stats| Some(stats.processed()))))
 }
 
 /// Returns handle, which returns the total number of consumed reads/read pairs after finishing.
@@ -658,16 +659,17 @@ fn set_mapping_stdin(
     bg_region: Option<&BgRegion>,
     recr_threads: u16,
     args: &Args,
-) -> crate::Result<thread::JoinHandle<Result<u64, Error>>>
+) -> crate::Result<thread::JoinHandle<Result<Option<u64>, Error>>>
 {
     // TODO: Can we optimize this?
     let mut writer = io::BufWriter::new(child_stdin);
     fastx::process_readers!(args.in_files, Some(ref_contigs); let {mut} reader; {
-        if args.similar_dataset.is_some() {
-            let proc_length = args.similar_proc_length;
-            Ok(thread::spawn(move || reader.copy_first(&mut writer, proc_length)))
+        if let Some(count) = args.debug_head {
+            Ok(thread::spawn(move || reader.copy_first(&mut writer, count)
+                .map(|_| None) // Do not return the number of reads.
+            ))
         } else if args.skip_recruitment {
-            Ok(thread::spawn(move || reader.copy(&mut writer)))
+            Ok(thread::spawn(move || reader.copy(&mut writer).map(Some)))
         } else {
             recruit_reads(reader, writer, seq_info, bg_region.expect("Background region must be defined"),
                 args.in_files.is_paired_end(), recr_threads)
@@ -716,8 +718,8 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
 
 fn first_step_str(args: &Args, bg_region: Option<&BgRegion>) -> String {
     let mut s = String::new();
-    if args.similar_dataset.is_some() {
-        write!(s, "_head_ --sum-len {}", PrettyU64(args.similar_proc_length)).unwrap();
+    if let Some(count) = args.debug_head {
+        write!(s, "_head_ -n {}", PrettyU64(count)).unwrap();
     } else if args.skip_recruitment {
         s.push_str("_interleave_");
     } else {
@@ -753,7 +755,7 @@ impl MappingParams {
     fn new(args: &Args, bg_region: Option<&Interval>) -> Self {
         MappingParams {
             technology: args.technology,
-            min_mapq: args.min_mapq.unwrap(),
+            min_mapq: args.min_mapq,
             bg_region: bg_region.map(Interval::to_string).unwrap_or_else(|| "None".to_owned()),
         }
     }
@@ -853,6 +855,29 @@ fn split_n_threads(args: &Args) -> (u16, u16) {
     (recr_threads, mapping_threads)
 }
 
+/// Either load sequencing info from old file, or recompute.
+fn prepare_seq_info(
+    args: &Args,
+    need_mapping: bool,
+    ref_contigs: &Arc<ContigNames>,
+    out_dir: &Path,
+) -> crate::Result<SequencingInfo>
+{
+    let old_path = out_dir.join(paths::BG_DISTR);
+    if !need_mapping && old_path.exists() {
+        if let Ok(old_distr) = BgDistr::load_from(&old_path, None) {
+            return Ok(old_distr.seq_info().clone());
+        }
+    }
+    let mut seq_info = SequencingInfo::new(read_len_from_reads(args, Some(ref_contigs))?,
+        args.technology, args.explicit_technology)?;
+    match args.in_files.sum_file_size() {
+        Ok(s) => seq_info.set_file_size(s),
+        Err(e) => log::warn!("Could not calculate file size, {:?}", e),
+    }
+    Ok(seq_info)
+}
+
 /// Map reads to the whole reference genome, and then take only reads mapped to the corresponding BED file.
 /// Subsample reads if the corresponding rate is less than 1.
 /// Return the total number of reads/read pairs.
@@ -866,10 +891,6 @@ fn run_mapping(
     bg_region: Option<&BgRegion>,
 ) -> crate::Result<()>
 {
-    if !need_mapping(args, out_dir, out_bam, bg_region.map(|data| &data.interval))? {
-        return Ok(());
-    }
-
     let (recr_threads, mapping_threads) = split_n_threads(args);
     let mut mapping = create_mapping_command(args, seq_info, ref_filename, mapping_threads);
     let mapping_exe = PathBuf::from(mapping.get_program().to_owned());
@@ -896,7 +917,7 @@ fn run_mapping(
             // Ignore reads where any of the mates is unmapped,
             // + ignore secondary & supplementary alignments + ignore failed checks.
             "-F", "3852",
-            "-q", &args.min_mapq.unwrap().to_string(),
+            "-q", &args.min_mapq.to_string(),
             ]);
     if let Some(filename) = &tmp_bed {
         samtools.arg("-L").arg(filename);
@@ -909,9 +930,10 @@ fn run_mapping(
     let samtools_child = samtools.spawn().map_err(add_path!(args.samtools))?;
     pipe_guard.push(args.samtools.clone(), samtools_child);
     pipe_guard.wait()?;
-    let total_reads = handle.join()
-        .map_err(|e| error!(RuntimeError, "Read mapping failed: {:?}", e))??;
-    seq_info.set_total_reads(total_reads);
+    if let Some(total_reads) = handle.join().map_err(|e| error!(RuntimeError, "Read mapping failed: {:?}", e))?? {
+        seq_info.set_total_reads(total_reads);
+    }
+
     fs::rename(&tmp_bam, out_bam).map_err(add_path!(tmp_bam, out_bam))?;
     if let Some(filename) = tmp_bed {
         fs::remove_file(&filename).map_err(add_path!(filename))?;
@@ -935,7 +957,7 @@ fn load_alns(
     args: &Args
 ) -> crate::Result<(Vec<NamedAlignment>, bool)>
 {
-    let min_mapq = args.min_mapq.unwrap();
+    let min_mapq = args.min_mapq;
     let max_clipping = args.max_clipping;
     let mut paired_counts = [0_u64, 0];
 
@@ -1125,12 +1147,13 @@ fn estimate_bg_distrs(
         }
         seq_info = SequencingInfo::new(read_len_from_alns(&alns), args.technology, args.explicit_technology)?;
     } else {
-        seq_info = SequencingInfo::new(read_len_from_reads(args, Some(ref_contigs))?,
-            args.technology, args.explicit_technology)?;
-        log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
-
         let bam_filename = out_dir.join("aln.bam");
-        run_mapping(args, &mut seq_info, &ref_filename, ref_contigs, &out_dir, &bam_filename, bg_region)?;
+        let need_mapping = need_mapping(args, &out_dir, &bam_filename, bg_region.map(|data| &data.interval))?;
+        seq_info = prepare_seq_info(args, need_mapping, ref_contigs, &out_dir)?;
+        log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
+        if need_mapping {
+            run_mapping(args, &mut seq_info, &ref_filename, ref_contigs, &out_dir, &bam_filename, bg_region)?;
+        }
 
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(&bam_filename));
         let mut bam_reader = bam::Reader::from_path(&bam_filename)?;
@@ -1158,17 +1181,23 @@ fn estimate_bg_distrs(
 }
 
 /// Assume that this WGS dataset is similar to another dataset, and use its parameters.
-fn estimate_like(args: &Args, like_dir: &Path) -> crate::Result<BgDistr> {
+fn estimate_like(
+    args: &Args,
+    out_dir: &Path,
+    like_dir: &Path,
+    ref_contigs: &Arc<ContigNames>,
+) -> crate::Result<BgDistr>
+{
     let similar_path = like_dir.join(paths::BG_DISTR);
     log::info!("Loading distribution parameters from {}", ext::fmt::path(&similar_path));
-    let similar_distr = BgDistr::load_from(&similar_path, &like_dir.join(paths::SUCCESS))?;
+    let similar_distr = BgDistr::load_from(&similar_path, Some(&like_dir.join(paths::SUCCESS)))?;
     let similar_seq_info = similar_distr.seq_info();
     let Some(similar_n_reads) = similar_seq_info.total_reads() else {
         return Err(error!(InvalidInput,
             "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir)))
     };
 
-    let seq_info = SequencingInfo::new(read_len_from_reads(args, None)?, args.technology, args.explicit_technology)?;
+    let seq_info = prepare_seq_info(args, false, ref_contigs, out_dir)?;
     if similar_seq_info.technology() != seq_info.technology() {
         return Err(error!(InvalidInput,
             "Cannot use similar dataset {}: different sequencing technology ({} and {})",
@@ -1274,17 +1303,14 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let (ref_contigs, mut ref_fasta) = ContigNames::load_indexed_fasta("ref", &ref_filename)?;
     let ref_contigs = Arc::new(ref_contigs);
 
-    let bg_region = if args.similar_dataset.is_none() {
-        Some(BgRegion::new(&args, &ref_filename, &ref_contigs, &mut ref_fasta)?)
+    let bg_distr = if let Some(similar_dataset) = &args.similar_dataset {
+        estimate_like(&args, &out_dir, similar_dataset, &ref_contigs)?
     } else {
-        None
+        let bg_region = if args.debug_head.is_none() {
+            Some(BgRegion::new(&args, &ref_filename, &ref_contigs, &mut ref_fasta)?)
+        } else { None };
+        estimate_bg_distrs(&args, &out_dir, &ref_contigs, bg_region.as_ref())?
     };
-    let bg_distr = estimate_bg_distrs(&args, &out_dir, &ref_contigs, bg_region.as_ref())?;
-    // let bg_distr = if let Some(similar_dataset) = args.similar_dataset.as_ref() {
-    //     estimate_like(&args, similar_dataset)?
-    // } else {
-    //     estimate_bg_distrs(&args, &out_dir, &mut bg_region)?
-    // };
 
     let distr_filename = out_dir.join(paths::BG_DISTR);
     let mut distr_file = ext::sys::create_gzip(&distr_filename)?;

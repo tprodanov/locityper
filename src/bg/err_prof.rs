@@ -91,7 +91,6 @@ impl OperCounts<u64> {
         log::info!("    {:12} mismatches ({:.6})", self.mismatches, mism_prob);
         log::info!("    {:12} insertions ({:.6})", self.insertions, ins_prob);
         log::info!("    {:12} deletions  ({:.6})", self.deletions, del_prob);
-        log::info!("    {:12} clippings  ({:.6})", self.clipping, self.clipping as f64 / sum_len);
         assert!(match_prob > 0.5, "Match probability ({:.5}) must be over 50%", match_prob);
         assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
             "Error probabilities do not sum to one");

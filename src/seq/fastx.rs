@@ -159,19 +159,17 @@ pub trait FastxRead: Send {
         Ok(count)
     }
 
-    /// Copied first records to the writer, until sum length does not exceed a given value.
+    /// Copied first `count` records to the writer. Returns the number of processed reads (<= count).
     /// All remaining records are then skipped.
-    fn copy_first(&mut self, writer: &mut impl io::Write, sum_length: u64) -> crate::Result<u64> {
+    fn copy_first(&mut self, writer: &mut impl io::Write, count: u64) -> crate::Result<u64> {
         let mut record = Self::Record::default();
         let mut progress = Progress::new_simple();
-        let mut s = 0;
-        while self.read_next(&mut record)? {
-            progress.inc_processed();
-            record.write_to(writer).map_err(add_path!(!))?;
-            s += u64::from(record.sum_len());
-            if s >= sum_length {
+        for _ in 0..count {
+            if !self.read_next(&mut record)? {
                 break;
             }
+            progress.inc_processed();
+            record.write_to(writer).map_err(add_path!(!))?;
         }
         progress.final_message();
         Ok(progress.processed())

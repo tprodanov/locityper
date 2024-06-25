@@ -985,7 +985,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     ext::sys::mkdir(out_dir)?;
     let preproc_dir = args.preproc.as_ref().unwrap();
 
-    let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), &preproc_dir.join(paths::SUCCESS))?;
+    let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), Some(&preproc_dir.join(paths::SUCCESS)))?;
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     let tech = bg_distr.seq_info().technology();
     let recr_params = recruit::Params::new(
