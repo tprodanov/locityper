@@ -231,6 +231,11 @@ impl InputFiles {
     }
 }
 
+/// Default minimal MAPQ.
+const DEF_MIN_MAPQ: u8 = 30;
+/// Default minimal MAPQ when similar dataset is used.
+const DEF_SIMIL_MIN_MAPQ: u8 = 60;
+
 struct Args {
     in_files: InputFiles,
     jf_counts: Option<PathBuf>,
@@ -240,7 +245,7 @@ struct Args {
     bg_region: Option<String>,
 
     technology: Technology,
-    min_mapq: u8,
+    min_mapq: Option<u8>,
 
     threads: u16,
     recr_threads: f64,
@@ -272,7 +277,7 @@ impl Default for Args {
             bg_region: None,
 
             technology: Technology::Illumina,
-            min_mapq: 30,
+            min_mapq: None,
 
             threads: 8,
             recr_threads: 0.4,
@@ -318,6 +323,9 @@ impl Args {
             validate_param!(self.recr_threads < 1.0 || self.recr_threads.fract() < 1e-8,
                 "Number of recruitment threads ({}) must be either integer, or smaller than 1",
                 self.recr_threads);
+        }
+        if self.min_mapq.is_none() {
+            self.min_mapq = Some(if self.similar_dataset.is_none() { DEF_MIN_MAPQ } else { DEF_SIMIL_MIN_MAPQ });
         }
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
@@ -403,8 +411,10 @@ fn print_help(extended: bool) {
             "    --recr-threads".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.recr_threads));
 
         println!("\n{}", "Insert size and error profile estimation:".bold());
-        println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
-            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.min_mapq));
+        println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].\n\
+            {EMPTY}  If {} is set, default is {}.",
+            "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(),
+            super::fmt_def(DEF_MIN_MAPQ), "-~".green(), super::fmt_def(DEF_SIMIL_MIN_MAPQ));
         println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
             "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(defaults.max_clipping));
@@ -414,10 +424,6 @@ fn print_help(extended: bool) {
             "    --pval-thresh".green(), "FLOAT FLOAT".yellow(),
             super::fmt_def_f64(defaults.bg_params.insert_pval),
             super::fmt_def_f64(defaults.bg_params.edit_pval));
-        println!("    {:KEY$} {:VAL$}  For preprocessing using similar dataset ({}),\n\
-            {EMPTY}  map reads with this total length to the reference [{}].",
-            "    --proc-length".green(), "INT".yellow(), "-~".green(),
-            super::fmt_def(PrettyU64(defaults.similar_proc_length)));
 
         println!("\n{}", "Background read depth estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Specie ploidy [{}].",
@@ -444,6 +450,12 @@ fn print_help(extended: bool) {
             "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
             super::fmt_def(defaults.bg_params.depth.min_tail_obs),
             super::fmt_def_f64(defaults.bg_params.depth.tail_var_mult));
+
+        println!("\n{}", "Preprocessing using similar dataset:".bold());
+        println!("    {:KEY$} {:VAL$}  When preprocessing using similar dataset ({}),\n\
+            {EMPTY}  map reads with this sum length to the reference [{}].",
+            "    --proc-length".green(), "INT".yellow(), "-~".green(),
+            super::fmt_def(PrettyU64(defaults.similar_proc_length)));
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -503,7 +515,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('~') | Long("like") => args.similar_dataset = Some(parser.value()?.parse()?),
             Short('b') | Long("bg") | Long("bg-region") => args.bg_region = Some(parser.value()?.parse()?),
 
-            Short('q') | Long("min-mapq") | Long("min-mq") => args.min_mapq = parser.value()?.parse()?,
+            Short('q') | Long("min-mapq") | Long("min-mq") => args.min_mapq = Some(parser.value()?.parse()?),
             Short('c') | Long("max-clip") | Long("max-clipping") => args.max_clipping = parser.value()?.parse()?,
             Long("pval-thresh") | Long("pval-threshold") | Long("pvalue-threshold") => {
                 args.bg_params.insert_pval = parser.value()?.parse()?;
@@ -741,7 +753,7 @@ impl MappingParams {
     fn new(args: &Args, bg_region: Option<&Interval>) -> Self {
         MappingParams {
             technology: args.technology,
-            min_mapq: args.min_mapq,
+            min_mapq: args.min_mapq.unwrap(),
             bg_region: bg_region.map(Interval::to_string).unwrap_or_else(|| "None".to_owned()),
         }
     }
@@ -884,7 +896,7 @@ fn run_mapping(
             // Ignore reads where any of the mates is unmapped,
             // + ignore secondary & supplementary alignments + ignore failed checks.
             "-F", "3852",
-            "-q", &args.min_mapq.to_string(),
+            "-q", &args.min_mapq.unwrap().to_string(),
             ]);
     if let Some(filename) = &tmp_bed {
         samtools.arg("-L").arg(filename);
@@ -923,7 +935,7 @@ fn load_alns(
     args: &Args
 ) -> crate::Result<(Vec<NamedAlignment>, bool)>
 {
-    let min_mapq = args.min_mapq;
+    let min_mapq = args.min_mapq.unwrap();
     let max_clipping = args.max_clipping;
     let mut paired_counts = [0_u64, 0];
 
