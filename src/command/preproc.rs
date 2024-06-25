@@ -266,6 +266,7 @@ struct Args {
     /// When calculating insert size distributions and read error profiles,
     /// ignore reads with `clipping > max_clipping * read_len`.
     max_clipping: f64,
+    use_file_size: bool,
 
     bg_params: bg::Params,
 }
@@ -296,6 +297,7 @@ impl Default for Args {
             explicit_technology: false,
             max_clipping: 0.02,
             bg_params: bg::Params::default(),
+            use_file_size: false,
         }
     }
 }
@@ -551,6 +553,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("recr-threads") | Long("recruit-threads") => args.recr_threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Long("debug") => args.debug = true,
+            Long("filesize") | Long("file-size") => args.use_file_size = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
@@ -1180,36 +1183,17 @@ fn estimate_bg_distrs(
     }
 }
 
-/// Assume that this WGS dataset is similar to another dataset, and use its parameters.
-fn estimate_like(
+/// Calculates rate, by which read depth differs, using difference in the number of reads.
+fn read_count_fraction(
     args: &Args,
-    out_dir: &Path,
-    like_dir: &Path,
-    ref_contigs: &Arc<ContigNames>,
-) -> crate::Result<BgDistr>
+    similar_seq_info: &SequencingInfo,
+) -> crate::Result<f64>
 {
-    let similar_path = like_dir.join(paths::BG_DISTR);
-    log::info!("Loading distribution parameters from {}", ext::fmt::path(&similar_path));
-    let similar_distr = BgDistr::load_from(&similar_path, Some(&like_dir.join(paths::SUCCESS)))?;
-    let similar_seq_info = similar_distr.seq_info();
     let Some(similar_n_reads) = similar_seq_info.total_reads() else {
         return Err(error!(InvalidInput,
-            "Cannot use similar dataset {}: total number of reads was not estimated", ext::fmt::path(like_dir)))
+            "Cannot use similar dataset {}: total number of reads was not estimated",
+            ext::fmt::path(args.similar_dataset.as_ref().unwrap())))
     };
-
-    let seq_info = prepare_seq_info(args, false, ref_contigs, out_dir)?;
-    if similar_seq_info.technology() != seq_info.technology() {
-        return Err(error!(InvalidInput,
-            "Cannot use similar dataset {}: different sequencing technology ({} and {})",
-            ext::fmt::path(like_dir), similar_seq_info.technology(), seq_info.technology()));
-    } else if similar_distr.insert_distr().is_paired_end() != args.in_files.is_paired_end() {
-        return Err(error!(InvalidInput,
-            "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(like_dir)));
-    } else if !seq_info.technology().is_read_len_similar(seq_info.mean_read_len(), similar_seq_info.mean_read_len()) {
-        return Err(error!(InvalidInput,
-            "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",
-            ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len()));
-    }
     let mut total_reads = if !args.in_files.alns.is_empty() {
         log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.alns));
         args.in_files.alns.iter()
@@ -1224,20 +1208,78 @@ fn estimate_like(
     if args.in_files.interleaved {
         total_reads /= 2;
     }
-    log::debug!("    Input contains {} reads", total_reads);
+    log::debug!("    Current dataset: {} reads, previous dataset: {} reads", total_reads, similar_n_reads);
+    // NOTE: total reads are deliberately not provided to `seq_info`, so as not to propagate errors.
+    Ok(total_reads as f64 / similar_n_reads as f64)
+}
 
+/// Calculates rate, by which read depth differs, using difference in file sizes.
+fn file_size_fraction(
+    args: &Args,
+    seq_info: &SequencingInfo,
+    similar_seq_info: &SequencingInfo,
+) -> crate::Result<f64>
+{
+    log::warn!("Calculating read depth difference using file sizes.");
+    log::warn!("    This may produce incorrect results.");
+    log::warn!("    Please check that the files are very similar,");
+    log::warn!("    including similar read names and identical file compression method.");
+    let Some(prev_size) = similar_seq_info.file_size() else {
+        return Err(error!(InvalidInput,
+            "Cannot use similar dataset {}: file size was not estimated",
+            ext::fmt::path(args.similar_dataset.as_ref().unwrap())))
+    };
+    let Some(file_size) = seq_info.file_size() else {
+        return Err(error!(RuntimeError, "File size could not be calculated for unknown reason"));
+    };
+    log::debug!("    Current dataset: {:.0} MiB, previous dataset: {:.0} MiB",
+        file_size as f64 / 1048576.0, prev_size as f64 / 1048576.0);
+    Ok(file_size as f64 / prev_size as f64)
+}
+
+/// Assume that this WGS dataset is similar to another dataset, and use its parameters.
+fn estimate_like(
+    args: &Args,
+    out_dir: &Path,
+    like_dir: &Path,
+    ref_contigs: &Arc<ContigNames>,
+) -> crate::Result<BgDistr>
+{
+    let similar_path = like_dir.join(paths::BG_DISTR);
+    log::info!("Loading distribution parameters from {}", ext::fmt::path(&similar_path));
+    let similar_distr = BgDistr::load_from(&similar_path, Some(&like_dir.join(paths::SUCCESS)))?;
+    let similar_seq_info = similar_distr.seq_info();
+
+    let seq_info = prepare_seq_info(args, false, ref_contigs, out_dir)?;
+    log::info!("Mean read length = {:.1}", seq_info.mean_read_len());
+    if similar_seq_info.technology() != seq_info.technology() {
+        return Err(error!(InvalidInput,
+            "Cannot use similar dataset {}: different sequencing technology ({} and {})",
+            ext::fmt::path(like_dir), similar_seq_info.technology(), seq_info.technology()));
+    } else if similar_distr.insert_distr().is_paired_end() != args.in_files.is_paired_end() {
+        return Err(error!(InvalidInput,
+            "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(like_dir)));
+    } else if !seq_info.technology().is_read_len_similar(seq_info.mean_read_len(), similar_seq_info.mean_read_len()) {
+        return Err(error!(InvalidInput,
+            "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",
+            ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len()));
+    }
+
+    let frac = if args.use_file_size {
+        file_size_fraction(args, &seq_info, &similar_seq_info)?
+    } else {
+        read_count_fraction(args, &similar_seq_info)?
+    };
     let mut new_distr = similar_distr.clone();
     new_distr.set_seq_info(seq_info);
-    // NOTE: total reads are deliberately not provided to `seq_info`, so as not to propagate errors.
-    let rate = total_reads as f64 / similar_n_reads as f64;
-    if rate < 0.1 {
+    if frac < 0.1 {
         return Err(error!(InvalidInput,
-            "Read depth changed too much (by a factor of {:.4}), please estimate parameters anew", rate))
-    } else if (rate - 1.0).abs() < 0.01 {
+            "Read depth changed too much (by a factor of {:.4}), please estimate parameters anew", frac))
+    } else if (frac - 1.0).abs() < 0.01 {
         log::debug!("    Almost identical read depth");
     } else {
-        log::debug!("    Adapt read depth to new dataset: average changed by {:.4}", rate);
-        new_distr.depth_mut().mul_depth(rate);
+        log::debug!("    Adapt read depth to new dataset: average changed by {:.4}", frac);
+        new_distr.depth_mut().mul_depth(frac);
     }
     Ok(new_distr)
 }
