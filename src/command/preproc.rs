@@ -21,6 +21,7 @@ use regex::{Regex, RegexBuilder};
 use crate::{
     ext::{
         self,
+        rand::XoshiroRng,
         fmt::{PrettyU32, PrettyU64},
     },
     err::{Error, error, validate_param, add_path},
@@ -254,6 +255,9 @@ struct Args {
     recr_threads: f64,
     skip_recruitment: bool,
 
+    subsampling_rate: f64,
+    seed: Option<u64>,
+
     rerun: super::Rerun,
     strobealign: PathBuf,
     minimap: PathBuf,
@@ -286,6 +290,9 @@ impl Default for Args {
             threads: 8,
             recr_threads: 0.4,
             skip_recruitment: false,
+
+            subsampling_rate: 1.0,
+            seed: None,
 
             rerun: super::Rerun::None,
             debug: false,
@@ -330,6 +337,12 @@ impl Args {
             validate_param!(self.recr_threads < 1.0 || self.recr_threads.fract() < 1e-8,
                 "Number of recruitment threads ({}) must be either integer, or smaller than 1",
                 self.recr_threads);
+        }
+
+        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
+            "Subsampling rate ({}) must be in (0, 1].", self.subsampling_rate);
+        if self.in_files.has_indexed_alignment() || self.similar_dataset.is_some() || self.debug_head.is_some() {
+            self.subsampling_rate = 1.0;
         }
 
         validate_param!(self.jf_counts.is_some(), "Jellyfish counts are not provided (see -j/--jf-counts)");
@@ -455,6 +468,14 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Estimate read depth by comparing file sizes\n\
             {EMPTY}  with similar dataset ({}). {}.",
             "    --filesize".green(), super::flag(), "-~".green(), "Use with extreme care".red());
+
+        println!("\n{}", "Subsampling:".bold());
+        println!("    {:KEY$} {:VAL$}  Subsample input reads by this fraction [{}].\n\
+            {EMPTY}  Smaller values increase speed, but impact accuracy.",
+            "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
+        println!("    {:KEY$} {:VAL$}  Subsampling seed (optional). Ensures reproducibility\n\
+            {EMPTY}  for the same input and program version.",
+            "    --seed".green(), "INT".yellow());
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -544,8 +565,11 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.bg_params.depth.min_tail_obs = parser.value()?.parse()?;
                 args.bg_params.depth.tail_var_mult = parser.value()?.parse()?;
             }
-            Long("debug-head") => args.debug_head = Some(parser.value()?.parse::<PrettyU64>()?.get()),
 
+            Long("subsample") => args.subsampling_rate = parser.value()?.parse()?,
+            Long("seed") => args.seed = Some(parser.value()?.parse()?),
+
+            Long("debug-head") => args.debug_head = Some(parser.value()?.parse::<PrettyU64>()?.get()),
             Long("skip-recruit") | Long("skip-recr") | Long("skip-recruitment") => args.skip_recruitment = true,
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
@@ -634,6 +658,7 @@ fn recruit_reads(
     bg_region: &BgRegion,
     is_paired_end: bool,
     recr_threads: u16,
+    sampling: Option<(f64, XoshiroRng)>,
 ) -> crate::Result<thread::JoinHandle<Result<Option<u64>, Error>>>
 {
     let minimizer_kw = seq_info.technology().default_minim_size();
@@ -651,7 +676,7 @@ fn recruit_reads(
     let chunk_size = genotype::calculate_chunk_size(genotype::DEFAULT_CHUNK_LENGTH,
         seq_info.mean_read_len(), is_paired_end);
     Ok(thread::spawn(move ||
-        targets.recruit(reader, vec![writer], recr_threads, chunk_size, None)
+        targets.recruit(reader, vec![writer], recr_threads, chunk_size, sampling)
             .map(|stats| Some(stats.processed()))))
 }
 
@@ -665,7 +690,10 @@ fn set_mapping_stdin(
     args: &Args,
 ) -> crate::Result<thread::JoinHandle<Result<Option<u64>, Error>>>
 {
-    // TODO: Can we optimize this?
+    let sampling = if args.subsampling_rate < 1.0 {
+        Some((args.subsampling_rate, ext::rand::init_rng(args.seed)))
+    } else { None };
+
     let mut writer = io::BufWriter::new(child_stdin);
     fastx::process_readers!(args.in_files, Some(ref_contigs); let {mut} reader; {
         if let Some(count) = args.debug_head {
@@ -673,10 +701,10 @@ fn set_mapping_stdin(
                 .map(|_| None) // Do not return the number of reads.
             ))
         } else if args.skip_recruitment {
-            Ok(thread::spawn(move || reader.copy(&mut writer).map(Some)))
+            Ok(thread::spawn(move || reader.copy_or_subsample(&mut writer, sampling).map(Some)))
         } else {
             recruit_reads(reader, writer, seq_info, bg_region.expect("Background region must be defined"),
-                args.in_files.is_paired_end(), recr_threads)
+                args.in_files.is_paired_end(), recr_threads, sampling)
         }
     })
 }
@@ -728,6 +756,12 @@ fn first_step_str(args: &Args, bg_region: Option<&BgRegion>) -> String {
         s.push_str("_interleave_");
     } else {
         write!(s, "_recruit_ --target {}", bg_region.unwrap().interval).unwrap();
+        if args.subsampling_rate <= 1.0 {
+            write!(s, " --subsample {}", crate::math::fmt_signif(args.subsampling_rate, 6)).unwrap();
+            if let Some(seed) = args.seed {
+                write!(s, " --seed {}", seed).unwrap();
+            }
+        }
     }
 
     s.push_str(" -i ");
@@ -752,6 +786,7 @@ const MAPPING_PARAMS: &'static str = "mapping.json";
 struct MappingParams {
     technology: Technology,
     min_mapq: u8,
+    subsampling: f64,
     bg_region: String,
 }
 
@@ -760,6 +795,7 @@ impl MappingParams {
         MappingParams {
             technology: args.technology,
             min_mapq: args.min_mapq,
+            subsampling: args.subsampling_rate,
             bg_region: bg_region.map(Interval::to_string).unwrap_or_else(|| "None".to_owned()),
         }
     }
@@ -780,6 +816,8 @@ impl MappingParams {
         };
         if self.technology != old.technology {
             Err(format!("Sequencing technologies do not match ({} -> {})", old.technology, self.technology))
+        } else if (self.subsampling - old.subsampling).abs() > 1e-8 {
+            Err(format!("Subsampling rate changed ({} -> {})", old.subsampling, self.subsampling))
         } else if self.min_mapq < old.min_mapq {
             Err(format!("Minimal mapping quality decreased ({} -> {})", old.min_mapq, self.min_mapq))
         } else if self.bg_region != old.bg_region {
@@ -795,20 +833,16 @@ impl JsonSer for MappingParams {
         json::object!{
             technology: self.technology.to_str(),
             min_mapq: self.min_mapq,
+            subsampling: self.subsampling,
             bg_region: &self.bg_region as &str,
         }
     }
 
     fn load(obj: &json::JsonValue) -> crate::Result<Self> {
-        json_get!(obj => technology (as_str), min_mapq (as_u8), subsampling ? (as_f64), bg_region (as_str));
-        if let Some(rate) = subsampling {
-            if rate < 0.999 {
-                return Err(error!(RuntimeError, "Preprocessed reads were subsampled, no longer supported"));
-            }
-        }
+        json_get!(obj => technology (as_str), min_mapq (as_u8), subsampling (as_f64), bg_region (as_str));
         let technology = Technology::from_str(technology).map_err(|e| Error::ParsingError(e))?;
         Ok(Self {
-            technology, min_mapq,
+            technology, min_mapq, subsampling,
             bg_region: bg_region.to_owned(),
         })
     }
@@ -1079,7 +1113,8 @@ fn estimate_bg_from_paired(
         }
     }
     let depth_distr = if let Some(windows) = opt_windows {
-        ReadDepth::estimate(&depth_alns, &windows, &args.bg_params.depth, true, &seq_info, opt_out_dir)?
+        ReadDepth::estimate(&depth_alns, &windows, &args.bg_params.depth,
+            args.subsampling_rate, true, &seq_info, opt_out_dir)?
     } else {
         ReadDepth::empty()
     };
@@ -1109,7 +1144,8 @@ fn estimate_bg_from_unpaired(
         .collect();
 
     let depth_distr = if let Some(windows) = opt_windows {
-        ReadDepth::estimate(&filt_alns, &windows, &args.bg_params.depth, false, &seq_info, opt_out_dir)?
+        ReadDepth::estimate(&filt_alns, &windows, &args.bg_params.depth,
+            args.subsampling_rate, false, &seq_info, opt_out_dir)?
     } else {
         ReadDepth::empty()
     };

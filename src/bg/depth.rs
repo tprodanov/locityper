@@ -256,7 +256,8 @@ pub struct ReadDepth {
     distributions: Vec<NBinom>,
 }
 
-/// Estimate read depth distributions based on observed mean, variance, and ploidy.
+/// Estimate read depth distributions based on observed mean and variance,
+/// as well on the subsampling rate and ploidy.
 ///
 /// Output distributions are calculated for ploidy 1 and first read ends.
 ///
@@ -265,11 +266,12 @@ pub struct ReadDepth {
 fn estimate_nbinoms<'a>(
     means: &'a [f64],
     vars: &'a [f64],
+    rate: f64,
     ploidy: f64,
 ) -> impl Iterator<Item = NBinom> + 'a
 {
     let mut estimator = RegularizedEstimator::default();
-    estimator.set_lambda(1e-5);
+    estimator.set_subsampling_rate(rate).set_lambda(1e-5);
 
     means.iter().zip(vars).map(move |(&m, &v)| {
         estimator.estimate(m, v).mul(1.0 / ploidy)
@@ -315,6 +317,7 @@ impl ReadDepth {
         alignments: &[&'a Alignment],
         windows: &Windows,
         params: &ReadDepthParams,
+        subsampling_rate: f64,
         is_paired_end: bool,
         seq_info: &super::SequencingInfo,
         out_dir: Option<&Path>,
@@ -338,14 +341,14 @@ impl ReadDepth {
         if seq_info.technology().has_gc_bias() {
             let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);
             let (blurred_means, blurred_vars) = blur_boundary_values(&loess_means, &loess_vars, &gc_bins, params);
-            distributions = estimate_nbinoms(&blurred_means, &blurred_vars, ploidy).collect();
+            distributions = estimate_nbinoms(&blurred_means, &blurred_vars, subsampling_rate, ploidy).collect();
             if let Some(writer) = dbg_writer2 {
                 write_summary(&gc_bins, &depth, &loess_means, &loess_vars, &blurred_means, &blurred_vars,
                     &distributions, writer).map_err(add_path!(dbg_filename2.as_ref().unwrap()))?;
             }
         } else {
             let (mean, var) = F64Ext::mean_variance(&depth);
-            let distr = estimate_nbinoms(&[mean], &[var], ploidy).next().unwrap();
+            let distr = estimate_nbinoms(&[mean], &[var], subsampling_rate, ploidy).next().unwrap();
             if let Some(writer) = dbg_writer2 {
                 write_summary_without_gc(depth.len(), mean, var, &distr, writer)
                     .map_err(add_path!(dbg_filename2.unwrap()))?;

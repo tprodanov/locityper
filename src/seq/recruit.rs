@@ -613,6 +613,12 @@ impl Subsampling {
     }
 }
 
+impl From<(f64, XoshiroRng)> for Subsampling {
+    fn from((p, rng): (f64, XoshiroRng)) -> Self {
+        Self::new(p, rng)
+    }
+}
+
 impl Sampling for Subsampling {
     #[inline(always)]
     fn next(&mut self) -> bool {
@@ -837,49 +843,28 @@ impl Targets {
     ) -> crate::Result<Progress>
     {
         assert_eq!(writers.len(), self.locus_minimizers.len(), "Unexpected number of writers");
+        assert!(threads >= 1 && self.n_targets() >= 1);
 
         // As read recruitment is very expensive, split into 8 implementations
         // based on the input parameters.
         match (threads, self.n_targets(), subsampling) {
             (1, 1, None) =>
                 self.recruit_single_thread::<_, SingleMatch>(reader, writers, All),
-            (1, 1, Some((p, rng))) =>
-                self.recruit_single_thread::<_, SingleMatch>(reader, writers, Subsampling::new(p, rng)),
+            (1, 1, Some(t)) =>
+                self.recruit_single_thread::<_, SingleMatch>(reader, writers, Subsampling::from(t)),
             (1, _, None) =>
                 self.recruit_single_thread::<_, MatchesMap>(reader, writers, All),
-            (1, _, Some((p, rng))) =>
-                self.recruit_single_thread::<_, MatchesMap>(reader, writers, Subsampling::new(p, rng)),
+            (1, _, Some(t)) =>
+                self.recruit_single_thread::<_, MatchesMap>(reader, writers, Subsampling::from(t)),
             (_, 1, None) =>
-                self.recruit_multi_thread::<_, SingleMatch>(reader, writers,
-                    threads, chunk_size, All),
-            (_, 1, Some((p, rng))) =>
-                self.recruit_multi_thread::<_, SingleMatch>(reader, writers,
-                    threads, chunk_size, Subsampling::new(p, rng)),
+                self.recruit_multi_thread::<_, SingleMatch>(reader, writers, threads, chunk_size, All),
+            (_, 1, Some(t)) =>
+                self.recruit_multi_thread::<_, SingleMatch>(reader, writers, threads, chunk_size, Subsampling::from(t)),
             (_, _, None) =>
-                self.recruit_multi_thread::<_, MatchesMap>(reader, writers,
-                    threads, chunk_size, All),
-            (_, _, Some((p, rng))) =>
-                self.recruit_multi_thread::<_, MatchesMap>(reader, writers,
-                    threads, chunk_size, Subsampling::new(p, rng)),
+                self.recruit_multi_thread::<_, MatchesMap>(reader, writers, threads, chunk_size, All),
+            (_, _, Some(t)) =>
+                self.recruit_multi_thread::<_, MatchesMap>(reader, writers, threads, chunk_size, Subsampling::from(t)),
         }
-        // if let Some((rate, rng)) = subsampling {
-
-        // }
-        // let sampling = All;
-
-        // if threads <= 1 {
-        //     if single_target {
-        //         self.recruit_single_thread::<_, SingleMatch>(reader, writers, sampling)
-        //     } else {
-        //         self.recruit_single_thread::<_, MatchesMap>(reader, writers, sampling)
-        //     }
-        // } else {
-        //     if single_target {
-        //         self.recruit_multi_thread::<_, SingleMatch>(reader, writers, threads, chunk_size, sampling)
-        //     } else {
-        //         self.recruit_multi_thread::<_, MatchesMap>(reader, writers, threads, chunk_size, sampling)
-        //     }
-        // }
     }
 
     /// How many targets are there in the set?

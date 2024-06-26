@@ -27,6 +27,7 @@ use crate::{
     },
     ext::{
         self,
+        rand::XoshiroRng,
         fmt::{PrettyU32, PrettyU64, PrettyUsize},
     },
     model::{
@@ -697,6 +698,7 @@ pub(super) fn recruit_to_targets(
     is_paired_end: Option<bool>,
     threads: u16,
     chunk_size: usize,
+    subsampling: Option<(f64, XoshiroRng)>,
     get_targets: impl FnOnce(&Arc<ContigNames>) -> crate::Result<Vec<Interval>>,
 ) -> crate::Result<recruit::Progress>
 {
@@ -712,13 +714,13 @@ pub(super) fn recruit_to_targets(
         let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
         // Need a lot of if-elses to have compile-time optimizations based on input data and the number of targets :]
         if is_paired_end {
-            targets.recruit(fastx::PairedBamReader::new(reader), writers, threads, chunk_size, None)
+            targets.recruit(fastx::PairedBamReader::new(reader), writers, threads, chunk_size, subsampling)
         } else {
-            targets.recruit(reader, writers, threads, chunk_size, None)
+            targets.recruit(reader, writers, threads, chunk_size, subsampling)
         }
     } else {
         fastx::process_readers!(in_files, None; let {} reader;
-            { targets.recruit(reader, writers, threads, chunk_size, None) })
+            { targets.recruit(reader, writers, threads, chunk_size, subsampling) })
     }
 }
 
@@ -762,7 +764,7 @@ fn recruit_reads(
     let targets = target_builder.finalize();
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let chunk_size = calculate_chunk_size(args.chunk_length, mean_read_len, is_paired_end);
-    recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), args.threads, chunk_size,
+    recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), args.threads, chunk_size, None,
         |contigs| create_fetch_targets(contigs, bg_distr, &filt_loci))?;
 
     for locus in filt_loci.iter() {

@@ -46,6 +46,9 @@ struct Args {
     chunk_size: usize,
     thresh_kmer_count: KmerCount,
 
+    subsampling_rate: f64,
+    seed: Option<u64>,
+
     threads: u16,
     jellyfish: PathBuf,
 }
@@ -68,6 +71,9 @@ impl Default for Args {
             match_len: recruit::DEFAULT_MATCH_LEN,
             chunk_size: SR_CHUNK_SIZE,
             thresh_kmer_count: DEFAULT_KMER_THRESH,
+
+            subsampling_rate: 1.0,
+            seed: None,
 
             threads: 8,
             jellyfish: PathBuf::from("jellyfish"),
@@ -99,6 +105,9 @@ impl Args {
     fn validate(mut self) -> crate::Result<Self> {
         self.in_files.validate(false)?;
         self.threads = max(self.threads, 1);
+
+        validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
+            "Subsampling rate ({}) must be in (0, 1].", self.subsampling_rate);
 
         validate_param!(self.chunk_size > 0, "Chunk size must be positive");
         if self.jf_counts.is_some() {
@@ -202,6 +211,13 @@ fn print_help() {
         "-x, --preset".green(), "STR".yellow(),
         "-m".green(), "-M".green(), "locityper genotype".underline(), "-c".green(), super::fmt_def(LR_CHUNK_SIZE));
 
+    println!("\n{}", "Subsampling:".bold());
+    println!("    {:KEY$} {:VAL$}  Before recruitment, subsample reads at this rate [{}].",
+        "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
+    println!("    {:KEY$} {:VAL$}  Subsampling seed (optional). Ensures reproducibility\n\
+        {EMPTY}  for the same input and program version.",
+        "    --seed".green(), "INT".yellow());
+
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
@@ -258,6 +274,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 args.match_len = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('c') | Long("chunk") | Long("chunk-size") =>
                 args.chunk_size = parser.value()?.parse::<PrettyU64>()?.get() as usize,
+
+            Long("subsample") => args.subsampling_rate = parser.value()?.parse()?,
+            Long("seed") => args.seed = Some(parser.value()?.parse()?),
 
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
@@ -517,12 +536,17 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let timer = Instant::now();
     args.in_files.fill_from_inlist()?;
     let args = args.validate()?;
-    let recr_params = recruit::Params::new(args.minimizer_kw, args.match_frac, args.match_len, args.thresh_kmer_count)?;
-
     super::greet();
+
+    let sampling = if args.subsampling_rate < 1.0 {
+        Some((args.subsampling_rate, ext::rand::init_rng(args.seed)))
+    } else { None };
+
+    let recr_params = recruit::Params::new(args.minimizer_kw, args.match_frac, args.match_len, args.thresh_kmer_count)?;
     let (seqs, files) = load_seqs_and_outputs(&args)?;
     let targets = build_targets(seqs, recr_params, args.jf_counts.as_ref(), &args.jellyfish)?;
-    super::genotype::recruit_to_targets(&targets, &args.in_files, files, None, args.threads, args.chunk_size,
+    super::genotype::recruit_to_targets(
+        &targets, &args.in_files, files, None, args.threads, args.chunk_size, sampling,
         |contigs| load_target_regions(contigs, &args))?;
 
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));

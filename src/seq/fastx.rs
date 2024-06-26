@@ -9,10 +9,13 @@ use std::{
 };
 use htslib::bam;
 use crate::{
-    ext,
+    ext::{
+        self,
+        rand::XoshiroRng,
+    },
     seq::{
         self, Interval, ContigNames, NamedSeq,
-        recruit::Progress,
+        recruit::{Progress, Sampling, Subsampling},
     },
     algo::HashSet,
     err::{Error, error, add_path},
@@ -185,6 +188,33 @@ pub trait FastxRead: Send {
         }
         progress.final_message();
         Ok(progress.processed())
+    }
+
+    /// Writes input stream to output.
+    fn subsample(&mut self, writer: &mut impl io::Write, mut s: impl Sampling) -> crate::Result<u64> {
+        let mut record = Self::Record::default();
+        let mut progress = Progress::new_simple();
+        while self.read_next(&mut record)? {
+            progress.inc_processed();
+            if s.next() {
+                record.write_to(writer).map_err(add_path!(!))?;
+            }
+        }
+        progress.final_message();
+        Ok(progress.processed())
+    }
+
+    /// Copy stream if `sampling` is None, otherwise, subsample reads.
+    fn copy_or_subsample(
+        &mut self,
+        writer: &mut impl io::Write,
+        sampling: Option<(f64, XoshiroRng)>,
+    ) -> crate::Result<u64>
+    {
+        match sampling {
+            Some(t) => self.subsample(writer, Subsampling::from(t)),
+            None => self.copy(writer),
+        }
     }
 }
 
