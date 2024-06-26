@@ -752,11 +752,13 @@ fn first_step_str(args: &Args, bg_region: Option<&BgRegion>) -> String {
     let mut s = String::new();
     if let Some(count) = args.debug_head {
         write!(s, "_head_ -n {}", PrettyU64(count)).unwrap();
-    } else if args.skip_recruitment {
-        s.push_str("_interleave_");
     } else {
-        write!(s, "_recruit_ --target {}", bg_region.unwrap().interval).unwrap();
-        if args.subsampling_rate <= 1.0 {
+        if args.skip_recruitment {
+            s.push_str("_interleave_");
+        } else {
+            write!(s, "_recruit_ --target {}", bg_region.unwrap().interval).unwrap();
+        }
+        if args.subsampling_rate < 1.0 {
             write!(s, " --subsample {}", crate::math::fmt_signif(args.subsampling_rate, 6)).unwrap();
             if let Some(seed) = args.seed {
                 write!(s, " --seed {}", seed).unwrap();
@@ -879,6 +881,8 @@ fn split_n_threads(args: &Args) -> (u16, u16) {
         let mapping_threads = max(1, args.threads);
         log::info!("Mapping reads to the reference in {} threads", mapping_threads);
         return (0, mapping_threads);
+    } else  if args.threads <= 1 {
+        return (1, 1);
     }
 
     let mut recr_threads = if args.recr_threads < 1.0 {
@@ -886,8 +890,8 @@ fn split_n_threads(args: &Args) -> (u16, u16) {
     } else {
         args.recr_threads.round()
     } as u16;
-    recr_threads = max(1, min(recr_threads, args.threads.saturating_sub(1)));
-    let mapping_threads = max(1, args.threads.saturating_sub(recr_threads));
+    recr_threads = recr_threads.clamp(1, args.threads - 1);
+    let mapping_threads = max(1, args.threads - 1);
     log::info!("Recruiting and mapping reads to the reference in {} and {} threads, respectively",
         recr_threads, mapping_threads);
     (recr_threads, mapping_threads)
@@ -1221,8 +1225,9 @@ fn estimate_bg_distrs(
 }
 
 /// Calculates rate, by which read depth differs, using difference in the number of reads.
-fn read_count_fraction(
+fn read_count_factor(
     args: &Args,
+    seq_info: &SequencingInfo,
     similar_seq_info: &SequencingInfo,
 ) -> crate::Result<f64>
 {
@@ -1245,14 +1250,22 @@ fn read_count_fraction(
     if args.in_files.interleaved {
         total_reads /= 2;
     }
-    log::debug!("    Current dataset: {:.0} reads, previous dataset: {:.0} reads",
+    log::debug!("    Current dataset: {:.0}k reads, previous dataset: {:.0}k reads",
         1e-3 * total_reads as f64, 1e-3 * similar_n_reads as f64);
     // NOTE: total reads are deliberately not provided to `seq_info`, so as not to propagate errors.
-    Ok(total_reads as f64 / similar_n_reads as f64)
+
+    let reads_factor = total_reads as f64 / similar_n_reads as f64;
+    let mut lengths_factor = seq_info.mean_read_len() / similar_seq_info.mean_read_len();
+    if (lengths_factor - 1.0).abs() > 0.03 {
+        log::debug!("    Read length differ by a factor of {:.5}", lengths_factor);
+    } else {
+        lengths_factor = 1.0;
+    }
+    Ok(reads_factor * lengths_factor)
 }
 
 /// Calculates rate, by which read depth differs, using difference in file sizes.
-fn file_size_fraction(
+fn file_size_factor(
     args: &Args,
     seq_info: &SequencingInfo,
     similar_seq_info: &SequencingInfo,
@@ -1303,21 +1316,21 @@ fn estimate_like(
             ext::fmt::path(like_dir), seq_info.mean_read_len(), similar_seq_info.mean_read_len()));
     }
 
-    let frac = if args.use_file_size {
-        file_size_fraction(args, &seq_info, &similar_seq_info)?
+    let factor = if args.use_file_size {
+        file_size_factor(args, &seq_info, &similar_seq_info)?
     } else {
-        read_count_fraction(args, &similar_seq_info)?
+        read_count_factor(args, &seq_info, &similar_seq_info)?
     };
     let mut new_distr = similar_distr.clone();
     new_distr.set_seq_info(seq_info);
-    if frac < 0.1 {
+    if factor < 0.1 {
         return Err(error!(InvalidInput,
-            "Read depth changed too much (by a factor of {:.4}), please estimate parameters anew", frac))
-    } else if (frac - 1.0).abs() < 0.01 {
+            "Read depth changed too much (by a factor of {:.4}), please estimate parameters anew", factor))
+    } else if (factor - 1.0).abs() < 0.01 {
         log::debug!("    Almost identical read depth");
     } else {
-        log::debug!("    Adapt read depth to new dataset: average changed by {:.4}", frac);
-        new_distr.depth_mut().mul_depth(frac);
+        log::debug!("    Update read depth by a factor of {:.4}", factor);
+        new_distr.depth_mut().mul_depth(factor);
     }
     Ok(new_distr)
 }

@@ -6,7 +6,8 @@ pub type XoshiroRng = rand_xoshiro::Xoshiro256PlusPlus;
 pub fn init_rng(seed: Option<u64>) -> XoshiroRng {
     if let Some(seed) = seed {
         if seed.count_ones() < 5 {
-            log::warn!("Seed ({}) is too simple, consider using a more random number.", seed);
+            log::warn!("Seed ({}) is too simple, consider using a more random number\
+                ({}/64 bits set in binary representation)", seed, seed.count_ones());
         }
         XoshiroRng::seed_from_u64(seed)
     } else {
