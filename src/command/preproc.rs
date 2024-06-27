@@ -258,6 +258,7 @@ struct Args {
     subsampling_rate: f64,
     seed: Option<u64>,
 
+    describe: bool,
     rerun: super::Rerun,
     strobealign: PathBuf,
     minimap: PathBuf,
@@ -294,6 +295,7 @@ impl Default for Args {
             subsampling_rate: 1.0,
             seed: None,
 
+            describe: false,
             rerun: super::Rerun::None,
             debug: false,
             debug_head: None,
@@ -375,6 +377,7 @@ fn print_help(extended: bool) {
     println!("    {} preproc (-i reads1.fq [reads2.fq] | -a reads.bam [--no-index] | -I in-list) \\", super::PROGRAM);
     println!("        -r reference.fa -j counts.jf -o out [args]");
     println!("    {} preproc -i/-a/-I <input> -~ similar -r reference.fa -j counts.jf -o out [args]", super::PROGRAM);
+    println!("    {} preproc --describe -o out", super::PROGRAM);
     if !extended {
         println!("\nThis is a {} help message. Please use {} to see the full help.",
             "short".red(), "-H/--full-help".green());
@@ -413,12 +416,12 @@ fn print_help(extended: bool) {
         {EMPTY}  pb  | pacbio   : PacBio CLR,\n\
         {EMPTY}  ont | nanopore : Oxford Nanopore.",
         "-t, --tech".green(), "STR".yellow(), super::fmt_def(defaults.technology));
-    println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region,\n\
-        {EMPTY}  preferably >3 Mb and without many duplications.\n\
-        {EMPTY}  Default regions are defined for CHM13, GRCh38 and GRCh37.",
-        "-b, --bg-region".green(), "STR".yellow());
-
     if extended {
+        println!("    {:KEY$} {:VAL$}  Preprocess WGS data based on this background region,\n\
+            {EMPTY}  preferably >3 Mb and without many duplications.\n\
+            {EMPTY}  Default regions are defined for CHM13, GRCh38 and GRCh37.",
+            "-b, --bg-region".green(), "STR".yellow());
+
         println!("\n{}", "Read recruitment:".bold());
         println!("    {:KEY$} {:VAL$}  Skip read recruitment before read mapping.\n\
             {EMPTY}  Otherwise, read recruitment is executed with default parameters.",
@@ -485,8 +488,10 @@ fn print_help(extended: bool) {
         {EMPTY}  read mapping ({}); do not rerun ({}).",
         "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
         "all".yellow(), "part".yellow(), "none".yellow());
+    println!("    {:KEY$} {:VAL$}  Simply describe already preprocessed data.",
+        "    --describe".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Save debug CSV files.",
-        "    --debug".green(), "INT".yellow());
+        "    --debug".green(), super::flag());
     if extended {
         println!("    {:KEY$} {:VAL$}  Instead of the full preprocessing, map first {} reads to the\n\
             {EMPTY}  reference and extract insert sizes and error profiles from them.\n\
@@ -577,6 +582,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("recr-threads") | Long("recruit-threads") => args.recr_threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Long("debug") => args.debug = true,
+            Long("describe") => args.describe = true,
             Long("filesize") | Long("file-size") => args.use_file_size = true,
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
@@ -1383,6 +1389,14 @@ impl BgRegion {
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let mut args = parse_args(argv)?;
+    if args.describe {
+        let out_dir = args.output.as_ref()
+            .ok_or_else(|| error!(InvalidInput, "Output directory (-o) must be set"))?;
+        let distr = BgDistr::load_from(&out_dir.join(paths::BG_DISTR), Some(&out_dir.join(paths::SUCCESS)))?;
+        distr.describe();
+        return Ok(());
+    }
+
     args.in_files.fill_from_inlist()?;
     let args = args.validate()?;
 

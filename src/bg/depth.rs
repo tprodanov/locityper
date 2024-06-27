@@ -372,7 +372,7 @@ impl ReadDepth {
         const GC_VAL: usize = 40;
         let distr = self.distributions[GC_VAL]
             .mul(f64::from(self.ploidy) * if is_paired_end { 2.0 } else { 1.0 });
-        log::info!("Read depth {:.2} ± {:.2}  (GC-content {}, window size {})",
+        log::info!("Read depth: {:.2} ± {:.2}  (GC-content {}, window size {})",
             distr.mean(), distr.variance().sqrt(), GC_VAL, self.window_size);
     }
 
