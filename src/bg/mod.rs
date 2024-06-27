@@ -92,6 +92,13 @@ impl BgDistr {
         BgDistr::load(&json::parse(&s)?)
     }
 
+    /// Describe distributions to log.
+    pub fn describe(&self) {
+        self.err_prof.describe();
+        self.insert_distr.describe();
+        self.depth.describe(self.insert_distr.is_paired_end());
+    }
+
     /// Access sequencing information (read length and technology).
     pub fn seq_info(&self) -> &SequencingInfo {
         &self.seq_info

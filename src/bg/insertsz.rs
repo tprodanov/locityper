@@ -44,6 +44,10 @@ fn cache_size(distr: &NBinom) -> usize {
     MAX_CACHE_SIZE.min(distr.quantile(0.99999) as usize)
 }
 
+fn allowed_forbidden(v: bool) -> &'static str {
+    if v { "allowed" } else { "forbidden" }
+}
+
 /// Insert size distribution.
 #[derive(Debug, Clone)]
 pub struct InsertDistr {
@@ -124,8 +128,7 @@ impl InsertDistr {
         for i in 0..2 {
             log::info!("    {}: {:8} ({:.3}%),  {}",
                 if i == 0 { "FR/RF" } else { "FF/RR" },
-                orient_counts[i], orient_frac[i],
-                if orient_allowed[i] { "allowed" } else { "forbidden" });
+                orient_counts[i], orient_frac[i], allowed_forbidden(orient_allowed[i]));
         }
 
         let est_limit = INS_QUANTILE_MULT * F64Ext::interpol_quantile(&mut insert_sizes, INS_QUANTILE);
@@ -134,9 +137,8 @@ impl InsertDistr {
         let lim_insert_sizes = &insert_sizes[..m];
         let (mean, var) = F64Ext::mean_variance(lim_insert_sizes);
         let distr = NBinom::estimate_corrected(mean, var);
-        let pred_mean = distr.mean();
         log::info!("    Insert size: observed {:.1} ± {:.1}, fitted {:.1} ± {:.1}",
-            mean, var.sqrt(), pred_mean, distr.variance().sqrt());
+            mean, var.sqrt(), distr.mean(), distr.variance().sqrt());
 
         let size = cache_size(&distr);
         let distr = distr.cached(size);
@@ -145,6 +147,14 @@ impl InsertDistr {
             mode_prob: distr.ln_pmf(distr.inner().mode()),
             distr: Some(distr),
         })
+    }
+
+    /// Describe insert size distribution.
+    pub fn describe(&self) {
+        let Some(distr) = &self.distr else { return };
+        log::info!("Insert size: {:.1} ± {:.1}", distr.mean(), distr.variance().sqrt());
+        log::info!("    FR/RF {},  FF/RR {}",
+            allowed_forbidden(self.orient_allowed[0]), allowed_forbidden(self.orient_allowed[1]));
     }
 
     /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.

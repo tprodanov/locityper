@@ -318,7 +318,6 @@ impl ReadDepth {
         windows: &Windows,
         params: &ReadDepthParams,
         subsampling_rate: f64,
-        is_paired_end: bool,
         seq_info: &super::SequencingInfo,
         out_dir: Option<&Path>,
     ) -> crate::Result<Self>
@@ -356,17 +355,25 @@ impl ReadDepth {
             distributions = vec![distr; GC_BINS];
         }
 
-        const GC_VAL: usize = 40;
-        let logging_distr = distributions[GC_VAL].mul(ploidy * if is_paired_end { 2.0 } else { 1.0 });
-        log::info!("    Read depth mean = {:.2},  variance: {:.2}  (at GC-content {})",
-            logging_distr.mean(), logging_distr.variance(), GC_VAL);
-
         Ok(Self {
             ploidy: params.ploidy,
             window_size: windows.window_size(),
             neighb_size: windows.neighb_size(),
             distributions,
         })
+    }
+
+    /// Describe predicted read depth.
+    pub fn describe(&self, is_paired_end: bool) {
+        if self.window_size == 0 {
+            log::warn!("Undefined read depth");
+            return;
+        }
+        const GC_VAL: usize = 40;
+        let distr = self.distributions[GC_VAL]
+            .mul(f64::from(self.ploidy) * if is_paired_end { 2.0 } else { 1.0 });
+        log::info!("Read depth {:.2} ± {:.2}  (GC-content {}, window size {})",
+            distr.mean(), distr.variance().sqrt(), GC_VAL, self.window_size);
     }
 
     /// Returns window size.

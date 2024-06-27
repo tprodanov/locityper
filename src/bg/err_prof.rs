@@ -194,6 +194,15 @@ impl ErrorProfile {
         Ok(Self { oper_probs, edit_distr })
     }
 
+    /// Describe error profile.
+    pub fn describe(&self) {
+        log::info!("Error profile:");
+        log::info!("    matches:    {:.6}", self.oper_probs.matches.exp());
+        log::info!("    mismatches: {:.6}", self.oper_probs.mismatches.exp());
+        log::info!("    insertions: {:.6}", self.oper_probs.insertions.exp());
+        log::info!("    deletions:  {:.6}", self.oper_probs.deletions.exp());
+    }
+
     /// Returns ln-probability for operation counts.
     pub fn ln_prob<T>(&self, counts: &OperCounts<T>) -> f64
     where T: Copy + TryInto<f64>,

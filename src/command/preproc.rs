@@ -868,8 +868,7 @@ fn need_mapping(args: &Args, out_dir: &Path, out_bam: &Path, bg_region: Option<&
         Err(s) => {
             log::error!("Problem comparing read mapping parameters against {}", ext::fmt::path(&params_path));
             log::error!("    {}", s);
-            log::error!("Please use `--rerun full`, or remove file {} to override this error",
-                ext::fmt::path(&params_path));
+            log::error!("Please update the corresponding argument or use `--rerun full`.");
             std::process::exit(1)
         }
     }
@@ -1118,10 +1117,11 @@ fn estimate_bg_from_paired(
     }
     let depth_distr = if let Some(windows) = opt_windows {
         ReadDepth::estimate(&depth_alns, &windows, &args.bg_params.depth,
-            args.subsampling_rate, true, &seq_info, opt_out_dir)?
+            args.subsampling_rate, &seq_info, opt_out_dir)?
     } else {
         ReadDepth::empty()
     };
+    depth_distr.describe(true);
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -1149,10 +1149,11 @@ fn estimate_bg_from_unpaired(
 
     let depth_distr = if let Some(windows) = opt_windows {
         ReadDepth::estimate(&filt_alns, &windows, &args.bg_params.depth,
-            args.subsampling_rate, false, &seq_info, opt_out_dir)?
+            args.subsampling_rate, &seq_info, opt_out_dir)?
     } else {
         ReadDepth::empty()
     };
+    depth_distr.describe(false);
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -1332,6 +1333,7 @@ fn estimate_like(
         log::debug!("    Update read depth by a factor of {:.4}", factor);
         new_distr.depth_mut().mul_depth(factor);
     }
+    new_distr.describe();
     Ok(new_distr)
 }
 
