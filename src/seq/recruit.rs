@@ -626,6 +626,14 @@ impl Sampling for Subsampling {
     }
 }
 
+// /// Additional recruitment parameters.
+// pub struct SupplParams {
+//     pub threads: u8,
+//     pub chunk_size: usize,
+//     /// Maximal number of recruited reads.
+//     pub max_recruited: u64,
+// }
+
 /// Recruitment targets.
 #[derive(Clone)]
 pub struct Targets {
@@ -743,7 +751,6 @@ impl Targets {
     ) {
         answer.clear();
         matches.clear();
-
         // First mate.
         minimizers.clear();
         kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, minimizers);
@@ -773,7 +780,6 @@ impl Targets {
                 }
             }
         }
-
 
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };

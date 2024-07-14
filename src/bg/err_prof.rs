@@ -265,9 +265,9 @@ impl SingleEditDistCache {
             self.edit_distr.inv_cdf(read_len, self.edit_cdf))
     }
 
-    pub fn print_log(&self, mean_read_len: f64) {
+    pub fn describe_with(&self, mean_read_len: f64) {
         let read_len = math::round_signif(mean_read_len, 2).round() as u32;
-        log::info!("    Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
+        log::info!("Maximum allowed edit distance: {} (for read length {}, {}%-confidence interval)",
             self.get(read_len), read_len, 100.0 * self.edit_cdf);
     }
 }
@@ -305,10 +305,10 @@ impl EditDistCache {
         })
     }
 
-    pub fn print_log(&self, mean_read_len: f64) {
+    pub fn describe_with(&self, mean_read_len: f64) {
         let read_len = math::round_signif(mean_read_len, 2).round() as u32;
         let (dist1, dist2) = self.get(read_len);
-        log::info!("    Edit distances for read length {}: {} (good) and {} (passable)",
+        log::info!("Edit distances for read length {}: {} (good) and {} (passable)",
             read_len, dist1, dist2);
     }
 }

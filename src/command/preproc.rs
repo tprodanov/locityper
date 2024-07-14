@@ -1105,7 +1105,7 @@ fn estimate_bg_from_paired(
     let (op_counter, opt_windows) = get_windows(&seq_info, bg_region, opt_out_dir, args)?;
     let err_prof = ErrorProfile::estimate(&errprof_alns, &op_counter, opt_windows.as_ref(), opt_out_dir)?;
     let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
-    edit_dist_cache.print_log(seq_info.mean_read_len());
+    edit_dist_cache.describe_with(seq_info.mean_read_len());
 
     // Estimate backgorund read depth from read pairs with both good probabilities and good insert size prob.
     let mut depth_alns: Vec<&Alignment> = Vec::with_capacity(errprof_alns.len());
@@ -1143,7 +1143,7 @@ fn estimate_bg_from_unpaired(
     let (op_counter, opt_windows) = get_windows(&seq_info, bg_region, opt_out_dir, args)?;
     let err_prof = ErrorProfile::estimate(&alns, &op_counter, opt_windows.as_ref(), opt_out_dir)?;
     let edit_dist_cache = SingleEditDistCache::new(&err_prof, args.bg_params.edit_pval);
-    edit_dist_cache.print_log(seq_info.mean_read_len());
+    edit_dist_cache.describe_with(seq_info.mean_read_len());
 
     let filt_alns: Vec<&Alignment> = alns.iter()
         .filter(|aln| {
@@ -1394,6 +1394,9 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
             .ok_or_else(|| error!(InvalidInput, "Output directory (-o) must be set"))?;
         let distr = BgDistr::load_from(&out_dir.join(paths::BG_DISTR), Some(&out_dir.join(paths::SUCCESS)))?;
         distr.describe();
+
+        let edit_dist_cache = SingleEditDistCache::new(distr.error_profile(), args.bg_params.edit_pval);
+        edit_dist_cache.describe_with(distr.seq_info().mean_read_len());
         return Ok(());
     }
 

@@ -998,7 +998,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     // Add 1 to good edit distance.
     const GOOD_DISTANCE_ADD: u32 = 1;
     let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(), GOOD_DISTANCE_ADD, args.assgn_params.edit_pvals);
-    edit_dist_cache.print_log(bg_distr.seq_info().mean_read_len());
+    edit_dist_cache.describe_with(bg_distr.seq_info().mean_read_len());
 
     validate_param!(args.in_files.has_indexed_alignment()
         || bg_distr.insert_distr().is_paired_end() == args.in_files.is_paired_end(),
