@@ -12,7 +12,8 @@ use crate::{
     err::{validate_param, add_path},
     seq::{
         ContigSet,
-        kmers::{self, Kmer, KmerCount},
+        kmers::{self, Kmer},
+        counts::KmerCount,
         fastx::{self, FastxRead},
     },
     math::RoundDiv,

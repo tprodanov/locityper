@@ -27,7 +27,7 @@ use crate::{
     err::{Error, error, validate_param, add_path},
     seq::{
         Interval,
-        kmers::{JfKmerGetter, KmerCounts},
+        counts::{JfKmerGetter, KmerCounts},
         fastx::{self, FastxRead},
         recruit::{self, RecruitableRecord},
         cigar::{self, Cigar},

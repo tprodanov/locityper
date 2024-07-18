@@ -26,7 +26,8 @@ use crate::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
         panvcf, fastx, div,
         contigs::GenomeVersion,
-        kmers::{self, Kmer, JfKmerGetter, KmerCount},
+        kmers::{self, Kmer},
+        counts::{JfKmerGetter, KmerCount},
     },
 };
 use super::paths;

@@ -18,7 +18,8 @@ use crate::{
         recruit,
         Interval, ContigNames, ContigSet,
         fastx::{self, FastxRecord, SingleRecord},
-        kmers::{Kmer, KmerCount, KmerCounts, JfKmerGetter},
+        kmers::Kmer,
+        counts::{KmerCount, KmerCounts, JfKmerGetter},
     },
     bg::Technology,
 };

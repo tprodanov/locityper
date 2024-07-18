@@ -8,6 +8,7 @@ pub mod fastx;
 pub mod recruit;
 pub mod wfa;
 pub mod compl;
+pub mod counts;
 #[cfg(feature = "align")]
 pub mod dist;
 pub mod div;

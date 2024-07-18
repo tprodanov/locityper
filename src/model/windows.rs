@@ -8,7 +8,7 @@ use crate::{
     seq::{
         self,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
-        kmers::KmerCounts,
+        counts::KmerCounts,
     },
     bg::ReadDepth,
     err::{error, add_path, validate_param},

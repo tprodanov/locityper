@@ -7,7 +7,7 @@ use super::depth::ReadDepthParams;
 use crate::{
     model::windows::WindowGetter,
     err::{error, add_path},
-    seq::{self, Interval, kmers::KmerCounts},
+    seq::{self, Interval, counts::KmerCounts},
     ext,
 };
 

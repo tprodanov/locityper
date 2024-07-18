@@ -13,7 +13,7 @@ use crate::{
     seq::{
         fastx,
         NamedSeq,
-        kmers::KmerCounts,
+        counts::KmerCounts,
     },
     algo::HashMap,
 };

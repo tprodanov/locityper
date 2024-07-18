@@ -19,7 +19,8 @@ use crate::{
     seq::{
         recruit, fastx, div, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
-        kmers::{Kmer, KmerCount},
+        kmers::Kmer,
+        counts::KmerCount,
     },
     bg::{
         TECHNOLOGIES, BgDistr, Technology, SequencingInfo,
