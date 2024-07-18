@@ -77,14 +77,15 @@ impl Minimizer for u32 {
     /// Murmur3 for uint32.
     #[inline]
     fn fast_hash(mut self) -> u32 {
+        // Use bitwise not to convert 0 to u32::MAX.
+        // This is needed because otherwise 0 would produce 0.
+        self = !self;
         self ^= self >> 16;
         self = self.wrapping_mul(0x85ebca6b);
         self ^= self >> 13;
         // self = self.wrapping_mul(0xc2b2ae35);
         // self ^= self >> 16;
-        // 0 will always produce 0. Here, we take bit-inversion, so that 0 will produce u32::MAX = UNDEF.
-        // This corresponds to AA..AA k-mer, which is a very bad minimizer.
-        !self
+        self
     }
 }
 
@@ -92,10 +93,11 @@ impl Minimizer for u64 {
     /// fasthash (https://github.com/rurban/smhasher/blob/master/fasthash.cpp) mix function.
     #[inline]
     fn fast_hash(mut self) -> u64 {
+        self = !self;
         self ^= self >> 23;
         self = self.wrapping_mul(0x2127599bf4325c37);
         self ^= self >> 47;
-        !self
+        self
     }
 }
 
@@ -229,27 +231,22 @@ impl<T> std::ops::IndexMut<u32> for CircArray<T> {
 /// Function that goes over indices `start..end`, and returns minimizer position and hash value.
 /// The function returns None if all k-mers in the window are undefined.
 #[inline(always)]
-fn select_minimizer<K: Kmer>(
+fn find_min<K: Kmer>(
+    hashes: &CircArray<K>,
     start: u32,
     end: u32,
-    k: u32,
-    hashes: &CircArray<K>,
-) -> Option<(u32, K)>
+) -> (u32, K)
 {
-    let mut minimizer = K::UNDEF;
     let mut pos = 0;
+    let mut minimizer = K::UNDEF;
     for j in start..end {
         let h = hashes[j];
         if h <= minimizer {
-            minimizer = h;
             pos = j;
+            minimizer = h;
         }
     }
-    if minimizer == K::UNDEF {
-        None
-    } else {
-        Some((pos + 1 - k, minimizer))
-    }
+    (pos, minimizer)
 }
 
 /// Finds sequence minimizers.
@@ -261,22 +258,27 @@ pub fn minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, output: &mu
 where K: Minimizer,
       P: PosKmer<K>,
 {
-    debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
-    debug_assert!(w <= MAX_MINIMIZER_W, "Minimizer window ({}) can be at most {}", w, MAX_MINIMIZER_W);
+    debug_assert!(0 < k && k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
+    debug_assert!(0 < w && w < MAX_MINIMIZER_W, "Minimizer window ({}) must be smaller than {}", w, MAX_MINIMIZER_W);
     let mask = K::create_mask(k);
-    let rv_shift = 2 * k - 2;
-    // Hashes in a window, stored in a cycling array.
-    let mut hashes = CircArray::new(K::UNDEF);
-
+    let rv_shift = if CANON { 2 * k - 2 } else { 0 };
     let mut fw_kmer = K::ZERO;
     let mut rv_kmer = K::ZERO;
 
     let k = u32::from(k);
+    let k_1 = k - 1;
     let w = u32::from(w);
-    // At what index will the first k-mer be available.
-    let mut reset = k - 1;
-    // Start of the window with consecutive k-mers.
-    let mut start = reset;
+
+    // At what position does new window start?
+    let mut new_window = k_1 + w;
+    // Hashes in a window, stored in a cycling array.
+    let mut hashes = CircArray::new(K::UNDEF);
+    // Position of the best k-mer.
+    // In addition, it indicates the position, where first k-mer becomes available.
+    let mut hash_pos = k_1;
+    let mut min_hash = K::UNDEF;
+    // Treat first minimizer differently.
+    let mut first_minim = true;
 
     for (i, &nt) in seq.iter().enumerate() {
         let i = i as u32;
@@ -286,53 +288,45 @@ where K: Minimizer,
             b'G' => (2, 1),
             b'T' => (3, 0),
             _ => {
-                reset = i + k;
-                if reset >= start + w {
-                    if i > start {
-                        if let Some((pos, minimizer)) = select_minimizer(start, i, k, &hashes) {
-                            output.push(P::transform(pos, minimizer));
-                        }
-                    }
-                    start = reset;
+                if first_minim && min_hash != K::UNDEF {
+                    output.push(P::transform(hash_pos - k_1, min_hash));
                 }
-                hashes[i] = K::UNDEF;
+                hash_pos = i + k;
+                new_window = hash_pos + w;
+                min_hash = K::UNDEF;
+                first_minim = true;
                 continue;
             },
         };
         fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
-        if CANON {
-            rv_kmer = (K::from(rv_enc) << rv_shift) | (rv_kmer >> 2);
-        }
-        if i < reset {
-            hashes[i] = K::UNDEF;
+        if CANON { rv_kmer = (K::from(rv_enc) << rv_shift) | (rv_kmer >> 2); }
+        if i < hash_pos {
             continue;
         }
+        let hash = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer }.fast_hash();
+        hashes[i] = hash;
 
-        hashes[i] = if CANON {
-            min(fw_kmer, rv_kmer).fast_hash()
-        } else {
-            fw_kmer.fast_hash()
-        };
-        if i == start + w - 1 {
-            // match select_minimizer(start, i + 1, k, &hashes) {
-            //     Some((pos, minimizer)) => {
-            //         output.push(P::transform(pos, minimizer));
-            //         start = pos + k;
-            //     }
-            //     None => start = i + 1,
-            // }
-            let (pos, minimizer) = select_minimizer(start, i + 1, k, &hashes)
-                .expect("At least one minimizer must be defined");
-            output.push(P::transform(pos, minimizer));
-            start = pos + k;
+        if i == new_window {
+            if first_minim {
+                debug_assert!(min_hash != K::UNDEF);
+                output.push(P::transform(hash_pos - k_1, min_hash));
+                first_minim = false;
+            }
+            (hash_pos, min_hash) = find_min(&hashes, hash_pos + 1, i + 1);
+            debug_assert!(min_hash != K::UNDEF);
+            output.push(P::transform(hash_pos - k_1, min_hash));
+            new_window = hash_pos + w;
+        } else if hash < min_hash {
+            min_hash = hash;
+            hash_pos = i;
+            if !first_minim {
+                output.push(P::transform(hash_pos - k_1, min_hash));
+                new_window = hash_pos + w;
+            }
         }
     }
-    let l = seq.len() as u32;
-    if l > start {
-        debug_assert!(l <= start + w - 1);
-        if let Some((pos, minimizer)) = select_minimizer(start, l, k, &hashes) {
-            output.push(P::transform(pos, minimizer));
-        }
+    if first_minim && min_hash != K::UNDEF {
+        output.push(P::transform(hash_pos - k_1, min_hash));
     }
 }
 
@@ -447,10 +441,7 @@ where K: Minimizer,
 
         let t_start = i + t - w - k_1;
         if tmer_pos < t_start {
-            let (pos, min_tmer) = select_minimizer(t_start, i + 1, t, &t_hashes)
-                .expect("Minimizer must be defined");
-            tmer_pos = pos + t_1;
-            best_tmer = min_tmer;
+            (tmer_pos, best_tmer) = find_min(&t_hashes, t_start, i + 1);
         }
 
         let new_shift = t_start + (tmer_pos - t_start) % w;
