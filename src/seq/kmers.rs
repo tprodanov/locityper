@@ -108,7 +108,7 @@ pub const NON_CANONICAL: bool = false;
 pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, output: &mut Vec<K>) {
     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     let mask = K::create_mask(k);
-    let rv_shift = 2 * k - 2;
+    let rv_shift = if CANON { 2 * k - 2 } else { 0 };
     let mut fw_kmer = K::ZERO;
     let mut rv_kmer = K::ZERO;
 
@@ -130,20 +130,14 @@ pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, output: &mut Vec<K>)
                 continue;
             },
         };
-        fw_kmer = (fw_kmer << 2) | K::from(fw_enc);
-        if CANON {
-            rv_kmer = (K::from(3 - fw_enc) << rv_shift) | (rv_kmer >> 2);
-        }
+        fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
+        if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(3 - fw_enc) << rv_shift); }
 
         if i >= reset {
-            if CANON {
-                output.push(min(fw_kmer & mask, rv_kmer));
-            } else {
-                output.push(fw_kmer & mask);
-            }
+            output.push(if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer });
         } else if i + 1 >= k {
             output.push(K::UNDEF);
-        }
+        } // else { }
     }
 }
 
@@ -215,6 +209,102 @@ impl<T> std::ops::IndexMut<u32> for CircArray<T> {
     }
 }
 
+/// Function that goes over indices `start..end`, and returns new `start`.
+/// Additionally, the function pushes the new minimizer to the output, if it is not `UNDEF`.
+#[inline]
+fn select_minimizer<K: Kmer, P: PosKmer<K>>(
+    start: u32,
+    end: u32,
+    k: u32,
+    hashes: &mut [K; MAX_MINIMIZER_W as usize],
+    output: &mut Vec<P>,
+) -> u32 {
+    let mut minimizer = K::UNDEF;
+    let mut kmer_end = end;
+    for j in start..end {
+        let h = hashes[(j & MOD_MAXW) as usize];
+        if h < minimizer {
+            minimizer = h;
+            kmer_end = j + 1;
+        }
+    }
+    if minimizer != K::UNDEF {
+        output.push(P::transform(kmer_end - k, minimizer));
+    }
+    kmer_end
+}
+
+/// Finds sequence minimizers.
+/// Minimizer is a k-mer with the smallest hash value across `w` consecutive k-mers.
+/// Output vector should have type `Vec<K>` or `Vec<(u32, K)>`, then minimizers are saved together with their positions.
+///
+/// NOTE: minimizers should be cleared in advance.
+pub fn minimizers0<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
+where K: Minimizer,
+      P: PosKmer<K>,
+{
+    debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
+    debug_assert!(w <= MAX_MINIMIZER_W, "Minimizer window ({}) can be at most {}", w, MAX_MINIMIZER_W);
+    let mask = K::create_mask(k);
+    let rv_shift = 2 * k - 2;
+    // Hashes in a window, stored in a cycling array.
+    let mut hashes = [K::UNDEF; MAX_MINIMIZER_W as usize];
+
+    let mut fw_kmer = K::ZERO;
+    let mut rv_kmer = K::ZERO;
+
+    let k = u32::from(k);
+    let w = u32::from(w);
+    // At what index will the first k-mer be available.
+    let mut reset = k - 1;
+    // Start of the window with consecutive k-mers.
+    let mut start = reset;
+
+    for (i, &nt) in seq.iter().enumerate() {
+        let i = i as u32;
+        let (fw_enc, rv_enc): (u8, u8) = match nt {
+            b'A' => (0, 3),
+            b'C' => (1, 2),
+            b'G' => (2, 1),
+            b'T' => (3, 0),
+            _ => {
+                reset = i + k;
+                if reset >= start + w {
+                    if i > start {
+                        select_minimizer(start, i, k, &mut hashes, output);
+                    }
+                    start = reset;
+                }
+                hashes[(i & MOD_MAXW) as usize] = K::UNDEF;
+                continue;
+            },
+        };
+        fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
+        if CANON {
+            rv_kmer = (K::from(rv_enc) << rv_shift) | (rv_kmer >> 2);
+        }
+        if i < reset {
+            hashes[(i & MOD_MAXW) as usize] = K::UNDEF;
+            continue;
+        }
+
+        let kmer = if CANON {
+            min(fw_kmer, rv_kmer)
+        } else {
+            fw_kmer
+        };
+        hashes[(i & MOD_MAXW) as usize] = kmer.fast_hash();
+        if i == start + w - 1 {
+            start = select_minimizer(start, i + 1, k, &mut hashes, output);
+        }
+    }
+    let l = seq.len() as u32;
+    if l >= start {
+        debug_assert!(l <= start + w - 1);
+        select_minimizer(start, l, k, &mut hashes, output);
+    }
+}
+
 /// Function that goes over indices `start..end`, and returns minimizer position and hash value.
 /// The function returns None if all k-mers in the window are undefined.
 #[inline(always)]
@@ -256,16 +346,17 @@ where K: Minimizer,
     let k_1 = k - 1;
     let w = u32::from(w);
 
-    // At what position does new window start?
-    let mut new_window = k_1 + w;
     // Hashes in a window, stored in a cycling array.
     let mut hashes = CircArray::new(K::UNDEF);
     // Position of the best k-mer.
     // In addition, it indicates the position, where first k-mer becomes available.
     let mut hash_pos = k_1;
     let mut min_hash = K::UNDEF;
-    // Treat first minimizer differently.
-    let mut first_minim = true;
+
+    // New window starts at least at this position.
+    let mut min_start = k_1 + w;
+    // and at most at this position.
+    let mut max_start = min_start;
 
     for (i, &nt) in seq.iter().enumerate() {
         let i = i as u32;
@@ -275,44 +366,42 @@ where K: Minimizer,
             b'G' => (2, 1),
             b'T' => (3, 0),
             _ => {
-                if first_minim && min_hash != K::UNDEF {
+                if min_hash != K::UNDEF && min_start <= i {
                     output.push(P::transform(hash_pos - k_1, min_hash));
                 }
                 hash_pos = i + k;
-                new_window = hash_pos + w;
                 min_hash = K::UNDEF;
-                first_minim = true;
+                min_start = hash_pos + w;
+                max_start = min_start;
                 continue;
             },
         };
         fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
-        if CANON { rv_kmer = (K::from(rv_enc) << rv_shift) | (rv_kmer >> 2); }
+        if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift); }
         if i < hash_pos {
             continue;
         }
         let hash = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer }.fast_hash();
         hashes[i] = hash;
 
-        if i == new_window {
-            if first_minim {
-                debug_assert!(min_hash != K::UNDEF);
-                output.push(P::transform(hash_pos - k_1, min_hash));
-                first_minim = false;
-            }
-            (hash_pos, min_hash) = find_min(&hashes, hash_pos + 1, i + 1);
-            debug_assert!(min_hash != K::UNDEF);
-            output.push(P::transform(hash_pos - k_1, min_hash));
-            new_window = hash_pos + w;
-        } else if hash < min_hash {
+        if min_hash == K::UNDEF {
             min_hash = hash;
             hash_pos = i;
-            if !first_minim {
+        } else if max_start <= i {
+            output.push(P::transform(hash_pos - k_1, min_hash));
+            min_start = hash_pos + w + 1;
+            (hash_pos, min_hash) = find_min(&hashes, hash_pos + 1, i + 1);
+            max_start = hash_pos + w;
+        } else if hash < min_hash {
+            if min_start <= i {
                 output.push(P::transform(hash_pos - k_1, min_hash));
-                new_window = hash_pos + w;
+                min_start = i + 1;
             }
+            hash_pos = i;
+            min_hash = hash;
         }
     }
-    if first_minim && min_hash != K::UNDEF {
+    if min_hash != K::UNDEF && min_start <= seq.len() as u32 {
         output.push(P::transform(hash_pos - k_1, min_hash));
     }
 }
@@ -459,13 +548,16 @@ where K: Minimizer,
 }
 
 /// Naïve implementation of mod-minimizers.
-pub fn naive_mod_minimizers<K, P>(seq: &[u8], k: u8, w: u8, t: u8, output: &mut Vec<P>)
+pub fn naive_mod_minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, t: u8, output: &mut Vec<P>)
 where K: Minimizer,
       P: PosKmer<K>,
 {
     let k_mask = K::create_mask(k);
     let t_mask = K::create_mask(t);
-    let mut kmer = K::ZERO;
+    let rv_shift = 2 * k - 2;
+    let t_shift = 2 * k - 2 * t;
+    let mut fw_kmer = K::ZERO;
+    let mut rv_kmer = K::ZERO;
     let mut kmers = Vec::new();
     let mut tmers = Vec::new();
     let mut kmer_pos = u32::MAX;
@@ -476,44 +568,72 @@ where K: Minimizer,
     let w = u32::from(w);
     'outer: for (i, &nt) in seq.iter().enumerate() {
         let i = i as u32;
-        let enc: u8 = match nt {
-            b'A' => 0,
-            b'C' => 1,
-            b'G' => 2,
-            b'T' => 3,
+        let (fw_enc, rv_enc): (u8, u8) = match nt {
+            b'A' => (0, 3),
+            b'C' => (1, 2),
+            b'G' => (2, 1),
+            b'T' => (3, 0),
             _ => {
                 reset = i + 1;
-                0
+                (0, 0)
             },
         };
 
-        kmer = ((kmer << 2) | K::from(enc)) & k_mask;
+        fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & k_mask;
+        rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift);
         if i >= k - 1 {
-            kmers.push(if i < reset + k - 1 { K::UNDEF } else { kmer });
+            kmers.push(if i < reset + k - 1 { (K::UNDEF, K::UNDEF) } else { (fw_kmer, rv_kmer) });
         }
         if i >= t - 1 {
-            tmers.push(if i < reset + t - 1 { K::UNDEF } else { (kmer & t_mask).fast_hash() });
+            let fw_hash = (fw_kmer & t_mask).fast_hash();
+            let rv_hash = (rv_kmer >> t_shift).fast_hash();
+            let hash = if i < reset + t - 1 {
+                (K::UNDEF, true)
+            } else if CANON && rv_hash < fw_hash {
+                (rv_hash, false)
+            } else {
+                (fw_hash, true)
+            };
+            if i >= reset + t - 1 {
+                println!();
+                println!("i = {}", i);
+                println!("    FW k-mer {fw_kmer:030b}");
+                println!("    FW t-mer {:08b} -> {:016x}", fw_kmer & t_mask, fw_hash);
+                println!("    BW k-mer {rv_kmer:030b}");
+                println!("    BW t-mer {:08b} -> {:016x}", rv_kmer >> t_shift, rv_hash);
+                println!("    -> {:016x}, {}", hash.0, hash.1);
+            }
+            tmers.push(hash);
         }
 
         let Some(start) = (i + 2).checked_sub(w + k) else { continue };
         let mut best_tmer = K::UNDEF;
-        let mut tmer_pos = 0;
+        let mut best_j = 0;
+        let mut best_dir = true;
+        let mut best_pos = 0;
         for j in 0..w + k - t {
-            let tmer = tmers[(start + j) as usize];
+            let (tmer, fw) = tmers[(start + j) as usize];
             if tmer == K::UNDEF {
                 continue 'outer;
             }
             if tmer < best_tmer {
                 best_tmer = tmer;
-                tmer_pos = j;
+                best_j = j;
+                best_dir = fw;
+
+                best_pos = if fw {
+                    start + (j % w)
+                } else {
+                    let j2 = k + w - j - t - 1;
+                    start + w - 1 - (j2 % w)
+                };
             }
         }
-        if best_tmer == K::UNDEF { continue; }
-        let curr_kmer_pos = start + (tmer_pos % w);
-        if kmer_pos == u32::MAX || curr_kmer_pos > kmer_pos {
-            kmer_pos = curr_kmer_pos;
-            let sel_kmer = kmers[kmer_pos as usize];
-            output.push(P::transform(kmer_pos, sel_kmer));
+        println!("    Best hash {:016x} ({}), j = {} -> {}", best_tmer, best_dir, best_j, best_pos);
+        if kmer_pos == u32::MAX || best_pos > kmer_pos {
+            kmer_pos = best_pos;
+            let (sel_fw, sel_rv) = kmers[kmer_pos as usize];
+            output.push(P::transform(kmer_pos, if best_dir { sel_fw } else { sel_rv }));
         }
     }
 }
