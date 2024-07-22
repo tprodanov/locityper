@@ -305,25 +305,25 @@ where K: Minimizer,
     }
 }
 
-/// Function that goes over indices `start..end`, and returns minimizer position and hash value.
-/// The function returns None if all k-mers in the window are undefined.
+/// Function that goes over non-empty slice `start..end`, and returns minimal position and value.
 #[inline(always)]
-fn find_min<K: Kmer>(
-    hashes: &CircArray<K>,
+fn find_min<T: Copy + Ord>(
+    arr: &CircArray<T>,
     start: u32,
     end: u32,
-) -> (u32, K)
+) -> (u32, T)
 {
-    let mut pos = 0;
-    let mut minimizer = K::UNDEF;
-    for j in start..end {
-        let h = hashes[j];
-        if h <= minimizer {
+    debug_assert!(start < end);
+    let mut pos = start;
+    let mut min = arr[start];
+    for j in start + 1..end {
+        let v = arr[j];
+        if v < min {
             pos = j;
-            minimizer = h;
+            min = v;
         }
     }
-    (pos, minimizer)
+    (pos, min)
 }
 
 /// Finds sequence minimizers.
@@ -459,7 +459,7 @@ pub fn mod_minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, t: u8, 
 where K: Minimizer,
       P: PosKmer<K>,
 {
-    println!("FAST");
+    println!("mod-minimizers({k}, {w}, {t}) for {}", String::from_utf8_lossy(seq));
     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     debug_assert!(t <= k, "t-mer size ({}) must not be greater than k-mer size ({})", t, k);
     debug_assert!(w.checked_add(k - t).unwrap() <= MAX_MINIMIZER_W,
@@ -468,8 +468,10 @@ where K: Minimizer,
     let t_shift = 2 * k - 2 * t;
     let k_mask = K::create_mask(k);
     let t_mask = K::create_mask(t);
-    // t-mer hashes in a window, stored in a cycling array.
-    let mut t_hashes = CircArray::new(K::UNDEF);
+
+    // canonical t-mer hashes and forward t-mers,
+    // needed to select the same direction when going on the forward and reverse-complement.
+    let mut t_keys = CircArray::new((K::UNDEF, K::UNDEF));
     let mut t_strands = CircArray::new(true);
     let mut kmers = CircArray::new(K::UNDEF);
     let mut fw_kmer = K::ZERO;
@@ -487,7 +489,7 @@ where K: Minimizer,
     let mut first_tmer = t_1;
     let mut first_window = w_1 + k_1;
 
-    let mut best_thash = K::UNDEF;
+    let mut best_key = (K::UNDEF, K::UNDEF);
     let mut best_t_pos = 0;
 
     for (i, &nt) in seq.iter().enumerate() {
@@ -502,7 +504,7 @@ where K: Minimizer,
                 // first_kmer = i + k;
                 first_tmer = i + t;
                 first_window = i + w + k_1;
-                best_thash = K::UNDEF;
+                best_key = (K::UNDEF, K::UNDEF);
                 continue;
             },
         };
@@ -512,24 +514,32 @@ where K: Minimizer,
 
         // This may be incorrect for first k-mers, but we should not access them.
         kmers[i] = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer };
-        let fw_thash = (fw_kmer & t_mask).fast_hash();
-        let (thash, strand) = if CANON {
-            let bw_thash = (rv_kmer >> t_shift).fast_hash();
-            if bw_thash < fw_thash { (bw_thash, false) } else { (fw_thash, true) }
-        } else { (fw_thash, true) };
+        println!("   {:3} '{}'{:16x}  {:030b}", i - t_1, nt as char, kmers[i], fw_kmer);
+        let fw_tmer = fw_kmer & t_mask;
+        let fw_t_hash = fw_tmer.fast_hash();
+        let (t_hash, strand) = if CANON {
+            let rv_t_hash = (rv_kmer >> t_shift).fast_hash();
+            println!("       F  {:016x}  {:010b}", fw_t_hash, fw_tmer);
+            println!("       B  {:016x}  {:010b}", rv_t_hash, rv_kmer >> t_shift);
+            if fw_t_hash <= rv_t_hash { (fw_t_hash, true) } else { (rv_t_hash, false) }
+        } else { (fw_t_hash, true) };
+        let key = (t_hash, fw_tmer);
+        println!("       K  {:016x}  {:010b}  {}", key.0, key.1, if strand { "+" } else { "-" });
 
         let t_pos = i - t_1;
-        t_hashes[t_pos] = thash;
+        t_keys[t_pos] = key;
         t_strands[t_pos] = strand;
-        if thash < best_thash {
+        if key < best_key {
             best_t_pos = t_pos;
-            best_thash = thash;
+            best_key = key;
+            println!("       Update best");
         }
         if i < first_window { continue };
 
         let start = i - w_1 - k_1;
         if best_t_pos < start {
-            (best_t_pos, best_thash) = find_min(&t_hashes, start, t_pos + 1);
+            (best_t_pos, best_key) = find_min(&t_keys, start, t_pos + 1);
+            println!("       Find min -> {:2}  {:016x}  {:010b}", best_t_pos, best_key.0, best_key.1);
         }
 
         let j = best_t_pos - start;
@@ -538,10 +548,9 @@ where K: Minimizer,
         } else {
             start + j % w
         };
-        println!("    * [{}] Best {:2}, {:016x} @ {:2} {:5} -> {:2}", start, best_t_pos, best_thash, j,
-            t_strands[best_t_pos], new_pos);
         // Replace previous value with UNDEF, so that we don't output the same k-mer twice.
         let sel_kmer = std::mem::replace(&mut kmers[new_pos + k_1], K::UNDEF);
+        println!("       Save {:2} -> {:2} ({})", best_t_pos, new_pos, if sel_kmer == K::UNDEF { "dupl" } else { "new" });
         if sel_kmer != K::UNDEF {
             output.push(P::transform(new_pos, sel_kmer));
         }
@@ -603,7 +612,6 @@ where K: Minimizer,
         if i >= k - 1 {
             kmers.push(if i < reset + k - 1 { K::UNDEF } else
                 if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer });
-            println!("  {:2}  {:030b}", i, kmers.last().unwrap());
             used.push(false);
         }
         if i >= t - 1 {
@@ -616,21 +624,18 @@ where K: Minimizer,
             } else {
                 (fw_hash, true)
             };
-            println!("      {:016x}  {:016x}  -> {}", fw_hash, rv_hash, hash.1);
             tmers.push(hash);
         }
 
         let Some(start) = (i + 2).checked_sub(w + k) else { continue };
         let mut best_tmer = K::UNDEF;
         let mut best_pos = 0;
-        let mut best_j = 0;
         for j in 0..w + k - t {
             let (tmer, fw) = tmers[(start + j) as usize];
             if tmer == K::UNDEF {
                 continue 'outer;
             }
-            if tmer <= best_tmer {
-                best_j = j;
+            if tmer < best_tmer {
                 best_tmer = tmer;
                 best_pos = if fw {
                     start + (j % w)
@@ -640,8 +645,6 @@ where K: Minimizer,
                 };
             }
         }
-        println!("    * [{}] Best {:2}, {:016x} @ {:2} {:5} -> {}", start, start + best_j, best_tmer, best_j,
-            tmers[(start + best_j) as usize].1, best_pos);
         if !std::mem::replace(&mut used[best_pos as usize], true) {
             output.push(P::transform(best_pos, kmers[best_pos as usize]));
         }
