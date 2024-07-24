@@ -455,27 +455,22 @@ pub fn find_best_t(k: u8, w: u8, very_small: bool, fw_only: bool) -> u8 {
 /// Output vector should have type `Vec<K>` or `Vec<(u32, K)>`, then minimizers are saved together with their positions.
 ///
 /// NOTE: minimizers should be cleared in advance.
-pub fn mod_minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, t: u8, output: &mut Vec<P>)
+pub fn mod_minimizers<K, P>(seq: &[u8], k: u8, w: u8, t: u8, output: &mut Vec<P>)
 where K: Minimizer,
       P: PosKmer<K>,
 {
-    println!("mod-minimizers({k}, {w}, {t}) for {}", String::from_utf8_lossy(seq));
     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     debug_assert!(t <= k, "t-mer size ({}) must not be greater than k-mer size ({})", t, k);
     debug_assert!(w.checked_add(k - t).unwrap() <= MAX_MINIMIZER_W,
         "Minimizer window w ({}) + k ({}) - t ({}) can be at most {}", w, k, t, MAX_MINIMIZER_W);
-    let rv_shift = 2 * k - 2;
-    let t_shift = 2 * k - 2 * t;
     let k_mask = K::create_mask(k);
     let t_mask = K::create_mask(t);
 
     // canonical t-mer hashes and forward t-mers,
     // needed to select the same direction when going on the forward and reverse-complement.
-    let mut t_keys = CircArray::new((K::UNDEF, K::UNDEF));
-    let mut t_strands = CircArray::new(true);
+    let mut t_hashes = CircArray::new(K::UNDEF);
     let mut kmers = CircArray::new(K::UNDEF);
-    let mut fw_kmer = K::ZERO;
-    let mut rv_kmer = K::ZERO;
+    let mut kmer = K::ZERO;
 
     let k = u32::from(k);
     let k_1 = k - 1;
@@ -483,96 +478,163 @@ where K: Minimizer,
     let t_1 = t - 1;
     let w = u32::from(w);
     let w_1 = w - 1;
-    let kwt_1 = k + w - t - 1;
 
     // let mut first_kmer = k_1;
     let mut first_tmer = t_1;
     let mut first_window = w_1 + k_1;
 
-    let mut best_key = (K::UNDEF, K::UNDEF);
+    let mut best_t_hash = K::UNDEF;
     let mut best_t_pos = 0;
 
     for (i, &nt) in seq.iter().enumerate() {
         let i = i as u32;
-        let (fw_enc, rv_enc): (u8, u8) = match nt {
-            b'A' => (0, 3),
-            b'C' => (1, 2),
-            b'G' => (2, 1),
-            b'T' => (3, 0),
+        let enc: u8 = match nt {
+            b'A' => 0,
+            b'C' => 1,
+            b'G' => 2,
+            b'T' => 3,
             _ => {
                 // First available position will be i + 1.
                 // first_kmer = i + k;
                 first_tmer = i + t;
                 first_window = i + w + k_1;
-                best_key = (K::UNDEF, K::UNDEF);
+                best_t_hash = K::UNDEF;
                 continue;
             },
         };
-        fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & k_mask;
-        if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift); }
+        kmer = ((kmer << 2) | K::from(enc)) & k_mask;
         if i < first_tmer { continue };
 
         // This may be incorrect for first k-mers, but we should not access them.
-        kmers[i] = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer };
-        println!("   {:3} '{}'{:16x}  {:030b}", i - t_1, nt as char, kmers[i], fw_kmer);
-        let fw_tmer = fw_kmer & t_mask;
-        let fw_t_hash = fw_tmer.fast_hash();
-        let (t_hash, strand) = if CANON {
-            let rv_t_hash = (rv_kmer >> t_shift).fast_hash();
-            println!("       F  {:016x}  {:010b}", fw_t_hash, fw_tmer);
-            println!("       B  {:016x}  {:010b}", rv_t_hash, rv_kmer >> t_shift);
-            if fw_t_hash <= rv_t_hash { (fw_t_hash, true) } else { (rv_t_hash, false) }
-        } else { (fw_t_hash, true) };
-        let key = (t_hash, fw_tmer);
-        println!("       K  {:016x}  {:010b}  {}", key.0, key.1, if strand { "+" } else { "-" });
-
+        kmers[i] = kmer;
+        let t_hash = (kmer & t_mask).fast_hash();
         let t_pos = i - t_1;
-        t_keys[t_pos] = key;
-        t_strands[t_pos] = strand;
-        if key < best_key {
+        t_hashes[t_pos] = t_hash;
+        if t_hash < best_t_hash {
             best_t_pos = t_pos;
-            best_key = key;
-            println!("       Update best");
+            best_t_hash = t_hash;
         }
         if i < first_window { continue };
 
         let start = i - w_1 - k_1;
         if best_t_pos < start {
-            (best_t_pos, best_key) = find_min(&t_keys, start, t_pos + 1);
-            println!("       Find min -> {:2}  {:016x}  {:010b}", best_t_pos, best_key.0, best_key.1);
+            (best_t_pos, best_t_hash) = find_min(&t_hashes, start, t_pos + 1);
         }
 
-        let j = best_t_pos - start;
-        let new_pos = if CANON && !t_strands[best_t_pos] {
-            start + w_1 - (kwt_1 - j) % w
-        } else {
-            start + j % w
-        };
+        let new_pos = start + (best_t_pos - start) % w;
         // Replace previous value with UNDEF, so that we don't output the same k-mer twice.
         let sel_kmer = std::mem::replace(&mut kmers[new_pos + k_1], K::UNDEF);
-        println!("       Save {:2} -> {:2} ({})", best_t_pos, new_pos, if sel_kmer == K::UNDEF { "dupl" } else { "new" });
         if sel_kmer != K::UNDEF {
             output.push(P::transform(new_pos, sel_kmer));
         }
     }
 }
 
-// /// Canonical mod-minimizers.
-// /// In contrast to `canon_minimizers`, this function simply concatenates minimizers from forward
-// /// and reverse complement strands.
-// pub fn canon_mod_minimizers<K, P>(seq: &[u8], k: u8, w: u8, t: u8, output: &mut Vec<P>)
+// /// Finds sequence mod-minimizers (https://doi.org/10.1101/2024.05.25.595898)
+// /// for the forward sequence.
+// /// Output vector should have type `Vec<K>` or `Vec<(u32, K)>`, then minimizers are saved together with their positions.
+// ///
+// /// NOTE: minimizers should be cleared in advance.
+// pub fn mod_minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, t: u8, output: &mut Vec<P>)
 // where K: Minimizer,
 //       P: PosKmer<K>,
 // {
-//     if seq.len() < usize::from(k) {
-//         return;
-//     }
+//     println!("mod-minimizers({k}, {w}, {t}) for {}", String::from_utf8_lossy(seq));
+//     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
+//     debug_assert!(t <= k, "t-mer size ({}) must not be greater than k-mer size ({})", t, k);
+//     debug_assert!(w.checked_add(k - t).unwrap() <= MAX_MINIMIZER_W,
+//         "Minimizer window w ({}) + k ({}) - t ({}) can be at most {}", w, k, t, MAX_MINIMIZER_W);
+//     let rv_shift = 2 * k - 2;
+//     let t_shift = 2 * k - 2 * t;
+//     let k_mask = K::create_mask(k);
+//     let t_mask = K::create_mask(t);
 
-//     mod_minimizers(seq, k, w, t, output);
-//     let s = output.len();
-//     mod_minimizers(&super::reverse_complement(seq), k, w, t, output);
-//     let n = seq.len() as u32 - u32::from(k);
-//     output[s..].iter_mut().for_each(|pos_kmer| pos_kmer.rc_pos(n));
+//     // canonical t-mer hashes and forward t-mers,
+//     // needed to select the same direction when going on the forward and reverse-complement.
+//     let mut t_keys = CircArray::new((K::UNDEF, K::UNDEF));
+//     let mut t_strands = CircArray::new(true);
+//     let mut kmers = CircArray::new(K::UNDEF);
+//     let mut fw_kmer = K::ZERO;
+//     let mut rv_kmer = K::ZERO;
+
+//     let k = u32::from(k);
+//     let k_1 = k - 1;
+//     let t = u32::from(t);
+//     let t_1 = t - 1;
+//     let w = u32::from(w);
+//     let w_1 = w - 1;
+//     let kwt_1 = k + w - t - 1;
+
+//     // let mut first_kmer = k_1;
+//     let mut first_tmer = t_1;
+//     let mut first_window = w_1 + k_1;
+
+//     let mut best_key = (K::UNDEF, K::UNDEF);
+//     let mut best_t_pos = 0;
+
+//     for (i, &nt) in seq.iter().enumerate() {
+//         let i = i as u32;
+//         let (fw_enc, rv_enc): (u8, u8) = match nt {
+//             b'A' => (0, 3),
+//             b'C' => (1, 2),
+//             b'G' => (2, 1),
+//             b'T' => (3, 0),
+//             _ => {
+//                 // First available position will be i + 1.
+//                 // first_kmer = i + k;
+//                 first_tmer = i + t;
+//                 first_window = i + w + k_1;
+//                 best_key = (K::UNDEF, K::UNDEF);
+//                 continue;
+//             },
+//         };
+//         fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & k_mask;
+//         if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift); }
+//         if i < first_tmer { continue };
+
+//         // This may be incorrect for first k-mers, but we should not access them.
+//         kmers[i] = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer };
+//         println!("   {:3} '{}'{:16x}  {:030b}", i - t_1, nt as char, kmers[i], fw_kmer);
+//         let fw_tmer = fw_kmer & t_mask;
+//         let fw_t_hash = fw_tmer.fast_hash();
+//         let (t_hash, strand) = if CANON {
+//             let rv_t_hash = (rv_kmer >> t_shift).fast_hash();
+//             println!("       F  {:016x}  {:010b}", fw_t_hash, fw_tmer);
+//             println!("       B  {:016x}  {:010b}", rv_t_hash, rv_kmer >> t_shift);
+//             if fw_t_hash <= rv_t_hash { (fw_t_hash, true) } else { (rv_t_hash, false) }
+//         } else { (fw_t_hash, true) };
+//         let key = (t_hash, K::from(min(fw_tmer, rv_kmer >> t_shift).count_ones() as u8));
+//         println!("       K  {:016x}  {:010b}  {}", key.0, key.1, if strand { "+" } else { "-" });
+
+//         let t_pos = i - t_1;
+//         t_keys[t_pos] = key;
+//         t_strands[t_pos] = strand;
+//         if key < best_key {
+//             best_t_pos = t_pos;
+//             best_key = key;
+//             println!("       Update best");
+//         }
+//         if i < first_window { continue };
+
+//         let start = i - w_1 - k_1;
+//         if best_t_pos < start {
+//             (best_t_pos, best_key) = find_min(&t_keys, start, t_pos + 1);
+//             println!("       Find min -> {:2}  {:016x}  {:010b}", best_t_pos, best_key.0, best_key.1);
+//         }
+
+//         let j = best_t_pos - start;
+//         let new_pos = if CANON && !t_strands[best_t_pos] {
+//             start + w_1 - (kwt_1 - j) % w
+//         } else {
+//             start + j % w
+//         };
+//         // Replace previous value with UNDEF, so that we don't output the same k-mer twice.
+//         let sel_kmer = std::mem::replace(&mut kmers[new_pos + k_1], K::UNDEF);
+//         println!("       Save {:2} -> {:2} ({})", best_t_pos, new_pos, if sel_kmer == K::UNDEF { "dupl" } else { "new" });
+//         if sel_kmer != K::UNDEF {
+//             output.push(P::transform(new_pos, sel_kmer));
+//         }
+//     }
 // }
 
 /// Naïve implementation of mod-minimizers.
