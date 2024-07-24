@@ -345,18 +345,16 @@ where K: Minimizer,
     let k = u32::from(k);
     let k_1 = k - 1;
     let w = u32::from(w);
+    let w_1 = w - 1;
 
     // Hashes in a window, stored in a cycling array.
     let mut hashes = CircArray::new(K::UNDEF);
-    // Position of the best k-mer.
-    // In addition, it indicates the position, where first k-mer becomes available.
-    let mut hash_pos = k_1;
-    let mut min_hash = K::UNDEF;
+    let mut last_pos = -1_i32;
+    let mut best_pos = 0;
+    let mut best_hash = K::UNDEF;
 
-    // New window starts at least at this position.
-    let mut min_start = k_1 + w;
-    // and at most at this position.
-    let mut max_start = min_start;
+    let mut first_kmer = k_1;
+    let mut first_window = k_1 + w_1;
 
     for (i, &nt) in seq.iter().enumerate() {
         let i = i as u32;
@@ -366,43 +364,36 @@ where K: Minimizer,
             b'G' => (2, 1),
             b'T' => (3, 0),
             _ => {
-                if min_hash != K::UNDEF && min_start <= i {
-                    output.push(P::transform(hash_pos - k_1, min_hash));
-                }
-                hash_pos = i + k;
-                min_hash = K::UNDEF;
-                min_start = hash_pos + w;
-                max_start = min_start;
-                continue;
+                first_kmer = i + k;
+                (0, 0)
             },
         };
         fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
         if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift); }
-        if i < hash_pos {
+        let kmer = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer };
+        let h = if i < first_kmer { K::UNDEF } else { kmer.fast_hash() };
+        hashes[i] = h;
+
+        if h < best_hash {
+            best_hash = h;
+            best_pos = i;
+        }
+        if i < first_window {
             continue;
         }
-        let hash = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer }.fast_hash();
-        hashes[i] = hash;
 
-        if min_hash == K::UNDEF {
-            min_hash = hash;
-            hash_pos = i;
-        } else if max_start <= i {
-            output.push(P::transform(hash_pos - k_1, min_hash));
-            min_start = hash_pos + w + 1;
-            (hash_pos, min_hash) = find_min(&hashes, hash_pos + 1, i + 1);
-            max_start = hash_pos + w;
-        } else if hash < min_hash {
-            if min_start <= i {
-                output.push(P::transform(hash_pos - k_1, min_hash));
-                min_start = i + 1;
+        let start = i - w_1;
+        if best_pos < start {
+            (best_pos, best_hash) = find_min(&hashes, start, i + 1);
+            if best_hash == K::UNDEF {
+                first_window = first_window + w_1;
+                continue;
             }
-            hash_pos = i;
-            min_hash = hash;
         }
-    }
-    if min_hash != K::UNDEF && min_start <= seq.len() as u32 {
-        output.push(P::transform(hash_pos - k_1, min_hash));
+        if best_pos as i32 > last_pos {
+            last_pos = best_pos as i32;
+            output.push(P::transform(best_pos - k_1, best_hash));
+        }
     }
 }
 
@@ -636,6 +627,62 @@ where K: Minimizer,
 //         }
 //     }
 // }
+
+/// Naïve implementation of regular minimizers.
+pub fn naive_minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
+where K: Minimizer,
+      P: PosKmer<K>,
+{
+    let k_mask = K::create_mask(k);
+    let rv_shift = 2 * k - 2;
+    let mut fw_kmer = K::ZERO;
+    let mut rv_kmer = K::ZERO;
+    let mut hashes = Vec::new();
+    let mut reset = 0;
+    let mut last_pos = -1_i32;
+
+    let k = u32::from(k);
+    let w = u32::from(w);
+    for (i, &nt) in seq.iter().enumerate() {
+        let i = i as u32;
+        let (fw_enc, rv_enc): (u8, u8) = match nt {
+            b'A' => (0, 3),
+            b'C' => (1, 2),
+            b'G' => (2, 1),
+            b'T' => (3, 0),
+            _ => {
+                reset = i + 1;
+                (0, 0)
+            },
+        };
+
+        fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & k_mask;
+        rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift);
+        if i < reset + k - 1 {
+            hashes.push(K::UNDEF);
+        } else {
+            let kmer = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer };
+            hashes.push(kmer.fast_hash());
+        }
+
+        if i + 2 < k + w {
+            continue;
+        }
+        let mut best_pos = 0;
+        let mut best_hash = K::UNDEF;
+        for j in (i + 1 - w)..=i {
+            let h = hashes[j as usize];
+            if h < best_hash {
+                best_pos = j;
+                best_hash = h;
+            }
+        }
+        if best_hash != K::UNDEF && best_pos as i32 > last_pos {
+            last_pos = best_pos as i32;
+            output.push(P::transform(best_pos + 1 - k, best_hash));
+        }
+    }
+}
 
 /// Naïve implementation of mod-minimizers.
 pub fn naive_mod_minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, t: u8, output: &mut Vec<P>)
