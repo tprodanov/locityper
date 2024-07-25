@@ -60,7 +60,7 @@ fn count_to_prob(count: u16, attempts: u16) -> (f32, u8) {
     } else {
         assert!(count < attempts);
         let prob = f32::from(count) / f32::from(attempts);
-        let mapq = (-10.0 * prob.log10()).round().min(60.0) as u8;
+        let mapq = (-10.0 * (1.0 - prob).log10()).round().min(60.0) as u8;
         (prob, mapq)
     }
 }
