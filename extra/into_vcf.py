@@ -4,11 +4,9 @@ import numpy as np
 import argparse
 import sys
 import pysam
-import json
 import os
 from collections import defaultdict
 import multiprocessing
-import functools
 import operator
 from simpleeval import simple_eval
 
@@ -203,7 +201,7 @@ def main():
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
         help='Analyze loci in this many threads [%(default)s].')
 
-    DEF_EXPR = 'warn == "*" and wdist <= 30 and (unexpl < 1000 or unexpl <= reads * 0.2)'
+    DEF_EXPR = 'warn == "*" and wdist < 30 and (unexpl < 1000 or unexpl < reads * 0.2)'
     parser.add_argument('-f', '--filtering', metavar='STR', default=DEF_EXPR,
         help='Simple expression to determine if the locus passes filterin. Default = `%(default)s`.')
     parser.add_argument('--subset-loci', metavar='STR', nargs='+',
