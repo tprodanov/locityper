@@ -15,6 +15,10 @@ from simpleeval import simple_eval
 import common
 
 
+def parse_float(val):
+    return float(val) if val != 'NA' else np.nan
+
+
 def load_predictions(f, expr):
     by_locus = defaultdict(dict)
     samples = set()
@@ -24,10 +28,10 @@ def load_predictions(f, expr):
 
         genotype = row['genotype'].split(',')
         features = dict(
-            qual=float(row['quality']),
+            qual=parse_float(row['quality']),
             reads=int(row['total_reads']),
             unexpl=int(row['unexpl_reads']),
-            wdist=float(row['weight_dist']),
+            wdist=parse_float(row['weight_dist']),
             warn=row['warnings'],
         )
         passes = bool(simple_eval(expr, names=features))
