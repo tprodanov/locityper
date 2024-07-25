@@ -62,7 +62,7 @@ struct Args {
     seed: Option<u64>,
     debug: DebugLvl,
 
-    minimizer_kw: Option<(u8, u8)>,
+    minimizer_kw: (u8, u8),
     match_frac: Option<f64>,
     match_len: u32,
     thresh_kmer_count: KmerCount,
@@ -92,7 +92,7 @@ impl Default for Args {
             seed: None,
             debug: DebugLvl::None,
 
-            minimizer_kw: None,
+            minimizer_kw: recruit::DEFAULT_MINIM_KW,
             match_frac: None,
             match_len: recruit::DEFAULT_MATCH_LEN,
             thresh_kmer_count: 5,
@@ -117,17 +117,6 @@ impl Args {
         self.assgn_params.validate()?;
         Ok(self)
     }
-}
-
-fn fmt_def_minimizers() -> String {
-    super::describe_defaults(
-        TECHNOLOGIES.iter().copied(),
-        |tech| tech.to_string(),
-        |tech| {
-            let (k, w) = tech.default_minim_size();
-            format!("{} {}", k, w)
-        }
-    )
 }
 
 fn fmt_def_match_frac() -> String {
@@ -194,10 +183,10 @@ fn print_help(extended: bool) {
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
-            {EMPTY}  across {} consecutive k-mers.\n\
-            {EMPTY}  Default: {}.",
+            {EMPTY}  across {} consecutive k-mers [{} {}].",
             "-m, --minimizer".green(), "INT INT".yellow(),
-            "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(), fmt_def_minimizers());
+            "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
+            super::fmt_def(defaults.minimizer_kw.0), super::fmt_def(defaults.minimizer_kw.1));
         println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
             {EMPTY}  Default: {}.",
             "-M, --match-frac".green(), "FLOAT".yellow(), fmt_def_match_frac());
@@ -351,7 +340,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
-                args.minimizer_kw = Some((parser.value()?.parse()?, parser.value()?.parse()?)),
+                args.minimizer_kw = (parser.value()?.parse()?, parser.value()?.parse()?),
             Short('M') | Long("match-frac") | Long("match-fraction") =>
                 args.match_frac = Some(parser.value()?.parse()?),
             Short('L') | Long("match-len") | Long("match-length") =>
@@ -684,7 +673,7 @@ fn identify_pairedness(bam_reader: &mut bam::IndexedReader) -> crate::Result<boo
         Err(error!(InvalidData, "Input BAM/CRAM file is empty"))
     } else {
         log::debug!("Input BAM/CRAM file is identified as {}-end",
-            if record.is_paired() { "paired" } else { "unpaired "});
+            if record.is_paired() { "paired" } else { "single"});
         Ok(record.is_paired())
     }
 }
@@ -992,7 +981,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
     let tech = bg_distr.seq_info().technology();
     let recr_params = recruit::Params::new(
-        args.minimizer_kw.unwrap_or_else(|| tech.default_minim_size()),
+        args.minimizer_kw,
         args.match_frac.unwrap_or_else(|| tech.default_match_frac(bg_distr.insert_distr().is_paired_end())),
         args.match_len, args.thresh_kmer_count)?;
 

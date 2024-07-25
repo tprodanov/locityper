@@ -23,6 +23,8 @@ use crate::{
 
 pub type Minimizer = u64;
 
+/// Default minimizer size.
+pub const DEFAULT_MINIM_KW: (u8, u8) = (15, 10);
 /// Default length, over which a long read must match the target
 /// (shorter matches with more minimizer matches will pass as well).
 pub const DEFAULT_MATCH_LEN: u32 = 2000;
@@ -79,8 +81,8 @@ impl Params {
         let min_frac = f64::from(SUBSUM_PENALTY) / f64::from(SUBSUM_BONUS + 1);
         validate_param!(match_frac >= min_frac && match_frac <= 1.0,
             "Minimizer match fraction ({}) must be in [{:.5}, 1]", match_frac, min_frac);
-        if match_frac < 0.5 {
-            log::warn!("Minimizer match fraction ({}) under 0.5 is allowed but not recommended", match_frac);
+        if match_frac < 0.3 {
+            log::warn!("Small minimizer match fraction ({}) is allowed but not recommended", match_frac);
         }
         validate_param!(match_length >= 200 && match_length <= 100_000,
             "Matching stretch length ({}) should be between 200 and 100,000", match_length);

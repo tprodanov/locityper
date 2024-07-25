@@ -220,17 +220,9 @@ impl Technology {
     pub fn default_match_frac(self, is_paired_end: bool) -> f64 {
         match (self, is_paired_end) {
             (Self::Illumina, false) => 0.7,
-            (Self::Illumina, true)  => 0.6,
+            (Self::Illumina, true)  => 0.5,
             (_, false) => 0.5,
             (_, true) => unreachable!("Paired-end long reads are not supported"),
-        }
-    }
-
-    /// Returns default k-mer size and minimizer window size.
-    pub fn default_minim_size(self) -> (u8, u8) {
-        match self {
-            Self::Illumina => (15, 5),
-            Self::HiFi | Self::PacBio | Self::Nanopore => (15, 10),
         }
     }
 

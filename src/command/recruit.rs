@@ -67,8 +67,8 @@ impl Default for Args {
             regions: None,
             alt_contig_len: 10_000_000,
 
-            minimizer_kw: (15, 5),
-            match_frac: 0.6,
+            minimizer_kw: recruit::DEFAULT_MINIM_KW,
+            match_frac: 0.5,
             match_len: recruit::DEFAULT_MATCH_LEN,
             chunk_size: SR_CHUNK_SIZE,
             thresh_kmer_count: DEFAULT_KMER_THRESH,
@@ -95,7 +95,6 @@ impl Args {
                 value: preset.into(),
             }),
         };
-        self.minimizer_kw = tech.default_minim_size();
         self.match_frac = tech.default_match_frac(paired);
         if tech != Technology::Illumina {
             self.chunk_size = LR_CHUNK_SIZE;

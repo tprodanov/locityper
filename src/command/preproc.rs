@@ -667,7 +667,7 @@ fn recruit_reads(
     sampling: Option<(f64, XoshiroRng)>,
 ) -> crate::Result<thread::JoinHandle<Result<Option<u64>, Error>>>
 {
-    let minimizer_kw = seq_info.technology().default_minim_size();
+    let minimizer_kw = recruit::DEFAULT_MINIM_KW;
     let match_frac = seq_info.technology().default_match_frac(is_paired_end);
     let recr_params = recruit::Params::new(minimizer_kw, match_frac, recruit::DEFAULT_MATCH_LEN,
         super::recruit::DEFAULT_KMER_THRESH)?;
