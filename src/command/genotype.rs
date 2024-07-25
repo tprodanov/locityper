@@ -166,6 +166,8 @@ fn print_help(extended: bool) {
         "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " add").underline());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
+    println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",
+        "-O, --out-bams".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.assgn_params.out_bams));
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
@@ -272,8 +274,6 @@ fn print_help(extended: bool) {
             {EMPTY}  Solver parameters (see {}).",
             "--greedy".green(), "STR".yellow(), "--anneal".green(), "STR".yellow(),
             "--highs".green(), "STR".yellow(), "--gurobi".green(), "STR".yellow(), "README".italic());
-        println!("    {:KEY$} {:VAL$}  Output BAM files for this number of genotypes [{}].",
-            "-O, --out-bams".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.out_bams));
     }
 
     println!("\n{}", "Execution arguments:".bold());

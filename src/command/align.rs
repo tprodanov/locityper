@@ -277,7 +277,7 @@ fn write_paf(
         let qentry = &seqs[j as usize];
         let rentry = &seqs[i as usize];
         write!(f, "{}\t{len}\t0\t{len}\t+\t", qentry.name(), len = qentry.seq().len())?;
-        write!(f, "{}\t{len}\t0\t{len}\t+\t", rentry.name(), len = rentry.seq().len())?;
+        write!(f, "{}\t{len}\t0\t{len}\t", rentry.name(), len = rentry.seq().len())?;
 
         cigar_str.clear();
         if has_aln {
