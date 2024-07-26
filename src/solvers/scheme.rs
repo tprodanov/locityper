@@ -622,7 +622,6 @@ impl Genotyping {
     /// Converts genotyping result into JSON format.
     pub fn to_json(&self) -> json::JsonValue {
         let mut res = json::object! {
-            locus: &self.tag as &str,
             total_reads: self.total_reads,
             quality: self.quality,
         };
@@ -819,7 +818,7 @@ pub fn solve(
         let width = max(2, math::num_digits(out_gts as f64) as usize);
         for (i, (gt, assgn_counts)) in genotyping.genotypes.iter().zip(&genotyping.assgn_counts)
                 .take(data.assgn_params.out_bams).enumerate() {
-            let bam_path = bam_dir.join(format!("{:0width$}_{}.bam", i, gt));
+            let bam_path = bam_dir.join(format!("{:0width$}.bam", i));
             model::bam::write_bam(&bam_path, gt, data, &mut contig_to_tid, assgn_counts)?
         }
     }

@@ -41,14 +41,23 @@ def load_haplotypes(path, subset_loci):
 
 def process_locus(locus, samples, preds, haplotypes, out_dir, compress):
     extension = 'fasta.gz' if compress else 'fasta'
+
+    processed = 0
+    ignored = 0
     with common.open(f'{out_dir}/{locus}.{extension}', 'w') as out:
         for sample in samples:
             gt, features = preds[sample]
+            if gt is None:
+                sys.stderr.write(f'Unknown genotype for {sample} at {locus}\n')
+                ignored += 1
+                continue
+
             for i, allele in enumerate(gt, 1):
                 try:
                     hap = haplotypes[allele]
                 except KeyError:
-                    sys.stderr.write(f'Could not find haplotype {allele} for locus {locus} and sample {sample}\n')
+                    sys.stderr.write(f'Could not find haplotype {allele} for {sample} at {locus}\n')
+                    ignored += 1 / len(gt)
                     continue
 
                 out.write(f'>{sample}.{i} {allele}')
@@ -58,7 +67,8 @@ def process_locus(locus, samples, preds, haplotypes, out_dir, compress):
                 out.write('\n')
                 for i in range(0, len(hap), 120):
                     out.write(hap[i:i+120] + '\n')
-    return locus
+                processed += 1 / len(gt)
+    return locus, processed, ignored
 
 
 def main():
@@ -90,11 +100,17 @@ def main():
         sys.stderr.write('WARN: Genotype predictions missing for {} loci, such as {}\n'.format(
             len(haplotypes) - len(loci_inters), list(set(haplotypes.keys()) - loci_inters)[:5].join(', ')))
 
+    sys.stderr.write('======\n')
     total = len(loci_inters)
     finished = 0
-    def callback(locus):
-        nonlocal finished
+    total_processed = 0
+    total_ignored = 0
+    def callback(data):
+        nonlocal finished, total_processed, total_ignored
+        locus, processed, ignored = data
         finished += 1
+        total_processed += processed
+        total_ignored += ignored
         sys.stderr.write(f'Finished [{finished:3}/{total}] {locus}\n')
 
     compress = args.compress.startswith('y')
@@ -108,6 +124,8 @@ def main():
             res.get()
         pool.close()
         pool.join()
+
+    sys.stderr.write(f'In total, wrote {total_processed} genotypes, skipped {total_ignored}\n')
 
 
 if __name__ == '__main__':

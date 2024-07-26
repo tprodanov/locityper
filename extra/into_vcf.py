@@ -24,16 +24,21 @@ def load_predictions(f, expr):
         locus = row['locus']
         sample = row['sample']
 
-        genotype = row['genotype'].split(',')
-        features = dict(
-            qual=parse_float(row['quality']),
-            reads=int(row['total_reads']),
-            unexpl=int(row['unexpl_reads']),
-            wdist=parse_float(row['weight_dist']),
-            warn=row['warnings'],
-        )
-        passes = bool(simple_eval(expr, names=features))
-        features['GQ'] = int(passes)
+        genotype = row['genotype']
+        if genotype == '*':
+            genotype = None
+            features = {}
+        else:
+            genotype = genotype.split(',')
+            features = dict(
+                qual=parse_float(row['quality']),
+                reads=int(row['total_reads']),
+                unexpl=int(row['unexpl_reads']),
+                wdist=parse_float(row['weight_dist']),
+                warn=row['warnings'],
+            )
+            features['GQ'] = float(simple_eval(expr, names=features))
+
         by_locus[locus][sample] = (genotype, features)
         samples.add(sample)
     return by_locus, sorted(samples)
@@ -73,8 +78,8 @@ def create_vcf_header(chrom_lengths, samples):
     for chrom, length in chrom_lengths:
         header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
     header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
-    header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="0/1 value based on prediction filtering">')
-    header.add_line('##FORMAT=<ID=qual,Number=1,Type=Float,Description="Locus genotype quality">')
+    header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="Converted genotype quality">')
+    header.add_line('##FORMAT=<ID=qual,Number=1,Type=Float,Description="Raw genotype quality">')
     header.add_line('##FORMAT=<ID=reads,Number=1,Type=Integer,'
         'Description="Total number of reads used to predict locus genotype">')
     header.add_line('##FORMAT=<ID=unexpl,Number=1,Type=Integer,'
@@ -122,7 +127,7 @@ def process_locus(locus, coords, samples, preds, genome_name, output):
             for i, sample in enumerate(samples):
                 fmt = newvar.samples[i]
                 pred = preds.get(sample)
-                if pred is None:
+                if pred is None or pred[0] is None:
                     continue
 
                 fmt['GT'] = copy_genotype(pred[0], var, genome_name)
@@ -202,8 +207,8 @@ def main():
         help='Analyze loci in this many threads [%(default)s].')
 
     DEF_EXPR = 'warn == "*" and wdist < 30 and (unexpl < 1000 or unexpl < reads * 0.2)'
-    parser.add_argument('-f', '--filtering', metavar='STR', default=DEF_EXPR,
-        help='Simple expression to determine if the locus passes filterin. Default = `%(default)s`.')
+    parser.add_argument('-q', '--quality', metavar='STR', default=DEF_EXPR,
+        help='Expression for calculating genotype quality. Default = `%(default)s`.')
     parser.add_argument('--subset-loci', metavar='STR', nargs='+',
         help='Limit the analysis to these loci.')
     args = parser.parse_args()
@@ -211,7 +216,7 @@ def main():
     common.mkdir(args.output)
     loci = load_database(args.database, args.subset_loci)
     with common.open(args.input) as f:
-        preds, samples = load_predictions(f, args.filtering)
+        preds, samples = load_predictions(f, args.quality)
     sys.stderr.write(f'Loaded {len(samples)} samples\n')
     loci_inters = set(loci.keys()) & set(preds.keys())
     if len(loci_inters) < len(loci):
