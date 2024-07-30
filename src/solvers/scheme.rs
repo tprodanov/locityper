@@ -372,12 +372,15 @@ impl Likelihoods {
     fn produce_result(&mut self, data: &Data) -> Genotyping {
         // ln(1e-5).
         const THRESH: f64 = -11.512925464970229;
+        // Output at most 100 genotypes.
+        const MAX_GENOTYPES: usize = 50;
+
         let params = &data.assgn_params;
         let min_output = max(4, params.out_bams);
         let thresh_prob = THRESH.min(params.prob_thresh);
         let attempts = f64::from(params.attempts);
         self.ixs.sort_unstable_by(|&i, &j| self.likelihoods[j].0.total_cmp(&self.likelihoods[i].0));
-        let mut n = self.ixs.len();
+        let mut n = min(self.ixs.len(), MAX_GENOTYPES);
         if n < 2 {
             log::warn!("Only {} genotype(s) remaining, quality will be undefined", n);
         }
