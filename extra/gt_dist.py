@@ -17,7 +17,7 @@ op_pattern = re.compile(r'[ID=X]')
 
 def calc_directed_distance(line):
     cigar = None
-    for entry in line[13:]:
+    for entry in line[12:]:
         if entry.startswith('cg:'):
             cigar = entry[5:]
             break
@@ -78,8 +78,11 @@ class Distances:
                     len2 = int(line[6])
                     for hap2a in self.group(hap2):
                         self.lengths[hap2a] = len2
-                nmatches = int(line[10])
-                aln_size = int(line[11])
+
+                # Due to incorrect output PAF files in some version of `locityper align`, need to shift column indices.
+                ix_shift = int(line[9] == '+')
+                nmatches = int(line[9 + ix_shift])
+                aln_size = int(line[10 + ix_shift])
                 assert aln_size != 0, f'Missing alignment between {hap1} and {hap2}'
                 assert nmatches <= aln_size
                 dist = (aln_size - nmatches, aln_size)
