@@ -783,7 +783,7 @@ fn create_mapping_command(
             "--no-progress",
             "-M", n_locs,   // Try as many secondary locations as possible.
             "-N", n_locs,   // Output as many secondary alignments as possible.
-            "-S", "0.8",     // Try candidate sites with score >= FLOAT * best score.
+            "-S", "0.5",     // Try candidate sites with minimizer hits >= FLOAT * best hits.
             "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.
             "--eqx",         // Output X/= instead of M operations.
