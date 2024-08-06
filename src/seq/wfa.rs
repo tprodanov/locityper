@@ -179,7 +179,12 @@ impl Aligner {
                 cigar.push_checked(op, 1);
             }
         }
-        Ok(unsafe { (*c_cigar).score })
+        let score = unsafe { (*c_cigar).score };
+        if score <= -0x60000000_i32 {
+            log::warn!("WFA produced very small score ({}). Sequences: {} and {}",
+                score, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2));
+        }
+        Ok(score)
     }
 }
 
