@@ -94,8 +94,8 @@ fn align_gap(
 /// First sequence: reference, sequence: query.
 fn align(
     aligner: &Aligner,
-    seq1: &[u8],
-    seq2: &[u8],
+    entry1: &NamedSeq,
+    entry2: &NamedSeq,
     kmer_matches: &[(u32, u32)],
     backbone_k: u32,
     max_gap: u32,
@@ -107,6 +107,9 @@ fn align(
     let mut i1 = 0;
     let mut j1 = 0;
     let mut curr_match = 0;
+
+    let seq1 = entry1.seq();
+    let seq2 = entry2.seq();
     for ix in sparse_aln.path.into_iter() {
         let (i2, j2) = kmer_matches[ix];
         if i1 > i2 {
@@ -132,15 +135,17 @@ fn align(
     let n1 = seq1.len() as u32;
     let n2 = seq2.len() as u32;
     score += align_gap(seq1, seq2, i1, n1, j1, n2, aligner, max_gap, &mut cigar)?;
-    assert_eq!(cigar.ref_len(), seq1.len() as u32, "Alignment produced incorrect CIGAR {}", cigar);
-    assert_eq!(cigar.query_len(), seq2.len() as u32, "Alignment produced incorrect CIGAR {}", cigar);
+    assert_eq!(cigar.ref_len(), seq1.len() as u32,
+        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name(), entry2.name(), cigar);
+    assert_eq!(cigar.query_len(), seq2.len() as u32,
+        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name(), entry2.name(), cigar);
     Ok((cigar, score))
 }
 
 fn align_multik(
     aligner: &Aligner,
-    seq1: &[u8],
-    seq2: &[u8],
+    entry1: &NamedSeq,
+    entry2: &NamedSeq,
     kmer_matches: &[Vec<(u32, u32)>],
     backbone_ks: &[u32],
     max_gap: u32,
@@ -149,13 +154,13 @@ fn align_multik(
     let mut best_cigar = None;
     let mut best_score = i32::MIN;
     for (&k, matches) in backbone_ks.iter().zip(kmer_matches) {
-        let (cigar, score) = align(aligner, seq1, seq2, matches, k, max_gap)?;
+        let (cigar, score) = align(aligner, entry1, entry2, matches, k, max_gap)?;
         if score > best_score {
             best_score = score;
             best_cigar = Some(cigar);
         }
     }
-    best_cigar.ok_or_else(|| error!(RuntimeError, "No alignment found"))
+    best_cigar.ok_or_else(|| error!(RuntimeError, "No alignment found between {} and {}", entry1.name(), entry2.name()))
         .map(|cigar| (cigar, best_score))
 }
 
@@ -190,7 +195,7 @@ pub fn align_sequences(
         for (&(i, j), matches) in pairs.iter().zip(&all_kmer_matches) {
             let i = i as usize;
             let j = j as usize;
-            alns.push(align_multik(&aligner, entries[i].seq(), entries[j].seq(), matches, backbone_ks, max_gap)?);
+            alns.push(align_multik(&aligner, &entries[i], &entries[j], matches, backbone_ks, max_gap)?);
         }
         Ok(alns)
     } else {
@@ -236,7 +241,7 @@ fn multithread_align(
                 let aligner = Aligner::new(penalties, accuracy);
                 pairs[start..end].iter().zip(all_kmer_matches[start..end].iter())
                     .map(|(&(i, j), matches)|
-                        align_multik(&aligner, &entries[i as usize].seq(), entries[j as usize].seq(),
+                        align_multik(&aligner, &entries[i as usize], &entries[j as usize],
                             matches, &curr_backbone_ks, max_gap))
                     .collect::<crate::Result<Vec<_>>>()
             }));

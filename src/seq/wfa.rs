@@ -127,7 +127,7 @@ impl Aligner {
         attributes.memory_mode = if accuracy < 7 {
             cwfa::wavefront_memory_t_wavefront_memory_med
         } else {
-            cwfa::wavefront_memory_t_wavefront_memory_ultralow
+            cwfa::wavefront_memory_t_wavefront_memory_low
         };
         // Compute score and CIGAR as well.
         attributes.alignment_scope = cwfa::alignment_scope_t_compute_alignment;
