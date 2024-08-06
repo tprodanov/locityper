@@ -152,7 +152,8 @@ fn align_multik(
 ) -> crate::Result<(Cigar, i32)>
 {
     let mut best_cigar = None;
-    let mut best_score = i32::MIN;
+    // Instead of i32::MIN, use ~ i32::MIN / 2, so that we notice errors if the score is too low.
+    let mut best_score = -0x3fffffff_i32;
     for (&k, matches) in backbone_ks.iter().zip(kmer_matches) {
         let (cigar, score) = align(aligner, entry1, entry2, matches, k, max_gap)?;
         if score > best_score {
