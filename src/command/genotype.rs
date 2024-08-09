@@ -778,7 +778,7 @@ fn create_mapping_command(
     let mut cmd: Command;
     if seq_info.technology() == Technology::Illumina {
         // Force strobealign v0.13 to use more minimizers.
-        let rescue_param = (n_seqs * 4 / 100).clamp(3, 25000);
+        let rescue_param = (n_seqs * 4 / 100 + 1).clamp(3, 25000);
 
         cmd = Command::new(&args.strobealign);
         // NOTE: Provide single input FASTQ, and do not use --interleaved option.
