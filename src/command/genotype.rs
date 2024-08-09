@@ -765,25 +765,30 @@ fn recruit_reads(
 }
 
 /// Map reads with either Strobealign or Minimap2.
-/// `n_locs`: number of possible alignment locations to examine for each read.
 fn create_mapping_command(
     ref_path: &Path,
     reads_path: &Path,
     seq_info: &SequencingInfo,
-    n_locs: &str,
+    n_seqs: usize,
     args: &Args,
-) -> Command {
+) -> Command
+{
+    let n_locs = min(25000, n_seqs * 4).to_string();
+
     let mut cmd: Command;
     if seq_info.technology() == Technology::Illumina {
+        // Force strobealign v0.13 to use more minimizers.
+        let rescue_param = (n_seqs * 4 / 100).clamp(3, 25000);
+
         cmd = Command::new(&args.strobealign);
         // NOTE: Provide single input FASTQ, and do not use --interleaved option.
         // This is because Strobealign starts to connect read pairs in multiple ways,
         // which produces too large output, and takes a lot of time.
         cmd.args(&[
             "--no-progress",
-            "-M", n_locs,   // Try as many secondary locations as possible.
-            "-R", "3",      // Different rescue strategy, in v0.13 needed to use more minimizers.
-            "-N", n_locs,   // Output as many secondary alignments as possible.
+            "-M", &n_locs,   // Try as many secondary locations as possible.
+            "-N", &n_locs,   // Output as many secondary alignments as possible.
+            "-R", &rescue_param.to_string(),
             "-S", "0.5",     // Try candidate sites with minimizer hits >= FLOAT * best hits.
             "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.
@@ -795,7 +800,7 @@ fn create_mapping_command(
         cmd.args(&[
             "-a", // Output SAM format,
             "-x", seq_info.technology().minimap_preset(), // Set mapping preset.
-            "-N", n_locs,   // Output as many secondary alignments as possible.
+            "-N", &n_locs,   // Output as many secondary alignments as possible.
             "-f", "0.05",   // Filter out 5% minimizers. Should be still enough minimizers for long reads.
             "--eqx",        // Output X/= instead of M operations.
             "-t", &args.threads.to_string()]);
@@ -814,10 +819,9 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> crate::Resul
 
     let in_fasta = locus.db_locus_dir.join(paths::LOCUS_FASTA);
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
-    // Output at most this number of alignments per read.
-    let n_locs = min(25000, locus.set.len() * 4).to_string();
     let start = Instant::now();
-    let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, bg_distr.seq_info(), &n_locs, args);
+    let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, bg_distr.seq_info(),
+        locus.set.len(), args);
     let mapping_exe = PathBuf::from(mapping_cmd.get_program().to_owned());
     let mut mapping_child = mapping_cmd.spawn().map_err(add_path!(mapping_exe))?;
     let child_stdout = mapping_child.stdout.take().unwrap();
