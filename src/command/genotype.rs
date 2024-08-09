@@ -782,6 +782,7 @@ fn create_mapping_command(
         cmd.args(&[
             "--no-progress",
             "-M", n_locs,   // Try as many secondary locations as possible.
+            "-R", "3",      // Different rescue strategy, in v0.13 needed to use more minimizers.
             "-N", n_locs,   // Output as many secondary alignments as possible.
             "-S", "0.5",     // Try candidate sites with minimizer hits >= FLOAT * best hits.
             "-f", "0.001",

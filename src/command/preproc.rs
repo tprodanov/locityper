@@ -722,7 +722,6 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
         command = Command::new(&args.strobealign);
         command.args(&[
             "-N", "0",     // Retain 0 additional alignments,
-            "-R", "0",     // Do not rescue reads,
             "-U",          // Do not output unmapped reads,
             "-f", "0.001", // Discard more minimizers to speed up alignment,
             "--eqx",       // Output X/= instead of M operations,
