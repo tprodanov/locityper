@@ -1,4 +1,6 @@
-use std::{fmt, result::Result};
+use std::{
+    fmt,
+};
 use grb::{
     Env, Var, Model, Status, attr, parameter, c, add_binvar,
     expr::{LinExpr, GurobiSum},

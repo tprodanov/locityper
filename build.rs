@@ -20,7 +20,7 @@ mod build_wfa {
             .allowlist_function("wavefront_.*")
             .allowlist_var("wavefront_.*")
             // Invalidate the built crate whenever any of the included header files changed.
-            .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             // Finish the builder and generate the bindings.
             .generate()
     }
