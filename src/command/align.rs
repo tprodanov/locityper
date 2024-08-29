@@ -68,7 +68,7 @@ impl Default for Args {
 }
 
 impl Args {
-    fn validate(self) -> crate::Result<Self> {
+    fn validate(mut self) -> crate::Result<Self> {
         validate_param!(self.input.is_some(), "Input FASTA file is not provided (see -i/--input)");
         validate_param!(self.output.is_some(), "Output PAF path is not provided (see -o/--output)");
 
@@ -85,6 +85,9 @@ impl Args {
             "Maximum divergence ({}) must be within [0, 1]", self.max_div);
         validate_param!(1 <= self.accuracy && self.accuracy <= wfa::MAX_ACCURACY,
             "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, wfa::MAX_ACCURACY);
+        if self.max_div == 0.0 {
+            self.max_div = -1.0;
+        }
 
         self.penalties.validate()?;
         Ok(self)

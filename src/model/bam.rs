@@ -97,6 +97,8 @@ fn create_record(
     let (cigar_view, strand) = if let Some(aln) = opt_aln {
         record.set_tid(contig_to_tid[aln.contig_id().ix()].expect("Contig ID undefined"));
         record.set_pos(i64::from(aln.interval().start()));
+        // By default, record is created as unmapped.
+        record.unset_unmapped();
         let strand = aln.strand();
         if strand == Strand::Reverse {
             record.set_reverse();
