@@ -811,7 +811,8 @@ impl AllAlignments {
         }
         log::debug!("    {}", counts.to_string(reads.len(), is_paired_end));
         if collisions > 2 && collisions * 100 > counts.total {
-            Err(error!(RuntimeError, "Too many hash collisions ({})", collisions))
+            Err(error!(RuntimeError, "Too many read name collisions ({}). \
+                Possibly, paired-end reads are processed as single-end reads.", collisions))
         } else {
             Ok(Self { reads, unused_reads })
         }

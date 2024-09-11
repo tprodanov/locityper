@@ -132,7 +132,7 @@ fn print_help() {
         "-l, --locus".green(), "NAME REGION [FILE]".yellow(), "-v".green());
     println!("    {:KEY$} {:VAL$}  BED file with loci coordinates. Fourth column: locus name.\n\
         {EMPTY}  If VCF ({}) was not provided, fifth column is required\n\
-        {EMPTY}  with path to locus alleles.",
+        {EMPTY}  with the path to locus alleles.",
         "-L, --loci".green(), "FILE".yellow(), "-v".green());
 
     println!("\n{}", "Allele extraction parameters:".bold());
