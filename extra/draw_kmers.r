@@ -12,7 +12,7 @@ parser$add_argument('fasta', metavar = 'FILE',
     help = 'Input FASTA file.')
 parser$add_argument('-n', '--names', metavar = 'STR', required = T,
     help = 'Two sequences names, through a comma.')
-parser$add_argument('-k', '--kmer', metavar = 'STR', default = 25, type = 'integer',
+parser$add_argument('-k', '--kmer', metavar = 'INT', default = 25, type = 'integer',
     help = 'k-mer size [%(default)s].')
 parser$add_argument('-f', '--max-freq', metavar = 'INT', default = 10, type = 'integer',
     help = 'Ignore k-mers with frequency over INT [%(default)s].')
@@ -41,7 +41,7 @@ rcomp <- function(seq) {
     stringi::stri_replace_all_fixed(seq,
         pattern = c('A', 'C', 'G', 'T'), replacement = c('t', 'g', 'c', 'a'),
         vectorize_all = FALSE) |>
-    sapply(function(x) rev(toupper(x)))
+    sapply(function(x) stringi::stri_reverse(toupper(x))) |> setNames(NULL)
 }
 
 get_kmers <- function(seq, k, canon = T) {
