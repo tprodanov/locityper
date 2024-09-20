@@ -179,8 +179,8 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
             "    --subset-loci".green(), "STR+".yellow());
         println!("    {:KEY$} {:VAL$}  Optional: genotype priors. Contains three columns:\n\
-            {EMPTY}  <locus>  <genotype (through comma)>  <log10(prior)>.\n\
-            {EMPTY}  Missing genotypes are removed from the analysis.",
+            {EMPTY}  <locus>  <haplotypes through comma>  <log10 prior>.\n\
+            {EMPTY}  Only specified genotypes are evaluated.",
             "    --priors".green(), "FILE".yellow());
 
         println!("\n{}", "Read recruitment:".bold());
@@ -903,9 +903,9 @@ fn analyze_locus(
     let all_contig_infos = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        ContigInfo::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, windows_writer)?
+        ContigInfo::new_all(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, windows_writer)?
     } else {
-        ContigInfo::new_all(&locus.set, bg_distr.depth(), &args.assgn_params, io::sink())?
+        ContigInfo::new_all(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, io::sink())?
     };
 
     let all_alns = if args.debug >= DebugLvl::Full {
