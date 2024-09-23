@@ -3,6 +3,7 @@ use std::{
     path::Path,
     io::{Write, BufRead},
     sync::Arc,
+    ops::Index,
 };
 use rand::Rng;
 use crate::{
@@ -204,11 +205,13 @@ impl WeightCalculator {
 
 /// Load explicit multipliers from a BED file (contig start end multiplier).
 /// Multipliers must be defined for all contigs.
+///
+/// For each haplotype, returns actual multipliers for each point, as well as moving averages.
 fn load_explicit_multipliers(
     dir: &Path,
     contigs: &Arc<ContigNames>,
     window_size: usize,
-) -> crate::Result<Vec<Vec<f64>>>
+) -> crate::Result<Vec<Option<[Vec<f64>; 2]>>>
 {
     let mut filename = dir.join("multipliers.bed");
     // Try both `multipliers.bed` and `multipliers.bed.gz`.
@@ -216,8 +219,7 @@ fn load_explicit_multipliers(
         filename.set_extension("bed.gz");
     }
     if !filename.exists() {
-        // Return all ones.
-        return Ok(contigs.lengths().iter().map(|&l| vec![1.0; l as usize + 1 - window_size]).collect());
+        return Ok(vec![None; contigs.len()]);
     }
 
     let reader = ext::sys::open(&filename)?;
@@ -262,7 +264,7 @@ fn load_explicit_multipliers(
     }
 
     let divisor = window_size as f64;
-    let mut mov_mults: Vec<Vec<f64>> = Vec::with_capacity(contigs.len());
+    let mut all_multipliers = Vec::with_capacity(contigs.len());
     for (mults, (name, &length)) in bp_mults.into_iter().zip(contigs.names().iter().zip(contigs.lengths())) {
         if mults.is_empty() {
             return Err(error!(ParsingError,
@@ -272,16 +274,16 @@ fn load_explicit_multipliers(
                 "Failed to parse explicit weights ({}): haplotype {} not fully covered/has different length",
                 ext::fmt::path(&filename), name));
         }
-        let mut curr_mults = Vec::with_capacity(mults.len() + 1 - window_size);
+        let mut mov_mults = Vec::with_capacity(mults.len() + 1 - window_size);
         let mut s: f64 = mults[..window_size].iter().sum();
-        curr_mults.push(s / divisor);
+        mov_mults.push(s / divisor);
         for (&trail, &new) in mults.iter().zip(&mults[window_size..]) {
             s = s + new - trail;
-            curr_mults.push(s / divisor);
+            mov_mults.push(s / divisor);
         }
-        mov_mults.push(curr_mults);
+        all_multipliers.push(Some([mults, mov_mults]));
     }
-    Ok(mov_mults)
+    Ok(all_multipliers)
 }
 
 /// Characteristics of a window.
@@ -319,8 +321,9 @@ pub struct ContigInfo {
     cumul_uniq_kmers: Vec<u32>,
     /// Linguistic complexity for each moving window.
     mov_complexities: Vec<f64>,
-    /// Explicit weight multipliers, one for each moving window.
-    mov_explicit_mults: Vec<f64>,
+    /// If defined, explicit weight multipliers.
+    /// First vector: direct multipliers, second: moving averages.
+    explicit_mults: Option<[Vec<f64>; 2]>,
 
     /// Default window weights (without boundary tweaking).
     default_weights: Vec<f64>,
@@ -333,7 +336,7 @@ impl ContigInfo {
         seq: &[u8],
         kmer_counts: &KmerCounts,
         depth: &ReadDepth,
-        mov_explicit_mults: Vec<f64>,
+        explicit_mults: Option<[Vec<f64>; 2]>,
         params: &super::Params,
         dbg_writer: &mut impl Write,
     ) -> crate::Result<Self>
@@ -354,8 +357,11 @@ impl ContigInfo {
         let left_padding = (neighb_size - window) / 2;
         let right_padding = neighb_size - window - left_padding;
 
-        assert_eq!((contig_len + 1 - window) as usize, mov_explicit_mults.len(),
-            "Incorrect number of explicit multipliers for {}", contig_name);
+        if let Some(mults) = &explicit_mults {
+            assert!(mults[0].len() == contig_len as usize
+                && mults[1].len() == (contig_len + 1 - window) as usize,
+                "Incorrect number of explicit multipliers for {}", contig_name);
+        }
 
         // Unique k-mers should have count = 0 because `kmer_counts` only stores off-target matches.
         let cumul_uniq_kmers = IterExt::cumul_sums(kmer_counts.get(contig_id.ix()).iter().map(|&count| count == 0));
@@ -368,7 +374,7 @@ impl ContigInfo {
             compl_weight_calc: params.compl_weight_calc.clone(),
             default_weights: Vec::with_capacity(n_windows as usize),
             mov_complexities: seq::compl::linguistic_complexity_123(seq, neighb_size as usize),
-            mov_explicit_mults,
+            explicit_mults,
         };
 
         for i in 0..n_windows {
@@ -382,29 +388,6 @@ impl ContigInfo {
         Ok(res)
     }
 
-    /// Creates a set of contig windows for each contig.
-    pub fn new_all(
-        set: &ContigSet,
-        db_locus_dir: &Path,
-        depth: &ReadDepth,
-        params: &super::Params,
-        mut dbg_writer: impl Write,
-    ) -> crate::Result<Vec<Arc<ContigInfo>>>
-    {
-        let contigs = set.contigs();
-        let explicit_mults = load_explicit_multipliers(db_locus_dir, contigs, depth.window_size() as usize)?;
-        let seqs = set.seqs();
-        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tcomplexity\texplicit_mult\tweight")
-            .map_err(add_path!(!))?;
-        let mut all_contig_infos = Vec::with_capacity(seqs.len());
-        for (id, (seq, curr_mults)) in contigs.ids().zip(seqs.iter().zip(explicit_mults.into_iter())) {
-            all_contig_infos.push(
-                Self::new(id, contigs, seq, set.kmer_counts(), depth, curr_mults, params, &mut dbg_writer)
-                .map(Arc::new)?);
-        }
-        Ok(all_contig_infos)
-    }
-
     /// Returns GC-content, kmer fraction, window complexity and window weight for `start..end`.
     pub fn window_characteristics(&self, start: u32, end: u32) -> WindowCharacteristics {
         let padded_start = start.saturating_sub(self.left_padding);
@@ -412,7 +395,8 @@ impl ContigInfo {
         let gc_content = (100.0 * f64::from(self.cumul_gc[padded_end as usize] - self.cumul_gc[padded_start as usize])
             / f64::from(padded_end - padded_start)).round() as u8;
         let ling_compl = self.mov_complexities[padded_start as usize];
-        let explicit_mult = self.mov_explicit_mults[start as usize];
+        let explicit_mult = self.explicit_mults.as_ref()
+            .map(|[_, mov_mults]| mov_mults[start as usize]).unwrap_or(1.0);
 
         let kmer_start = padded_start.saturating_sub(self.kmer_size / 2);
         let kmer_end = min(self.contig_len - self.kmer_size + 1, padded_end - self.kmer_size / 2);
@@ -467,6 +451,63 @@ impl ContigInfo {
     }
 }
 
+/// Contig informations for all haplotypes.
+pub struct ContigInfos {
+    infos: Vec<Arc<ContigInfo>>,
+    has_explicit_mults: bool,
+}
+
+impl ContigInfos {
+    /// Creates a set of contig windows for each contig.
+    pub fn new(
+        set: &ContigSet,
+        db_locus_dir: &Path,
+        depth: &ReadDepth,
+        params: &super::Params,
+        mut dbg_writer: impl Write,
+    ) -> crate::Result<Self>
+    {
+        let contigs = set.contigs();
+        let explicit_mults = load_explicit_multipliers(db_locus_dir, contigs, depth.window_size() as usize)?;
+        let has_explicit_mults = explicit_mults[0].is_some();
+        let seqs = set.seqs();
+        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tcomplexity\texplicit_mult\tweight")
+            .map_err(add_path!(!))?;
+        let mut infos = Vec::with_capacity(seqs.len());
+        for (id, (seq, curr_mults)) in contigs.ids().zip(seqs.iter().zip(explicit_mults.into_iter())) {
+            infos.push(
+                ContigInfo::new(id, contigs, seq, set.kmer_counts(), depth, curr_mults, params, &mut dbg_writer)
+                .map(Arc::new)?);
+        }
+        Ok(Self { infos, has_explicit_mults })
+    }
+
+    /// If explicit multipliers are defined, returns average read pair weight.
+    pub fn explicit_read_weight(&self, pair_alns: &[PairAlignment]) -> f64 {
+        if !self.has_explicit_mults {
+            return 1.0;
+        }
+        let mut s = 0.0;
+        for pair in pair_alns {
+            let [mults, _] = self.infos[pair.contig_id().ix()].explicit_mults.as_ref()
+                .expect("Explicit multipliers must be defined");
+            s += f64::max(
+                pair.middle1().map(|i| mults[i as usize]).unwrap_or(0.0),
+                pair.middle2().map(|i| mults[i as usize]).unwrap_or(0.0),
+            );
+        }
+        s / pair_alns.len() as f64
+    }
+}
+
+impl Index<usize> for ContigInfos {
+    type Output = ContigInfo;
+
+    fn index(&self, i: usize) -> &Self::Output {
+        self.infos.index(i)
+    }
+}
+
 /// Stores the contigs and windows corresponding to the windows.
 pub struct GenotypeWindows {
     genotype: Genotype,
@@ -479,7 +520,7 @@ pub struct GenotypeWindows {
 }
 
 impl GenotypeWindows {
-    pub fn new(genotype: Genotype, all_infos: &[Arc<ContigInfo>]) -> Self {
+    pub fn new(genotype: Genotype, all_infos: &ContigInfos) -> Self {
         let n = genotype.ploidy();
         let mut infos = Vec::with_capacity(n);
         let mut wshifts = Vec::with_capacity(n + 1);
@@ -487,7 +528,7 @@ impl GenotypeWindows {
         wshifts.push(curr_wshift);
 
         for &id in genotype.ids() {
-            let curr_contig = Arc::clone(&all_infos[id.ix()]);
+            let curr_contig = Arc::clone(&all_infos.infos[id.ix()]);
             curr_wshift += curr_contig.n_windows();
             wshifts.push(curr_wshift);
             infos.push(curr_contig);

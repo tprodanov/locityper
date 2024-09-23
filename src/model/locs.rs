@@ -21,6 +21,7 @@ use crate::{
     },
     algo::{bisect, TwoU32, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
     math::Ln,
+    model::windows::ContigInfos,
 };
 
 // ------------------------- Read-end and pair-end data, such as sequences and qualities -------------------------
@@ -512,6 +513,7 @@ fn identify_paired_end_alignments(
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
+    contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
@@ -556,6 +558,7 @@ fn identify_paired_end_alignments(
         identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, min_prob1, min_prob2, max_alns,
             buffer, insert_distr, params);
     }
+    let weight = contig_infos.explicit_read_weight(&aln_pairs);
 
     let both_unmapped = min_prob1 + min_prob2
         + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty();
@@ -564,12 +567,12 @@ fn identify_paired_end_alignments(
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
-        aln.ln_prob = aln.ln_prob - norm_fct; // weight * (aln.ln_prob - norm_fct);
+        aln.ln_prob = weight * (aln.ln_prob - norm_fct);
         max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
         read_data, max_lik, alignments, aln_pairs,
-        unmapped_prob: both_unmapped - norm_fct, // weight * (both_unmapped - norm_fct),
+        unmapped_prob: weight * (both_unmapped - norm_fct),
     }
 }
 
@@ -582,6 +585,7 @@ fn identify_single_end_alignments(
     max_alns: usize,
     min_prob: f64,
     ln_ncontigs: f64,
+    contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
@@ -606,6 +610,7 @@ fn identify_single_end_alignments(
             curr_saved += 1;
         }
     }
+    let weight = contig_infos.explicit_read_weight(&aln_pairs);
 
     let unmapped_prob = min_prob + params.unmapped_penalty;
     // Only for normalization, unmapped probability is multiplied by the number of contigs
@@ -613,12 +618,12 @@ fn identify_single_end_alignments(
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
-        aln.ln_prob = aln.ln_prob - norm_fct; // weight * (aln.ln_prob - norm_fct);
+        aln.ln_prob = weight * (aln.ln_prob - norm_fct);
         max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
         read_data, max_lik, alignments, aln_pairs,
-        unmapped_prob: unmapped_prob - norm_fct, // weight * (unmapped_prob - norm_fct),
+        unmapped_prob: weight * (unmapped_prob - norm_fct),
     }
 }
 
@@ -740,6 +745,7 @@ impl AllAlignments {
         contig_set: &ContigSet,
         bg_distr: &BgDistr,
         edit_dist_cache: &EditDistCache,
+        contig_infos: &ContigInfos,
         params: &super::Params,
         mut dbg_writer1: impl Write,
         mut dbg_writer2: impl Write,
@@ -798,10 +804,11 @@ impl AllAlignments {
             let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
                 identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns,
-                    opt_min_prob1.unwrap(), opt_min_prob2.unwrap(), &mut buffer, insert_distr, ln_ncontigs, params)
+                    opt_min_prob1.unwrap(), opt_min_prob2.unwrap(), &mut buffer, insert_distr, ln_ncontigs,
+                    contig_infos, params)
             } else {
                 identify_single_end_alignments(read_data, &mut tmp_alns, max_alns, opt_min_prob1.unwrap(),
-                    ln_ncontigs, params)
+                    ln_ncontigs, contig_infos, params)
             };
             if use_read {
                 reads.push(groupped_alns);

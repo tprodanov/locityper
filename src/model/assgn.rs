@@ -1,6 +1,5 @@
 use std::{
     io,
-    sync::Arc,
 };
 use rand::Rng;
 use crate::{
@@ -9,7 +8,7 @@ use crate::{
 };
 use super::{
     locs::AllAlignments,
-    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadGtAlns, ContigInfo, GenotypeWindows},
+    windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadGtAlns, ContigInfos, GenotypeWindows},
     distr_cache::{DistrCache, WindowDistr},
 };
 
@@ -41,7 +40,7 @@ impl GenotypeAlignments {
     /// Read assignment itself is not stored, call `init_assignments()` to start.
     pub fn new(
         genotype: Genotype,
-        all_contig_infos: &[Arc<ContigInfo>],
+        all_contig_infos: &ContigInfos,
         all_alns: &AllAlignments,
         params: &super::Params,
     ) -> Self

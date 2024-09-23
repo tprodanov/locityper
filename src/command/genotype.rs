@@ -34,7 +34,7 @@ use crate::{
     model::{
         Params as AssgnParams,
         locs::AllAlignments,
-        windows::{ContigInfo, WeightCalculator},
+        windows::{ContigInfos, WeightCalculator},
         distr_cache::DistrCache,
     },
     solvers::scheme::{self, Scheme, SchemeParams},
@@ -900,21 +900,21 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let all_contig_infos = if args.debug >= DebugLvl::Some {
+    let contig_infos = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        ContigInfo::new_all(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, windows_writer)?
+        ContigInfos::new(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, windows_writer)?
     } else {
-        ContigInfo::new_all(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, io::sink())?
+        ContigInfos::new(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, io::sink())?
     };
 
     let all_alns = if args.debug >= DebugLvl::Full {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         let read_kmer_writer = ext::sys::create_gzip(&locus.out_dir.join("read_kmers.csv.gz"))?;
-        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache,
+        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache, &contig_infos,
             &args.assgn_params, reads_writer, read_kmer_writer)?
     } else {
-        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache,
+        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache, &contig_infos,
             &args.assgn_params, io::sink(), io::sink())?
     };
 
@@ -957,7 +957,7 @@ fn analyze_locus(
             assgn_params: args.assgn_params.clone(),
             debug: args.debug,
             threads: usize::from(args.threads),
-            all_alns, genotypes, priors, all_contig_infos, is_paired_end,
+            all_alns, genotypes, priors, contig_infos, is_paired_end,
         };
         scheme::solve(data, bg_distr, &locus.out_dir, &mut rng)?
     };

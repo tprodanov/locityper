@@ -40,7 +40,7 @@ use crate::{
         Params as AssgnParams,
         locs::AllAlignments,
         assgn::{GenotypeAlignments, ReadAssignment},
-        windows::ContigInfo,
+        windows::ContigInfos,
         distr_cache::DistrCache,
     },
     command::DebugLvl,
@@ -138,7 +138,7 @@ fn prefilter_genotypes(
 }
 
 /// Calculates average sum window weights across remaining genotypes.
-fn calc_average_sum_weight(genotypes: &[Genotype], ixs: &[usize], contig_infos: &[Arc<ContigInfo>]) -> f64 {
+fn calc_average_sum_weight(genotypes: &[Genotype], ixs: &[usize], contig_infos: &ContigInfos) -> f64 {
     let mut s = 0.0;
     for &i in ixs {
         s += genotypes[i].ids().iter()
@@ -212,7 +212,7 @@ pub struct Data {
     pub contig_distances: Option<TriangleMatrix<u32>>,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
-    pub all_contig_infos: Vec<Arc<ContigInfo>>,
+    pub contig_infos: ContigInfos,
     pub distr_cache: Arc<DistrCache>,
 
     /// Genotypes and their priors.
@@ -543,7 +543,7 @@ impl Genotyping {
         #[allow(unused_variables)]
         bg_depth: &ReadDepth,
         #[allow(unused_variables)]
-        all_contig_infos: &[Arc<ContigInfo>],
+        contig_infos: &ContigInfos,
     ) {
         let gt = &self.genotypes[0];
         let ploidy = gt.ploidy() as u32;
@@ -572,7 +572,7 @@ impl Genotyping {
         // let mut lbound = 0.0;
         // let mut ubound = 0.0;
         // for contig_id in gt.ids() {
-        //     let contig_info = &all_contig_infos[contig_id.ix()];
+        //     let contig_info = &contig_infos[contig_id.ix()];
         //     for (start, end) in contig_info.default_windows() {
         //         let window_chars = contig_info.window_characteristics(start, end);
         //         // Note: number of reads is actually the number of read pairs.
@@ -688,7 +688,7 @@ fn solve_single_thread(
             let gt = &data.genotypes[ix];
             let prefix = format!("{}\t{}\t", stage_ix + 1, gt);
             let prior = data.priors[ix];
-            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.all_contig_infos, &data.all_alns,
+            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns,
                 &data.assgn_params);
             let mut counts = gt_alns.create_counts();
 
@@ -784,7 +784,7 @@ pub fn solve(
         (0..n_gts).collect()
     };
     let mean_weight = if data.assgn_params.depth_norm_power != 0.0 {
-        calc_average_sum_weight(&data.genotypes, &rem_ixs, &data.all_contig_infos)
+        calc_average_sum_weight(&data.genotypes, &rem_ixs, &data.contig_infos)
     } else {
         f64::NAN
     };
@@ -829,7 +829,7 @@ pub fn solve(
         genotyping.find_weighted_dist(dist_matrix);
     }
     genotyping.check_first_prob();
-    genotyping.check_num_of_reads(data.all_alns.reads().len() as u32, bg_distr.depth(), &data.all_contig_infos);
+    genotyping.check_num_of_reads(data.all_alns.reads().len() as u32, bg_distr.depth(), &data.contig_infos);
     genotyping.count_unexplained_reads(&data.all_alns, data.assgn_params.unmapped_penalty);
     genotyping.print_log();
     Ok(genotyping)
@@ -977,7 +977,7 @@ impl Worker {
                 let gt = &data.genotypes[ix];
                 let prefix = format!("{}\t{}\t", stage_ix + 1, gt);
                 let prior = data.priors[ix];
-                let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.all_contig_infos, &data.all_alns,
+                let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns,
                     &data.assgn_params);
                 let mut counts = gt_alns.create_counts();
                 for (attempt, lik) in liks.iter_mut().enumerate() {

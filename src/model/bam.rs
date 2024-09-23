@@ -351,7 +351,7 @@ pub fn write_bam(
     let header_view = Rc::new(bam::HeaderView::from_header(&header));
     let mut records = Vec::new();
 
-    let gt_alns = GenotypeAlignments::new(gt.clone(), &data.all_contig_infos, &data.all_alns, &data.assgn_params);
+    let gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns, &data.assgn_params);
     let mut counts_iter = assgn_counts.iter().copied();
     let mut buffer1 = Default::default();
     let mut buffer2 = Default::default();
