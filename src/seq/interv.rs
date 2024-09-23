@@ -99,6 +99,7 @@ impl Interval {
     {
         let contig_name = split.next()
             .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?;
+        // NOTE: Do not change this error message without checking `model/windows.rs`.
         let contig_id = contigs.try_get_id(contig_name)
             .ok_or_else(|| error!(ParsingError, "Unknown contig {:?}", contig_name))?;
         let start = split.next()

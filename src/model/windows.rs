@@ -224,10 +224,19 @@ fn load_explicit_multipliers(
     log::debug!("[{}] Loading explicit window weights from {}", contigs.tag(), ext::fmt::path(&filename));
     // Explicit multipliers for each basepair.
     let mut bp_mults = vec![vec![]; contigs.len()];
+    let mut ignored_lines = 0;
     for line in reader.lines() {
         let line = line.map_err(add_path!(filename))?;
         let mut split = line.split_whitespace();
-        let interval = Interval::parse_bed(&mut split, contigs)?;
+        let interval = match Interval::parse_bed(&mut split, contigs) {
+            Ok(interval) => interval,
+            Err(crate::Error::ParsingError(s)) if s.starts_with("Unknown contig") => {
+                ignored_lines += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
         let mult: f64 = split.next()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| error!(ParsingError,
@@ -245,6 +254,11 @@ fn load_explicit_multipliers(
                 ext::fmt::path(&filename), interval.contig_name()));
         }
         bp_mults[interval.contig_id().ix()].resize(interval.end() as usize, mult);
+    }
+
+    if ignored_lines > 0 {
+        log::debug!("Skipped {} lines in {} (unused haplotypes)",
+            ignored_lines, ext::fmt::path(&filename));
     }
 
     let divisor = window_size as f64;
