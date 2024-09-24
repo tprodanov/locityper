@@ -223,10 +223,11 @@ fn load_explicit_weights(
     }
 
     let reader = ext::sys::open(&filename)?;
-    log::debug!("    Loading explicit window weights from {}", ext::fmt::path(&filename));
+    log::debug!("    Loading explicit region weights from {}", ext::fmt::path(&filename));
     // Explicit weights for each basepair.
     let mut bp_weights = vec![vec![]; contigs.len()];
     let mut ignored_lines = 0;
+    let mut warned_over1 = false;
     for line in reader.lines() {
         let line = line.map_err(add_path!(filename))?;
         let mut split = line.split_whitespace();
@@ -243,11 +244,15 @@ fn load_explicit_weights(
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| error!(ParsingError,
                 "Failed to parse explicit weights ({}, line `{}`): fourth numeric column required",
-                ext::fmt::path(&filename), line))?;
+                ext::fmt::path(&filename), line.replace('\t', " ")))?;
         if val < 0.0 {
             return Err(
                 error!(ParsingError, "parse explicit weights ({}, line `{}`): value must be non-negative",
-                ext::fmt::path(&filename), line));
+                ext::fmt::path(&filename), line.replace('\t', " ")));
+        } else if val > 1.0 && !warned_over1 {
+            warned_over1 = true;
+            log::warn!("    Explicit weight > 1 ({}, line `{}`). Use with care",
+                ext::fmt::path(&filename), line.replace('\t', " "));
         }
 
         if bp_weights[interval.contig_id().ix()].len() != interval.start() as usize {
