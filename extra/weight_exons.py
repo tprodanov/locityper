@@ -64,7 +64,7 @@ def main():
             'Haplotype in the filename should be replaced with `{}`.')
     parser.add_argument('-g', '--gene', metavar='STR', required=True,
         help='Gene name.')
-    parser.add_argument('-w', '--weights', metavar='FLOAT', nargs=3, default='1.0 0.5 0.1',
+    parser.add_argument('-w', '--weights', metavar='FLOAT', nargs=3, default='1.0 0.5 0.05',
         help='Weights for exons, introns and intergenic sequence [%(default)s].')
     parser.add_argument('-d', '--discarded', metavar='FILE',
         help='Optional: Text file denoting discarded haplotypes.')

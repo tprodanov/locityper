@@ -414,15 +414,18 @@ impl ContigInfo {
         WindowCharacteristics { gc_content, uniq_kmer_frac, ling_compl, explicit_weight, weight }
     }
 
+    #[inline(always)]
     pub fn n_windows(&self) -> u32 {
         self.default_weights.len() as u32
     }
 
+    #[inline(always)]
     pub fn window_size(&self) -> u32 {
         self.window_getter.window
     }
 
     /// Default window weights (can change due to random tweaking).
+    #[inline(always)]
     pub fn default_weights(&self) -> &[f64] {
         &self.default_weights
     }
@@ -451,8 +454,22 @@ impl ContigInfo {
         })
     }
 
+    #[inline(always)]
     pub fn window_getter(&self) -> &WindowGetter {
         &self.window_getter
+    }
+
+    /// Returns the weight for a read end by taking maximum value over the middle of the read,
+    /// as well as half window shifts to both sides.
+    pub fn read_end_weight(&self, middle: Option<u32>) -> f64 {
+        let Some(i) = middle else { return 0.0 };
+        let [weights, _] = self.explicit_weights.as_ref().expect("Explicit weights must be defined");
+        let i = i as usize;
+        let n = weights.len();
+        let u = self.window_size() as usize / 2;
+        weights[i]
+            .max(weights[i.saturating_sub(u)])
+            .max(weights[min(i + u, n - 1)])
     }
 }
 
@@ -494,12 +511,8 @@ impl ContigInfos {
         }
         let mut s = 0.0;
         for pair in pair_alns {
-            let [weights, _] = self.infos[pair.contig_id().ix()].explicit_weights.as_ref()
-                .expect("Explicit weights must be defined");
-            s += f64::max(
-                pair.middle1().map(|i| weights[i as usize]).unwrap_or(0.0),
-                pair.middle2().map(|i| weights[i as usize]).unwrap_or(0.0),
-            );
+            let info = &self.infos[pair.contig_id().ix()];
+            s += f64::max(info.read_end_weight(pair.middle1()), info.read_end_weight(pair.middle2()));
         }
         s / pair_alns.len() as f64
     }
