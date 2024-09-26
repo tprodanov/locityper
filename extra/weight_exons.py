@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import os
 from Bio import SeqIO
 
 import common
