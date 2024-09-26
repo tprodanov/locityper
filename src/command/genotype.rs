@@ -53,6 +53,7 @@ struct Args {
     subset_loci: HashSet<String>,
     ploidy: u8,
     priors: Option<PathBuf>,
+    reg_weights: Option<PathBuf>,
 
     threads: u16,
     rerun: super::Rerun,
@@ -83,6 +84,7 @@ impl Default for Args {
             subset_loci: HashSet::default(),
             ploidy: 2,
             priors: None,
+            reg_weights: None,
 
             threads: 8,
             rerun: super::Rerun::None,
@@ -182,9 +184,6 @@ fn print_help(extended: bool) {
             {EMPTY}  <locus>  <haplotypes through comma>  <log10 prior>.\n\
             {EMPTY}  Only specified genotypes are evaluated.",
             "    --priors".green(), "FILE".yellow());
-        println!("    {:KEY$} {:VAL$}  Panic if any locus does not have explicit subregion weights\n\
-            {EMPTY}  `weights.bed` or `weights.bed.gz` (see documentation).",
-            "    --reg-weights".green(), super::flag());
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -237,6 +236,9 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().breakpoint()),
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().power()),
             "--kmers-weight".green());
+        println!("    {:KEY$} {:VAL$}  Explicit haplotype subregion weights, for example\n\
+            {EMPTY}  based on exons/introns (see documentation).",
+            "    --reg-weights".green(), super::flag());
         println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
         println!("    {:KEY$} {:VAL$}  Use reads/read pairs that have at least this number\n\
@@ -341,7 +343,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
-            Long("reg-weights") | Long("region-weights") => args.assgn_params.ensure_weights = true,
+            Long("reg-weights") | Long("region-weights") => args.reg_weights = Some(parser.value()?.parse()?),
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
                 args.minimizer_kw = (parser.value()?.parse()?, parser.value()?.parse()?),
@@ -491,6 +493,30 @@ fn load_priors(path: &Path) -> crate::Result<HashMap<String, HashMap<String, f64
         }
     }
     Ok(res)
+}
+
+/// Returns a single filename for each locus.
+pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathBuf>> {
+    let mut map = HashMap::default();
+    for line in ext::sys::open(path)?.lines() {
+        let line = line.map_err(add_path!(path))?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let split: smallvec::SmallVec<[&str; 2]> = line.split_whitespace().collect();
+        if split.len() != 2 {
+            return Err(error!(ParsingError, "Failed to parse {}: more than 2 entries on line `{}`",
+                ext::fmt::path(path), line));
+        }
+        let locus = split[0];
+        let filename = PathBuf::from(split[1]);
+        if !filename.exists() {
+            return Err(error!(ParsingError, "Failed to parse {}: file {} does not exist",
+            ext::fmt::path(path), split[1]));
+        }
+        map.insert(locus.to_owned(), filename);
+    }
+    Ok(map)
 }
 
 struct LocusData {
@@ -891,6 +917,7 @@ fn analyze_locus(
     scheme: &Arc<Scheme>,
     distr_cache: &Arc<DistrCache>,
     opt_priors: Option<&HashMap<String, f64>>,
+    explicit_weights: Option<&Path>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
 ) -> crate::Result<()>
@@ -907,9 +934,9 @@ fn analyze_locus(
     let contig_infos = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         let windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        ContigInfos::new(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, windows_writer)?
+        ContigInfos::new(&locus.set, explicit_weights, bg_distr.depth(), &args.assgn_params, windows_writer)?
     } else {
-        ContigInfos::new(&locus.set, &locus.db_locus_dir, bg_distr.depth(), &args.assgn_params, io::sink())?
+        ContigInfos::new(&locus.set, explicit_weights, bg_distr.depth(), &args.assgn_params, io::sink())?
     };
 
     let all_alns = if args.debug >= DebugLvl::Full {
@@ -1009,6 +1036,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     }
 
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
+    let explicit_weights = args.reg_weights.as_ref().map(|path| load_explicit_weights(path)).transpose()?;
     let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun)?;
     if loci.is_empty() {
         return Ok(());
@@ -1024,11 +1052,17 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         if priors.is_some() && locus_priors.is_none() {
             log::warn!("Priors for locus {} are not found. Assuming equal priors", locus.set.tag());
         }
+        let locus_weights = explicit_weights.as_ref()
+            .and_then(|paths| paths.get(locus.set.tag()).map(|path| path as &Path));
+        if explicit_weights.is_some() && locus_weights.is_none() {
+            log::warn!("Explicit weights for locus {} are not found. Assuming no weights", locus.set.tag());
+        }
 
         let rng_clone = rng.clone();
         // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
         rng.long_jump();
-        match analyze_locus(locus, &bg_distr, &edit_dist_cache, &scheme, &distr_cache, locus_priors, rng_clone, &args) {
+        match analyze_locus(locus, &bg_distr, &edit_dist_cache, &scheme, &distr_cache,
+                locus_priors, locus_weights, rng_clone, &args) {
             Err(e) => log::error!("Error in locus {}: {}", locus.set.tag(), e.display()),
             Ok(()) => successes += 1,
         }

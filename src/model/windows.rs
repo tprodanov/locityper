@@ -208,20 +208,11 @@ impl WeightCalculator {
 ///
 /// For each haplotype, returns actual weights for each point, as well as moving averages.
 fn load_explicit_weights(
-    dir: &Path,
+    filename: &Path,
     contigs: &Arc<ContigNames>,
     window_size: usize,
 ) -> crate::Result<Vec<Option<[Vec<f64>; 2]>>>
 {
-    let mut filename = dir.join("weights.bed");
-    // Try both `weights.bed` and `weights.bed.gz`.
-    if !filename.exists() {
-        filename.set_extension("bed.gz");
-    }
-    if !filename.exists() {
-        return Ok(vec![None; contigs.len()]);
-    }
-
     let reader = ext::sys::open(&filename)?;
     log::debug!("    Loading explicit region weights from {}", ext::fmt::path(&filename));
     // Explicit weights for each basepair.
@@ -483,19 +474,18 @@ impl ContigInfos {
     /// Creates a set of contig windows for each contig.
     pub fn new(
         set: &ContigSet,
-        db_locus_dir: &Path,
+        weights_filename: Option<&Path>,
         depth: &ReadDepth,
         params: &super::Params,
         mut dbg_writer: impl Write,
     ) -> crate::Result<Self>
     {
         let contigs = set.contigs();
-        let explicit_weights = load_explicit_weights(db_locus_dir, contigs, depth.window_size() as usize)?;
+        let explicit_weights = match weights_filename {
+            Some(fname) => load_explicit_weights(fname, contigs, depth.window_size() as usize)?,
+            None => vec![None; contigs.len()],
+        };
         let has_explicit_weights = explicit_weights[0].is_some();
-        if params.ensure_weights && !has_explicit_weights {
-            return Err(error!(InvalidInput,
-                "Explicit weights absent for locus {} and --reg-weights is set", set.tag()));
-        }
 
         let seqs = set.seqs();
         writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tcomplexity\texplicit_weight\tweight")
