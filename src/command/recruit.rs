@@ -137,8 +137,8 @@ fn print_help() {
     println!("        (-i reads1.fq [reads2.fq] | -a reads.bam [--no-index] | -I in-list) \\");
     println!("        (-s seqs.fa | -S all_seqs.fa) -o out.fastq [args]");
 
-    println!("\n{}  (please see {} for more information on {}/{}/{} arguments)",
-        "Input arguments:".bold(), "README".italic(), "-i".green(), "-a".green(), "-I".green());
+    println!("\n{}  (please see documentation for more information on {}/{}/{} arguments)",
+        "Input arguments:".bold(), "-i".green(), "-a".green(), "-I".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
@@ -146,14 +146,14 @@ fn print_help() {
         {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n\
         {EMPTY}  please specify {} otherwise.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
-    println!("    {:KEY$} {:VAL$}  File with input filenames (see {}).",
-        "-I, --in-list".green(), "FILE".yellow(), "README".italic());
+    println!("    {:KEY$} {:VAL$}  File with input filenames (see documentation).",
+        "-I, --in-list".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Required with input CRAM file ({} alns.cram).",
         "-r, --reference".green(), "FILE".yellow(), "-a".green());
     println!("    {:KEY$} {:VAL$}  Canonical k-mer counts across the reference genome, calculated\n\
         {EMPTY}  using Jellyfish. Not required, but highly recommended. k does not\n\
-        {EMPTY}  have to match minimizer size. See {} for recommended options.",
-        "-j, --jf-counts".green(), "FILE".yellow(), "README".italic());
+        {EMPTY}  have to match minimizer size. See docs for recommended options.",
+        "-j, --jf-counts".green(), "FILE".yellow());
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",

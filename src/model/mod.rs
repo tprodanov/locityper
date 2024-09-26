@@ -38,6 +38,9 @@ pub struct Params {
     /// Do not normalize read depth, if this value is 0.
     pub depth_norm_power: f64,
 
+    /// Ensure that all loci have explicit subregion weights.
+    pub ensure_weights: bool,
+
     /// Randomly move read middle by `tweak` bp into one of the directions.
     /// None: half window size.
     pub tweak: Option<u32>,
@@ -72,6 +75,7 @@ impl Default for Params {
 
             min_weight: 0.001,
             depth_norm_power: 0.0,
+            ensure_weights: false,
 
             tweak: None,
             alt_cn: (0.5, 1.5),

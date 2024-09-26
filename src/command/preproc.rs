@@ -383,8 +383,8 @@ fn print_help(extended: bool) {
             "short".red(), "-H/--full-help".green());
     }
 
-    println!("\n{}  (please see {} for more information on {}/{}/{} arguments)",
-        "Input/output arguments:".bold(), "README".italic(), "-i".green(), "-a".green(), "-I".green());
+    println!("\n{}  (please see documentation for more information on {}/{}/{} arguments)",
+        "Input/output arguments:".bold(), "-i".green(), "-a".green(), "-I".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
@@ -392,12 +392,12 @@ fn print_help(extended: bool) {
         {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n\
         {EMPTY}  please specify {} otherwise.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
-    println!("    {:KEY$} {:VAL$}  File with input filenames (see {}).",
-        "-I, --in-list".green(), "FILE".yellow(), "README".italic());
+    println!("    {:KEY$} {:VAL$}  File with input filenames (see documentation).",
+        "-I, --in-list".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must be indexed with FAIDX.",
         "-r, --reference".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see {}).",
-        "-j, --jf-counts".green(), "FILE".yellow(), "README".italic());
+    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see documentation).",
+        "-j, --jf-counts".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  This dataset is similar to already preprocessed dataset.\n\

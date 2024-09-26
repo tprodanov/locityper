@@ -120,8 +120,8 @@ fn print_help() {
         "-d, --database".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see {}).",
-        "-j, --jf-counts".green(), "FILE".yellow(), "README".italic());
+    println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see documentation).",
+        "-j, --jf-counts".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input VCF file, encoding variation across pangenome samples.",
         "-v, --variants".green(), "FILE".yellow());
 

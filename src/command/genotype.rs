@@ -146,8 +146,8 @@ fn print_help(extended: bool) {
             "short".red(), "-H/--full-help".green());
     }
 
-    println!("\n{}  (please see {} for more information on {}/{}/{} arguments)",
-        "Input/output arguments:".bold(), "README".italic(), "-i".green(), "-a".green(), "-I".green());
+    println!("\n{}  (please see documentation for more information on {}/{}/{} arguments)",
+        "Input/output arguments:".bold(), "-i".green(), "-a".green(), "-I".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
@@ -155,8 +155,8 @@ fn print_help(extended: bool) {
         {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n\
         {EMPTY}  please specify {} otherwise.",
         "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
-    println!("    {:KEY$} {:VAL$}  File with input filenames (see {}).",
-        "-I, --in-list".green(), "FILE".yellow(), "README".italic());
+    println!("    {:KEY$} {:VAL$}  File with input filenames (see documentation).",
+        "-I, --in-list".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Required with input CRAM file ({} alns.cram).",
         "-r, --reference".green(), "FILE".yellow(), "-a".green());
     println!("    {:KEY$} {:VAL$}  Preprocessed dataset information (see {}).",
@@ -176,12 +176,15 @@ fn print_help(extended: bool) {
         {EMPTY}  Single-end and paired-end interleaved ({}) data is allowed.",
         "    --no-index".green(), super::flag(), "-a".green(), "-^".green());
     if extended {
-        println!("    {:KEY$} {:VAL$}  Optional: only analyze loci with names from this list.",
+        println!("    {:KEY$} {:VAL$}  Only analyze loci with names from this list.",
             "    --subset-loci".green(), "STR+".yellow());
-        println!("    {:KEY$} {:VAL$}  Optional: genotype priors. Contains three columns:\n\
+        println!("    {:KEY$} {:VAL$}  Genotype priors. Contains three columns:\n\
             {EMPTY}  <locus>  <haplotypes through comma>  <log10 prior>.\n\
             {EMPTY}  Only specified genotypes are evaluated.",
             "    --priors".green(), "FILE".yellow());
+        println!("    {:KEY$} {:VAL$}  Panic if any locus does not have explicit subregion weights\n\
+            {EMPTY}  `weights.bed` or `weights.bed.gz` (see documentation).",
+            "    --reg-weights".green(), super::flag());
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -248,9 +251,9 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
 
         println!("\n{}", "Locus genotyping:".bold());
-        println!("    {:KEY$} {:VAL$}  Solving stages through comma (see {}) [{}].\n\
+        println!("    {:KEY$} {:VAL$}  Solving stages through comma (see documentation) [{}].\n\
             {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
-            "-S, --stages".green(), "STR".yellow(), "README".italic(), super::fmt_def(defaults.scheme_params.stages),
+            "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
             "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
         println!("    {:KEY$} {:VAL$}  During pre-filtering, discard genotypes that have 10^{}\n\
             {EMPTY}  worse alignment probability than the best genotype [{}].",
@@ -271,9 +274,9 @@ fn print_help(extended: bool) {
             {EMPTY}  genotype, raised to this power (0 - no normalization) [{}].",
             "    --depth-norm".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_norm_power));
         println!("        {} {}, {} {}, {} {}, {} {}\n\
-            {EMPTY}  Solver parameters (see {}).",
+            {EMPTY}  Solver parameters (see documentation).",
             "--greedy".green(), "STR".yellow(), "--anneal".green(), "STR".yellow(),
-            "--highs".green(), "STR".yellow(), "--gurobi".green(), "STR".yellow(), "README".italic());
+            "--highs".green(), "STR".yellow(), "--gurobi".green(), "STR".yellow());
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -338,6 +341,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
+            Long("reg-weights") | Long("region-weights") => args.assgn_params.ensure_weights = true,
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
                 args.minimizer_kw = (parser.value()?.parse()?, parser.value()?.parse()?),

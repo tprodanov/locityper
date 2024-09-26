@@ -492,6 +492,11 @@ impl ContigInfos {
         let contigs = set.contigs();
         let explicit_weights = load_explicit_weights(db_locus_dir, contigs, depth.window_size() as usize)?;
         let has_explicit_weights = explicit_weights[0].is_some();
+        if params.ensure_weights && !has_explicit_weights {
+            return Err(error!(InvalidInput,
+                "Explicit weights absent for locus {} and --reg-weights is set", set.tag()));
+        }
+
         let seqs = set.seqs();
         writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tcomplexity\texplicit_weight\tweight")
             .map_err(add_path!(!))?;
