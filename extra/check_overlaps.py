@@ -17,6 +17,9 @@ class Locus(collections.namedtuple('Locus', 'chrom start end name')):
         # Order first by chromosome, then by start, and then in descending order, by end.
         return (self.chrom, self.start, -self.end).__lt__((oth.chrom, oth.start, -oth.end))
 
+    def __len__(self):
+        return self.end - self.start
+
 
 def load_loci(indir):
     loci = []
@@ -34,17 +37,40 @@ def load_loci(indir):
     return loci
 
 
-def find_redundant(loci):
+def find_redundant(loci, out_csv):
     loci.sort()
-    furthest = None
+    current = []
+    redundant = []
+
     for locus in loci:
-        if furthest is None or furthest.chrom != locus.chrom or furthest.end < locus.end:
-            if furthest is not None and furthest.chrom == locus.chrom and furthest.end > locus.start:
-                sys.stderr.write(f'...    {str(furthest):50} overlaps {locus}\n')
-            furthest = locus
-        else:
-            sys.stderr.write(f'!!!    {str(locus):50} contained completely in {furthest}\n')
-            yield locus
+        # reversed because this way we don't care about loci, removed in the process.
+        for i in reversed(range(len(current))):
+            oth = current[i]
+            if oth.chrom != locus.chrom or oth.end <= locus.start:
+                current.pop(i)
+
+        locus_str = str(locus)
+        this_redundant = False
+        for oth in current:
+            assert oth.chrom == locus.chrom
+            overlap = min(locus.end, oth.end) - max(locus.start, oth.start)
+            assert overlap > 0
+            if overlap < len(locus):
+                sys.stderr.write(f'...    {locus_str:40}    overlaps     {oth}\n')
+            elif locus.start == oth.start and locus.end == oth.end:
+                sys.stderr.write(f'===    {locus_str:40} identical with  {oth}\n')
+                this_redundant = True
+            else:
+                sys.stderr.write(f'!!!    {locus_str:40}  contained in   {oth}\n')
+                this_redundant = True
+            if out_csv:
+                out_csv.write(f'{oth.name}\t{locus.name}\t{overlap}'
+                    f'\t{overlap / len(oth):.6f}\t{overlap / len(locus):.6f}\n')
+
+        if this_redundant:
+            redundant.append(locus)
+        current.append(locus)
+    return redundant
 
 
 def main():
@@ -57,6 +83,8 @@ def main():
         help='Move redundant loci to `--output`.')
     parser.add_argument('-o', '--output', metavar='DIR',
         help='Move discarded loci to this directory (default: <input>/redundant).')
+    parser.add_argument('-O', '--out-csv', metavar='FILE',
+        help='Optional: output CSV file with overlap information.')
     args = parser.parse_args()
 
     loci_dir = os.path.join(args.input, 'loci')
@@ -69,9 +97,14 @@ def main():
         sys.stderr.write(f'Writing redundant loci to {args.output}\n')
         common.mkdir(args.output)
 
-    redundant = 0
-    for locus in find_redundant(loci):
-        redundant += 1
+    if args.out_csv:
+        out_csv = common.open(args.out_csv, 'w')
+        out_csv.write('locus1\tlocus2\toverlap\tfrac_of1\tfrac_of2\n')
+    else:
+        out_csv = None
+
+    redundant = find_redundant(loci, out_csv)
+    for locus in redundant:
         if args.move:
             new_dir = os.path.join(args.output, locus.name)
             while os.path.isdir(new_dir):
@@ -79,7 +112,7 @@ def main():
                 sys.stderr.write(f'WARN: Output directory {new_dir} already exists, moving to {rand_dir}\n')
                 new_dir = rand_dir
             os.rename(os.path.join(loci_dir, locus.name), new_dir)
-    sys.stderr.write(f'{redundant} / {len(loci)} redundant loci\n')
+    sys.stderr.write(f'{len(redundant)} / {len(loci)} redundant loci\n')
 
 
 if __name__ == '__main__':
