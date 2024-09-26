@@ -87,12 +87,14 @@ def main():
         with common.open(args.annot.replace('{}', name)) as gtf:
             entries[name] = process_gtf(gtf, name, length, args.gene)
 
-    if args.discarded:
+    if args.discarded and os.path.exists(args.discarded):
         with common.open(args.discarded) as f:
             for line in f:
                 left, right = map(str.strip, line.split('='))
                 for name in map(str.strip, right.split(',')):
                     entries[name] = entries[left]
+    elif args.discarded:
+        sys.stderr.write(f'WARN: {args.discarded} does not exist\n')
 
     with common.open(args.output, 'w') as out:
         for name, curr_entries in entries.items():
