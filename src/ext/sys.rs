@@ -198,6 +198,20 @@ pub fn path_append(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
     os_string.into()
 }
 
+/// Returns true if the path is -, starts with /dev/ or starts with proc.
+pub fn redirect_path(path: &Path) -> bool {
+    path.starts_with("/dev") || path.starts_with("/proc") || path == OsStr::new("-")
+}
+
+/// Returns parent directory, unless the path indicates redirection (/proc/..., /dev/..., -).
+pub fn parent_unless_redirect(path: &Path) -> Option<&Path> {
+    if redirect_path(path) {
+        None
+    } else {
+        path.parent()
+    }
+}
+
 /// Adds dirname at the start, if any.
 pub fn add_dir(dirname: Option<&Path>, filename: &str) -> PathBuf {
     dirname.map(|d| d.join(Path::new(filename))).unwrap_or_else(|| PathBuf::from(filename))

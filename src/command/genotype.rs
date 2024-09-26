@@ -498,6 +498,7 @@ fn load_priors(path: &Path) -> crate::Result<HashMap<String, HashMap<String, f64
 /// Returns a single filename for each locus.
 pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathBuf>> {
     let mut map = HashMap::default();
+    let dirname = ext::sys::parent_unless_redirect(path);
     for line in ext::sys::open(path)?.lines() {
         let line = line.map_err(add_path!(path))?;
         if line.starts_with('#') {
@@ -509,10 +510,10 @@ pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathB
                 ext::fmt::path(path), line));
         }
         let locus = split[0];
-        let filename = PathBuf::from(split[1]);
+        let filename = ext::sys::add_dir(dirname, split[1]);
         if !filename.exists() {
             return Err(error!(ParsingError, "Failed to parse {}: file {} does not exist",
-            ext::fmt::path(path), split[1]));
+            ext::fmt::path(path), ext::fmt::path(filename)));
         }
         map.insert(locus.to_owned(), filename);
     }

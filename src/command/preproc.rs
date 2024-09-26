@@ -52,8 +52,8 @@ fn check_filename(
     shouldnt_match: &Regex,
     wrong_format: &'static str,
 ) -> crate::Result<()> {
-    if filename == OsStr::new("-") || filename.starts_with("/dev") {
-        log::error!("Stdin and other /dev/* files may not be supported. Continuing for now");
+    if ext::sys::redirect_path(filename) {
+        log::error!("Stdin and other redirect files may not be supported. Continuing for now");
         return Ok(());
     } else if filename == OsStr::new("!") {
         // Ignore this filename.
@@ -116,7 +116,7 @@ impl InputFiles {
             "Input list (-I) cannot be used together with other input files (-i/-a).");
         validate_param!(!self.interleaved && !self.no_index,
             "Input list (-I) and --interleaved/--no-index cannot be provided together, please see README");
-        let dirname = list_filename.parent();
+        let dirname = ext::sys::parent_unless_redirect(&list_filename);
 
         let mut prev_flag: Option<String> = None;
         for line in ext::sys::open(&list_filename)?.lines() {

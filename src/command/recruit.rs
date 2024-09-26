@@ -304,7 +304,7 @@ type SeqsFiles = (Vec<Vec<Vec<u8>>>, Vec<BufFile>);
 /// Creates plain-text output file with large buffer,
 fn create_output(filename: impl AsRef<Path>) -> crate::Result<BufFile> {
     let filename = filename.as_ref();
-    if let Some(dir) = filename.parent() {
+    if let Some(dir) = ext::sys::parent_unless_redirect(filename) {
         fs::create_dir_all(dir).map_err(add_path!(dir))?;
     }
     // Output files with a large buffer (4 Mb).
@@ -421,7 +421,7 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> crate::Result<SeqsFiles>
 
 /// Loads files from
 fn load_seqs_list(list_filename: &Path) -> crate::Result<SeqsFiles> {
-    let dirname = list_filename.parent();
+    let dirname = ext::sys::parent_unless_redirect(list_filename);
     let mut out_filenames = HashSet::default();
     let mut seqs = Vec::new();
     let mut files = Vec::new();
