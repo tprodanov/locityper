@@ -12,8 +12,9 @@ def process_gtf(gtf_file, hap_name, hap_len, gene):
     """
     Returns list [(start, end, ty)] where ty = 0: CDSl; ty = 1: non-CDS part of the gene; ty = 2: rest.
     """
-    gene_start = None
-    gene_end = None
+    # triples (pos, is_start? T/F, type: 0 exon, 1 gene, 2 boundaries).
+    positions = [(0, True, 2), (hap_len, False, 2)]
+
     cds = []
     tag = f'gene_name "{gene}";'
     for line in gtf_file:
@@ -23,36 +24,29 @@ def process_gtf(gtf_file, hap_name, hap_len, gene):
         if tag not in line[8]:
             continue
         ty = line[2]
-        coords = (int(line[3]), int(line[4]))
-        assert coords[1] <= hap_len
+        start = int(line[3])
+        end = int(line[4])
+        assert end <= hap_len
+
         if ty == 'gene':
-            assert gene_start is None
-            gene_start, gene_end = coords
+            positions.append((start, True, 1))
+            positions.append((end, False, 1))
         elif ty == 'CDS':
-            cds.append(coords)
+            positions.append((start, True, 0))
+            positions.append((end, False, 0))
 
-    if gene_start is None:
-        assert not cds
-        sys.stderr.write(f'WARN: Gene {gene} not found on haplotype {hap_name}\n')
-        return [(0, hap_len, 2)]
-
+    enabled = [0, 0, 0]
+    positions.sort()
     out = []
-    if gene_start > 0:
-        out.append((0, gene_start, 2))
-    last_end = gene_start
-    cds.sort()
-    for start, end in cds:
-        if last_end < start:
-            out.append((last_end, start, 1))
-        start = max(start, last_end)
-        end = min(end, gene_end)
-        if start < end:
-            out.append((start, end, 0))
-        last_end = max(last_end, end)
-    if last_end < gene_end:
-        out.append((last_end, gene_end, 1))
-    if gene_end < hap_len:
-        out.append((gene_end, hap_len, 2))
+    last_pos = 0
+    for pos, is_start, ty in positions:
+        if last_pos < pos:
+            curr = min(i for i, v in enumerate(enabled) if v)
+            out.append((last_pos, pos, curr))
+        enabled[ty] += 1 if is_start else -1
+        assert enabled[ty] >= 0
+        last_pos = pos
+    assert not any(enabled) and last_pos == hap_len
     return out
 
 
