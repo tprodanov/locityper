@@ -24,18 +24,17 @@ def process_gtf(gtf_file, hap_name, hap_len, gene):
         if tag not in line[8]:
             continue
         ty = line[2]
-        if ty != 'gene' or ty != 'exon':
-            continue
 
         start = int(line[3])
         end = int(line[4])
         assert end <= hap_len
-        assert start < end, gtf_file
+        if start >= end:
+            continue
 
         if ty == 'gene':
             positions.append((start, True, 1))
             positions.append((end, False, 1))
-        elif ty == 'exon':
+        elif ty == 'CDS' or ty == 'start_codon' or ty == 'stop_codon':
             positions.append((start, True, 0))
             positions.append((end, False, 0))
 
