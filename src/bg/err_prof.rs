@@ -11,6 +11,7 @@ use crate::{
     err::{add_path},
     seq::{
         aln::{NamedAlignment, OpCounter},
+        cigar::Operation,
     },
     math::{self, distr::BetaBinomial},
     bg::ser::{JsonSer, json_get},
@@ -27,6 +28,11 @@ pub struct EditDist {
 }
 
 impl EditDist {
+    #[inline]
+    pub fn new(edit: u32, read_len: u32) -> Self {
+        Self { edit, read_len }
+    }
+
     #[inline]
     pub fn edit(&self) -> u32 {
         self.edit
@@ -213,6 +219,44 @@ impl ErrorProfile {
             + self.oper_probs.insertions * counts.insertions.try_into().unwrap()
             + self.oper_probs.deletions * counts.deletions.try_into().unwrap()
             + self.oper_probs.clipping * counts.clipping.try_into().unwrap()
+    }
+
+    /// Returns probability of a CIGAR operation.
+    #[inline]
+    pub fn operation_prob(&self, operation: Operation) -> f64 {
+        match operation {
+            Operation::Equal => self.oper_probs.matches,
+            Operation::Diff => self.oper_probs.mismatches,
+            Operation::Ins => self.oper_probs.insertions,
+            Operation::Del => self.oper_probs.deletions,
+            Operation::Soft => self.oper_probs.clipping,
+            _ => panic!("Unsupported CIGAR operation {}", operation),
+        }
+    }
+
+    #[inline(always)]
+    pub fn match_prob(&self) -> f64 {
+        self.oper_probs.matches
+    }
+
+    #[inline(always)]
+    pub fn mismatch_prob(&self) -> f64 {
+        self.oper_probs.mismatches
+    }
+
+    #[inline(always)]
+    pub fn insert_prob(&self) -> f64 {
+        self.oper_probs.insertions
+    }
+
+    #[inline(always)]
+    pub fn deletion_prob(&self) -> f64 {
+        self.oper_probs.deletions
+    }
+
+    #[inline(always)]
+    pub fn clipping_prob(&self) -> f64 {
+        self.oper_probs.clipping
     }
 }
 

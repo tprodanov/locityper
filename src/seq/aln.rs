@@ -136,31 +136,37 @@ impl Alignment {
     }
 
     /// Get contig id of the alignment.
+    #[inline(always)]
     pub fn contig_id(&self) -> ContigId {
         self.interval.contig_id()
     }
 
     /// Reference interval, to which the record is aligned.
+    #[inline(always)]
     pub fn interval(&self) -> &Interval {
         &self.interval
     }
 
     /// Read end of the alignment.
+    #[inline(always)]
     pub fn strand(&self) -> Strand {
         self.strand
     }
 
     /// Read end of the alignment.
+    #[inline(always)]
     pub fn read_end(&self) -> ReadEnd {
         self.read_end
     }
 
     /// Returns alignment CIGAR.
+    #[inline(always)]
     pub fn cigar(&self) -> &Cigar {
         &self.cigar
     }
 
     /// Ln-probability of the alignment.
+    #[inline(always)]
     pub fn ln_prob(&self) -> f64 {
         self.ln_prob
     }
@@ -170,6 +176,7 @@ impl Alignment {
         self.ln_prob = ln_prob;
     }
 
+    #[inline(always)]
     pub fn distance(&self) -> Option<EditDist> {
         self.dist
     }
@@ -186,14 +193,14 @@ impl Alignment {
 
     /// Returns insert size (distance between smallest start and largest end).
     /// Returns u32::MAX if two mates are not on the same strand.
-    #[inline]
+    #[inline(always)]
     pub fn insert_size(&self, mate: &Alignment) -> u32 {
         self.interval.furthest_distance(&mate.interval)
             .unwrap_or(u32::MAX)
     }
 
     /// Returns false for `FR/RF` and true for `FF/RR`.
-    #[inline]
+    #[inline(always)]
     pub fn pair_orientation(&self, mate: &Alignment) -> bool {
         self.strand == mate.strand
     }
@@ -250,12 +257,22 @@ impl Alignment {
         counts
     }
 
-    /// Counts operations in the alignment, excluding operations outside the boundary `0..contig_end`.
+    /// Returns clipping size, taking into account haplotype size.
+    pub fn limited_clipping(&self, contig_len: u32) -> (u32, u32) {
+        let (left, right) = self.cigar.soft_clipping();
+        (
+            // Limit left clipping to the distance between contig start (0) and alignment start.
+            min(left, self.interval.start()),
+            // Limit right clipping to the distance distance between alignment end and contig end.
+            max(right, contig_len.saturating_sub(self.interval.end())),
+        )
+    }
+
+    /// Counts operations in the alignment, excluding operations outside the boundary `0..contig_len`.
     /// In contrast to `count_region_operations`, this function assumes that there is no alignment
     /// out of the contig boundaries.
-    pub fn count_region_operations_fast(&self, contig_end: u32) -> OperCounts<u32> {
+    pub fn count_region_operations_fast(&self, contig_len: u32) -> OperCounts<u32> {
         let mut counts = OperCounts::default();
-        let mut first = true;
         for item in self.cigar.iter() {
             let oplen = item.len();
             match item.operation() {
@@ -263,21 +280,12 @@ impl Alignment {
                 Operation::Diff => counts.mismatches += oplen,
                 Operation::Del => counts.deletions += oplen,
                 Operation::Ins => counts.insertions += oplen,
-                Operation::Soft => {
-                    counts.clipping += if first {
-                        // If first operation of the CIGAR,
-                        // limit clipping to the distance between contig start (0) and alignment start.
-                        min(oplen, self.interval.start())
-                    } else {
-                        // Otherwise, we should be at the end of the CIGAR,
-                        // limit clipping to the distance distance between curr position and contig end.
-                        min(oplen, contig_end.saturating_sub(self.interval.end()))
-                    };
-                }
+                Operation::Soft => {}
                 op => panic!("Unsupported CIGAR operation {}", op),
             }
-            first = false;
         }
+        let (left, right) = self.limited_clipping(contig_len);
+        counts.clipping = left + right;
         counts
     }
 

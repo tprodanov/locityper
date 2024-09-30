@@ -12,8 +12,13 @@ use crate::{
         Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         counts::KmerCounts,
+        aln::Alignment,
+        cigar::Operation,
     },
-    bg::ReadDepth,
+    bg::{
+        ReadDepth,
+        err_prof::{ErrorProfile, EditDist},
+    },
     err::{error, add_path, validate_param},
     ext::{self, vec::IterExt},
 };
@@ -217,11 +222,11 @@ impl ExplicitWeights {
     // 2 ^ 32
     const SCALE: f64 = (1u64 << 32) as f64;
 
-    fn push(&mut self, val: f64) {
-        let i = (val * Self::SCALE) as u64;
-        self.weights.push((i, self.sum));
-        self.sum = self.sum.checked_add(i).unwrap();
-    }
+    // fn push(&mut self, val: f64) {
+    //     let i = (val * Self::SCALE) as u64;
+    //     self.weights.push((i, self.sum));
+    //     self.sum = self.sum.checked_add(i).unwrap();
+    // }
 
     fn extend_by(&mut self, n: usize, val: f64) {
         let i = (val * Self::SCALE) as u64;
@@ -233,22 +238,23 @@ impl ExplicitWeights {
 
     /// Needs to be called at the end.
     fn finish(&mut self) {
-        self.weights.push((0, self.sum));
+        let last = self.weights.last().unwrap().0;
+        self.weights.push((last, self.sum));
     }
 
     #[inline]
-    fn at(&self, i: usize) -> f64 {
-        self.weights[i].0 as f64 / Self::SCALE
+    fn at(&self, i: u32) -> f64 {
+        self.weights[i as usize].0 as f64 / Self::SCALE
     }
 
     #[inline]
-    fn sum(&self, i: usize, j: usize) -> f64 {
-        (self.weights[j].1 - self.weights[i].1) as f64 / Self::SCALE
+    fn sum(&self, i: u32, j: u32) -> f64 {
+        (self.weights[j as usize].1 - self.weights[i as usize].1) as f64 / Self::SCALE
     }
 
     #[inline]
-    fn mean(&self, i: usize, j: usize) -> f64 {
-        ((self.weights[j].1 - self.weights[i].1) / (j - i) as u64) as f64 / Self::SCALE
+    fn mean(&self, i: u32, j: u32) -> f64 {
+        ((self.weights[j as usize].1 - self.weights[i as usize].1) / (j - i) as u64) as f64 / Self::SCALE
     }
 
     #[inline(always)]
@@ -432,7 +438,7 @@ impl ContigInfo {
             / f64::from(padded_end - padded_start)).round() as u8;
         let ling_compl = self.mov_complexities[padded_start as usize];
         let explicit_weight = self.explicit_weights.as_ref()
-            .map(|weights| weights.mean(start as usize, end as usize)).unwrap_or(1.0);
+            .map(|weights| weights.mean(start, end)).unwrap_or(1.0);
 
         let kmer_start = padded_start.saturating_sub(self.kmer_size / 2);
         let kmer_end = min(self.contig_len - self.kmer_size + 1, padded_end - self.kmer_size / 2);
@@ -495,12 +501,73 @@ impl ContigInfo {
     pub fn read_end_weight(&self, middle: Option<u32>) -> f64 {
         let Some(i) = middle else { return 0.0 };
         let weights = self.explicit_weights.as_ref().expect("Explicit weights must be defined");
-        let i = i as usize;
-        let n = weights.len();
-        let u = self.window_size() as usize / 2;
+        let i = i;
+        let n = weights.len() as u32;
+        let u = self.window_size() / 2;
         weights.at(i)
             .max(weights.at(i.saturating_sub(u)))
             .max(weights.at(min(i + u, n - 1)))
+    }
+
+    /// When explicit weights are defined, calculates weighted alignment probability.
+    /// Returns triple (probability, edit distance).
+    fn weighted_aln_prob(&self, aln: &Alignment, err_prof: &ErrorProfile) -> (f64, EditDist) {
+        let mut prob = 0.0;
+        let mut sum_weight = 0.0;
+        let mut edit: u32 = 0;
+        let mut sum_dels: u32 = 0;
+        let mut sum_len: u32 = 0;
+
+        let weights = self.explicit_weights.as_ref().expect("Explicit weights must be defined");
+        let mut rpos = aln.interval().start();
+        for item in aln.cigar().iter() {
+            let (shift, op_prob) = match item.operation() {
+                Operation::Equal => {
+                    (item.len(), err_prof.match_prob())
+                }
+                Operation::Diff => {
+                    edit += item.len();
+                    (item.len(), err_prof.mismatch_prob())
+                }
+                Operation::Ins => {
+                    edit += item.len();
+                    (0, err_prof.insert_prob())
+                }
+                Operation::Del => {
+                    sum_dels += item.len();
+                    edit += item.len();
+                    (item.len(), err_prof.deletion_prob())
+                }
+                Operation::Soft => continue,
+                _ => panic!("Unsupported CIGAR operation in {}", aln.cigar()),
+            };
+            let curr_weight = if shift == 0 {
+                item.len() as f64 * weights.at(rpos)
+            } else {
+                weights.sum(rpos, rpos + shift)
+            };
+            prob += curr_weight * op_prob;
+            sum_weight += curr_weight;
+            sum_len += item.len();
+            rpos += shift;
+        }
+
+        let (left_clipping, right_clipping) = aln.limited_clipping(self.contig_len);
+        for (rpos, clipping) in [(aln.interval().start(), left_clipping), (aln.interval().end(), right_clipping)] {
+            if clipping > 0 {
+                let curr_weight = clipping as f64 * weights.at(rpos);
+                prob += curr_weight * err_prof.clipping_prob();
+                sum_weight += curr_weight;
+                sum_len += clipping;
+            }
+        }
+
+        // Normalize by average weight, because different locations may have different weights.
+        // This way we make sure that various subregions contribute differently to alignment probability,
+        // but ensure that more important location does not get penalized simply by having higher sum weight.
+        prob *= sum_len as f64 / sum_weight;
+        let edit = EditDist::new(edit, sum_len - sum_dels);
+        (prob, edit)
     }
 }
 
@@ -550,6 +617,20 @@ impl ContigInfos {
             s += f64::max(info.read_end_weight(pair.middle1()), info.read_end_weight(pair.middle2()));
         }
         s / pair_alns.len() as f64
+    }
+
+    /// If explicit weights are defined, calculates weighted alignment probability, otherwise simply aln. prob.
+    /// Returns alignment probability and edit distance.
+    pub fn weighted_aln_prob(&self, aln: &Alignment, err_prof: &ErrorProfile) -> (f64, EditDist) {
+        let info = &self.infos[aln.contig_id().ix()];
+        if self.has_explicit_weights {
+            info.weighted_aln_prob(aln, err_prof)
+        } else {
+            let read_prof = aln.count_region_operations_fast(info.contig_len);
+            let aln_prob = err_prof.ln_prob(&read_prof);
+            let dist = read_prof.edit_distance();
+            (aln_prob, dist)
+        }
     }
 }
 

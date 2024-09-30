@@ -23,6 +23,7 @@ pub enum Operation {
 
 impl Operation {
     /// Does the Cigar operation consume reference sequence?
+    #[inline]
     pub const fn consumes_ref(self) -> bool {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff | Operation::Del => true,
@@ -31,6 +32,7 @@ impl Operation {
     }
 
     /// Does the Cigar operation consume query sequence?
+    #[inline]
     pub const fn consumes_query(self) -> bool {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff | Operation::Ins | Operation::Soft => true,
@@ -39,6 +41,7 @@ impl Operation {
     }
 
     /// Does the Cigar operation consume both reference and query sequences?
+    #[inline]
     pub const fn consumes_both(self) -> bool {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff => true,
@@ -120,21 +123,25 @@ pub struct CigarItem {
 
 impl CigarItem {
     /// Creates a new tuple.
+    #[inline(always)]
     pub fn new(op: Operation, len: u32) -> Self {
         CigarItem { op, len }
     }
 
     /// Get operation.
+    #[inline(always)]
     pub fn operation(&self) -> Operation {
         self.op
     }
 
     /// Get length.
+    #[inline(always)]
     pub fn len(&self) -> u32 {
         self.len
     }
 
     /// Creates a new tuple from a raw u32 value.
+    #[inline(always)]
     pub fn from_u32(val: u32) -> Self {
         Self {
             op: Operation::from_u32(val & 0b1111),
