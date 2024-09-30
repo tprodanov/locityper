@@ -203,6 +203,66 @@ impl WeightCalculator {
     }
 }
 
+/// Explicitely set weights for one contig.
+#[derive(Default, Clone)]
+struct ExplicitWeights {
+    /// Each weight is converted to integer. This is done for more accurate cumulative sums.
+    /// Length of the vector = length of the contig.
+    /// Each value = (weight, cumulative weight without the last one).
+    weights: Vec<(u64, u64)>,
+    sum: u64,
+}
+
+impl ExplicitWeights {
+    // 2 ^ 32
+    const SCALE: f64 = (1u64 << 32) as f64;
+
+    fn push(&mut self, val: f64) {
+        let i = (val * Self::SCALE) as u64;
+        self.weights.push((i, self.sum));
+        self.sum = self.sum.checked_add(i).unwrap();
+    }
+
+    fn extend_by(&mut self, n: usize, val: f64) {
+        let i = (val * Self::SCALE) as u64;
+        for _ in 0..n {
+            self.weights.push((i, self.sum));
+            self.sum = self.sum.checked_add(i).unwrap();
+        }
+    }
+
+    /// Needs to be called at the end.
+    fn finish(&mut self) {
+        self.weights.push((0, self.sum));
+    }
+
+    #[inline]
+    fn at(&self, i: usize) -> f64 {
+        self.weights[i].0 as f64 / Self::SCALE
+    }
+
+    #[inline]
+    fn sum(&self, i: usize, j: usize) -> f64 {
+        (self.weights[j].1 - self.weights[i].1) as f64 / Self::SCALE
+    }
+
+    #[inline]
+    fn mean(&self, i: usize, j: usize) -> f64 {
+        ((self.weights[j].1 - self.weights[i].1) / (j - i) as u64) as f64 / Self::SCALE
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.weights.is_empty()
+    }
+
+    /// After calling `finish` this number will be 1 bigger than the number of pushed elements.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.weights.len()
+    }
+}
+
 /// Load explicit weights from a BED file (contig start end value).
 /// Multipliers must be defined for all contigs.
 ///
@@ -210,15 +270,13 @@ impl WeightCalculator {
 fn load_explicit_weights(
     filename: &Path,
     contigs: &Arc<ContigNames>,
-    window_size: usize,
-) -> crate::Result<Vec<Option<[Vec<f64>; 2]>>>
+) -> crate::Result<Vec<Option<ExplicitWeights>>>
 {
     let reader = ext::sys::open(&filename)?;
     log::debug!("    Loading explicit region weights from {}", ext::fmt::path(&filename));
     // Explicit weights for each basepair.
-    let mut bp_weights = vec![vec![]; contigs.len()];
+    let mut weights = vec![Some(ExplicitWeights::default()); contigs.len()];
     let mut ignored_lines = 0;
-    let mut warned_over1 = false;
     for line in reader.lines() {
         let line = line.map_err(add_path!(filename))?;
         let mut split = line.split_whitespace();
@@ -236,22 +294,19 @@ fn load_explicit_weights(
             .ok_or_else(|| error!(ParsingError,
                 "Failed to parse explicit weights ({}, line `{}`): fourth numeric column required",
                 ext::fmt::path(&filename), line.replace('\t', " ")))?;
-        if val < 0.0 {
+        if val < 0.0 || val > 1.0 {
             return Err(
-                error!(ParsingError, "parse explicit weights ({}, line `{}`): value must be non-negative",
+                error!(ParsingError, "Failed to parse explicit weights ({}, line `{}`): value must be in [0, 1]",
                 ext::fmt::path(&filename), line.replace('\t', " ")));
-        } else if val > 1.0 && !warned_over1 {
-            warned_over1 = true;
-            log::warn!("    Explicit weight > 1 ({}, line `{}`). Use with care",
-                ext::fmt::path(&filename), line.replace('\t', " "));
         }
 
-        if bp_weights[interval.contig_id().ix()].len() != interval.start() as usize {
+        let curr_weights = weights[interval.contig_id().ix()].as_mut().unwrap();
+        if curr_weights.len() != interval.start() as usize {
             return Err(error!(ParsingError,
                 "Failed to parse explicit weights ({}): haplotype {} not fully covered",
                 ext::fmt::path(&filename), interval.contig_name()));
         }
-        bp_weights[interval.contig_id().ix()].resize(interval.end() as usize, val);
+        curr_weights.extend_by(interval.len() as usize, val);
     }
 
     if ignored_lines > 0 {
@@ -259,27 +314,19 @@ fn load_explicit_weights(
             ignored_lines, ext::fmt::path(&filename));
     }
 
-    let divisor = window_size as f64;
-    let mut all_weights = Vec::with_capacity(contigs.len());
-    for (weights, (name, &length)) in bp_weights.into_iter().zip(contigs.names().iter().zip(contigs.lengths())) {
-        if weights.is_empty() {
+    for (curr_weights, (name, &length)) in weights.iter_mut().zip(contigs.names().iter().zip(contigs.lengths())) {
+        let curr_weights = curr_weights.as_mut().unwrap();
+        if curr_weights.is_empty() {
             return Err(error!(ParsingError,
                 "Failed to parse explicit weights ({}): haplotype {} missing", ext::fmt::path(filename), name));
-        } else if weights.len() != length as usize {
+        } else if curr_weights.len() != length as usize {
             return Err(error!(ParsingError,
                 "Failed to parse explicit weights ({}): haplotype {} not fully covered/has different length",
                 ext::fmt::path(&filename), name));
         }
-        let mut mov_weights = Vec::with_capacity(weights.len() + 1 - window_size);
-        let mut s: f64 = weights[..window_size].iter().sum();
-        mov_weights.push(s / divisor);
-        for (&trail, &new) in weights.iter().zip(&weights[window_size..]) {
-            s = s + new - trail;
-            mov_weights.push(s / divisor);
-        }
-        all_weights.push(Some([weights, mov_weights]));
+        curr_weights.finish();
     }
-    Ok(all_weights)
+    Ok(weights)
 }
 
 /// Characteristics of a window.
@@ -317,9 +364,8 @@ pub struct ContigInfo {
     cumul_uniq_kmers: Vec<u32>,
     /// Linguistic complexity for each moving window.
     mov_complexities: Vec<f64>,
-    /// If defined, explicit weights.
-    /// First vector: direct values, second: moving averages.
-    explicit_weights: Option<[Vec<f64>; 2]>,
+    /// Explicitely set weights.
+    explicit_weights: Option<ExplicitWeights>,
 
     /// Default window weights (without boundary tweaking).
     default_weights: Vec<f64>,
@@ -332,7 +378,7 @@ impl ContigInfo {
         seq: &[u8],
         kmer_counts: &KmerCounts,
         depth: &ReadDepth,
-        explicit_weights: Option<[Vec<f64>; 2]>,
+        explicit_weights: Option<ExplicitWeights>,
         params: &super::Params,
         dbg_writer: &mut impl Write,
     ) -> crate::Result<Self>
@@ -352,12 +398,6 @@ impl ContigInfo {
         let reg_end = reg_start + sum_len;
         let left_padding = (neighb_size - window) / 2;
         let right_padding = neighb_size - window - left_padding;
-
-        if let Some(weights) = &explicit_weights {
-            assert!(weights[0].len() == contig_len as usize
-                && weights[1].len() == (contig_len + 1 - window) as usize,
-                "Incorrect number of explicit weights for {}", contig_name);
-        }
 
         // Unique k-mers should have count = 0 because `kmer_counts` only stores off-target matches.
         let cumul_uniq_kmers = IterExt::cumul_sums(kmer_counts.get(contig_id.ix()).iter().map(|&count| count == 0));
@@ -392,7 +432,7 @@ impl ContigInfo {
             / f64::from(padded_end - padded_start)).round() as u8;
         let ling_compl = self.mov_complexities[padded_start as usize];
         let explicit_weight = self.explicit_weights.as_ref()
-            .map(|[_, mov_weights]| mov_weights[start as usize]).unwrap_or(1.0);
+            .map(|weights| weights.mean(start as usize, end as usize)).unwrap_or(1.0);
 
         let kmer_start = padded_start.saturating_sub(self.kmer_size / 2);
         let kmer_end = min(self.contig_len - self.kmer_size + 1, padded_end - self.kmer_size / 2);
@@ -454,13 +494,13 @@ impl ContigInfo {
     /// as well as half window shifts to both sides.
     pub fn read_end_weight(&self, middle: Option<u32>) -> f64 {
         let Some(i) = middle else { return 0.0 };
-        let [weights, _] = self.explicit_weights.as_ref().expect("Explicit weights must be defined");
+        let weights = self.explicit_weights.as_ref().expect("Explicit weights must be defined");
         let i = i as usize;
         let n = weights.len();
         let u = self.window_size() as usize / 2;
-        weights[i]
-            .max(weights[i.saturating_sub(u)])
-            .max(weights[min(i + u, n - 1)])
+        weights.at(i)
+            .max(weights.at(i.saturating_sub(u)))
+            .max(weights.at(min(i + u, n - 1)))
     }
 }
 
@@ -482,7 +522,7 @@ impl ContigInfos {
     {
         let contigs = set.contigs();
         let explicit_weights = match weights_filename {
-            Some(fname) => load_explicit_weights(fname, contigs, depth.window_size() as usize)?,
+            Some(fname) => load_explicit_weights(fname, contigs)?,
             None => vec![None; contigs.len()],
         };
         let has_explicit_weights = explicit_weights[0].is_some();
