@@ -606,19 +606,6 @@ impl ContigInfos {
         Ok(Self { infos, has_explicit_weights })
     }
 
-    /// If explicit weights are defined, returns average read pair weight.
-    pub fn explicit_read_weight(&self, pair_alns: &[PairAlignment]) -> f64 {
-        if !self.has_explicit_weights {
-            return 1.0;
-        }
-        let mut s = 0.0;
-        for pair in pair_alns {
-            let info = &self.infos[pair.contig_id().ix()];
-            s += f64::max(info.read_end_weight(pair.middle1()), info.read_end_weight(pair.middle2()));
-        }
-        s / pair_alns.len() as f64
-    }
-
     /// If explicit weights are defined, calculates weighted alignment probability, otherwise simply aln. prob.
     /// Returns alignment probability and edit distance.
     pub fn weighted_aln_prob(&self, aln: &Alignment, err_prof: &ErrorProfile) -> (f64, EditDist) {
@@ -631,6 +618,20 @@ impl ContigInfos {
             let dist = read_prof.edit_distance();
             (aln_prob, dist)
         }
+    }
+
+    /// Returns average read weight across all alignments based on explicit weights.
+    pub fn average_read_weight(&self, alns: &[Alignment]) -> f64 {
+        if !self.has_explicit_weights {
+            return 1.0;
+        }
+        let sum_weight = alns.iter().map(|aln|
+            self.infos[aln.contig_id().ix()]
+                .explicit_weights.as_ref().expect("Explicit weights must be defined")
+                .mean(aln.interval().start(), aln.interval().end())
+            )
+            .sum::<f64>();
+        sum_weight / alns.len() as f64
     }
 }
 

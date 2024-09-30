@@ -122,6 +122,7 @@ struct FilteredReader<'a, R: bam::Read> {
     contigs: Arc<ContigNames>,
     err_prof: &'a ErrorProfile,
     edit_dist_cache: &'a EditDistCache,
+    contig_infos: &'a ContigInfos,
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id, alignment start), value: index of the previous position.
     found_alns: IntMap<TwoU32, usize>,
@@ -138,6 +139,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
         edit_dist_cache: &'a EditDistCache,
+        contig_infos: &'a ContigInfos,
     ) -> crate::Result<Self> {
         let mut record = bam::Record::new();
         // Reader would return None if there are no more records.
@@ -145,7 +147,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
             found_alns: IntMap::default(),
-            reader, record, contigs, err_prof, edit_dist_cache, has_more,
+            reader, record, contigs, err_prof, edit_dist_cache, contig_infos, has_more,
         })
     }
 
@@ -209,9 +211,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 cigar.hard_to_soft();
             }
             let mut aln = Alignment::new(&self.record, cigar, read_end, Arc::clone(&self.contigs), f64::NAN);
-            let read_prof = aln.count_region_operations_fast(self.contigs.get_len(aln.interval().contig_id()));
-            let aln_prob = self.err_prof.ln_prob(&read_prof);
-            let dist = read_prof.edit_distance();
+            let (aln_prob, dist) = self.contig_infos.weighted_aln_prob(&aln, &self.err_prof);
             let (good_dist, passable_dist) = self.edit_dist_cache.get(dist.read_len());
             let is_good_dist = dist.edit() <= good_dist;
             // Discard all alignments with edit distance over half of the read length.
@@ -558,7 +558,7 @@ fn identify_paired_end_alignments(
         identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, min_prob1, min_prob2, max_alns,
             buffer, insert_distr, params);
     }
-    let weight = contig_infos.explicit_read_weight(&aln_pairs);
+    let weight = contig_infos.average_read_weight(&alignments);
 
     let both_unmapped = min_prob1 + min_prob2
         + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty();
@@ -610,7 +610,7 @@ fn identify_single_end_alignments(
             curr_saved += 1;
         }
     }
-    let weight = contig_infos.explicit_read_weight(&aln_pairs);
+    let weight = contig_infos.average_read_weight(&alignments);
 
     let unmapped_prob = min_prob + params.unmapped_penalty;
     // Only for normalization, unmapped probability is multiplied by the number of contigs
@@ -762,7 +762,8 @@ impl AllAlignments {
             .map_err(add_path!(!))?;
         writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tuse").map_err(add_path!(!))?;
 
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache)?;
+        let mut reader = FilteredReader::new(
+            reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache, contig_infos)?;
 
         let insert_distr = bg_distr.insert_distr();
         let is_paired_end = insert_distr.is_paired_end();
