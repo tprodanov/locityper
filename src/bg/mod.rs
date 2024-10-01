@@ -100,26 +100,32 @@ impl BgDistr {
     }
 
     /// Access sequencing information (read length and technology).
+    #[inline(always)]
     pub fn seq_info(&self) -> &SequencingInfo {
         &self.seq_info
     }
 
+    #[inline(always)]
     pub fn set_seq_info(&mut self, seq_info: SequencingInfo) {
         self.seq_info = seq_info;
     }
 
+    #[inline(always)]
     pub fn depth(&self) -> &ReadDepth {
         &self.depth
     }
 
+    #[inline(always)]
     pub fn depth_mut(&mut self) -> &mut ReadDepth {
         &mut self.depth
     }
 
+    #[inline(always)]
     pub fn insert_distr(&self) -> &InsertDistr {
         &self.insert_distr
     }
 
+    #[inline(always)]
     pub fn error_profile(&self) -> &ErrorProfile {
         &self.err_prof
     }

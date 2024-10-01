@@ -1,5 +1,5 @@
 use std::{
-    cmp::min,
+    cmp::{min, max},
     path::Path,
     io::{Write, BufRead},
     sync::Arc,
@@ -546,6 +546,8 @@ impl ContigInfo {
             } else {
                 weights.sum(rpos, rpos + shift)
             };
+            // log::debug!("    {}{}", item.operation(), item.len());
+            // log::debug!("        p += {:.5} * {:.5}", curr_weight, op_prob);
             prob += curr_weight * op_prob;
             sum_weight += curr_weight;
             sum_len += item.len();
@@ -556,11 +558,17 @@ impl ContigInfo {
         for (rpos, clipping) in [(aln.interval().start(), left_clipping), (aln.interval().end(), right_clipping)] {
             if clipping > 0 {
                 let curr_weight = clipping as f64 * weights.at(rpos);
+                // log::debug!("    {}S", clipping);
+                // log::debug!("        p += {:.5} * {:.5}", curr_weight, err_prof.clipping_prob());
                 prob += curr_weight * err_prof.clipping_prob();
                 sum_weight += curr_weight;
                 sum_len += clipping;
             }
         }
+
+        // log::debug!("    Σw = {:.5}, Σl = {}, Σδ = {}", sum_weight, sum_len, sum_dels);
+        // log::debug!("    P = {:.10} * {} / {:.5} -> {:.10}", prob, sum_len, sum_weight,
+        //     prob * sum_len as f64 / sum_weight);
 
         // Normalize by average weight, because different locations may have different weights.
         // This way we make sure that various subregions contribute differently to alignment probability,
@@ -632,6 +640,63 @@ impl ContigInfos {
             )
             .sum::<f64>();
         sum_weight / alns.len() as f64
+    }
+
+    /// Calculate weight for each bp of the read based on explicit subregion weights.
+    fn read_bp_weights(&self, alns: &[Alignment]) -> [Vec<f64>; 2] {
+        debug_assert!(self.has_explicit_weights);
+        // Weight for each of the read ends.
+        let mut weights = [Vec::<f64>::new(), Vec::new()];
+        for aln in alns {
+            let re_weights = &mut weights[aln.read_end().ix()];
+            let read_len = aln.cigar().query_len();
+            if re_weights.is_empty() {
+                re_weights.resize(read_len as usize, 0.0);
+            }
+            let (mut qpos, qstep) = if aln.strand().is_forward() {
+                (0_i32, 1_i32)
+            } else {
+                (read_len as i32 - 1, -1)
+            };
+            let mut rpos = aln.interval().start();
+            let contig_weights = self.infos[aln.contig_id().ix()]
+                .explicit_weights.as_ref().expect("Explicit weights must be defined");
+            for item in aln.cigar().iter() {
+                let curr_rstep = if item.operation().consumes_ref() { 1 } else { 0 };
+                let curr_qstep = if item.operation().consumes_query() { qstep } else { 0 };
+                for _ in 0..item.len() {
+                    re_weights[qpos as usize] = re_weights[qpos as usize].max(contig_weights.at(rpos));
+                    rpos += curr_rstep;
+                    qpos += curr_qstep;
+                }
+            }
+        }
+        weights
+    }
+
+    #[inline(always)]
+    pub fn has_explicit_weights(&self) -> bool {
+        self.has_explicit_weights
+    }
+
+    /// Recalculate alignment probabilities based on explicit weights.
+    /// Returns minimum likelihoods for each read ends, as well as the combined read weight.
+    pub fn recalc_aln_probs(&self, alns: &mut [Alignment], err_prof: &ErrorProfile) -> (f64, f64, f64) {
+        let weights = self.read_bp_weights(alns);
+        let sum_weight = [weights[0].iter().sum::<f64>(), weights[1].iter().sum()];
+        let mut min_probs = [f64::INFINITY; 2];
+        for aln in alns {
+            let read_end = aln.read_end().ix();
+            // Normalize by sum weight to simplify calculations later
+            // (no need to recalculate insert size weights, unmapped penalty, etc).
+            let new_prob = err_prof.weighted_aln_prob(aln, &weights, self.infos[read_end].contig_len)
+                / sum_weight[read_end];
+            aln.set_ln_prob(new_prob);
+            min_probs[aln.read_end().ix()] = min_probs[aln.read_end().ix()].min(new_prob);
+        }
+        let weight1 = sum_weight[0] / max(1, weights[0].len()) as f64;
+        let weight2 = sum_weight[1] / max(1, weights[1].len()) as f64;
+        (min_probs[0], min_probs[1], f64::max(weight1, weight2))
     }
 }
 

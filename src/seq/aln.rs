@@ -30,6 +30,11 @@ impl Strand {
     pub fn from_record(record: &Record) -> Self {
         if record.is_reverse() { Self::Reverse } else { Self::Forward }
     }
+
+    #[inline(always)]
+    pub fn is_forward(self) -> bool {
+        self == Strand::Forward
+    }
 }
 
 impl fmt::Debug for Strand {
@@ -101,7 +106,7 @@ impl fmt::Display for ReadEnd {
     }
 }
 
-/// Light alignment information. Use `Alignemnt` to store alignment name and CIGAR as well.
+/// Light alignment information. Use `Alignment` to store alignment name and CIGAR as well.
 #[derive(Clone)]
 pub struct Alignment {
     interval: Interval,
@@ -264,7 +269,7 @@ impl Alignment {
             // Limit left clipping to the distance between contig start (0) and alignment start.
             min(left, self.interval.start()),
             // Limit right clipping to the distance distance between alignment end and contig end.
-            max(right, contig_len.saturating_sub(self.interval.end())),
+            min(right, contig_len.saturating_sub(self.interval.end())),
         )
     }
 

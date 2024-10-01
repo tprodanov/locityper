@@ -10,7 +10,7 @@ use std::{
 use crate::{
     err::{add_path},
     seq::{
-        aln::{NamedAlignment, OpCounter},
+        aln::{Alignment, NamedAlignment, OpCounter},
         cigar::Operation,
     },
     math::{self, distr::BetaBinomial},
@@ -219,6 +219,52 @@ impl ErrorProfile {
             + self.oper_probs.insertions * counts.insertions.try_into().unwrap()
             + self.oper_probs.deletions * counts.deletions.try_into().unwrap()
             + self.oper_probs.clipping * counts.clipping.try_into().unwrap()
+    }
+
+    /// Calculates weighted alignment ln-probability.
+    /// Weights: paired-end weights.
+    pub fn weighted_aln_prob(
+        &self,
+        aln: &Alignment,
+        weights: &[Vec<f64>; 2],
+        contig_len: u32,
+    ) -> f64
+    {
+        let re_weights = &weights[aln.read_end().ix()];
+        let (mut qpos, qstep) = if aln.strand().is_forward() {
+            (0_i32, 1_i32)
+        } else {
+            (aln.cigar().query_len() as i32 - 1, -1)
+        };
+        let (left_clipping, right_clipping) = aln.limited_clipping(contig_len);
+        let mut aln_prob = 0.0;
+        let mut first = true;
+        for item in aln.cigar().iter() {
+            let mut length = item.len();
+            let op_prob = match item.operation() {
+                Operation::Soft => {
+                    if first {
+                        qpos += qstep * (length - left_clipping) as i32;
+                        length = left_clipping;
+                    } else {
+                        length = right_clipping;
+                    }
+                    self.oper_probs.clipping
+                }
+                Operation::Equal => self.oper_probs.matches,
+                Operation::Diff => self.oper_probs.mismatches,
+                Operation::Ins => self.oper_probs.insertions,
+                Operation::Del => self.oper_probs.deletions,
+                _ => panic!("Unsupported CIGAR operation in {}", aln.cigar()),
+            };
+            let curr_qstep = if item.operation().consumes_query() { qstep } else { 0 };
+            for _ in 0..length {
+                aln_prob += op_prob * re_weights[qpos as usize];
+                qpos += curr_qstep;
+            }
+            first = false;
+        }
+        aln_prob
     }
 
     /// Returns probability of a CIGAR operation.
