@@ -211,10 +211,10 @@ impl WeightCalculator {
 /// Explicitely set weights for one contig.
 #[derive(Default, Clone)]
 struct ExplicitWeights {
-    /// Each weight is converted to integer. This is done for more accurate cumulative sums.
+    /// Cumulative weights are converted to integers for more accurate sums.
     /// Length of the vector = length of the contig.
     /// Each value = (weight, cumulative weight without the last one).
-    weights: Vec<(u64, u64)>,
+    weights: Vec<(f64, u64)>,
     sum: u64,
 }
 
@@ -224,14 +224,14 @@ impl ExplicitWeights {
 
     // fn push(&mut self, val: f64) {
     //     let i = (val * Self::SCALE) as u64;
-    //     self.weights.push((i, self.sum));
+    //     self.weights.push((val, self.sum));
     //     self.sum = self.sum.checked_add(i).unwrap();
     // }
 
     fn extend_by(&mut self, n: usize, val: f64) {
         let i = (val * Self::SCALE) as u64;
         for _ in 0..n {
-            self.weights.push((i, self.sum));
+            self.weights.push((val, self.sum));
             self.sum = self.sum.checked_add(i).unwrap();
         }
     }
@@ -244,7 +244,7 @@ impl ExplicitWeights {
 
     #[inline]
     fn at(&self, i: u32) -> f64 {
-        self.weights[i as usize].0 as f64 / Self::SCALE
+        self.weights[i as usize].0
     }
 
     #[inline]
@@ -672,6 +672,38 @@ impl ContigInfos {
             }
         }
         weights
+    }
+
+    /// Takes contig explicit weights based on the primary read alignment.
+    pub fn weights_along_read(&self, aln: &Alignment, weights: &mut Vec<f64>) {
+        weights.clear();
+        let read_len = aln.cigar().query_len();
+        weights.resize(read_len as usize, 0.0);
+        let (mut qpos, qstep) = if aln.strand().is_forward() {
+            (0_i32, 1_i32)
+        } else {
+            (read_len as i32 - 1, -1)
+        };
+        let mut rpos = aln.interval().start();
+        let contig_weights = self.infos[aln.contig_id().ix()]
+            .explicit_weights.as_ref().expect("Explicit weights must be defined");
+
+        let mut s = 0.0;
+        for item in aln.cigar().iter() {
+            let curr_rstep = if item.operation().consumes_ref() { 1 } else { 0 };
+            let curr_qstep = if item.operation().consumes_query() { qstep } else { 0 };
+            for _ in 0..item.len() {
+                let w = contig_weights.at(rpos);
+                weights[qpos as usize] = w;
+                s += w;
+                rpos += curr_rstep;
+                qpos += curr_qstep;
+            }
+        }
+        // Normalize by average weight so that final weighted alignment likelihood
+        // has similar range to unweighted likelihood.
+        s /= read_len as f64;
+        weights.iter_mut().for_each(|w| *w /= s);
     }
 
     #[inline(always)]

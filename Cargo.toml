@@ -1,7 +1,7 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.17.1-alpha4"
+version = "0.17.1-alpha5"
 rust-version = "1.70"
 edition = "2021"
 

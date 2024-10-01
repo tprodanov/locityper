@@ -226,11 +226,10 @@ impl ErrorProfile {
     pub fn weighted_aln_prob(
         &self,
         aln: &Alignment,
-        weights: &[Vec<f64>; 2],
+        weights: &[f64],
         contig_len: u32,
     ) -> f64
     {
-        let re_weights = &weights[aln.read_end().ix()];
         let (mut qpos, qstep) = if aln.strand().is_forward() {
             (0_i32, 1_i32)
         } else {
@@ -259,7 +258,7 @@ impl ErrorProfile {
             };
             let curr_qstep = if item.operation().consumes_query() { qstep } else { 0 };
             for _ in 0..length {
-                aln_prob += op_prob * re_weights[qpos as usize];
+                aln_prob += op_prob * weights[qpos as usize];
                 qpos += curr_qstep;
             }
             first = false;
