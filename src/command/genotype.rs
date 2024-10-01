@@ -943,11 +943,14 @@ fn analyze_locus(
     let all_alns = if args.debug >= DebugLvl::Full {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         let read_kmer_writer = ext::sys::create_gzip(&locus.out_dir.join("read_kmers.csv.gz"))?;
+        let aln_recalc_writer = if contig_infos.has_explicit_weights() {
+            Some(ext::sys::create_gzip(&locus.out_dir.join("weighted_reads.csv.gz"))?)
+        } else { None };
         AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, reads_writer, read_kmer_writer)?
+            &args.assgn_params, reads_writer, read_kmer_writer, aln_recalc_writer)?
     } else {
         AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, io::sink(), io::sink())?
+            &args.assgn_params, io::sink(), io::sink(), None)?
     };
 
     if locus.reads_filename.exists() {

@@ -22,6 +22,7 @@ use crate::{
     algo::{bisect, TwoU32, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
     math::Ln,
     model::windows::ContigInfos,
+    ext::sys::GzFile,
 };
 
 // ------------------------- Read-end and pair-end data, such as sequences and qualities -------------------------
@@ -89,7 +90,7 @@ impl MateData {
 
 /// Read information: read name, two sequences and qualities (for both mates).
 #[derive(Default, Clone)]
-pub(super) struct ReadData {
+pub struct ReadData {
     name: String,
     name_hash: NameHash,
     mates: [Option<MateData>; 2],
@@ -122,12 +123,9 @@ struct FilteredReader<'a, R: bam::Read> {
     contigs: Arc<ContigNames>,
     err_prof: &'a ErrorProfile,
     edit_dist_cache: &'a EditDistCache,
-    config_infos: &'a ConfigInfos,
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id, alignment start), value: index of the previous position.
     found_alns: IntMap<TwoU32, usize>,
-    /// Buffer for weights along the read.
-    read_weights: Vec<f64>,
 }
 
 #[inline]
@@ -140,7 +138,6 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         mut reader: R,
         contigs: Arc<ContigNames>,
         err_prof: &'a ErrorProfile,
-        config_infos: &'a ConfigInfos,
         edit_dist_cache: &'a EditDistCache,
     ) -> crate::Result<Self> {
         let mut record = bam::Record::new();
@@ -149,8 +146,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
             found_alns: IntMap::default(),
-            read_weights: Vec::new(),
-            reader, record, contigs, err_prof, edit_dist_cache, config_infos, has_more,
+            reader, record, contigs, err_prof, edit_dist_cache, has_more,
         })
     }
 
@@ -222,15 +218,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             // Discard all alignments with edit distance over half of the read length.
             let is_passable_dist = dist.edit() <= passable_dist;
             any_good |= is_good_dist;
-
-            let aln_prob = if self.config_infos.has_explicit_weights() {
-                if primary {
-                    self.config_infos.weights_along_read(&aln, &mut self.read_weights);
-                }
-                self.err_prof.weighted_aln_prob(&aln, &self.read_weights, contig_len)
-            } else {
-                self.err_prof.ln_prob(&read_prof)
-            };
+            let aln_prob = self.err_prof.ln_prob(&read_prof);
 
             write!(dbg_writer, "{}\t{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
                 dist, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
@@ -520,6 +508,7 @@ fn identify_contig_pair_alns(
 /// Returns groupped alignments and true if the alignments should be used for read assignment.
 fn identify_paired_end_alignments(
     read_data: ReadData,
+    weight: f64,
     tmp_alns: &mut Vec<Alignment>,
     max_alns: usize,
     min_prob1: f64,
@@ -527,7 +516,6 @@ fn identify_paired_end_alignments(
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
-    contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
@@ -574,7 +562,7 @@ fn identify_paired_end_alignments(
     }
 
     let both_unmapped = min_prob1 + min_prob2
-        + 2.0 * params.unmapped_penalty + bg_distr.insert_distr().insert_penalty();
+        + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty();
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
@@ -594,21 +582,16 @@ fn identify_paired_end_alignments(
 /// Returns groupped alignments and true if the alignments should be used for read assignment.
 fn identify_single_end_alignments(
     read_data: ReadData,
+    weight: f64,
     tmp_alns: &mut Vec<Alignment>,
     max_alns: usize,
-    mut min_prob: f64,
-    bg_distr: &BgDistr,
+    min_prob: f64,
     ln_ncontigs: f64,
-    contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
     let mut alignments = Vec::new();
     let mut aln_pairs = Vec::new();
-    let mut weight = 1.0;
-    if contig_infos.has_explicit_weights() {
-        (min_prob, _, weight) = contig_infos.recalc_aln_probs(tmp_alns, bg_distr.error_profile());
-    }
     // First: by contig (decreasing), then decreasing by ln-probability (increasing).
     tmp_alns.sort_unstable_by(|a, b| (b.contig_id(), a.ln_prob()).partial_cmp(&(a.contig_id(), b.ln_prob())).unwrap());
 
@@ -766,6 +749,7 @@ impl AllAlignments {
         params: &super::Params,
         mut dbg_writer1: impl Write,
         mut dbg_writer2: impl Write,
+        mut dbg_writer3: Option<GzFile>,
     ) -> crate::Result<Self>
     {
         log::info!("    Loading read alignments");
@@ -778,7 +762,10 @@ impl AllAlignments {
         writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tread_name")
             .map_err(add_path!(!))?;
         writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tuse").map_err(add_path!(!))?;
-
+        if let Some(w) = &mut dbg_writer3 {
+            writeln!(w, "read_hash\tread_end\tinterval\told_lik\tnew_lik\toverall_weight\tweights")
+                .map_err(add_path!(!))?;
+        }
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache)?;
 
         let is_paired_end = bg_distr.insert_distr().is_paired_end();
@@ -816,15 +803,21 @@ impl AllAlignments {
             }
 
             let use_read = unique_kmers.can_use_read(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
+            let (min_prob1, min_prob2, weight) = if contig_infos.has_explicit_weights() {
+                contig_infos.recalc_aln_probs(
+                    read_data.name_hash, &mut tmp_alns, bg_distr.error_profile(), dbg_writer3.as_mut())?
+            } else {
+                (opt_min_prob1.unwrap(), opt_min_prob2.unwrap_or(f64::NAN), 1.0)
+            };
+
             counts.few_kmers += u32::from(!use_read);
             let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns,
-                    opt_min_prob1.unwrap(), opt_min_prob2.unwrap(), &mut buffer, bg_distr, ln_ncontigs,
-                    contig_infos, params)
+                identify_paired_end_alignments(read_data, weight, &mut tmp_alns, max_alns,
+                    min_prob1, min_prob2, &mut buffer, bg_distr.insert_distr(), ln_ncontigs, params)
             } else {
-                identify_single_end_alignments(read_data, &mut tmp_alns, max_alns, opt_min_prob1.unwrap(),
-                    bg_distr, ln_ncontigs, contig_infos, params)
+                identify_single_end_alignments(read_data, weight, &mut tmp_alns, max_alns,
+                    min_prob1, ln_ncontigs, params)
             };
             if use_read {
                 reads.push(groupped_alns);
