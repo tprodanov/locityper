@@ -649,16 +649,16 @@ impl ContigInfos {
     }
 
     /// Calculate weight for each bp of the read based on explicit subregion weights.
-    /// Returns paired-end bp-level weights, as well as the total weight of the read pair.
-    fn weights_along_read(&self, alns: &[Alignment]) -> ([Vec<f64>; 2], [f64; 2]) {
+    /// Returns paired-end bp-level weights, as well as the maximum weight under the read pair.
+    fn weights_along_read(&self, alns: &[Alignment]) -> ([Vec<f64>; 2], f64) {
         debug_assert!(self.has_explicit_weights);
         let mut max_liks = [f64::NEG_INFINITY; 2];
         for aln in alns {
             max_liks[aln.read_end().ix()] = max_liks[aln.read_end().ix()].max(aln.ln_prob());
         }
 
-        // Overall average weight over each of the reads.
-        let mut overall_weight = [0.0; 2];
+        // Maximum weight under each of the basepairs.
+        let mut max_weight: f64 = 0.0;
         // Weight along each of the read ends.
         let mut weights = [Vec::<f64>::new(), Vec::new()];
         for aln in alns {
@@ -669,8 +669,6 @@ impl ContigInfos {
             }
             let contig_weights = self.infos[aln.contig_id().ix()]
                 .explicit_weights.as_ref().expect("Explicit weights must be defined");
-            overall_weight[read_end] = f64::max(overall_weight[read_end],
-                contig_weights.average(aln.interval().start(), aln.interval().end()));
 
             let re_weights = &mut weights[read_end];
             let read_len = aln.cigar().query_len();
@@ -687,7 +685,9 @@ impl ContigInfos {
                 let curr_rstep = if item.operation().consumes_ref() { 1 } else { 0 };
                 let curr_qstep = if item.operation().consumes_query() { qstep } else { 0 };
                 for _ in 0..item.len() {
-                    re_weights[qpos as usize] = f64::max(re_weights[qpos as usize], contig_weights.at(rpos));
+                    let rpos_weight = contig_weights.at(rpos);
+                    re_weights[qpos as usize] = re_weights[qpos as usize].max(rpos_weight);
+                    max_weight = max_weight.max(rpos_weight);
                     rpos += curr_rstep;
                     qpos += curr_qstep;
                 }
@@ -700,7 +700,7 @@ impl ContigInfos {
                 re_weights.iter_mut().for_each(|w| *w /= s);
             }
         }
-        (weights, overall_weight)
+        (weights, max_weight)
     }
 
     // /// Takes contig explicit weights based on the primary read alignment.
@@ -750,7 +750,7 @@ impl ContigInfos {
         mut dbg_writer: Option<&mut GzFile>,
     ) -> crate::Result<(f64, f64, f64)>
     {
-        let (weights, overall_weight) = self.weights_along_read(alns);
+        let (weights, max_weight) = self.weights_along_read(alns);
         let mut min_probs = [f64::INFINITY; 2];
         let mut re_written = [false; 2];
 
@@ -761,8 +761,7 @@ impl ContigInfos {
                 write!(w, "{}\t{}\t{}\t{:.2}\t{:.2}", name_hash, read_end + 1, aln.interval(),
                     Ln::to_log10(aln.ln_prob()), Ln::to_log10(new_prob)).map_err(add_path!(!))?;
                 if !re_written[read_end] {
-                    write!(w, "\t{:.2}\t{}", overall_weight[read_end], encode_runs(&weights[read_end]))
-                        .map_err(add_path!(!))?;
+                    write!(w, "\t{:.2}\t{}", max_weight, encode_runs(&weights[read_end])).map_err(add_path!(!))?;
                     re_written[read_end] = true;
                 }
                 writeln!(w).map_err(add_path!(!))?;
@@ -770,12 +769,7 @@ impl ContigInfos {
             aln.set_ln_prob(new_prob);
             min_probs[read_end] = f64::min(min_probs[read_end], new_prob);
         }
-        let overall_weight = if weights[0].is_empty() || weights[1].is_empty() {
-            f64::max(overall_weight[0], overall_weight[1])
-        } else {
-            0.5 * (overall_weight[0] + overall_weight[1])
-        };
-        Ok((min_probs[0], min_probs[1], overall_weight))
+        Ok((min_probs[0], min_probs[1], max_weight))
     }
 }
 
