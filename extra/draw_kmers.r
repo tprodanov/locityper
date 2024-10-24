@@ -18,6 +18,8 @@ parser$add_argument('-f', '--max-freq', metavar = 'INT', default = 10, type = 'i
     help = 'Ignore k-mers with frequency over INT [%(default)s].')
 parser$add_argument('--no-canon', action = 'store_false', dest = 'canon',
     help = 'Do not canonize k-mers (forward and reverse-compl will not match).')
+parser$add_argument('-b', '--breaks', nargs = 2, type = 'integer', metavar = 'INT',
+    help = 'Two integers, for distance (bp) between major and minor breaks.')
 parser$add_argument('-o', '--out', metavar = 'FILE', required = T,
     help = 'Output plot file (PNG, PDF, etc.). Literal {} is replaced with --names STR.')
 args <- parser$parse_args()
@@ -79,13 +81,30 @@ jaccard <- n12 / (n1 + n2 - n12)
 max_freq_legend <- min(20, args$max_freq)
 freq_limits <- c(2, max_freq_legend)
 
+if (!is.null(args$breaks)) {
+    m <- max(nrow(kmers1), nrow(kmers2))
+    d1 <- args$breaks[1]
+    d2 <- args$breaks[2]
+    stop1 <- ceiling(m / d1) * d1
+    stop2 <- ceiling(m / d2) * d2
+    breaks1 <- seq(0, stop1, d1)
+    breaks2 <- seq(0, stop2, d2)
+} else {
+    breaks1 <- waiver()
+    breaks2 <- waiver()
+}
+
 ggplot(kmer_pairs) +
     geom_point(aes(pos1, pos2, color = pmax(2, pmin(freq, max_freq_legend))),
         size = 0.1) +
     labs(title = sprintf('%s - %s', name1, name2),
         subtitle = sprintf('Jaccard index: %.5f', jaccard)) +
-    scale_x_continuous(sprintf('Position (%s)', name1), expand = expansion(mult = 0.02)) +
-    scale_y_continuous(sprintf('Position (%s)', name2), expand = expansion(mult = 0.02)) +
+    scale_x_continuous(sprintf('Position (%s)', name1),
+        expand = expansion(mult = 0.02),
+        breaks = breaks1, minor_breaks = breaks2) +
+    scale_y_continuous(sprintf('Position (%s)', name2),
+        expand = expansion(mult = 0.02),
+        breaks = breaks1, minor_breaks = breaks2) +
     coord_fixed() +
     scale_color_viridis('k-mer frequency',
         limits = freq_limits) +
