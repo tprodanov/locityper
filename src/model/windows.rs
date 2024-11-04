@@ -771,6 +771,19 @@ impl ContigInfos {
         }
         Ok((min_probs[0], min_probs[1], max_weight))
     }
+
+    /// If explicit weights are defined, returns average read pair weight.
+    pub fn explicit_read_weight(&self, pair_alns: &[PairAlignment]) -> f64 {
+        if !self.has_explicit_weights {
+            return 1.0;
+        }
+        let mut s = 0.0;
+        for pair in pair_alns {
+            let info = &self.infos[pair.contig_id().ix()];
+            s += f64::max(info.read_end_weight(pair.middle1()), info.read_end_weight(pair.middle2()));
+        }
+        s / pair_alns.len() as f64
+    }
 }
 
 fn encode_runs(vec: &[f64]) -> String {

@@ -508,7 +508,6 @@ fn identify_contig_pair_alns(
 /// Returns groupped alignments and true if the alignments should be used for read assignment.
 fn identify_paired_end_alignments(
     read_data: ReadData,
-    weight: f64,
     tmp_alns: &mut Vec<Alignment>,
     max_alns: usize,
     min_prob1: f64,
@@ -516,6 +515,7 @@ fn identify_paired_end_alignments(
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
     ln_ncontigs: f64,
+    contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
@@ -566,6 +566,8 @@ fn identify_paired_end_alignments(
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
+
+    let weight = contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob = weight * (aln.ln_prob - norm_fct);
@@ -582,11 +584,11 @@ fn identify_paired_end_alignments(
 /// Returns groupped alignments and true if the alignments should be used for read assignment.
 fn identify_single_end_alignments(
     read_data: ReadData,
-    weight: f64,
     tmp_alns: &mut Vec<Alignment>,
     max_alns: usize,
     min_prob: f64,
     ln_ncontigs: f64,
+    contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
 {
@@ -616,6 +618,8 @@ fn identify_single_end_alignments(
     // Only for normalization, unmapped probability is multiplied by the number of contigs
     // because there is an unmapped possibility for every contig, which we do not store explicitely.
     let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
+
+    let weight = contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob = weight * (aln.ln_prob - norm_fct);
@@ -803,21 +807,15 @@ impl AllAlignments {
             }
 
             let use_read = unique_kmers.can_use_read(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
-            let (min_prob1, min_prob2, weight) = if contig_infos.has_explicit_weights() {
-                contig_infos.recalc_aln_probs(
-                    read_data.name_hash, &mut tmp_alns, bg_distr.error_profile(), dbg_writer3.as_mut())?
-            } else {
-                (opt_min_prob1.unwrap(), opt_min_prob2.unwrap_or(f64::NAN), 1.0)
-            };
-
             counts.few_kmers += u32::from(!use_read);
             let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
-                identify_paired_end_alignments(read_data, weight, &mut tmp_alns, max_alns,
-                    min_prob1, min_prob2, &mut buffer, bg_distr.insert_distr(), ln_ncontigs, params)
+                identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns,
+                    opt_min_prob1.unwrap(), opt_min_prob2.unwrap(),
+                    &mut buffer, bg_distr.insert_distr(), ln_ncontigs, contig_infos, params)
             } else {
-                identify_single_end_alignments(read_data, weight, &mut tmp_alns, max_alns,
-                    min_prob1, ln_ncontigs, params)
+                identify_single_end_alignments(read_data, &mut tmp_alns, max_alns,
+                    opt_min_prob1.unwrap(), ln_ncontigs, contig_infos, params)
             };
             if use_read {
                 reads.push(groupped_alns);
