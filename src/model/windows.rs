@@ -752,22 +752,22 @@ impl ContigInfos {
     {
         let (weights, max_weight) = self.weights_along_read(alns);
         let mut min_probs = [f64::INFINITY; 2];
-        let mut re_written = [false; 2];
+        // let mut re_written = [false; 2];
 
         for aln in alns {
             let read_end = aln.read_end().ix();
-            let new_prob = err_prof.weighted_aln_prob(aln, &weights[read_end], self.infos[read_end].contig_len);
-            if let Some(ref mut w) = dbg_writer {
-                write!(w, "{}\t{}\t{}\t{:.2}\t{:.2}", name_hash, read_end + 1, aln.interval(),
-                    Ln::to_log10(aln.ln_prob()), Ln::to_log10(new_prob)).map_err(add_path!(!))?;
-                if !re_written[read_end] {
-                    write!(w, "\t{:.2}\t{}", max_weight, encode_runs(&weights[read_end])).map_err(add_path!(!))?;
-                    re_written[read_end] = true;
-                }
-                writeln!(w).map_err(add_path!(!))?;
-            }
-            aln.set_ln_prob(new_prob);
-            min_probs[read_end] = f64::min(min_probs[read_end], new_prob);
+            // let new_prob = err_prof.weighted_aln_prob(aln, &weights[read_end], self.infos[read_end].contig_len);
+            // if let Some(ref mut w) = dbg_writer {
+            //     write!(w, "{}\t{}\t{}\t{:.2}\t{:.2}", name_hash, read_end + 1, aln.interval(),
+            //         Ln::to_log10(aln.ln_prob()), Ln::to_log10(new_prob)).map_err(add_path!(!))?;
+            //     if !re_written[read_end] {
+            //         write!(w, "\t{:.2}\t{}", max_weight, encode_runs(&weights[read_end])).map_err(add_path!(!))?;
+            //         re_written[read_end] = true;
+            //     }
+            //     writeln!(w).map_err(add_path!(!))?;
+            // }
+            // aln.set_ln_prob(new_prob);
+            min_probs[read_end] = f64::min(min_probs[read_end], aln.ln_prob());
         }
         Ok((min_probs[0], min_probs[1], max_weight))
     }
