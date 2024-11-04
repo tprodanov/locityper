@@ -1,7 +1,7 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.17.2-alpha2"
+version = "0.17.2-alpha3"
 rust-version = "1.70"
 edition = "2021"
 
@@ -12,7 +12,7 @@ statrs = { version = "0.17", default-features = false } # Possibly remove later.
 nohash = { package = "nohash-hasher", version = "0.2.0", default-features = false, features = ["std"] }
 json = { version = "0.12", default-features = false }
 bio = { version = "2", default-features = false } # Remove later.
-fern = { version = "0.6", default-features = false, features = ["colored"] }
+fern = { version = "0.7", default-features = false, features = ["colored"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 log = { version = "0.4", default-features = false }
 rand = { version = "0.8", default-features = false, features = ["std", "alloc"] }
@@ -24,9 +24,9 @@ highs-sys = { version = "=1.6.1", default-features = false, optional = true }
 highs = { version = "=1.6.1", default-features = false, optional = true }
 lexopt = { version = "0.3", default-features = false }
 colored = { version = "2", default-features = false }
-which = { version = "6", default-features = false }
+which = { version = "7", default-features = false }
 regex = { version = "1.10", default-features = false, features = ["std", "perf"] }
-fancy-regex = { version = "0.13", default-features = false, features = ["std", "unicode", "perf"] }
+fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode", "perf"] }
 # Later: replace lazy_static with std::sync::LazyLock (since rust 1.80.0).
 lazy_static = { version = "1.4", default-features = false }
 const_format = { version = "0.2", default-features = false }

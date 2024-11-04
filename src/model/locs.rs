@@ -756,7 +756,7 @@ impl AllAlignments {
         let contigs = contig_set.contigs();
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
-            "[{}] Some contigs are too short (must be over {})", contigs.tag(), 2 * boundary);
+            "[{}] Some contigs are too short (must be over twice boundary size = {})", contigs.tag(), 2 * boundary);
         let mut unique_kmers = UniqueKmers::new(contig_set, params.min_unique_kmers);
 
         writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tread_name")

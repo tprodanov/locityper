@@ -637,8 +637,7 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
     }
     let min_size = seqs.iter().map(|s| s.len()).min().unwrap();
     if min_size < 1000 {
-        return Err(error!(InvalidData, "Locus alleles are too short for locus {} (shortest: {} bp)",
-            locus, min_size));
+        log::error!("[{}] Locus alleles extremely short (shortest: {} bp). Continuing for now", locus.name(), min_size);
     } else if min_size < 10000 {
         log::warn!("[{}] Locus alleles may be too short (shortest: {} bp)", locus.name(), min_size);
     }
