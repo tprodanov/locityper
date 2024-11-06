@@ -11,6 +11,7 @@ pub fn left<T: PartialOrd>(a: &[T], target: &T) -> usize {
 /// Performs binary search between indices `lo` and `hi`
 /// and finds index `i` such that `a[i-1] < target <= a[i].
 #[inline]
+#[allow(unused)]
 pub fn left_at<T: PartialOrd>(a: &[T], target: &T, lo: usize, hi: usize) -> usize {
     left_by_at(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"), lo, hi)
 }

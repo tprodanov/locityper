@@ -149,18 +149,18 @@ pub trait FastxRead: Send {
     /// Read next one/two records, and return true if the read was filled (is not empty).
     fn read_next(&mut self, record: &mut Self::Record) -> crate::Result<bool>;
 
-    /// Writes the next `count` records to the output stream.
-    /// Returns the number of records that were written.
-    fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> crate::Result<usize> {
-        let mut record = Self::Record::default();
-        for i in 0..count {
-            match self.read_next(&mut record)? {
-                true => record.write_to(writer).map_err(add_path!(!))?,
-                false => return Ok(i),
-            }
-        }
-        Ok(count)
-    }
+    // /// Writes the next `count` records to the output stream.
+    // /// Returns the number of records that were written.
+    // fn write_next_n(&mut self, writer: &mut impl io::Write, count: usize) -> crate::Result<usize> {
+    //     let mut record = Self::Record::default();
+    //     for i in 0..count {
+    //         match self.read_next(&mut record)? {
+    //             true => record.write_to(writer).map_err(add_path!(!))?,
+    //             false => return Ok(i),
+    //         }
+    //     }
+    //     Ok(count)
+    // }
 
     /// Copied first `count` records to the writer. Returns the number of processed reads (<= count).
     /// All remaining records are then skipped.
@@ -231,6 +231,7 @@ pub struct FastxRecord {
 
 impl FastxRecord {
     /// Returns true if the record is empty.
+    #[allow(unused)]
     pub fn is_empty(&self) -> bool {
         self.name.is_empty()
     }

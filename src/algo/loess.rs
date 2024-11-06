@@ -37,13 +37,13 @@ impl Loess {
         }
     }
 
-    pub fn frac(&self) -> f64 {
-        self.frac
-    }
+    // pub fn frac(&self) -> f64 {
+    //     self.frac
+    // }
 
-    pub fn degree(&self) -> usize {
-        self.degree
-    }
+    // pub fn degree(&self) -> usize {
+    //     self.degree
+    // }
 
     pub fn xout(&self) -> Option<&[f64]> {
         match &self.xout {

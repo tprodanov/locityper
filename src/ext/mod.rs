@@ -31,6 +31,7 @@ impl TriangleMatrix<()> {
 
 impl<T> TriangleMatrix<T> {
     /// Returns 0-based index (i,j) in the regular matrix n×n based on linear index k.
+    #[allow(unused)]
     pub fn from_linear_index(&self, k: usize) -> (usize, usize) {
         assert!(k < self.data.len());
         let under_root = (8 * self.data.len()).checked_sub(8 * k + 7).unwrap();
@@ -51,12 +52,14 @@ impl<T> TriangleMatrix<T> {
     }
 
     /// Creates triangle matrix from linear storage (must have correct order: sorted first by row, then by column).
+    #[allow(unused)]
     pub fn from_linear(side: usize, data: Vec<T>) -> Self {
         assert_eq!(data.len(), Self::expected_len(side), "Incorrect triangle matrix size");
         Self { side, data }
     }
 
     /// Creates triangle matrix by running `f(i, j)` for corresponding indices.
+    #[allow(unused)]
     pub fn create(side: usize, f: impl FnMut((usize, usize)) -> T) -> Self {
         Self {
             side,
@@ -65,14 +68,17 @@ impl<T> TriangleMatrix<T> {
     }
 
     /// Total number of elements in the triangle matrix.
+    #[allow(unused)]
     pub fn linear_len(&self) -> usize {
         self.data.len()
     }
 
+    #[allow(unused)]
     pub fn linear_data(&self) -> &[T] {
         &self.data
     }
 
+    #[allow(unused)]
     pub fn take_linear(self) -> Vec<T> {
         self.data
     }
@@ -98,6 +104,7 @@ impl<T> TriangleMatrix<T> {
 }
 
 impl<T: Clone> TriangleMatrix<T> {
+    #[allow(unused)]
     pub fn new(side: usize, val: T) -> Self {
         Self {
             side,

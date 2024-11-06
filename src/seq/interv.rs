@@ -365,6 +365,7 @@ impl<'a> fmt::Display for NamedBedFormat<'a> {
 /// Split intervals (start, end, depth) into disjoint intervals with fixed depth.
 /// Depth is summed for overlapping intervals.
 /// Only output intervals for which `keep(depth)` is true.
+#[allow(unused)]
 pub fn split_disjoint<P>(intervals: &[(u32, u32, i32)], mut keep: P) -> Vec<(u32, u32, i32)>
 where P: FnMut(i32) -> bool,
 {

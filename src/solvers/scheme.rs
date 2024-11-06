@@ -433,6 +433,7 @@ pub enum GenotypingWarning {
     /// There are some reads, but fewer than expected (number of reads).
     FewReads(u32),
     /// There are more reads than expected (number of reads).
+    #[allow(unused)]
     TooManyReads(u32),
     /// Even the best genotype has very low quality.
     NoProbableGenotype,

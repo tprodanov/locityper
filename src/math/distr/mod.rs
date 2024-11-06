@@ -34,17 +34,6 @@ pub trait DiscreteCdf {
     }
 }
 
-/// Discrete distribution that provides p-values.
-pub trait PVal {
-    fn pvalue(&self, k: u32) -> f64;
-}
-
-impl<T: DiscreteCdf> PVal for T {
-    fn pvalue(&self, k: u32) -> f64 {
-        2.0 * self.cdf(k).min(self.sf(k))
-    }
-}
-
 pub trait WithQuantile: DiscreteCdf + WithMoments {
     /// Inverse CDF function: returns approximate such `x` that `cdf(x) = q`.
     fn quantile(&self, q: f64) -> f64 {

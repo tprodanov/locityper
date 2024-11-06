@@ -23,11 +23,11 @@ pub struct HaplotypeName {
     name: String,
 }
 
-impl HaplotypeName {
-    pub fn hap_ix(&self) -> usize {
-        self.hap_ix
-    }
-}
+// impl HaplotypeName {
+//     pub fn hap_ix(&self) -> usize {
+//         self.hap_ix
+//     }
+// }
 
 /// One sample.
 pub struct Sample {
@@ -39,15 +39,15 @@ pub struct Sample {
     subnames: Vec<HaplotypeName>,
 }
 
-impl Sample {
-    pub fn sample_id(&self) -> usize {
-        self.sample_id
-    }
+// impl Sample {
+//     pub fn sample_id(&self) -> usize {
+//         self.sample_id
+//     }
 
-    pub fn subnames(&self) -> &[HaplotypeName] {
-        &self.subnames
-    }
-}
+//     pub fn subnames(&self) -> &[HaplotypeName] {
+//         &self.subnames
+//     }
+// }
 
 /// Collection of all haplotypes.
 pub struct HaplotypeNames {
@@ -138,14 +138,14 @@ impl HaplotypeNames {
         Ok(Self { ref_name, samples, total })
     }
 
-    pub fn samples(&self) -> &[Sample] {
-        &self.samples
-    }
+    // pub fn samples(&self) -> &[Sample] {
+    //     &self.samples
+    // }
 
-    /// Total number of haplotypes (including the reference).
-    pub fn total(&self) -> usize {
-        self.total
-    }
+    // /// Total number of haplotypes (including the reference).
+    // pub fn total(&self) -> usize {
+    //     self.total
+    // }
 }
 
 /// Discard variants where there is no known variation.

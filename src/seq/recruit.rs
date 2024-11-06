@@ -127,6 +127,7 @@ impl Params {
     }
 
     /// Window size for the minimizers.
+    #[allow(unused)]
     pub fn minimizer_w(&self) -> u8 {
         self.minimizer_w
     }
@@ -161,6 +162,7 @@ impl Progress {
     }
 
     /// Create new progress logger, where the number of recruited reads is shown.
+    #[allow(unused)]
     pub fn new_recruitment() -> Self {
         Self::new(true)
     }
@@ -231,6 +233,7 @@ impl Progress {
 
     /// Total number of recruited reads.
     #[inline]
+    #[allow(unused)]
     pub fn recruited(&self) -> u64 {
         self.recruited
     }

@@ -1,24 +1,15 @@
 use std::{
     thread,
-    path::Path,
     sync::Arc,
-    rc::Rc,
 };
 use smallvec::SmallVec;
-use htslib::bam::{
-    self,
-    Read as BamRead,
-    record::Aux,
-};
 use crate::{
-    ext::{self, TriangleMatrix},
     seq::{
         NamedSeq,
-        contigs::{ContigNames, ContigId},
         wfa::{Aligner, Penalties},
-        cigar::{Cigar, CigarItem, Operation},
+        cigar::{Cigar, Operation},
     },
-    err::{Error, error},
+    err::error,
     algo::HashMap,
     math::RoundDiv,
 };
@@ -259,144 +250,144 @@ fn multithread_align(
     Ok(alns)
 }
 
-fn create_bam_header(entries: &[NamedSeq], backbone_k: u32, accuracy: u8) -> bam::header::Header {
-    let mut header = bam::header::Header::new();
-    let mut prg = bam::header::HeaderRecord::new(b"PG");
-    prg.push_tag(b"ID", crate::command::PROGRAM);
-    prg.push_tag(b"PN", crate::command::PROGRAM);
-    prg.push_tag(b"VN", crate::command::VERSION);
-    prg.push_tag(b"CL", &std::env::args().collect::<Vec<_>>().join(" "));
-    header.push_record(&prg);
-    header.push_comment(format!("backbone-k={};accuracy-lvl={}", backbone_k, accuracy).as_bytes());
+// fn create_bam_header(entries: &[NamedSeq], backbone_k: u32, accuracy: u8) -> bam::header::Header {
+//     let mut header = bam::header::Header::new();
+//     let mut prg = bam::header::HeaderRecord::new(b"PG");
+//     prg.push_tag(b"ID", crate::command::PROGRAM);
+//     prg.push_tag(b"PN", crate::command::PROGRAM);
+//     prg.push_tag(b"VN", crate::command::VERSION);
+//     prg.push_tag(b"CL", &std::env::args().collect::<Vec<_>>().join(" "));
+//     header.push_record(&prg);
+//     header.push_comment(format!("backbone-k={};accuracy-lvl={}", backbone_k, accuracy).as_bytes());
 
-    for entry in entries {
-        let mut record = bam::header::HeaderRecord::new(b"SQ");
-        record.push_tag(b"SN", entry.name());
-        record.push_tag(b"LN", entry.len());
-        header.push_record(&record);
-    }
-    header
-}
+//     for entry in entries {
+//         let mut record = bam::header::HeaderRecord::new(b"SQ");
+//         record.push_tag(b"SN", entry.name());
+//         record.push_tag(b"LN", entry.len());
+//         header.push_record(&record);
+//     }
+//     header
+// }
 
-fn fill_cigar_buffer(buffer: &mut bam::record::CigarString, iter: impl Iterator<Item = CigarItem>) {
-    buffer.0.clear();
-    buffer.0.extend(iter.map(CigarItem::to_htslib));
-}
+// fn fill_cigar_buffer(buffer: &mut bam::record::CigarString, iter: impl Iterator<Item = CigarItem>) {
+//     buffer.0.clear();
+//     buffer.0.extend(iter.map(CigarItem::to_htslib));
+// }
 
-fn create_record(
-    header: &Rc<bam::HeaderView>,
-    query: &NamedSeq,
-    refid: usize,
-    cigar_view: &bam::record::CigarString,
-    edit_dist: u32,
-    score: i32,
-    divergence: f64,
-) -> bam::Record
-{
-    let mut record = bam::Record::new();
-    record.set_header(Rc::clone(header));
-    record.set_tid(refid as i32);
-    record.set_pos(0);
-    record.set_mtid(-1);
-    record.set_mpos(-1);
-    record.set(query.name().as_bytes(), Some(cigar_view), &[], &[]);
-    record.push_aux(b"NM", bam::record::Aux::U32(edit_dist)).expect("Cannot set NM tag");
-    record.push_aux(b"AS", bam::record::Aux::I32(score)).expect("Cannot set AS tag");
-    record.push_aux(b"dv", bam::record::Aux::Double(divergence)).expect("Cannot set `dv` tag");
-    record
-}
+// fn create_record(
+//     header: &Rc<bam::HeaderView>,
+//     query: &NamedSeq,
+//     refid: usize,
+//     cigar_view: &bam::record::CigarString,
+//     edit_dist: u32,
+//     score: i32,
+//     divergence: f64,
+// ) -> bam::Record
+// {
+//     let mut record = bam::Record::new();
+//     record.set_header(Rc::clone(header));
+//     record.set_tid(refid as i32);
+//     record.set_pos(0);
+//     record.set_mtid(-1);
+//     record.set_mpos(-1);
+//     record.set(query.name().as_bytes(), Some(cigar_view), &[], &[]);
+//     record.push_aux(b"NM", bam::record::Aux::U32(edit_dist)).expect("Cannot set NM tag");
+//     record.push_aux(b"AS", bam::record::Aux::I32(score)).expect("Cannot set AS tag");
+//     record.push_aux(b"dv", bam::record::Aux::Double(divergence)).expect("Cannot set `dv` tag");
+//     record
+// }
 
-/// Creates BAM file, writes all pairwise records, and returns linear vector of divergences.
-pub fn write_all(
-    bam_path: &Path,
-    entries: &[NamedSeq],
-    alns: TriangleMatrix<(Cigar, i32)>,
-    backbone_k: u32,
-    accuracy: u8,
-) -> crate::Result<TriangleMatrix<f64>> {
-    let header = create_bam_header(entries, backbone_k, accuracy);
-    let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
-    writer.set_compression_level(bam::CompressionLevel::Maximum)?;
-    let mut cigar_buffer = bam::record::CigarString(Vec::new());
+// /// Creates BAM file, writes all pairwise records, and returns linear vector of divergences.
+// pub fn write_all(
+//     bam_path: &Path,
+//     entries: &[NamedSeq],
+//     alns: TriangleMatrix<(Cigar, i32)>,
+//     backbone_k: u32,
+//     accuracy: u8,
+// ) -> crate::Result<TriangleMatrix<f64>> {
+//     let header = create_bam_header(entries, backbone_k, accuracy);
+//     let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
+//     writer.set_compression_level(bam::CompressionLevel::Maximum)?;
+//     let mut cigar_buffer = bam::record::CigarString(Vec::new());
 
-    let n = entries.len();
-    let mut pairwise_records = vec![None; n * n];
-    let mut divergences = TriangleMatrix::new(n, 0.0);
-    let header_view = Rc::new(bam::HeaderView::from_header(&header));
-    for (i, refer) in entries.iter().enumerate() {
-        let rlen = refer.len();
-        fill_cigar_buffer(&mut cigar_buffer, std::iter::once(CigarItem::new(Operation::Equal, rlen)));
-        pairwise_records[i * n + i] = Some(create_record(&header_view, refer, i, &cigar_buffer, 0, 0, 0.0));
+//     let n = entries.len();
+//     let mut pairwise_records = vec![None; n * n];
+//     let mut divergences = TriangleMatrix::new(n, 0.0);
+//     let header_view = Rc::new(bam::HeaderView::from_header(&header));
+//     for (i, refer) in entries.iter().enumerate() {
+//         let rlen = refer.len();
+//         fill_cigar_buffer(&mut cigar_buffer, std::iter::once(CigarItem::new(Operation::Equal, rlen)));
+//         pairwise_records[i * n + i] = Some(create_record(&header_view, refer, i, &cigar_buffer, 0, 0, 0.0));
 
-        for (j, query) in (i + 1..).zip(&entries[i + 1..]) {
-            let (cigar, score) = &alns[(i, j)];
-            if query.len() != cigar.query_len() || rlen != cigar.ref_len() {
-                return Err(error!(RuntimeError,
-                    "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
-                    query.name(), query.len(), refer.name(), rlen, cigar.query_len(), cigar.ref_len()));
-            }
+//         for (j, query) in (i + 1..).zip(&entries[i + 1..]) {
+//             let (cigar, score) = &alns[(i, j)];
+//             if query.len() != cigar.query_len() || rlen != cigar.ref_len() {
+//                 return Err(error!(RuntimeError,
+//                     "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
+//                     query.name(), query.len(), refer.name(), rlen, cigar.query_len(), cigar.ref_len()));
+//             }
 
-            let (nmatches, total_size) = cigar.frac_matches();
-            let edit_dist = total_size - nmatches;
-            let divergence = f64::from(edit_dist) / f64::from(total_size);
-            divergences[(i, j)] = divergence;
-            fill_cigar_buffer(&mut cigar_buffer, cigar.iter().copied());
-            pairwise_records[i * n + j] = Some(
-                create_record(&header_view, query, i, &cigar_buffer, edit_dist, *score, divergence));
+//             let (nmatches, total_size) = cigar.frac_matches();
+//             let edit_dist = total_size - nmatches;
+//             let divergence = f64::from(edit_dist) / f64::from(total_size);
+//             divergences[(i, j)] = divergence;
+//             fill_cigar_buffer(&mut cigar_buffer, cigar.iter().copied());
+//             pairwise_records[i * n + j] = Some(
+//                 create_record(&header_view, query, i, &cigar_buffer, edit_dist, *score, divergence));
 
-            fill_cigar_buffer(&mut cigar_buffer, cigar.iter().map(CigarItem::invert));
-            pairwise_records[j * n + i] = Some(
-                create_record(&header_view, refer, j, &cigar_buffer, edit_dist, *score, divergence));
-        }
-    }
+//             fill_cigar_buffer(&mut cigar_buffer, cigar.iter().map(CigarItem::invert));
+//             pairwise_records[j * n + i] = Some(
+//                 create_record(&header_view, refer, j, &cigar_buffer, edit_dist, *score, divergence));
+//         }
+//     }
 
-    for record in pairwise_records.into_iter() {
-        writer.write(&record.expect("Alignment record is not set"))?;
-    }
-    Ok(divergences)
-}
+//     for record in pairwise_records.into_iter() {
+//         writer.write(&record.expect("Alignment record is not set"))?;
+//     }
+//     Ok(divergences)
+// }
 
-/// Loads edit distances between all contigs based on a BAM file.
-/// All contigs must be present in the BAM file.
-pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> crate::Result<TriangleMatrix<u32>> {
-    let path = path.as_ref();
-    let mut reader = bam::Reader::from_path(&path)?;
-    let mut record = bam::Record::new();
-    let mut matrix = TriangleMatrix::new(contigs.len(), u32::MAX);
-    while reader.read(&mut record).transpose()?.is_some() {
-        let qname = std::str::from_utf8(record.qname())
-            .map_err(|_| Error::Utf8("contig name", record.qname().to_vec()))?;
-        let i = match contigs.try_get_id(&qname) {
-            Some(val) => val.ix(),
-            None => continue,
-        };
-        let rname = reader.header().tid2name(record.tid() as u32);
-        let rname = std::str::from_utf8(rname).map_err(|_| Error::Utf8("contig name", rname.to_vec()))?;
-        let j = match contigs.try_get_id(&rname) {
-            Some(val) => val.ix(),
-            None => continue,
-        };
-        if i >= j {
-            continue;
-        }
-        let edit_dist: u32 = match record.aux(b"NM")
-            .map_err(|_| error!(InvalidData, "BAM file {} does not contain NM field", ext::fmt::path(&path)))?
-        {
-            Aux::I8(val) => val.try_into().unwrap(),
-            Aux::U8(val) => val.into(),
-            Aux::I16(val) => val.try_into().unwrap(),
-            Aux::U16(val) => val.into(),
-            Aux::I32(val) => val.try_into().unwrap(),
-            Aux::U32(val) => val,
-            _ => return Err(error!(InvalidData, "Invalid value for NM field in {}", ext::fmt::path(&path))),
-        };
-        matrix[(i, j)] = edit_dist;
-    }
-    if let Some(k) = matrix.iter().position(|&val| val == u32::MAX) {
-        let (i, j) = matrix.from_linear_index(k);
-        Err(error!(InvalidData, "BAM file {} does not contain alignment between contigs {} and {}",
-            ext::fmt::path(&path), contigs.get_name(ContigId::new(i)), contigs.get_name(ContigId::new(j))))
-    } else {
-        Ok(matrix)
-    }
-}
+// /// Loads edit distances between all contigs based on a BAM file.
+// /// All contigs must be present in the BAM file.
+// pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> crate::Result<TriangleMatrix<u32>> {
+//     let path = path.as_ref();
+//     let mut reader = bam::Reader::from_path(&path)?;
+//     let mut record = bam::Record::new();
+//     let mut matrix = TriangleMatrix::new(contigs.len(), u32::MAX);
+//     while reader.read(&mut record).transpose()?.is_some() {
+//         let qname = std::str::from_utf8(record.qname())
+//             .map_err(|_| Error::Utf8("contig name", record.qname().to_vec()))?;
+//         let i = match contigs.try_get_id(&qname) {
+//             Some(val) => val.ix(),
+//             None => continue,
+//         };
+//         let rname = reader.header().tid2name(record.tid() as u32);
+//         let rname = std::str::from_utf8(rname).map_err(|_| Error::Utf8("contig name", rname.to_vec()))?;
+//         let j = match contigs.try_get_id(&rname) {
+//             Some(val) => val.ix(),
+//             None => continue,
+//         };
+//         if i >= j {
+//             continue;
+//         }
+//         let edit_dist: u32 = match record.aux(b"NM")
+//             .map_err(|_| error!(InvalidData, "BAM file {} does not contain NM field", ext::fmt::path(&path)))?
+//         {
+//             Aux::I8(val) => val.try_into().unwrap(),
+//             Aux::U8(val) => val.into(),
+//             Aux::I16(val) => val.try_into().unwrap(),
+//             Aux::U16(val) => val.into(),
+//             Aux::I32(val) => val.try_into().unwrap(),
+//             Aux::U32(val) => val,
+//             _ => return Err(error!(InvalidData, "Invalid value for NM field in {}", ext::fmt::path(&path))),
+//         };
+//         matrix[(i, j)] = edit_dist;
+//     }
+//     if let Some(k) = matrix.iter().position(|&val| val == u32::MAX) {
+//         let (i, j) = matrix.from_linear_index(k);
+//         Err(error!(InvalidData, "BAM file {} does not contain alignment between contigs {} and {}",
+//             ext::fmt::path(&path), contigs.get_name(ContigId::new(i)), contigs.get_name(ContigId::new(j))))
+//     } else {
+//         Ok(matrix)
+//     }
+// }

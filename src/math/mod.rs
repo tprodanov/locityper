@@ -32,6 +32,7 @@ impl Ln {
     }
 
     /// Calculates *log(exp(a) - exp(b))*.
+    #[allow(unused)]
     pub fn sub(a: f64, b: f64) -> f64 {
         if b == f64::NEG_INFINITY {
             a
@@ -95,6 +96,7 @@ pub struct Phred;
 
 impl Phred {
     /// Convert regular probability to a Phred quality.
+    #[allow(unused)]
     pub fn from_prob(prob: f64) -> f64 {
         debug_assert!(0.0 <= prob && prob <= 1.0);
         -10.0 * prob.log10()
@@ -107,18 +109,21 @@ impl Phred {
     }
 
     /// Convert phred quality into regular probability (0 - 1).
+    #[allow(unused)]
     pub fn to_prob(phred: f64) -> f64 {
         debug_assert!(phred >= 0.0);
         10.0_f64.powf(-0.1 * phred)
     }
 
     /// Convert phred quality into regular probability (0 - 1).
+    #[allow(unused)]
     pub fn to_ln_prob(phred: f64) -> f64 {
         debug_assert!(phred >= 0.0);
         -0.1 * Ln::from_log10(phred)
     }
 
     /// Returns Phred score ln-likelihood with index `ix` across all `likelihoods`.
+    #[allow(unused)]
     pub fn from_likelihoods(likelihoods: &mut [f64], ix: usize) -> f64 {
         let stored = likelihoods[ix];
         likelihoods[ix] = f64::NEG_INFINITY;
@@ -184,6 +189,7 @@ pub fn unpaired_onesided_t_test<const EQ_VAR: bool>(mean1: f64, var1: f64, mean2
 /// Rounding divisions.
 pub trait RoundDiv {
     /// Correct division, without overflows.
+    #[allow(unused)]
     fn correct_ceil_div(self, rhs: Self) -> Self;
 
     /// Fast ceiling division. Can give incorrect results due to overflowing.
@@ -212,6 +218,7 @@ impl<T: num_traits::PrimInt + num_traits::Unsigned> RoundDiv for T {
 }
 
 /// Linear extrapolation. `x1` must not be equal to `x2`.
+#[allow(unused)]
 pub fn interpolate((x1, x2): (f64, f64), (y1, y2): (f64, f64), x: f64) -> f64 {
     x * (y2 - y1) / (x2 - x1) + y1
 }

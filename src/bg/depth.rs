@@ -23,12 +23,6 @@ use crate::{
     model::windows::WindowGetter,
 };
 
-pub trait DepthDistr {
-    fn window_size(&self) -> u32;
-
-    fn ln_prob(&self, gc_content: u8, depth: u32) -> f64;
-}
-
 /// Count reads in various windows of length `window_size`.
 fn count_reads<'a>(
     alignments: impl Iterator<Item = &'a Alignment>,

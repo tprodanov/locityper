@@ -1,5 +1,5 @@
 use std::{
-    fmt::{self, Write},
+    fmt,
     ops::AddAssign,
 };
 
@@ -29,24 +29,24 @@ impl VecExt {
         a.sort_unstable_by(|x, y| x.partial_cmp(y).expect("Error in sort: elements are not comparable"));
     }
 
-    /// Finds `q`-th quantile in a sorted array.
-    /// Does not use linear interpolation, just returns closest of the two values.
-    fn quantile_sorted<T>(a: &[T], q: f64) -> T
-    where T: Copy,
-    {
-        let n = a.len();
-        assert!(0.0 <= q && q <= 1.0, "Quantile must be within [0, 1]!");
-        assert!(n > 0, "Cannot find quantile on an empty array!");
-        let i = (((a.len() - 1) as f64 * q).round() as usize).min(n - 1);
-        a[i]
-    }
+    // /// Finds `q`-th quantile in a sorted array.
+    // /// Does not use linear interpolation, just returns closest of the two values.
+    // fn quantile_sorted<T>(a: &[T], q: f64) -> T
+    // where T: Copy,
+    // {
+    //     let n = a.len();
+    //     assert!(0.0 <= q && q <= 1.0, "Quantile must be within [0, 1]!");
+    //     assert!(n > 0, "Cannot find quantile on an empty array!");
+    //     let i = (((a.len() - 1) as f64 * q).round() as usize).min(n - 1);
+    //     a[i]
+    // }
 
-    pub fn quantile<T>(a: &mut [T], q: f64) -> T
-    where T: Copy + PartialOrd,
-    {
-        Self::sort(a);
-        Self::quantile_sorted(a, q)
-    }
+    // pub fn quantile<T>(a: &mut [T], q: f64) -> T
+    // where T: Copy + PartialOrd,
+    // {
+    //     Self::sort(a);
+    //     Self::quantile_sorted(a, q)
+    // }
 }
 
 /// Static methods related to vectors over f64.
@@ -60,10 +60,10 @@ impl F64Ext {
         a.iter().copied().map(T::into).sum::<f64>() / a.len() as f64
     }
 
-    /// Calculates geometric mean.
-    pub fn geom_mean(a: &[f64]) -> f64 {
-        (a.iter().copied().map(f64::ln).sum::<f64>() / a.len() as f64).exp()
-    }
+    // /// Calculates geometric mean.
+    // pub fn geom_mean(a: &[f64]) -> f64 {
+    //     (a.iter().copied().map(f64::ln).sum::<f64>() / a.len() as f64).exp()
+    // }
 
     /// Returns variance for already calculated mean.
     pub fn fast_variance(a: &[f64], mean: f64) -> f64 {
@@ -96,25 +96,25 @@ impl F64Ext {
         }
     }
 
-    /// Returns minimal vector value.
-    pub fn min(a: &[f64]) -> f64 {
-        a.iter().copied().fold(f64::INFINITY, f64::min)
-    }
+    // /// Returns minimal vector value.
+    // pub fn min(a: &[f64]) -> f64 {
+    //     a.iter().copied().fold(f64::INFINITY, f64::min)
+    // }
 
-    /// Returns maximal vector value.
-    pub fn max(a: &[f64]) -> f64 {
-        IterExt::max(a.iter().copied())
-    }
+    // /// Returns maximal vector value.
+    // pub fn max(a: &[f64]) -> f64 {
+    //     IterExt::max(a.iter().copied())
+    // }
 
-    /// Returns the index of the minimal value and the value itself.
-    pub fn argmin(a: &[f64]) -> (usize, f64) {
-        IterExt::argmin(a.iter().copied())
-    }
+    // /// Returns the index of the minimal value and the value itself.
+    // pub fn argmin(a: &[f64]) -> (usize, f64) {
+    //     IterExt::argmin(a.iter().copied())
+    // }
 
-    /// Returns the index of the maximal value and the value itself.
-    pub fn argmax(a: &[f64]) -> (usize, f64) {
-        IterExt::argmax(a.iter().copied())
-    }
+    // /// Returns the index of the maximal value and the value itself.
+    // pub fn argmax(a: &[f64]) -> (usize, f64) {
+    //     IterExt::argmax(a.iter().copied())
+    // }
 
     /// Finds `q`-th quantile in a sorted array.
     /// Uses linear interpolation, if the quantile is between two elements.
@@ -143,25 +143,25 @@ impl F64Ext {
         Self::interpol_quantile_sorted(a, q)
     }
 
-    /// Converts vector to string with given precision and width.
-    pub fn to_str(a: &[f64], width: usize, precision: usize) -> String {
-        let mut buffer = String::new();
-        buffer.write_char('[').unwrap();
-        for (i, v) in a.iter().enumerate() {
-            if i > 0 {
-                buffer.write_str(", ").unwrap();
-            }
-            write!(buffer, "{:width$.precision$}", v).unwrap();
-        }
-        buffer.write_char(']').unwrap();
-        buffer
-    }
+    // /// Converts vector to string with given precision and width.
+    // pub fn to_str(a: &[f64], width: usize, precision: usize) -> String {
+    //     let mut buffer = String::new();
+    //     buffer.write_char('[').unwrap();
+    //     for (i, v) in a.iter().enumerate() {
+    //         if i > 0 {
+    //             buffer.write_str(", ").unwrap();
+    //         }
+    //         write!(buffer, "{:width$.precision$}", v).unwrap();
+    //     }
+    //     buffer.write_char(']').unwrap();
+    //     buffer
+    // }
 
-    /// Converts vector to string with precision = 5 and width = 10.
-    #[inline]
-    pub fn to_str5(a: &[f64]) -> String {
-        F64Ext::to_str(a, 10, 5)
-    }
+    // /// Converts vector to string with precision = 5 and width = 10.
+    // #[inline]
+    // pub fn to_str5(a: &[f64]) -> String {
+    //     F64Ext::to_str(a, 10, 5)
+    // }
 }
 
 /// Static methods related to iterators.
@@ -192,19 +192,19 @@ impl IterExt {
         it.fold(f64::NEG_INFINITY, f64::max)
     }
 
-    /// Finds an index of the minimal value in the iterator and the value itself.
-    /// If the minimal value appears several times, returns the index of the first value.
-    /// Panics on an empty iterator.
-    pub fn argmin(it: impl Iterator<Item = f64>) -> (usize, f64) {
-        Self::arg_optimal(it, |opt, e| opt < e)
-    }
+    // /// Finds an index of the minimal value in the iterator and the value itself.
+    // /// If the minimal value appears several times, returns the index of the first value.
+    // /// Panics on an empty iterator.
+    // pub fn argmin(it: impl Iterator<Item = f64>) -> (usize, f64) {
+    //     Self::arg_optimal(it, |opt, e| opt < e)
+    // }
 
-    /// Finds an index of the maximal value in the iterator and the value itself.
-    /// If the maximal value appears several times, returns the index of the first value.
-    /// Panics on an empty iterator.
-    pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
-        Self::arg_optimal(it, |opt, e| opt > e)
-    }
+    // /// Finds an index of the maximal value in the iterator and the value itself.
+    // /// If the maximal value appears several times, returns the index of the first value.
+    // /// Panics on an empty iterator.
+    // pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
+    //     Self::arg_optimal(it, |opt, e| opt > e)
+    // }
 
     /// Calculates cumulative sums over iterator and returns the vector of length `len(iter) + 1`.
     /// First element = 0.

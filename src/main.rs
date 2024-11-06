@@ -1,11 +1,11 @@
-pub mod seq;
-pub mod algo;
-pub mod math;
-pub mod bg;
-pub mod model;
-pub mod solvers;
-pub mod ext;
-pub mod command;
+pub(crate) mod seq;
+pub(crate) mod algo;
+pub(crate) mod math;
+pub(crate) mod bg;
+pub(crate) mod model;
+pub(crate) mod solvers;
+pub(crate) mod ext;
+pub(crate) mod command;
 
 mod err;
 // mod test;

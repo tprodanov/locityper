@@ -238,7 +238,7 @@ fn print_help(extended: bool) {
             "--kmers-weight".green());
         println!("    {:KEY$} {:VAL$}  Explicit haplotype subregion weights, for example\n\
             {EMPTY}  based on exons/introns (see documentation).",
-            "    --reg-weights".green(), super::flag());
+            "    --reg-weights".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
         println!("    {:KEY$} {:VAL$}  Use reads/read pairs that have at least this number\n\
