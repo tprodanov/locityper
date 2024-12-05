@@ -646,10 +646,6 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
     let seq0 = seqs[0].seq();
     let prefix = &seq0[..AFFIX_SIZE];
     let suffix = &seq0[seq0.len() - AFFIX_SIZE..];
-    if seqs[1..].iter().map(NamedSeq::seq)
-            .any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix) {
-        log::warn!("[{}] Allele sequences differ at the boundary", locus.name());
-    }
 
     if let Some(rseq) = ref_seq {
         let prefix = &rseq[..AFFIX_SIZE];
@@ -660,10 +656,13 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
         if d > 0 {
             log::log!(
                 if d == n { log::Level::Error } else { log::Level::Warn },
-                "[{}] {} of the alleles ({}/{}) do not match the reference sequence at {}. Continuing", locus.name(),
-                if d == n { "All" } else if d >= n / 2 { "Most" } else { "Some" },
-                d, n, locus.interval());
+                "[{}] {} of the alleles ({}/{}) do not match the reference at the boundary", locus.name(),
+                if d == n { "All" } else if d >= n / 2 { "Most" } else { "Some" }, d, n);
         }
+    } else if seqs[1..].iter().map(NamedSeq::seq)
+        .any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix)
+    {
+        log::warn!("[{}] Allele sequences differ at the boundary", locus.name());
     }
     Ok(())
 }

@@ -115,6 +115,8 @@ impl Args {
         validate_param!(self.preproc.is_some(), "Preprocessing directory is not provided (see -p/--preproc)");
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
+
+        validate_param!(self.ploidy > 0, "Ploidy must be positive");
         self.samtools = ext::sys::find_exe(self.samtools)?;
         self.assgn_params.validate()?;
         Ok(self)
@@ -206,7 +208,7 @@ fn print_help(extended: bool) {
 
         println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
-            "-p, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
+            "-P, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
         println!("    {:KEY$} {:VAL$}\n\
             {EMPTY}  Two p-value thresholds on edit distance:\n\
             {EMPTY}  for good alignments [{}], and for passable alignments [{}].",
@@ -355,6 +357,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Short('c') | Long("chunk") | Long("chunk-len") =>
                 args.chunk_length = parser.value()?.parse::<PrettyU64>()?.get(),
 
+            Short('P') | Long("ploidy") => args.ploidy = parser.value()?.parse()?,
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
             Short('A') | Long("alt-cn") =>
                 args.assgn_params.alt_cn = (parser.value()?.parse()?, parser.value()?.parse()?),

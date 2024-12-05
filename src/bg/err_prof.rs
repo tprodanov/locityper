@@ -86,11 +86,12 @@ impl OperCounts<u64> {
     ///
     /// Returned clipping probability is set to the maximum of mismatch and insert probabilities.
     pub fn to_ln_probs(&self) -> OperCounts<f64> {
+        const MIN_VAL: f64 = 1e-5;
         // Clipping is ignored.
         let sum_len = (self.matches + self.mismatches + self.insertions + self.deletions) as f64;
-        let mism_prob = self.mismatches as f64 / sum_len;
-        let ins_prob = self.insertions as f64 / sum_len;
-        let del_prob = self.deletions as f64 / sum_len;
+        let mism_prob = f64::max(self.mismatches as f64 / sum_len, MIN_VAL);
+        let ins_prob = f64::max(self.insertions as f64 / sum_len, MIN_VAL);
+        let del_prob = f64::max(self.deletions as f64 / sum_len, MIN_VAL);
         let match_prob = 1.0 - mism_prob - ins_prob - del_prob;
 
         log::info!("    {:12} matches    ({:.6})", self.matches, match_prob);
@@ -98,8 +99,6 @@ impl OperCounts<u64> {
         log::info!("    {:12} insertions ({:.6})", self.insertions, ins_prob);
         log::info!("    {:12} deletions  ({:.6})", self.deletions, del_prob);
         assert!(match_prob > 0.5, "Match probability ({:.5}) must be over 50%", match_prob);
-        assert!((match_prob + mism_prob + ins_prob + del_prob - 1.0).abs() < 1e-8,
-            "Error probabilities do not sum to one");
         OperCounts {
             matches: match_prob.ln(),
             mismatches: mism_prob.ln(),

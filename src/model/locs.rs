@@ -788,7 +788,7 @@ impl AllAlignments {
             tmp_alns.clear();
             let opt_min_prob1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
             if !hashes.insert(read_data.name_hash) {
-                log::warn!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
+                log::debug!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
             let opt_min_prob2 = if is_paired_end {
