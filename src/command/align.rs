@@ -296,7 +296,8 @@ fn write_paf(
             let aln_len = nmatches + nerrs;
             write!(f, "{}\t{}\t255", nmatches, aln_len)?;
             let dv = f64::from(nerrs) / f64::from(aln_len);
-            write!(f, "\tNM:i:{}\tAS:i:{}\tdv:f:{:.9}", nerrs, score, dv)?;
+            let qv = if dv.is_finite() { -10.0 * dv.log10() } else { f64::INFINITY };
+            write!(f, "\tNM:i:{}\tAS:i:{}\tdv:f:{:.9}\tqv:f:{:.6}", nerrs, score, dv, qv)?;
             write!(cigar_str, "{}", cigar).unwrap();
         } else {
             write!(f, "0\t0\t255")?;
