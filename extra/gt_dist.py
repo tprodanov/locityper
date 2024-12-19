@@ -159,6 +159,8 @@ class Distances:
                 except KeyError:
                     sys.stderr.write(f'Cannot calculate distance between {",".join(gt1)} and {",".join(gt2)}'
                         f' (missing distance {hap1} - {hap2}) (see {self.paf_path})\n')
+                    distances.append((None, None))
+                    continue
                 sum_edit += edit
                 sum_size += size
                 distances.append((edit, size))

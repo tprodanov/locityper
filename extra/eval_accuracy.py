@@ -18,15 +18,16 @@ def load_distances(cached_dists, locus, excluded_samples, paf_fmt, db_dir):
         return cached_dists[locus]
 
     paf_filename = paf_fmt.format(locus)
-    locus_dir = f'{db_dir}/loci/{locus}'
+    locus_dir = f'{db_dir}/loci/{locus}' if db_dir is not None else None
     excl_haps = ()
     if not os.path.exists(paf_filename):
         dists = None
-    elif not os.path.exists(locus_dir):
+    elif locus_dir is not None and not os.path.exists(locus_dir):
         sys.stderr.write(f'Database directory `{locus_dir}` does not exist.\n')
         exit(1)
     else:
-        dists = gt_dist.Distances(os.path.join(locus_dir, 'discarded_haplotypes.txt'), paf_filename)
+        disc_filename = os.path.join(locus_dir, 'discarded_haplotypes.txt') if locus_dir is not None else None
+        dists = gt_dist.Distances(disc_filename, paf_filename)
         if excluded_samples:
             excl_haps = set()
             for sample in excluded_samples:
@@ -68,8 +69,8 @@ def main():
         usage='%(prog)s -i summary.csv -a paf_path -d discarded_path -o out.csv [--loo]')
     parser.add_argument('-i', '--input', metavar='FILE', required=True,
         help='CSV summary file with Locityper genotyping results.')
-    parser.add_argument('-d', '--database', metavar='DIR', required=True,
-        help='Path to the database.')
+    parser.add_argument('-d', '--database', metavar='DIR',
+        help='Path to the database, if possible. Uses `discarded_haplotypes.txt` for each locus.')
     parser.add_argument('-a', '--alignments', metavar='STR', required=True,
         help='Path to PAF files, where locus name is replaced with `{}`. '
             'Only loci with available distances will be analyzed.')
@@ -81,7 +82,9 @@ def main():
         help='File with sample names, which were excluded from the analysis.')
     args = parser.parse_args()
 
-    if not os.path.exists(args.database):
+    if args.database is None:
+        sys.stderr.write('WARN: Database (-d) not provided. Assuming there are no discarded haplotypes\n')
+    elif not os.path.exists(args.database):
         sys.stderr.write(f'Database `{args.database}` does not exist\n')
         exit(1)
 
