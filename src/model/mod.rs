@@ -66,8 +66,8 @@ impl Default for Params {
             unmapped_penalty: Ln::from_log10(-5.0),
             edit_pvals: (0.01, 0.001),
 
-            kmers_weight_calc: Some(WeightCalculator::new(0.2, 2.0).unwrap()),
-            compl_weight_calc: Some(WeightCalculator::new(0.5, 2.0).unwrap()),
+            kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),
+            compl_weight_calc: Some(WeightCalculator::new(0.5, 4.0).unwrap()),
             min_unique_kmers: 5,
 
             min_weight: 0.001,

@@ -224,8 +224,8 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
         println!("    {:KEY$} {}\n\
             {EMPTY}  Calculate window weight based on the fraction of unique k-mers [{} {}].\n\
-            {EMPTY}  * {} = breakpoint (0, 1). Weight at breakpoint is 1/2,\n\
-            {EMPTY}  * {} = power [0.5, 50]. Regulates sigmoid slope (bigger - steeper).\n\
+            {EMPTY}  * {} = breakpoint (0, 1), such that the weight at breakpoint will be 1/2.\n\
+            {EMPTY}  * {} = power > 0. Regulates sigmoid slope (bigger = steeper).\n\
             {EMPTY}  Use {} to disable weights.",
             "    --kmers-weight".green(), "FLOAT FLOAT | off".yellow(),
             super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().breakpoint()),

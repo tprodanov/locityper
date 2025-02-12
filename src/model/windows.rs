@@ -173,39 +173,33 @@ pub struct WeightCalculator {
     /// Value > 0: determines how fast do the value change near the breakpoint.
     power: f64,
     /// Constant factor in the calculation.
-    coeff: f64,
-    /// power * 2.
-    double_power: f64,
+    const_fct: f64,
 }
 
 impl WeightCalculator {
     pub fn new(breakpoint: f64, power: f64) -> crate::Result<Self> {
         validate_param!(0.0 < breakpoint && breakpoint < 1.0,
             "Weight breakpoint ({}) must be within (0, 1)", breakpoint);
-        validate_param!(power > 0.5 && power <= 50.0, "Weight power ({}) should be within [0.5, 50].", power);
-        let double_power = power * 2.0;
+        validate_param!(power > 0.0, "Weight power ({}) should be positive.", power);
         Ok(Self {
-            coeff: ((1.0 - breakpoint) / breakpoint).powf(double_power),
-            breakpoint, power, double_power,
+            const_fct: (breakpoint / (1.0 - breakpoint)).powf(power),
+            breakpoint, power,
         })
     }
 
-    /// See supplementary methods.
+    /// See methods.
     pub fn get(&self, x: f64) -> f64 {
-        if x == 1.0 {
-            1.0
-        } else {
-            let t2 = self.coeff * (x / (1.0 - x)).powf(self.double_power);
-            t2 / (t2 + 1.0)
-        }
+        1.0 / (1.0 + self.const_fct * ((1.0 - x) / x).powf(self.power))
     }
 
     /// Weight breakpoint.
+    #[inline]
     pub fn breakpoint(&self) -> f64 {
         self.breakpoint
     }
 
     /// Weight power.
+    #[inline]
     pub fn power(&self) -> f64 {
         self.power
     }
