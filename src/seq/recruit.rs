@@ -628,7 +628,7 @@ impl From<(f64, XoshiroRng)> for Subsampling {
 impl Sampling for Subsampling {
     #[inline(always)]
     fn next(&mut self) -> bool {
-        self.rng.gen::<u64>() < self.p_int
+        self.rng.random::<u64>() < self.p_int
     }
 }
 

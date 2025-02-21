@@ -111,10 +111,11 @@ impl F64Ext {
     //     IterExt::argmin(a.iter().copied())
     // }
 
-    // /// Returns the index of the maximal value and the value itself.
-    // pub fn argmax(a: &[f64]) -> (usize, f64) {
-    //     IterExt::argmax(a.iter().copied())
-    // }
+    /// Returns the index of the maximal value and the value itself.
+    #[cfg(feature = "highs")]
+    pub fn argmax(a: &[f64]) -> (usize, f64) {
+        IterExt::argmax(a.iter().copied())
+    }
 
     /// Finds `q`-th quantile in a sorted array.
     /// Uses linear interpolation, if the quantile is between two elements.
@@ -199,12 +200,13 @@ impl IterExt {
     //     Self::arg_optimal(it, |opt, e| opt < e)
     // }
 
-    // /// Finds an index of the maximal value in the iterator and the value itself.
-    // /// If the maximal value appears several times, returns the index of the first value.
-    // /// Panics on an empty iterator.
-    // pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
-    //     Self::arg_optimal(it, |opt, e| opt > e)
-    // }
+    /// Finds an index of the maximal value in the iterator and the value itself.
+    /// If the maximal value appears several times, returns the index of the first value.
+    /// Panics on an empty iterator.
+    #[cfg(feature = "highs")]
+    pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
+        Self::arg_optimal(it, |opt, e| opt > e)
+    }
 
     /// Calculates cumulative sums over iterator and returns the vector of length `len(iter) + 1`.
     /// First element = 0.

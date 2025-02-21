@@ -12,7 +12,7 @@ pub fn init_rng(seed: Option<u64>) -> XoshiroRng {
         XoshiroRng::seed_from_u64(seed)
     } else {
         let mut buffer = [0_u8; 8];
-        getrandom::getrandom(&mut buffer).unwrap();
+        getrandom::fill(&mut buffer).unwrap();
         let seed = u64::from_le_bytes(buffer);
         log::debug!("Using random seed {}", seed);
         XoshiroRng::seed_from_u64(seed)

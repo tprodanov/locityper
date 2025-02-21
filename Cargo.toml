@@ -1,29 +1,29 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "0.18.0"
+version = "0.18.1-0"
 rust-version = "1.70"
 edition = "2021"
 
 [dependencies]
-htslib = { package = "rust-htslib", version = "0.47", default-features = false }
+htslib = { package = "rust-htslib", version = "0.49", default-features = false }
 nalgebra = { version = "0.33", default-features = false, features = ["std"] } # Possibly remove later.
-statrs = { version = "0.17", default-features = false } # Possibly remove later.
+statrs = { version = "0.18", default-features = false } # Possibly remove later.
 nohash = { package = "nohash-hasher", version = "0.2.0", default-features = false, features = ["std"] }
 json = { version = "0.12", default-features = false }
 bio = { version = "2", default-features = false } # Remove later.
 fern = { version = "0.7", default-features = false, features = ["colored"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 log = { version = "0.4", default-features = false }
-rand = { version = "0.8", default-features = false, features = ["std", "alloc"] }
-rand_xoshiro = { version = "0.6", default-features = false }
-getrandom = { version = "0.2", default-features = false }
+rand = { version = "0.9", default-features = false, features = ["std", "alloc"] }
+rand_xoshiro = { version = "0.7", default-features = false }
+getrandom = { version = "0.3", default-features = false }
 grb = { version = "2", default-features = false, optional = true }
 # Force same version of highs-sys as highs.
 highs-sys = { version = "=1.6.1", default-features = false, optional = true }
 highs = { version = "=1.6.1", default-features = false, optional = true }
 lexopt = { version = "0.3", default-features = false }
-colored = { version = "2", default-features = false }
+colored = { version = "3", default-features = false }
 which = { version = "7", default-features = false }
 regex = { version = "1.10", default-features = false, features = ["std", "perf"] }
 fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode", "perf"] }

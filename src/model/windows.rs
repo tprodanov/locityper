@@ -483,7 +483,7 @@ impl ContigInfo {
             let (start, end) = self.window_getter.ith_window(i);
             let left_tweak = tweak.min(start) as i32;
             let right_tweak = tweak.min(self.contig_len.checked_sub(end).unwrap()) as i32;
-            let r = rng.gen_range(-left_tweak..=right_tweak);
+            let r = rng.random_range(-left_tweak..=right_tweak);
             (start.checked_add_signed(r).unwrap(), end.checked_add_signed(r).unwrap())
         })
     }

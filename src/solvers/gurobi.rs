@@ -114,7 +114,7 @@ impl super::Solver for GurobiSolver {
     ) -> crate::Result<ReadAssignment<'a>>
     {
         let (mut model, vars) = define_model(gt_alns)?;
-        model.set_param(parameter::IntParam::Seed, rng.gen::<i32>().abs())?;
+        model.set_param(parameter::IntParam::Seed, rng.random::<i32>().abs())?;
         model.optimize()?;
         let status = model.status()?;
         if status != Status::Optimal {

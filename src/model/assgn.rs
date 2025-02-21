@@ -455,7 +455,7 @@ impl ReassignmentTarget {
 
     /// Creates a random reassignment target: selects one random read pair, and its possible random new location.
     pub fn random(assgn: &ReadAssignment, rng: &mut impl Rng) -> Self {
-        let read_pair = assgn.parent.non_trivial_reads[rng.gen_range(0..assgn.parent.non_trivial_reads.len())];
+        let read_pair = assgn.parent.non_trivial_reads[rng.random_range(0..assgn.parent.non_trivial_reads.len())];
         let start_ix = assgn.parent.read_ixs[read_pair];
         let end_ix = assgn.parent.read_ixs[read_pair + 1];
         let total_assgns = end_ix - start_ix;
@@ -465,7 +465,7 @@ impl ReassignmentTarget {
         let new_assgn = if total_assgns == 2 {
             1 - old_assgn
         } else {
-            let i = rng.gen_range(1..total_assgns as u16);
+            let i = rng.random_range(1..total_assgns as u16);
             if i <= old_assgn { i - 1 } else { i }
         };
 

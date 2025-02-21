@@ -4,7 +4,7 @@ use std::{
 };
 use rand::{
     Rng,
-    seq::SliceRandom,
+    seq::IndexedRandom,
 };
 use crate::{
     err::{error, validate_param},
@@ -80,7 +80,7 @@ impl Solver for GreedySolver {
             // 0 - index of the best alignment.
             ReadAssignment::new(gt_alns, |_| 0)
         } else {
-            ReadAssignment::new(gt_alns, |alns| rng.gen_range(0..alns.len()))
+            ReadAssignment::new(gt_alns, |alns| rng.random_range(0..alns.len()))
         };
         let min_diff = minimum_allowed_diff(max_abs_random(&assignments, rng, INIT_ITER));
 
@@ -186,7 +186,7 @@ impl Solver for SimAnneal {
     {
         // 0 - index of the best alignment.
         // let mut assignments = ReadAssignment::new(gt_alns, |_| 0);
-        let mut assignments = ReadAssignment::new(gt_alns, |alns| rng.gen_range(0..alns.len()));
+        let mut assignments = ReadAssignment::new(gt_alns, |alns| rng.random_range(0..alns.len()));
         let max_abs = max_abs_random(&assignments, rng, INIT_ITER);
         let min_diff = minimum_allowed_diff(max_abs);
         // Solution to equation   `init_prob = exp(-max_abs / start_temp)`.
@@ -197,7 +197,7 @@ impl Solver for SimAnneal {
         for i in (1..=self.anneal_steps).rev() {
             let target = ReassignmentTarget::random(&assignments, rng);
             let diff = assignments.calculate_improvement(&target) - min_diff;
-            if diff >= 0.0 || rng.gen::<f64>() <= (diff / (temp_step * i as f64)).exp() {
+            if diff >= 0.0 || rng.random::<f64>() <= (diff / (temp_step * i as f64)).exp() {
                 assignments.reassign(&target);
                 curr_plato = 0;
             } else {
