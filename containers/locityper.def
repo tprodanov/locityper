@@ -3,7 +3,7 @@ From: rust:1.76-slim-bookworm
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v0.17.4
+    Version v0.18.0
 
 %post
     PREFIX=/usr/local
