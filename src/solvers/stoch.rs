@@ -2,10 +2,7 @@ use std::{
     fmt,
     cmp::{min, max},
 };
-use rand::{
-    Rng,
-    seq::IndexedRandom,
-};
+use rand::Rng;
 use crate::{
     err::{error, validate_param},
     ext::rand::XoshiroRng,
@@ -74,8 +71,8 @@ impl Solver for GreedySolver {
         rng: &mut XoshiroRng,
     ) -> crate::Result<ReadAssignment<'a>>
     {
-        let non_trivial_ixs = gt_alns.non_trivial_reads();
-        let sample_size = min(self.sample_size, non_trivial_ixs.len());
+        let non_trivial_reads = gt_alns.non_trivial_reads();
+        let sample_size = min(self.sample_size, non_trivial_reads.len());
         let mut assignments = if self.best_start {
             // 0 - index of the best alignment.
             ReadAssignment::new(gt_alns, |_| 0)
@@ -89,7 +86,8 @@ impl Solver for GreedySolver {
         for _ in 0..max_iter {
             let mut best_target = None;
             let mut best_improv = min_diff;
-            for &rp in non_trivial_ixs.choose_multiple(rng, sample_size) {
+            for _ in 0..sample_size {
+                let rp = non_trivial_reads.random(rng);
                 let (target, improv) = assignments.best_read_improvement(rp);
                 if improv > best_improv {
                     best_target = Some(target);

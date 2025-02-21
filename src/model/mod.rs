@@ -3,6 +3,7 @@ pub mod locs;
 pub mod assgn;
 pub mod distr_cache;
 pub mod bam;
+pub mod randread;
 
 use crate::{
     math::Ln,

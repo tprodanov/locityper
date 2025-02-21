@@ -278,6 +278,8 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 pub struct GrouppedAlignments {
     /// Read name.
     read_data: ReadData,
+    /// Read weight.
+    weight: f64,
     /// Highest likelihood across all possible locations.
     max_lik: f64,
     /// Probability that both mates are unmapped.
@@ -290,16 +292,25 @@ pub struct GrouppedAlignments {
 
 impl GrouppedAlignments {
     /// Returns read name.
+    #[inline(always)]
     pub fn read_name(&self) -> &str {
         &self.read_data.name
     }
 
+    /// Read pair weight.
+    #[inline(always)]
+    pub fn weight(&self) -> f64 {
+        self.weight
+    }
+
     /// Maximum likelihood across all contigs.
+    #[inline(always)]
     pub fn max_lik(&self) -> f64 {
         self.max_lik
     }
 
     /// Probability that both reads are unmapped for one specific contig (but same for all contigs).
+    #[inline(always)]
     pub fn unmapped_prob(&self) -> f64 {
         self.unmapped_prob
     }
@@ -334,11 +345,13 @@ impl GrouppedAlignments {
     }
 
     /// Return `i`-th alignment of all alignments for the read pair.
+    #[inline(always)]
     pub fn ith_aln(&self, i: u32) -> &Alignment {
         &self.alignments[i as usize]
     }
 
     /// Returns the total number of alignment pairs.
+    #[inline(always)]
     pub fn alignment_pairs(&self) -> usize {
         self.aln_pairs.len()
     }
@@ -574,7 +587,7 @@ fn identify_paired_end_alignments(
         max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
-        read_data, max_lik, alignments, aln_pairs,
+        read_data, max_lik, alignments, aln_pairs, weight,
         unmapped_prob: weight * (both_unmapped - norm_fct),
     }
 }
@@ -626,7 +639,7 @@ fn identify_single_end_alignments(
         max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
-        read_data, max_lik, alignments, aln_pairs,
+        read_data, max_lik, alignments, aln_pairs, weight,
         unmapped_prob: weight * (unmapped_prob - norm_fct),
     }
 }
@@ -825,11 +838,12 @@ impl AllAlignments {
         }
         log::debug!("    {}", counts.to_string(reads.len(), is_paired_end));
         if collisions > 2 && collisions * 100 > counts.total {
-            Err(error!(RuntimeError, "Too many read name collisions ({}). \
+            return Err(error!(RuntimeError, "Too many read name collisions ({}). \
                 Possibly, paired-end reads are processed as single-end reads.", collisions))
-        } else {
-            Ok(Self { reads, unused_reads })
         }
+        // Reverse-sort by weights.
+        reads.sort_unstable_by(|a, b| b.weight().total_cmp(&a.weight()));
+        Ok(Self { reads, unused_reads })
     }
 
     /// Reads that are used in the model.
