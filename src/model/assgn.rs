@@ -8,7 +8,6 @@ use crate::{
 };
 use super::{
     locs::AllAlignments,
-    randread::ReadSelector,
     windows::{UNMAPPED_WINDOW, BOUNDARY_WINDOW, REG_WINDOW_SHIFT, ReadGtAlns, ContigInfos, GenotypeWindows},
     distr_cache::{DistrCache, WindowDistr},
 };
@@ -32,8 +31,8 @@ pub struct GenotypeAlignments {
     ///
     /// For read-pair `i`, possible read locations are `alns[read_ixs[i]..read_ixs[i + 1]]`.
     read_ixs: Vec<usize>,
-    /// Wrapper over non trivial reads that have > 1 possible read location (length <= n_reads).
-    non_trivial_reads: ReadSelector,
+    /// Indices of reads that have > 1 possible read location (length <= n_reads).
+    non_trivial_reads: Vec<usize>,
 }
 
 impl GenotypeAlignments {
@@ -59,7 +58,7 @@ impl GenotypeAlignments {
             assert!(nw <= usize::from(u16::MAX), "Read pair {} has too many alignment locations ({})", rp, nw);
             ix += nw;
             read_ixs.push(ix);
-            if nw > 1 && paired_alns.weight() > 0.0 {
+            if nw > 1 {
                 non_trivial_reads.push(rp);
             }
         }
@@ -80,13 +79,12 @@ impl GenotypeAlignments {
         Self {
             aln_contrib: 1.0 - params.lik_skew,
             depth_contrib: 1.0 + params.lik_skew,
-            non_trivial_reads: ReadSelector::new(non_trivial_reads, all_alns),
-            gt_windows, alns, depth_distrs, read_ixs,
+            non_trivial_reads, gt_windows, alns, depth_distrs, read_ixs,
         }
     }
 
     /// Returns slice with indices of all read pairs with at least two alignment locations.
-    pub(crate) fn non_trivial_reads(&self) -> &ReadSelector {
+    pub(crate) fn non_trivial_reads(&self) -> &[usize] {
         &self.non_trivial_reads
     }
 
@@ -457,7 +455,7 @@ impl ReassignmentTarget {
 
     /// Creates a random reassignment target: selects one random read pair, and its possible random new location.
     pub fn random(assgn: &ReadAssignment, rng: &mut impl Rng) -> Self {
-        let read_pair = assgn.parent.non_trivial_reads.random(rng);
+        let read_pair = assgn.parent.non_trivial_reads[rng.random_range(0..assgn.parent.non_trivial_reads.len())];
         let start_ix = assgn.parent.read_ixs[read_pair];
         let end_ix = assgn.parent.read_ixs[read_pair + 1];
         let total_assgns = end_ix - start_ix;

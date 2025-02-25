@@ -2,7 +2,10 @@ use std::{
     fmt,
     cmp::{min, max},
 };
-use rand::Rng;
+use rand::{
+    Rng,
+    seq::IndexedRandom,
+};
 use crate::{
     err::{error, validate_param},
     ext::rand::XoshiroRng,
@@ -86,8 +89,7 @@ impl Solver for GreedySolver {
         for _ in 0..max_iter {
             let mut best_target = None;
             let mut best_improv = min_diff;
-            for _ in 0..sample_size {
-                let rp = non_trivial_reads.random(rng);
+            for &rp in non_trivial_reads.choose_multiple(rng, sample_size) {
                 let (target, improv) = assignments.best_read_improvement(rp);
                 if improv > best_improv {
                     best_target = Some(target);

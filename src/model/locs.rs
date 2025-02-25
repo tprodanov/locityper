@@ -841,8 +841,6 @@ impl AllAlignments {
             return Err(error!(RuntimeError, "Too many read name collisions ({}). \
                 Possibly, paired-end reads are processed as single-end reads.", collisions))
         }
-        // Reverse-sort by weights.
-        reads.sort_unstable_by(|a, b| b.weight().total_cmp(&a.weight()));
         Ok(Self { reads, unused_reads })
     }
 
