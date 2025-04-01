@@ -265,7 +265,7 @@ struct Args {
     samtools: PathBuf,
     jellyfish: PathBuf,
     debug: bool,
-    debug_head: Option<u64>,
+    head: Option<u64>,
     /// Was technology explicitely provided?
     explicit_technology: bool,
     /// When calculating insert size distributions and read error profiles,
@@ -298,7 +298,7 @@ impl Default for Args {
             describe: false,
             rerun: super::Rerun::None,
             debug: false,
-            debug_head: None,
+            head: None,
             strobealign: PathBuf::from("strobealign"),
             minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
@@ -330,7 +330,7 @@ impl Args {
             }
         }
 
-        if self.debug_head.is_some() {
+        if self.head.is_some() {
             self.skip_recruitment = true;
         }
         if !self.skip_recruitment {
@@ -343,7 +343,7 @@ impl Args {
 
         validate_param!(0.0 < self.subsampling_rate && self.subsampling_rate <= 1.0,
             "Subsampling rate ({}) must be in (0, 1].", self.subsampling_rate);
-        if self.in_files.has_indexed_alignment() || self.similar_dataset.is_some() || self.debug_head.is_some() {
+        if self.in_files.has_indexed_alignment() || self.similar_dataset.is_some() || self.head.is_some() {
             self.subsampling_rate = 1.0;
         }
 
@@ -497,7 +497,7 @@ fn print_help(extended: bool) {
             {EMPTY}  reference and extract insert sizes and error profiles from them.\n\
             {EMPTY}  Can be used to validate similar dataset preprocessing ({}).\n\
             {EMPTY}  Recommended to use together with {}.",
-            "    --debug-head".green(), "INT".yellow(), "INT".yellow(), "-~".green(), "-q 60".underline());
+            "    --head".green(), "INT".yellow(), "INT".yellow(), "-~".green(), "-q 60".underline());
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
         println!("    {:KEY$} {:VAL$}  Minimap2 executable    [{}].",
@@ -574,7 +574,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("subsample") => args.subsampling_rate = parser.value()?.parse()?,
             Long("seed") => args.seed = Some(parser.value()?.parse()?),
 
-            Long("debug-head") => args.debug_head = Some(parser.value()?.parse::<PrettyU64>()?.get()),
+            Long("head") => args.head = Some(parser.value()?.parse::<PrettyU64>()?.get()),
             Long("skip-recruit") | Long("skip-recr") | Long("skip-recruitment") => args.skip_recruitment = true,
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
             Long("no-index") => args.in_files.no_index = true,
@@ -702,7 +702,7 @@ fn set_mapping_stdin(
 
     let mut writer = io::BufWriter::new(child_stdin);
     fastx::process_readers!(args.in_files, Some(ref_contigs); let {mut} reader; {
-        if let Some(count) = args.debug_head {
+        if let Some(count) = args.head {
             Ok(thread::spawn(move || reader.copy_first(&mut writer, count)
                 .map(|_| None) // Do not return the number of reads.
             ))
@@ -755,7 +755,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
 
 fn first_step_str(args: &Args, bg_region: Option<&BgRegion>) -> String {
     let mut s = String::new();
-    if let Some(count) = args.debug_head {
+    if let Some(count) = args.head {
         write!(s, "_head_ -n {}", PrettyU64(count)).unwrap();
     } else {
         if args.skip_recruitment {
@@ -1422,7 +1422,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let bg_distr = if let Some(similar_dataset) = &args.similar_dataset {
         estimate_like(&args, &out_dir, similar_dataset, &ref_contigs)?
     } else {
-        let bg_region = if args.debug_head.is_none() {
+        let bg_region = if args.head.is_none() {
             Some(BgRegion::new(&args, &ref_filename, &ref_contigs, &mut ref_fasta)?)
         } else { None };
         estimate_bg_distrs(&args, &out_dir, &ref_contigs, bg_region.as_ref())?
