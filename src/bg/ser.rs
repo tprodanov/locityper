@@ -12,7 +12,7 @@ pub trait JsonSer: Sized {
 pub fn parse_f64_arr(obj: &json::JsonValue, key: &str, arr: &mut [f64]) -> crate::Result<()> {
     if let json::JsonValue::Array(v) = &obj[key] {
         if v.len() != arr.len() {
-            return Err(error!(JsonLoad, "Failed to parse '{}': incorrect number of elements in array '{}'",
+            return Err(error!(JsonLoad, "Failed to parse '{}': incorrect number of elements in array `{}`",
                 obj, key));
         }
         for (i, val) in v.iter().enumerate() {

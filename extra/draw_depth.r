@@ -111,7 +111,8 @@ for (gt_str in args$genotype) {
         # Window weights behind likelihoods.
         geom_rect(aes(xmin = window - 0.5, xmax = window + 0.5,
             ymin = ifelse(no_lik, 0, -Inf), ymax = ifelse(no_lik, Inf, 0), fill = weight)) +
-        scale_fill_gradientn('Window weight ', limits = c(0, 1), colors = c('#ff000055', '#ffffff00')) +
+        scale_fill_gradientn('Window weight ', limits = c(0, 1),
+            breaks = c(0, 0.5, 1), colors = c('#ff000055', '#ffffff00')) +
         new_scale('fill') +
 
         # 0-line.

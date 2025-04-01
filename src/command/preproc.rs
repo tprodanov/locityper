@@ -1121,12 +1121,13 @@ fn estimate_bg_from_paired(
         }
     }
     let depth_distr = if let Some(windows) = opt_windows {
-        ReadDepth::estimate(&depth_alns, &windows, &args.bg_params.depth,
-            args.subsampling_rate, &seq_info, opt_out_dir)?
+        let depth = ReadDepth::estimate(&depth_alns, &windows, &args.bg_params.depth,
+            args.subsampling_rate, &seq_info, opt_out_dir)?;
+        depth.describe(true);
+        Some(depth)
     } else {
-        ReadDepth::empty()
+        None
     };
-    depth_distr.describe(true);
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -1153,12 +1154,13 @@ fn estimate_bg_from_unpaired(
         .collect();
 
     let depth_distr = if let Some(windows) = opt_windows {
-        ReadDepth::estimate(&filt_alns, &windows, &args.bg_params.depth,
-            args.subsampling_rate, &seq_info, opt_out_dir)?
+        let depth = ReadDepth::estimate(&filt_alns, &windows, &args.bg_params.depth,
+            args.subsampling_rate, &seq_info, opt_out_dir)?;
+        depth.describe(false);
+        Some(depth)
     } else {
-        ReadDepth::empty()
+        None
     };
-    depth_distr.describe(false);
     Ok(BgDistr::new(seq_info, insert_distr, err_prof, depth_distr))
 }
 
@@ -1316,6 +1318,9 @@ fn estimate_like(
     } else if similar_distr.insert_distr().is_paired_end() != args.in_files.is_paired_end() {
         return Err(error!(InvalidInput,
             "Cannot use similar dataset {}: paired-end status does not match", ext::fmt::path(like_dir)));
+    } else if !similar_distr.has_read_depth() {
+        return Err(error!(InvalidInput,
+            "Cannot use similar dataset {}: undefined read depth", ext::fmt::path(like_dir)));
     } else if !seq_info.technology().is_read_len_similar(seq_info.mean_read_len(), similar_seq_info.mean_read_len()) {
         return Err(error!(InvalidInput,
             "Cannot use similar dataset {}: read lengths are different ({:.0} and {:.0})",

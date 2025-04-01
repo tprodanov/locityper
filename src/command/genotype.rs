@@ -1,5 +1,6 @@
 use std::{
     fs,
+    str::FromStr,
     io::{self, BufRead},
     process::{Command, Stdio},
     cmp::{min, max, Ordering},
@@ -44,6 +45,26 @@ use super::{paths, DebugLvl, preproc::InputFiles};
 
 pub const DEFAULT_CHUNK_LENGTH: u64 = 3_000_000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StopAfter {
+    Recruit,
+    Map,
+    All,
+}
+
+impl FromStr for StopAfter {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "recruit" | "recruitment" => Ok(Self::Recruit),
+            "map" | "mapping" => Ok(Self::Map),
+            "all" => Ok(Self::All),
+            _ => Err(format!("Unknown --stop-after value {:?}", s)),
+        }
+    }
+}
+
 struct Args {
     in_files: InputFiles,
     preproc: Option<PathBuf>,
@@ -57,6 +78,7 @@ struct Args {
 
     threads: u16,
     rerun: super::Rerun,
+    stop_after: StopAfter,
     strobealign: PathBuf,
     minimap: PathBuf,
     samtools: PathBuf,
@@ -88,6 +110,7 @@ impl Default for Args {
 
             threads: 8,
             rerun: super::Rerun::None,
+            stop_after: StopAfter::All,
             strobealign: PathBuf::from("strobealign"),
             minimap: PathBuf::from("minimap2"),
             samtools: PathBuf::from("samtools"),
@@ -290,6 +313,9 @@ fn print_help(extended: bool) {
         {EMPTY}  read recruitment ({}); do not rerun completed loci ({}).",
         "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
         "all".yellow(), "part".yellow(), "none".yellow());
+    println!("    {:KEY$} {:VAL$}  Stop after one of the steps: {}, {} or {} (default).",
+        "    --stop-after".green(), "STR".yellow(),
+        "recruit".yellow(), "map".yellow(), "all".yellow());
     println!("    {:KEY$} {:VAL$}  Random seed. Ensures reproducibility for the same\n\
         {EMPTY}  input and program version.",
         "-s, --seed".green(), "INT".yellow());
@@ -417,6 +443,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("no-index") => args.in_files.no_index = true,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
+            Long("stop-after") => args.stop_after = parser.value()?.parse()?,
             Short('s') | Long("seed") => args.seed = Some(parser.value()?.parse()?),
             Long("debug") => args.debug = DebugLvl::from(parser.value()?.parse::<u8>()?),
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
@@ -929,7 +956,10 @@ fn analyze_locus(
     log::info!("{} {}", "Analyzing".bold(), locus.set.tag().bold());
     let timer = Instant::now();
     map_reads(locus, bg_distr, &args)?;
-    let is_paired_end = bg_distr.insert_distr().is_paired_end();
+    if args.stop_after <= StopAfter::Map {
+        log::warn!("    Stopping after read mapping");
+        return Ok(());
+    }
 
     log::info!("    Calculating read alignment probabilities");
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
@@ -965,7 +995,7 @@ fn analyze_locus(
         log::error!("[{}] No available reads", locus.set.tag());
         scheme::Genotyping::empty_result(locus.set.tag().to_string(), vec![scheme::GenotypingWarning::NoReads])
     } else {
-        if is_paired_end && args.debug >= DebugLvl::Full {
+        if bg_distr.insert_distr().is_paired_end() && args.debug >= DebugLvl::Full {
             let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
             let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
             all_alns.write_read_pair_info::<false>(pairs_writer, contigs).map_err(add_path!(read_pairs_filename))?;
@@ -995,7 +1025,8 @@ fn analyze_locus(
             assgn_params: args.assgn_params.clone(),
             debug: args.debug,
             threads: usize::from(args.threads),
-            all_alns, genotypes, priors, contig_infos, is_paired_end,
+            is_paired_end: bg_distr.insert_distr().is_paired_end(),
+            all_alns, genotypes, priors, contig_infos,
         };
         scheme::solve(data, bg_distr, &locus.out_dir, &mut rng)?
     };
@@ -1021,7 +1052,11 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let preproc_dir = args.preproc.as_ref().unwrap();
 
     let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), Some(&preproc_dir.join(paths::SUCCESS)))?;
-    args.assgn_params.set_tweak_size(bg_distr.depth().window_size())?;
+    if let Some(depth) = bg_distr.opt_depth() {
+        args.assgn_params.set_tweak_size(depth.window_size())?;
+    } else if args.stop_after > StopAfter::Map {
+        return Err(error!(InvalidInput, "Background read depth undefined"));
+    }
     let tech = bg_distr.seq_info().technology();
     let recr_params = recruit::Params::new(
         args.minimizer_kw,
@@ -1049,6 +1084,10 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         return Ok(());
     }
     recruit_reads(&loci, &bg_distr, &args, recr_params)?;
+    if args.stop_after <= StopAfter::Recruit {
+        log::warn!("Stopping after read recruitment");
+        return Ok(());
+    }
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, args.assgn_params.alt_cn));

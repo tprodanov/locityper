@@ -59,10 +59,14 @@ pub struct DistrCache(Vec<CachedDistr>);
 
 impl DistrCache {
     pub fn new(bg_distr: &bg::BgDistr, alt_cn: (f64, f64)) -> Self {
+        let depth = match bg_distr.opt_depth() {
+            Some(depth) => depth,
+            None => return Self(Vec::new()),
+        };
         let mul_coef = if bg_distr.insert_distr().is_paired_end() { 2.0 } else { 1.0 };
         let mut cached_distrs = Vec::with_capacity(GC_BINS);
         for gc in 0..GC_BINS {
-            let cn1_distr = bg_distr.depth().depth_distribution(gc.try_into().unwrap()).mul(mul_coef);
+            let cn1_distr = depth.depth_distribution(gc.try_into().unwrap()).mul(mul_coef);
             let sub_distr = cn1_distr.mul(alt_cn.0);
             let super_distr = cn1_distr.mul(alt_cn.1);
             let bayes = LinearCache::new(BayesCalc::new(cn1_distr, [sub_distr, super_distr]), CACHE_SIZE);

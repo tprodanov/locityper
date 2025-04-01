@@ -65,7 +65,7 @@ pub struct BgDistr {
     /// Error profile.
     err_prof: ErrorProfile,
     /// Read depth distribution,
-    depth: ReadDepth,
+    depth: Option<ReadDepth>,
 }
 
 impl BgDistr {
@@ -73,7 +73,7 @@ impl BgDistr {
         seq_info: SequencingInfo,
         insert_distr: InsertDistr,
         err_prof: ErrorProfile,
-        depth: ReadDepth
+        depth: Option<ReadDepth>,
     ) -> Self
     {
         Self { seq_info, insert_distr, err_prof, depth }
@@ -96,7 +96,10 @@ impl BgDistr {
     pub fn describe(&self) {
         self.err_prof.describe();
         self.insert_distr.describe();
-        self.depth.describe(self.insert_distr.is_paired_end());
+        match &self.depth {
+            Some(depth) => depth.describe(self.insert_distr.is_paired_end()),
+            None => log::warn!("Background read depth was not estimated"),
+        };
     }
 
     /// Access sequencing information (read length and technology).
@@ -111,13 +114,23 @@ impl BgDistr {
     }
 
     #[inline(always)]
+    pub fn has_read_depth(&self) -> bool {
+        self.depth.is_some()
+    }
+
+    #[inline(always)]
     pub fn depth(&self) -> &ReadDepth {
-        &self.depth
+        self.depth.as_ref().expect("Read depth must be defined")
+    }
+
+    #[inline(always)]
+    pub fn opt_depth(&self) -> Option<&ReadDepth> {
+        self.depth.as_ref()
     }
 
     #[inline(always)]
     pub fn depth_mut(&mut self) -> &mut ReadDepth {
-        &mut self.depth
+        self.depth.as_mut().expect("Read depth must be defined")
     }
 
     #[inline(always)]
@@ -133,25 +146,31 @@ impl BgDistr {
 
 impl JsonSer for BgDistr {
     fn save(&self) -> json::JsonValue {
-        json::object!{
+        let mut obj = json::object!{
             seq_info: self.seq_info.save(),
             insert_distr: self.insert_distr.save(),
             error_profile: self.err_prof.save(),
-            bg_depth: self.depth.save(),
+        };
+        if let Some(depth) = &self.depth {
+            obj["bg_depth"] = depth.save();
         }
+        obj
     }
 
     fn load(obj: &json::JsonValue) -> crate::Result<Self> {
-        if obj.has_key("seq_info") && obj.has_key("bg_depth")
-                && obj.has_key("insert_distr") && obj.has_key("error_profile") {
+        let depth = if obj.has_key("bg_depth") {
+            Some(ReadDepth::load(&obj["bg_depth"])?)
+        } else { None };
+
+        if obj.has_key("seq_info") && obj.has_key("insert_distr") && obj.has_key("error_profile") {
             Ok(Self {
                 seq_info: SequencingInfo::load(&obj["seq_info"])?,
                 insert_distr: InsertDistr::load(&obj["insert_distr"])?,
                 err_prof: ErrorProfile::load(&obj["error_profile"])?,
-                depth: ReadDepth::load(&obj["bg_depth"])?,
+                depth,
             })
         } else {
-            Err(error!(JsonLoad, "BgDistr: Failed to parse '{}': missing 'seq_info', 'bg_depth', \
+            Err(error!(JsonLoad, "BgDistr: Failed to parse '{}': missing 'seq_info', \
                 'insert_distr' or 'error_profile' keys!", obj))
         }
     }
