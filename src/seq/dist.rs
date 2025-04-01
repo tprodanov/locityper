@@ -293,7 +293,7 @@ fn multithread_align(
 //     record.set(query.name().as_bytes(), Some(cigar_view), &[], &[]);
 //     record.push_aux(b"NM", bam::record::Aux::U32(edit_dist)).expect("Cannot set NM tag");
 //     record.push_aux(b"AS", bam::record::Aux::I32(score)).expect("Cannot set AS tag");
-//     record.push_aux(b"dv", bam::record::Aux::Double(divergence)).expect("Cannot set `dv` tag");
+//     record.push_aux(b"dv", bam::record::Aux::Float(divergence as f32)).expect("Cannot set `dv` tag");
 //     record
 // }
 

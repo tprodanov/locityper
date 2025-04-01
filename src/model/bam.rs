@@ -18,6 +18,7 @@ use crate::{
         assgn::GenotypeAlignments,
     },
     algo::{TwoU32, IntMap},
+    math::Ln,
 };
 
 /// Updates `contig_to_tid` vector, and returns
@@ -121,7 +122,7 @@ fn create_record(
         if let Some(dist) = aln.distance() {
             record.push_aux(EDIT_TAG, bam::record::Aux::U32(dist.edit()))?;
         }
-        record.push_aux(ALN_LIK_TAG, bam::record::Aux::Double(aln.ln_prob()))?;
+        record.push_aux(ALN_LIK_TAG, bam::record::Aux::Float(Ln::to_log10(aln.ln_prob()) as f32))?;
     }
     record.push_aux(UNIQ_KMERS_TAG, bam::record::Aux::U16(mate_data.unique_kmers()))?;
     Ok(record)
