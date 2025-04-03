@@ -2,6 +2,7 @@ use std::{
     cmp::{min, Ord},
     ops::{Shl, Shr, BitOr, BitAnd},
 };
+use crate::algo::IntSet;
 
 /// Store k-mers in integers of different length (15-mers in u32, 31-mers in u64, 63-mers in u128).
 pub trait Kmer: From<u8>
@@ -98,6 +99,33 @@ impl Minimizer for u128 {
     }
 }
 
+/// Output data structure for k-mers or minimizers.
+/// Either Vec<(position, kmer)>, Vec<kmer> or IntSet<kmer>.
+pub trait Output<K: Kmer> {
+    fn push(&mut self, pos: u32, kmer: K);
+}
+
+impl<K: Kmer> Output<K> for Vec<(u32, K)> {
+    #[inline(always)]
+    fn push(&mut self, pos: u32, kmer: K) {
+        self.push((pos, kmer));
+    }
+}
+
+impl<K: Kmer> Output<K> for Vec<K> {
+    #[inline(always)]
+    fn push(&mut self, _pos: u32, kmer: K) {
+        self.push(kmer);
+    }
+}
+
+impl<K: Kmer + std::hash::Hash + nohash::IsEnabled> Output<K> for IntSet<K> {
+    #[inline(always)]
+    fn push(&mut self, _pos: u32, kmer: K) {
+        self.insert(kmer);
+    }
+}
+
 pub const CANONICAL: bool = true;
 pub const NON_CANONICAL: bool = false;
 
@@ -105,7 +133,10 @@ pub const NON_CANONICAL: bool = false;
 /// Returns `K::UNDEF` for k-mers containing N.
 ///
 /// If `CANONICAL` is true, returns canonical k-mers (min between forward and reverse-complement k-mer).
-pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, output: &mut Vec<K>) {
+pub fn kmers<K, O, const CANON: bool>(seq: &[u8], k: u8, output: &mut O)
+where K: Kmer,
+      O: Output<K>,
+{
     debug_assert!(k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     let mask = K::create_mask(k);
     let rv_shift = if CANON { 2 * k - 2 } else { 0 };
@@ -113,7 +144,8 @@ pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, output: &mut Vec<K>)
     let mut rv_kmer = K::ZERO;
 
     let k = u32::from(k);
-    let mut reset = k - 1;
+    let k_1 = k - 1;
+    let mut reset = k_1;
 
     for (i, &nt) in seq.iter().enumerate() {
         let i = i as u32;
@@ -125,7 +157,7 @@ pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, output: &mut Vec<K>)
             _ => {
                 reset = i + k;
                 if i + 1 >= k {
-                    output.push(K::UNDEF);
+                    output.push(i - k_1, K::UNDEF);
                 }
                 continue;
             },
@@ -134,31 +166,10 @@ pub fn kmers<K: Kmer, const CANON: bool>(seq: &[u8], k: u8, output: &mut Vec<K>)
         if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(3 - fw_enc) << rv_shift); }
 
         if i >= reset {
-            output.push(if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer });
+            output.push(i - k_1, if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer });
         } else if i + 1 >= k {
-            output.push(K::UNDEF);
+            output.push(i - k_1, K::UNDEF);
         } // else { }
-    }
-}
-
-/// Trait that summarizes tuple `(u32, kmer)` and simply `kmer`.
-/// In the first case, minimizers are saved together with their positions,
-/// in the other, only kmers are saved.
-pub trait PosKmer<K> {
-    fn transform(pos: u32, kmer: K) -> Self;
-}
-
-impl<K: Kmer> PosKmer<K> for K {
-    #[inline(always)]
-    fn transform(_: u32, kmer: K) -> K {
-        kmer
-    }
-}
-
-impl<K: Kmer> PosKmer<K> for (u32, K) {
-    #[inline(always)]
-    fn transform(pos: u32, kmer: K) -> (u32, K) {
-        (pos, kmer)
     }
 }
 
@@ -223,9 +234,9 @@ fn find_min<T: Copy + Ord>(
 /// Output vector should have type `Vec<K>` or `Vec<(u32, K)>`, then minimizers are saved together with their positions.
 ///
 /// NOTE: minimizers should be cleared in advance.
-pub fn minimizers<K, P, const CANON: bool>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
+pub fn minimizers<K, O, const CANON: bool>(seq: &[u8], k: u8, w: u8, output: &mut O)
 where K: Minimizer,
-      P: PosKmer<K>,
+      O: Output<K>,
 {
     debug_assert!(0 < k && k <= K::MAX_KMER_SIZE, "k-mer size ({}) can be at most {}", k, K::MAX_KMER_SIZE);
     debug_assert!(0 < w && w < MAX_MINIMIZER_W, "Minimizer window ({}) must be smaller than {}", w, MAX_MINIMIZER_W);
@@ -284,16 +295,16 @@ where K: Minimizer,
         }
         if best_pos as i32 > last_pos {
             last_pos = best_pos as i32;
-            output.push(P::transform(best_pos - k_1, best_hash));
+            output.push(best_pos - k_1, best_hash);
         }
     }
 }
 
 /// Find canonical minimizers (wrapper around `minimizers`).
 #[inline]
-pub fn canon_minimizers<K, P>(seq: &[u8], k: u8, w: u8, output: &mut Vec<P>)
+pub fn canon_minimizers<K, O>(seq: &[u8], k: u8, w: u8, output: &mut O)
 where K: Minimizer,
-      P: PosKmer<K>,
+      O: Output<K>,
 {
-    minimizers::<K, P, { CANONICAL }>(seq, k, w, output)
+    minimizers::<K, O, { CANONICAL }>(seq, k, w, output)
 }

@@ -1,4 +1,8 @@
 use std::cmp::min;
+use crate::{
+    seq::kmers::{self, NON_CANONICAL},
+    algo::IntSet,
+};
 
 type Kmer = u8;
 type Count = u16;
@@ -70,4 +74,14 @@ pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
     }
     assert_eq!(complexities.len(), n - w + 1);
     complexities
+}
+
+/// Counts the fraction of unique k-mers in a sequence out of the total possible.
+/// k should be small enough that k-mer fits into u16 (<= 15), but large enough
+/// that sequence length is significantly larger than 4 ** k (for speed reasons).
+pub fn frac_unique_kmers(seq: &[u8], k: u8, set: &mut IntSet<u16>) -> f64 {
+    debug_assert!(k <= <u16 as kmers::Kmer>::MAX_KMER_SIZE);
+    set.clear();
+    kmers::kmers::<u16, _, NON_CANONICAL>(seq, k, set);
+    set.len() as f64 / (seq.len() + 1 - k as usize) as f64
 }

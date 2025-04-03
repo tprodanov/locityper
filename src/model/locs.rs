@@ -664,7 +664,7 @@ impl UniqueKmers {
         let mut off_target_kmers = HashSet::default();
         for (seq, counts) in contig_set.seqs().iter().zip(kmer_counts.iter()) {
             kmers_buf.clear();
-            kmers::kmers::<u128, CANONICAL>(seq, k, &mut kmers_buf);
+            kmers::kmers::<u128, _, CANONICAL>(seq, k, &mut kmers_buf);
             assert_eq!(kmers_buf.len(), counts.len());
             for (&kmer, &count) in kmers_buf.iter().zip(counts) {
                 if count == 0 {
@@ -686,7 +686,7 @@ impl UniqueKmers {
         for mate_data in read_data.mates.iter_mut() {
             if let Some(data) = mate_data.as_mut() {
                 self.kmers_buf.clear();
-                kmers::kmers::<u128, CANONICAL>(&data.sequence, self.k, &mut self.kmers_buf);
+                kmers::kmers::<u128, _, CANONICAL>(&data.sequence, self.k, &mut self.kmers_buf);
 
                 let mut kmers_iter = self.kmers_buf.iter();
                 let mut count = 0_u16;

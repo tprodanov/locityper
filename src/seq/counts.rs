@@ -184,7 +184,7 @@ impl KmerCounts {
         assert!(k <= u128::MAX_KMER_SIZE, "Cannot subtract k-mer counts: k is too high ({})", self.k);
 
         let mut buffer = Vec::new();
-        kmers::<u128, CANONICAL>(target_seq, k, &mut buffer);
+        kmers::<u128, _, CANONICAL>(target_seq, k, &mut buffer);
         assert_eq!(buffer.len(), target_counts.len(), "Unexpected number of subtract k-mers");
 
         // Value: off-target count.
@@ -208,7 +208,7 @@ impl KmerCounts {
         let mut all_new_counts = Vec::with_capacity(seqs.len());
         for (seq, old_counts) in seqs.iter().zip(&self.counts) {
             buffer.clear();
-            kmers::<u128, CANONICAL>(seq, k, &mut buffer);
+            kmers::<u128, _, CANONICAL>(seq, k, &mut buffer);
             let new_counts: Vec<_> = buffer.iter().zip(old_counts)
                 .map(|(kmer, &old_count)| off_target_map.get(kmer).copied().unwrap_or(old_count))
                 .collect();

@@ -54,7 +54,7 @@ pub fn minimizer_divergences(
         let seq = entry.seq();
         // Expected num of minimizers = 2L / (w + 1), here we take a bit more to be safe.
         let mut buff = Vec::with_capacity((5 * seq.len()).fast_round_div(2 * usize::from(w) + 2));
-        kmers::minimizers::<u64, u64, { kmers::NON_CANONICAL }>(seq, k, w, &mut buff);
+        kmers::minimizers::<u64, _, { kmers::NON_CANONICAL }>(seq, k, w, &mut buff);
         buff.sort_unstable();
         minimizers.push(buff);
     }
