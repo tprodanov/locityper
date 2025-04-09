@@ -224,10 +224,12 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let read_prof = aln.count_region_operations_fast(contig_len);
             let dist = read_prof.edit_distance();
             let (mut good_dist, mut passable_dist) = self.edit_dist_cache.get(dist.read_len());
-            if u5 <= 0.8 {
-                let diff = good_dist * 2;
-                good_dist += diff;
-                passable_dist += diff;
+            if u5 <= 0.85 {
+                // let diff = good_dist * 2;
+                // good_dist += diff;
+                // passable_dist += diff;
+                good_dist = 75;
+                passable_dist = 80;
             }
             // } else if u5 <= 0.75 {
             //     good_dist *= 2;
@@ -396,6 +398,7 @@ impl GrouppedAlignments {
             }
             writeln!(f, "{:.4}", Ln::to_log10(pair.ln_prob))?;
         }
+        writeln!(f, "{}\t*\t*\t*\t{:.4}", self.read_data.name_hash, self.unmapped_prob)?;
         Ok(())
     }
 }

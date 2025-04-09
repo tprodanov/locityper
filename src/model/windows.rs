@@ -42,6 +42,7 @@ pub struct WindowGetter {
 }
 
 impl WindowGetter {
+    #[inline]
     pub fn new(start: u32, end: u32, window: u32) -> Self {
         Self {
             start, end, window,
@@ -50,11 +51,13 @@ impl WindowGetter {
     }
 
     /// Returns boundaries of the i-th window.
+    #[inline]
     pub fn ith_window(&self, i: u32) -> (u32, u32) {
         let start = self.start + i * self.window;
         (start, start + self.window)
     }
 
+    #[inline(always)]
     pub fn len(&self) -> u32 {
         self.end - self.start
     }
@@ -78,6 +81,7 @@ impl WindowGetter {
     // }
 
     /// Returns window that is covered by the alignment middle.
+    #[inline]
     pub fn middle_window(&self, aln_middle: u32) -> Option<u32> {
         if self.start <= aln_middle && aln_middle < self.end {
             Some((aln_middle - self.start) / self.window)
@@ -155,11 +159,13 @@ impl ReadGtAlns {
     }
 
     /// Returns range of windows, to which the first and the second read ends are aligned.
+    #[inline]
     pub fn windows(&self) -> [u32; 2] {
         self.windows
     }
 
     /// Returns ln-probability of the alignment.
+    #[inline]
     pub fn ln_prob(&self) -> f64 {
         self.ln_prob
     }
@@ -188,18 +194,19 @@ impl WeightCalculator {
     }
 
     /// See methods.
+    #[inline]
     pub fn get(&self, x: f64) -> f64 {
         1.0 / (1.0 + self.const_fct * ((1.0 - x) / x).powf(self.power))
     }
 
     /// Weight breakpoint.
-    #[inline]
+    #[inline(always)]
     pub fn breakpoint(&self) -> f64 {
         self.breakpoint
     }
 
     /// Weight power.
-    #[inline]
+    #[inline(always)]
     pub fn power(&self) -> f64 {
         self.power
     }

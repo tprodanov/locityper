@@ -890,6 +890,9 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> crate::Resul
 
     let mut samtools_cmd = Command::new(&args.samtools);
     samtools_cmd.args(&["view", "-b"]); // Output BAM.
+    if bg_distr.seq_info().technology().are_short_reads() {
+        samtools_cmd.args(&["-e", "[AS] >= 50 || flag & 2304 == 0"]); // Discard secondary alignments with low score.
+    }
     // if !bg_distr.insert_distr().is_paired_end() {
     //     samtools_cmd.arg("-F4"); // ignore unmapped reads in case of single-end reads.
     // }

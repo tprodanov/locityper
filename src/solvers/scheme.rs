@@ -225,7 +225,7 @@ pub struct Data {
     pub is_paired_end: bool,
 }
 
-const ALNS_CSV_HEADER: &'static str = "read_hash\tcontig\tpos1\tposs2\tlik\tselected";
+const ALNS_CSV_HEADER: &'static str = "read_hash\tcontig\tpos1\tpos2\tlik\tselected";
 
 /// Write reads and their assignments to a CSV file in the following format (tab-separated):
 /// `prefix  read_hash  aln1  aln2  w1  w2  log10-prob  selected`
