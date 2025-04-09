@@ -122,10 +122,12 @@ struct FilteredReader<'a, R: bam::Read> {
     has_more: bool,
     contigs: Arc<ContigNames>,
     err_prof: &'a ErrorProfile,
+    are_short_reads: bool,
     edit_dist_cache: &'a EditDistCache,
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id, alignment start), value: index of the previous position.
     found_alns: IntMap<TwoU32, usize>,
+    buffer_set: IntSet<u16>,
 }
 
 #[inline]
@@ -137,7 +139,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     fn new(
         mut reader: R,
         contigs: Arc<ContigNames>,
-        err_prof: &'a ErrorProfile,
+        bg_distr: &'a BgDistr,
         edit_dist_cache: &'a EditDistCache,
     ) -> crate::Result<Self> {
         let mut record = bam::Record::new();
@@ -146,7 +148,10 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
             found_alns: IntMap::default(),
-            reader, record, contigs, err_prof, edit_dist_cache, has_more,
+            buffer_set: IntSet::default(),
+            are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
+            err_prof: bg_distr.error_profile(),
+            reader, record, contigs, edit_dist_cache, has_more,
         })
     }
 
@@ -202,10 +207,15 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         let mut min_prob = f64::INFINITY;
         self.found_alns.clear();
         let mut primary = true;
+        let mut u5 = f64::NAN;
+
         loop {
             let mut cigar = Cigar::from_raw(self.record.raw_cigar());
             if primary {
                 assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
+                if self.are_short_reads {
+                    u5 = seq::compl::frac_unique_kmers(&self.record.seq().as_bytes(), 5, &mut self.buffer_set);
+                }
             } else {
                 cigar.hard_to_soft();
             }
@@ -213,7 +223,17 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let contig_len = self.contigs.get_len(aln.contig_id());
             let read_prof = aln.count_region_operations_fast(contig_len);
             let dist = read_prof.edit_distance();
-            let (good_dist, passable_dist) = self.edit_dist_cache.get(dist.read_len());
+            let (mut good_dist, mut passable_dist) = self.edit_dist_cache.get(dist.read_len());
+            if u5 <= 0.8 {
+                let diff = good_dist * 2;
+                good_dist += diff;
+                passable_dist += diff;
+            }
+            // } else if u5 <= 0.75 {
+            //     good_dist *= 2;
+            //     passable_dist *= 2;
+            // }
+
             let is_good_dist = dist.edit() <= good_dist;
             // Discard all alignments with edit distance over half of the read length.
             let is_passable_dist = dist.edit() <= passable_dist;
@@ -224,7 +244,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 dist, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
                 Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
-                write!(dbg_writer, "\t{}", read_data.name).map_err(add_path!(!))?;
+                write!(dbg_writer, "\t{:.5}\t{}", u5, read_data.name).map_err(add_path!(!))?;
                 primary = false;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
@@ -674,7 +694,7 @@ impl UniqueKmers {
                 }
             }
         }
-        log::debug!("    {} k-mers unique to this locus, {} k-mers appear off target",
+        log::info!("    {} k-mers unique to this locus, {} k-mers appear off target",
             unique_kmers.len(), off_target_kmers.len());
         Self { k, unique_kmers, kmers_buf, min_kmers }
     }
@@ -726,8 +746,8 @@ fn in_bounds(alns: &[Alignment], boundary: u32, contigs: &ContigNames) -> bool {
 struct ReadCounts {
     total: u32,
     out_of_bounds: u32,
-    unmapped: u32,
-    unpaired: u32,
+    both_unmapped: u32,
+    pair_unmapped: u32,
     few_kmers: u32,
 }
 
@@ -735,10 +755,12 @@ impl ReadCounts {
     fn to_string(&self, use_reads: usize, is_paired_end: bool) -> String {
         let mut s = format!("Use {} read{}s. Discard ", use_reads, if is_paired_end { " pair" } else { "" });
         if is_paired_end {
-            write!(s, "{} unpaired, ", self.unpaired).unwrap();
+            write!(s, "{} + {} one|two mates", self.pair_unmapped, self.both_unmapped).unwrap();
+        } else {
+            write!(s, "{}", self.both_unmapped).unwrap();
         }
-        write!(s, "{} unmapped, {} out of bounds and {} with few unique k-mers",
-            self.unmapped, self.out_of_bounds, self.few_kmers).unwrap();
+        write!(s, " poorly mapped, {} out of bounds and {} with few unique k-mers",
+            self.out_of_bounds, self.few_kmers).unwrap();
         s
     }
 }
@@ -769,21 +791,21 @@ impl AllAlignments {
         mut dbg_writer3: Option<GzFile>,
     ) -> crate::Result<Self>
     {
-        log::info!("    Loading read alignments");
         let contigs = contig_set.contigs();
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over twice boundary size = {})", contigs.tag(), 2 * boundary);
         let mut unique_kmers = UniqueKmers::new(contig_set, params.min_unique_kmers);
 
-        writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tread_name")
+        log::info!("    Loading read alignments");
+        writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tu5\tread_name")
             .map_err(add_path!(!))?;
         writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tuse").map_err(add_path!(!))?;
         if let Some(w) = &mut dbg_writer3 {
             writeln!(w, "read_hash\tread_end\tinterval\told_lik\tnew_lik\toverall_weight\tweights")
                 .map_err(add_path!(!))?;
         }
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr.error_profile(), edit_dist_cache)?;
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr, edit_dist_cache)?;
 
         let is_paired_end = bg_distr.insert_distr().is_paired_end();
         let ln_ncontigs = (contigs.len() as f64).ln();
@@ -809,10 +831,10 @@ impl AllAlignments {
             } else { None };
 
             if opt_min_prob1.is_none() && opt_min_prob2.is_none() {
-                counts.unmapped += 1;
+                counts.both_unmapped += 1;
                 continue;
             } else if is_paired_end && (opt_min_prob1.is_none() || opt_min_prob2.is_none()) {
-                counts.unpaired += 1;
+                counts.pair_unmapped += 1;
                 continue;
             } else if !in_bounds(&tmp_alns, boundary, contigs) {
                 counts.out_of_bounds += 1;

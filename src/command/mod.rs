@@ -27,7 +27,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
         std::process::exit(1);
     }
     match &argv[1] as &str {
-        "a" | "add" => add::run(&argv[2..])?,
+        "a" | "add" | "t" | "target" | "targets" => add::run(&argv[2..])?,
         "p" | "preproc" | "preprocess" => preproc::run(&argv[2..])?,
         "g" | "genotype" => genotype::run(&argv[2..])?,
         "r" | "recruit" => recruit::run(&argv[2..])?,
@@ -94,9 +94,9 @@ fn print_help() {
     println!("\n{} {} command [arguments]",
         "Usage:".bold(), PROGRAM);
 
-    println!("\n{}", "[ Loci database ]".bold());
-    println!("    {:WIDTH$} Add target locus/loci to the database",
-        "a, add".red());
+    println!("\n{}", "[ Target loci ]".bold());
+    println!("    {:WIDTH$} Create database with target locus/loci (formerly {})",
+        "t, target".red(), "add".red());
 
     println!("\n{}", "[ Analysing WGS data ]".bold());
     println!("    {:WIDTH$} Preprocess WGS dataset",

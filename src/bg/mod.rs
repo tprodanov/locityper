@@ -260,6 +260,11 @@ impl Technology {
             (len1 - len2).abs() / len1.min(len2) < 0.2
         }
     }
+
+    #[inline(always)]
+    pub fn are_short_reads(self) -> bool {
+        self == Self::Illumina
+    }
 }
 
 impl FromStr for Technology {
