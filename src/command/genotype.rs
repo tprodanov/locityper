@@ -272,10 +272,9 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
             {EMPTY}  matter more; Positive: read depth matters more.",
             "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
-        println!("    {} {}  Compare window probability to have copy number 1 against two\n\
-            {EMPTY}  alternative CN values [{} {}]. First in (0, 1), second > 1.",
-            "-A, --alt-cn".green(), "FLOAT FLOAT".yellow(),
-            super::fmt_def_f64(defaults.assgn_params.alt_cn.0), super::fmt_def_f64(defaults.assgn_params.alt_cn.1));
+        println!("    {:KEY$} {:VAL$}  Compare read depth probability at copy number 1\n\
+            {EMPTY}  against other copy numbers (possibly fractional) [{}].",
+            "-A, --alt-cn".green(), "STR".yellow(), super::fmt_def(defaults.assgn_params.default_alt_cn));
 
         println!("\n{}", "Locus genotyping:".bold());
         println!("    {:KEY$} {:VAL$}  Solving stages through comma (see documentation) [{}].\n\
@@ -385,8 +384,14 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
             Short('P') | Long("ploidy") => args.ploidy = parser.value()?.parse()?,
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
-            Short('A') | Long("alt-cn") =>
-                args.assgn_params.alt_cn = (parser.value()?.parse()?, parser.value()?.parse()?),
+            Short('A') | Long("alt-cn") => {
+                let alt_cn_str: String = parser.value()?.parse()?;
+                args.assgn_params.alt_cn.clear();
+                for val in alt_cn_str.split(',') {
+                    args.assgn_params.alt_cn.push(val.parse()
+                        .map_err(|_| error!(InvalidInput, "Cannot parse -A/--alt-cn {}", alt_cn_str))?);
+                }
+            }
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
@@ -1093,7 +1098,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     }
 
     let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
-    let distr_cache = Arc::new(DistrCache::new(&bg_distr, args.assgn_params.alt_cn));
+    let distr_cache = Arc::new(DistrCache::new(&bg_distr, &args.assgn_params.alt_cn));
     let mut successes = 0;
     for locus in loci.iter() {
         // Remove to get ownership of the locus priors.

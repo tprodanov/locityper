@@ -679,10 +679,10 @@ fn solve_single_thread(
     let distr_cache = data.distr_cache.deref();
     for (stage_ix, solver) in data.scheme.iter().enumerate() {
         logger.start_stage(stage_ix, likelihoods.curr_len());
-        if stage_ix + 1 < n_stages && likelihoods.curr_len() <= data.assgn_params.min_gts {
-            log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
-            continue;
-        }
+        // if stage_ix + 1 < n_stages && likelihoods.curr_len() <= data.assgn_params.min_gts {
+        //     log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
+        //     continue;
+        // }
 
         let mut liks = vec![f64::NAN; usize::from(attempts)];
         for &ix in likelihoods.ixs.iter() {
@@ -902,10 +902,10 @@ impl MainWorker {
         for stage_ix in 0..n_stages {
             logger.start_stage(stage_ix, likelihoods.curr_len());
             let m = likelihoods.curr_len();
-            if stage_ix + 1 < n_stages && m <= data.assgn_params.min_gts.max(data.threads) {
-                log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
-                continue;
-            }
+            // if stage_ix + 1 < n_stages && m <= data.assgn_params.min_gts.max(data.threads) {
+            //     log::warn!("    Skip stage {} (too few genotypes)", LATIN_NUMS[stage_ix]);
+            //     continue;
+            // }
 
             rem_jobs.clear();
             let mut start = 0;

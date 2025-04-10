@@ -14,7 +14,7 @@ use crate::{
 const CACHE_SIZE: usize = 256;
 
 /// Cached read depth distribution.
-type CachedDistr = Arc<LinearCache<BayesCalc<NBinom, NBinom, 2>>>;
+type CachedDistr = Arc<LinearCache<BayesCalc<NBinom, NBinom>>>;
 
 /// Window distribution.
 pub struct WindowDistr {
@@ -58,7 +58,7 @@ impl WindowDistr {
 pub struct DistrCache(Vec<CachedDistr>);
 
 impl DistrCache {
-    pub fn new(bg_distr: &bg::BgDistr, alt_cn: (f64, f64)) -> Self {
+    pub fn new(bg_distr: &bg::BgDistr, alt_cn: &[f64]) -> Self {
         let depth = match bg_distr.opt_depth() {
             Some(depth) => depth,
             None => return Self(Vec::new()),
@@ -67,9 +67,8 @@ impl DistrCache {
         let mut cached_distrs = Vec::with_capacity(GC_BINS);
         for gc in 0..GC_BINS {
             let cn1_distr = depth.depth_distribution(gc.try_into().unwrap()).mul(mul_coef);
-            let sub_distr = cn1_distr.mul(alt_cn.0);
-            let super_distr = cn1_distr.mul(alt_cn.1);
-            let bayes = LinearCache::new(BayesCalc::new(cn1_distr, [sub_distr, super_distr]), CACHE_SIZE);
+            let alt_distrs = alt_cn.iter().map(|&cn| cn1_distr.mul(cn)).collect();
+            let bayes = LinearCache::new(BayesCalc::new(cn1_distr, alt_distrs), CACHE_SIZE);
             cached_distrs.push(Arc::new(bayes));
         }
         Self(cached_distrs)

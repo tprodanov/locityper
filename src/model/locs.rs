@@ -162,14 +162,14 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     ///
     /// If read is unmapped, or best edit distance is too high, does not add any new alignments.
     ///
-    /// Returns smallest saved alignment probability (None if unmapped).
+    /// Returns true if any of the reads were well mapped.
     fn next_alns(
         &mut self,
         read_end: ReadEnd,
         alns: &mut Vec<Alignment>,
         read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
-    ) -> crate::Result<Option<f64>>
+    ) -> crate::Result<bool>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name = std::str::from_utf8(self.record.qname())
@@ -198,13 +198,13 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             writeln!(dbg_writer, "{}\t{}\t*\tNA\t-\t{}", name_hash, read_end, name).map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
-            return Ok(None);
+            return Ok(false);
         }
 
         let start_len = alns.len();
         // Does any alignment have good edit distance?
         let mut any_good = false;
-        let mut min_prob = f64::INFINITY;
+        let mut max_prob = f64::NEG_INFINITY;
         self.found_alns.clear();
         let mut primary = true;
         let mut u5 = f64::NAN;
@@ -267,7 +267,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                         alns.push(aln);
                     }
                 }
-                min_prob = aln_prob.min(min_prob);
+                max_prob = aln_prob.max(max_prob);
             }
             if self.reader.read(&mut self.record).transpose()?.is_none() {
                 self.has_more = false;
@@ -282,10 +282,11 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         if any_good {
-            Ok(Some(min_prob))
+            alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
+            Ok(true)
         } else {
             alns.truncate(start_len);
-            Ok(None)
+            Ok(false)
         }
     }
 
@@ -398,7 +399,7 @@ impl GrouppedAlignments {
             }
             writeln!(f, "{:.4}", Ln::to_log10(pair.ln_prob))?;
         }
-        writeln!(f, "{}\t*\t*\t*\t{:.4}", self.read_data.name_hash, self.unmapped_prob)?;
+        writeln!(f, "{}\t*\t*\t*\t{:.4}", self.read_data.name_hash, Ln::to_log10(self.unmapped_prob))?;
         Ok(())
     }
 }
@@ -486,8 +487,6 @@ fn identify_contig_pair_alns(
     i: usize,
     j: usize,
     aln_pairs: &mut Vec<PairAlignment>,
-    min_prob1: f64,
-    min_prob2: f64,
     max_alns: usize,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
@@ -495,8 +494,7 @@ fn identify_contig_pair_alns(
 ) {
     let start_len = aln_pairs.len();
     let insert_penalty = insert_distr.insert_penalty();
-    // Factor, added to `aln1.ln_prob()` to get the cost of the pair `aln1, unmapped2`.
-    let term1 = insert_penalty + min_prob2 + params.unmapped_penalty;
+    let one_unmapped = insert_penalty + params.unmapped_penalty;
 
     let k = alignments.len();
     assert!(i <= j && j <= k);
@@ -514,16 +512,15 @@ fn identify_contig_pair_alns(
         }
 
         // Only add alignment `aln1,unmapped2` if it is better than any existing paired alignment to the same contig.
-        let alone_prob1 = aln1.ln_prob() + term1;
+        let alone_prob1 = aln1.ln_prob() + one_unmapped;
         if alone_prob1 >= max_prob1 {
             aln_pairs.push(PairAlignment::new_first(ix1, aln1.interval(), alone_prob1));
         }
     }
 
-    let term2 = insert_penalty + min_prob1 + params.unmapped_penalty;
     for (ix2, &max_prob2) in (j..k).zip(buffer.iter()) {
         let aln2 = unsafe { alignments.get_unchecked(ix2) };
-        let alone_prob2 = aln2.ln_prob() + term2;
+        let alone_prob2 = aln2.ln_prob() + one_unmapped;
         // Only add alignment `unmapped1,aln2` if it is better than existing `aln1,aln2` pairs.
         if alone_prob2 >= max_prob2 {
             aln_pairs.push(PairAlignment::new_second(ix2, aln2.interval(), alone_prob2));
@@ -546,11 +543,8 @@ fn identify_paired_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
     max_alns: usize,
-    min_prob1: f64,
-    min_prob2: f64,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
-    ln_ncontigs: f64,
     contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
@@ -572,7 +566,7 @@ fn identify_paired_end_alignments(
         if curr_contig != aln.contig_id() {
             if i < k {
                 // There are some alignments that need to be saved.
-                identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, min_prob1, min_prob2, max_alns,
+                identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, max_alns,
                     buffer, insert_distr, params);
             }
             curr_contig = aln.contig_id();
@@ -593,25 +587,19 @@ fn identify_paired_end_alignments(
     let k = alignments.len();
     if i < k {
         // There are some alignments that need to be saved.
-        identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, min_prob1, min_prob2, max_alns,
+        identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, max_alns,
             buffer, insert_distr, params);
     }
-
-    let both_unmapped = min_prob1 + min_prob2
-        + 2.0 * params.unmapped_penalty + insert_distr.insert_penalty();
-    // Only for normalization, unmapped probability is multiplied by the number of contigs
-    // because there is an unmapped possibility for every contig, which we do not store explicitely.
-    let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, both_unmapped + ln_ncontigs);
 
     let weight = contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
-        aln.ln_prob = weight * (aln.ln_prob - norm_fct);
+        aln.ln_prob *= weight;
         max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
         read_data, max_lik, alignments, aln_pairs, weight,
-        unmapped_prob: weight * (both_unmapped - norm_fct),
+        unmapped_prob: weight * (2.0 * params.unmapped_penalty + insert_distr.insert_penalty()),
     }
 }
 
@@ -622,8 +610,6 @@ fn identify_single_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
     max_alns: usize,
-    min_prob: f64,
-    ln_ncontigs: f64,
     contig_infos: &ContigInfos,
     params: &super::Params,
 ) -> GrouppedAlignments
@@ -650,20 +636,15 @@ fn identify_single_end_alignments(
         }
     }
 
-    let unmapped_prob = min_prob + params.unmapped_penalty;
-    // Only for normalization, unmapped probability is multiplied by the number of contigs
-    // because there is an unmapped possibility for every contig, which we do not store explicitely.
-    let norm_fct = Ln::map_sum_init(&aln_pairs, PairAlignment::ln_prob, unmapped_prob + ln_ncontigs);
-
     let weight = contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
-        aln.ln_prob = weight * (aln.ln_prob - norm_fct);
+        aln.ln_prob *= weight;
         max_lik = max_lik.max(aln.ln_prob);
     }
     GrouppedAlignments {
         read_data, max_lik, alignments, aln_pairs, weight,
-        unmapped_prob: weight * (unmapped_prob - norm_fct),
+        unmapped_prob: weight * params.unmapped_penalty,
     }
 }
 
@@ -811,7 +792,6 @@ impl AllAlignments {
         let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr, edit_dist_cache)?;
 
         let is_paired_end = bg_distr.insert_distr().is_paired_end();
-        let ln_ncontigs = (contigs.len() as f64).ln();
         let mut hashes = IntSet::default();
         let mut tmp_alns = Vec::new();
         let mut buffer = Vec::with_capacity(16);
@@ -824,19 +804,18 @@ impl AllAlignments {
             let mut read_data = ReadData::default();
             counts.total += 1;
             tmp_alns.clear();
-            let opt_min_prob1 = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+            let has_first = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
             if !hashes.insert(read_data.name_hash) {
                 log::debug!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
-            let opt_min_prob2 = if is_paired_end {
-                reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?
-            } else { None };
+            let has_second = is_paired_end
+                && reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
 
-            if opt_min_prob1.is_none() && opt_min_prob2.is_none() {
+            if !has_first && !has_second {
                 counts.both_unmapped += 1;
                 continue;
-            } else if is_paired_end && (opt_min_prob1.is_none() || opt_min_prob2.is_none()) {
+            } else if is_paired_end && !(has_first && has_second) {
                 counts.pair_unmapped += 1;
                 continue;
             } else if !in_bounds(&tmp_alns, boundary, contigs) {
@@ -849,11 +828,10 @@ impl AllAlignments {
             let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
                 identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns,
-                    opt_min_prob1.unwrap(), opt_min_prob2.unwrap(),
-                    &mut buffer, bg_distr.insert_distr(), ln_ncontigs, contig_infos, params)
+                    &mut buffer, bg_distr.insert_distr(), contig_infos, params)
             } else {
                 identify_single_end_alignments(read_data, &mut tmp_alns, max_alns,
-                    opt_min_prob1.unwrap(), ln_ncontigs, contig_infos, params)
+                    contig_infos, params)
             };
             if use_read {
                 reads.push(groupped_alns);

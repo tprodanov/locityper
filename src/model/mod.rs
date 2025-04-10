@@ -5,7 +5,10 @@ pub mod distr_cache;
 pub mod bam;
 
 use crate::{
-    math::Ln,
+    math::{
+        Ln,
+        distr::bayes,
+    },
     err::{validate_param},
 };
 use windows::WeightCalculator;
@@ -42,7 +45,8 @@ pub struct Params {
     /// None: half window size.
     pub tweak: Option<u32>,
     /// Alternative hypotheses copy number values (main hypothesis is 1).
-    pub alt_cn: (f64, f64),
+    pub default_alt_cn: &'static str,
+    pub alt_cn: Vec<f64>,
 
     /// Minimal number of genotypes after each step of solving.
     pub min_gts: usize,
@@ -74,7 +78,8 @@ impl Default for Params {
             depth_norm_power: 0.0,
 
             tweak: None,
-            alt_cn: (0.5, 1.5),
+            default_alt_cn: "0.3,2,3,4,5",
+            alt_cn: vec![0.3, 2.0, 3.0, 4.0, 5.0],
 
             min_gts: 500,
             filt_diff: Ln::from_log10(100.0),
@@ -114,10 +119,12 @@ impl Params {
         validate_param!(0.0 <= self.min_weight && self.min_weight <= 0.5,
             "Minimal weight ({}) must be within [0, 0.5].", self.min_weight);
 
-        validate_param!(self.alt_cn.0 > 0.0 && self.alt_cn.0 < 1.0,
-            "Alternative copy number #1 ({}) must be in (0, 1).", self.alt_cn.0);
-        validate_param!(self.alt_cn.1 > 1.0,
-            "Alternative copy number #2 ({}) must be over 1.", self.alt_cn.1);
+        for &cn in &self.alt_cn {
+            validate_param!(cn > 0.0 && cn != 1.0,
+                "Alternative copy number ({}) must be positive and not equal to one.", cn);
+        }
+        validate_param!(self.alt_cn.len() <= bayes::N_ALTS, "Too many alternative CNs ({}, max {})",
+            self.alt_cn.len(), bayes::N_ALTS);
 
         validate_param!(self.filt_diff >= 0.0,
             "Filtering likelihood difference ({}) must be non-negative (log10-space)", Ln::to_log10(self.filt_diff));
