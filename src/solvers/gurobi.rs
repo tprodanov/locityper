@@ -106,6 +106,10 @@ fn get_assignments<'a>(
 pub struct GurobiSolver;
 
 impl super::Solver for GurobiSolver {
+    fn name(&self) -> &'static str {
+        "Gurobi ILP"
+    }
+
     /// Distribute reads between several haplotypes in a best way.
     fn solve_nontrivial<'a>(
         &self,

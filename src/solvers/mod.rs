@@ -4,7 +4,7 @@ use crate::{
     ext::rand::XoshiroRng,
 };
 
-pub mod scheme;
+pub mod solve;
 pub mod stoch;
 #[cfg(feature = "gurobi")]
 pub mod gurobi;
@@ -16,25 +16,39 @@ pub use self::stoch::{GreedySolver, SimAnneal};
 pub use self::gurobi::GurobiSolver;
 #[cfg(feature = "highs")]
 pub use self::highs::HighsSolver;
-use crate::err::error;
+
+pub enum ParamErr {
+    Unknown,
+    Parse,
+    Invalid(String),
+}
+
+impl From<std::num::ParseFloatError> for ParamErr {
+    fn from(_: std::num::ParseFloatError) -> Self {
+        Self::Parse
+    }
+}
+
+impl From<std::num::ParseIntError> for ParamErr {
+    fn from(_: std::num::ParseIntError) -> Self {
+        Self::Parse
+    }
+}
+
+impl From<std::str::ParseBoolError> for ParamErr {
+    fn from(_: std::str::ParseBoolError) -> Self {
+        Self::Parse
+    }
+}
 
 pub trait SetParams {
-    /// Sets solver parameters.
-    /// Each element: string `key=value`.
-    fn set_params(&mut self, params: &[String]) -> crate::Result<()> {
-        for param in params {
-            let (key, value) = param.split_once('=')
-                .ok_or_else(|| error!(InvalidInput, "Cannot parse parameter {:?} (must contain =)", param))?;
-            self.set_param(key.trim(), value.trim())?;
-        }
-        Ok(())
-    }
-
-    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()>;
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), ParamErr>;
 }
 
 /// General trait for all solvers.
 pub trait Solver: Send + Sync + SetParams + CloneSolver + Display {
+    fn name(&self) -> &'static str;
+
     /// Distribute reads between several haplotypes in the best way,
     /// when at least one read pair has several possible locations.
     fn solve_nontrivial<'a>(

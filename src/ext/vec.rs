@@ -76,11 +76,13 @@ impl F64Ext {
     }
 
     /// Calculate sample variance.
+    #[inline]
     pub fn variance(a: &[f64]) -> f64 {
         Self::fast_variance(a, Self::mean(a))
     }
 
     /// Returns mean and variance together.
+    #[inline]
     pub fn mean_variance(a: &[f64]) -> (f64, f64) {
         let mean = Self::mean(a);
         (mean, Self::fast_variance(a, mean))

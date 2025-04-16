@@ -37,9 +37,6 @@ pub struct Params {
 
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
-    /// Normalize read depth based on (<mean sum weight> / <sum weight>) ^ depth_norm_power.
-    /// Do not normalize read depth, if this value is 0.
-    pub depth_norm_power: f64,
 
     /// Randomly move read middle by `tweak` bp into one of the directions.
     /// None: half window size.
@@ -48,14 +45,15 @@ pub struct Params {
     pub default_alt_cn: &'static str,
     pub alt_cn: Vec<f64>,
 
-    /// Minimal number of genotypes after each step of solving.
-    pub min_gts: usize,
     /// Discard low likelihood genotypes with alignment likelihood smaller than `best - filt_diff`.
     pub filt_diff: f64,
     /// Discard genotypes with low probability to be best (after each step).
     pub prob_thresh: f64,
+
     /// Number of attempts with different tweak sizes.
-    pub attempts: u16,
+    pub def_attempts: u16,
+    /// Minimal number of genotypes after each step of solving.
+    pub def_min_gts: usize,
 
     /// Generate BAM files for this many best genotypes.
     pub out_bams: usize,
@@ -75,17 +73,17 @@ impl Default for Params {
             min_unique_kmers: 5,
 
             min_weight: 0.001,
-            depth_norm_power: 0.0,
 
             tweak: None,
             default_alt_cn: "0.3,2,3,4,5",
             alt_cn: vec![0.3, 2.0, 3.0, 4.0, 5.0],
 
-            min_gts: 500,
             filt_diff: Ln::from_log10(100.0),
             prob_thresh: Ln::from_log10(-4.0),
-            attempts: 20,
             out_bams: 0,
+
+            def_attempts: 20,
+            def_min_gts: 500,
         }
     }
 }
@@ -130,14 +128,6 @@ impl Params {
             "Filtering likelihood difference ({}) must be non-negative (log10-space)", Ln::to_log10(self.filt_diff));
         validate_param!(self.prob_thresh < 0.0,
             "Probability threshold ({}) must be negative (log10-space)", Ln::to_log10(self.prob_thresh));
-        validate_param!(self.attempts > 0, "Number of attempts must be positive");
-        if self.attempts < 3 {
-            log::warn!("At least 3 attempts are recommended");
-        }
-        validate_param!(self.depth_norm_power >= 0.0 && self.depth_norm_power.is_finite(),
-            "Depth normalization factor ({}) must be non-negative", self.depth_norm_power);
-        validate_param!(self.min_gts > 1,
-            "Minimal number of genotypes ({}) must be at least 2", self.min_gts);
         Ok(())
     }
 

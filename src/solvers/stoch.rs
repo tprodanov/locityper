@@ -7,7 +7,6 @@ use rand::{
     seq::IndexedRandom,
 };
 use crate::{
-    err::{error, validate_param},
     ext::rand::XoshiroRng,
     model::assgn::{GenotypeAlignments, ReadAssignment, ReassignmentTarget},
 };
@@ -55,10 +54,13 @@ impl GreedySolver {
         self.best_start = best_start;
     }
 
-    pub fn set_sample_size(&mut self, sample_size: usize) -> crate::Result<()> {
-        validate_param!(sample_size != 0, "Greedy solver: sample size must be positive");
-        self.sample_size = sample_size;
-        Ok(())
+    pub fn set_sample_size(&mut self, sample_size: usize) -> Result<(), super::ParamErr> {
+        if sample_size == 0 {
+            Err(super::ParamErr::Invalid("Sample size must be positive".to_string()))
+        } else {
+            self.sample_size = sample_size;
+            Ok(())
+        }
     }
 
     pub fn set_plato_size(&mut self, plato_size: usize) {
@@ -67,6 +69,10 @@ impl GreedySolver {
 }
 
 impl Solver for GreedySolver {
+    fn name(&self) -> &'static str {
+        "Stoch.Greedy"
+    }
+
     /// Stochastic greedy algorithm to find the best read assignment.
     fn solve_nontrivial<'a>(
         &self,
@@ -112,15 +118,12 @@ impl Solver for GreedySolver {
 
 impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
-    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()> {
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), super::ParamErr> {
         match &key.to_lowercase() as &str {
-            "best" | "beststart" | "best_start" => self.set_best_start(val.parse()
-                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?),
-            "sample" => self.set_sample_size(val.parse()
-                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?)?,
-            "plato" => self.set_plato_size(val.parse()
-                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?),
-            _ => log::error!("Greedy solver: unknown parameter {:?}", key),
+            "best" | "best-start" => self.set_best_start(val.parse()?),
+            "sample" | "sample-size" => self.set_sample_size(val.parse()?)?,
+            "plato" => self.set_plato_size(val.parse()?),
+            _ => return Err(super::ParamErr::Unknown),
         }
         Ok(())
     }
@@ -158,17 +161,22 @@ impl Default for SimAnneal {
 }
 
 impl SimAnneal {
-    pub fn set_init_prob(&mut self, init_prob: f64) -> crate::Result<()> {
-        validate_param!(init_prob > 0.0 && init_prob <= 1.0,
-            "Initial probability ({}) must be within (0, 1]", init_prob);
-        self.init_prob = init_prob;
-        Ok(())
+    pub fn set_init_prob(&mut self, init_prob: f64) -> Result<(), super::ParamErr> {
+        if init_prob > 0.0 && init_prob <= 1.0 {
+            self.init_prob = init_prob;
+            Ok(())
+        } else {
+            Err(super::ParamErr::Invalid(format!("Initial probability ({}) must be within (0, 1]", init_prob)))
+        }
     }
 
-    pub fn set_anneal_steps(&mut self, anneal_steps: usize) -> crate::Result<()> {
-        validate_param!(anneal_steps > 0, "Number of annealing steps ({}) must be positive", anneal_steps);
-        self.anneal_steps = anneal_steps;
-        Ok(())
+    pub fn set_anneal_steps(&mut self, anneal_steps: usize) -> Result<(), super::ParamErr> {
+        if anneal_steps > 0 {
+            self.anneal_steps = anneal_steps;
+            Ok(())
+        } else {
+            Err(super::ParamErr::Invalid(format!("Number of annealing steps ({}) must be positive", anneal_steps)))
+        }
     }
 
     pub fn set_plato_size(&mut self, plato_size: usize) {
@@ -177,6 +185,10 @@ impl SimAnneal {
 }
 
 impl Solver for SimAnneal {
+    fn name(&self) -> &'static str {
+        "Sim.Annealing"
+    }
+
     /// Run simulated annealing to find the best read assignment.
     fn solve_nontrivial<'a>(
         &self,
@@ -228,15 +240,12 @@ impl Solver for SimAnneal {
 
 impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
-    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()> {
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), super::ParamErr> {
         match &key.to_lowercase() as &str {
-            "steps" | "annealsteps" | "anneal_steps" => self.set_anneal_steps(val.parse()
-                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?)?,
-            "init" | "init_prob" | "initprob" => self.set_init_prob(val.parse()
-                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?)?,
-            "plato" => self.set_plato_size(val.parse()
-                .map_err(|_| error!(InvalidInput, "Cannot parse '{}={}'", key, val))?),
-            _ => log::error!("Sim.Annealing: unknown parameter {:?}", key),
+            "steps" => self.set_anneal_steps(val.parse()?)?,
+            "init" | "init-prob" => self.set_init_prob(val.parse()?)?,
+            "plato" => self.set_plato_size(val.parse()?),
+            _ => return Err(super::ParamErr::Unknown),
         }
         Ok(())
     }

@@ -174,13 +174,43 @@ pub fn fmt_signif(x: impl Into<f64>, digits: u8) -> String {
 /// Returns probability of observing t-statistic under the null hypothesis: `mean1 >= mean2`.
 /// Null hipothesis: first mean is equal or larger than the second mean.
 /// Sample sizes should be the same.
-pub fn unpaired_onesided_t_test<const EQ_VAR: bool>(mean1: f64, var1: f64, mean2: f64, var2: f64, n: f64) -> f64 {
+pub fn unpaired_onesided_t_test<const EQ_VAR: bool>(
+    mean1: f64,
+    var1: f64,
+    mean2: f64,
+    var2: f64,
+    n: f64,
+) -> f64
+{
     let var_sum = var1 + var2;
-    let t_stat = (mean1 - mean2) / (var_sum / n).sqrt();
+    let t_stat = (mean1 - mean2) * (n / var_sum).sqrt();
     let freedom = if EQ_VAR {
         2.0 * n - 2.0
     } else {
         (n - 1.0) * var_sum * var_sum / (var1 * var1 + var2 * var2)
+    };
+    let t_distr = StudentsT::new(0.0, 1.0, freedom).expect("Could not create Student's t distribution");
+    t_distr.cdf(t_stat)
+}
+
+/// Same as `unpaired_onesided_t_test`, but allowing for different sample sizes.
+pub fn unpaired_onesided_t_test_diffsizes<const EQ_VAR: bool>(
+    mean1: f64,
+    var1: f64,
+    mean2: f64,
+    var2: f64,
+    n1: f64,
+    n2: f64,
+) -> f64
+{
+    let nvar1 = var1 / n1;
+    let nvar2 = var2 / n2;
+    let sum_nvar = nvar1 + nvar2;
+    let t_stat = (mean1 - mean2) / sum_nvar.sqrt();
+    let freedom = if EQ_VAR {
+        n1 + n2 - 2.0
+    } else {
+        sum_nvar * sum_nvar / (nvar1 * nvar1 / (n1 - 1.0) + nvar2 * nvar2 / (n2 - 1.0))
     };
     let t_distr = StudentsT::new(0.0, 1.0, freedom).expect("Could not create Student's t distribution");
     t_distr.cdf(t_stat)

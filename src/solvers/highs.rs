@@ -100,6 +100,10 @@ impl HighsSolver {
 }
 
 impl super::Solver for HighsSolver {
+    fn name(&self) -> &'static str {
+        "HiGHS ILP"
+    }
+
     /// Distribute reads between several haplotypes in a best way.
     fn solve_nontrivial<'a>(
         &self,

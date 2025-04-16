@@ -38,7 +38,7 @@ use crate::{
         windows::{ContigInfos, WeightCalculator},
         distr_cache::DistrCache,
     },
-    solvers::scheme::{self, Scheme, SchemeParams},
+    solvers::solve::{self, Scheme},
     algo::{HashSet, HashMap},
 };
 use super::{paths, DebugLvl, preproc::InputFiles};
@@ -92,7 +92,7 @@ struct Args {
     chunk_length: u64,
 
     assgn_params: AssgnParams,
-    scheme_params: SchemeParams,
+    solvers: Vec<String>,
 }
 
 impl Default for Args {
@@ -124,7 +124,7 @@ impl Default for Args {
             chunk_length: DEFAULT_CHUNK_LENGTH,
 
             assgn_params: Default::default(),
-            scheme_params: Default::default(),
+            solvers: Vec::new(),
         }
     }
 }
@@ -277,10 +277,9 @@ fn print_help(extended: bool) {
             "-A, --alt-cn".green(), "STR".yellow(), super::fmt_def(defaults.assgn_params.default_alt_cn));
 
         println!("\n{}", "Locus genotyping:".bold());
-        println!("    {:KEY$} {:VAL$}  Solving stages through comma (see documentation) [{}].\n\
-            {EMPTY}  Possible solvers: {}, {}, {}, {} and {}.",
-            "-S, --stages".green(), "STR".yellow(), super::fmt_def(defaults.scheme_params.stages),
-            "filter".yellow(), "greedy".yellow(), "anneal".yellow(), "highs".yellow(), "gurobi".yellow());
+        println!("    {:KEY$} {:VAL$}  Solvers, can be specified multiple times (see documentation).\n\
+            {EMPTY}  Default: {}.",
+            "-S, --solver".green(), "STR".yellow(), super::fmt_def(Scheme::DEFAULT_STAGES));
         println!("    {:KEY$} {:VAL$}  During pre-filtering, discard genotypes that have 10^{}\n\
             {EMPTY}  worse alignment probability than the best genotype [{}].",
             "    --filt-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
@@ -289,20 +288,13 @@ fn print_help(extended: bool) {
             {EMPTY}  smaller probability than 10^{} to be best [{}].",
             "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
-        println!("    {:KEY$} {:VAL$}  Minimum number of genotypes after each step [{}].",
+        println!("    {:KEY$} {:VAL$}  Default number of genotypes after each solver [{}].",
             "    --min-gts".green(), "INT".yellow(),
-            super::fmt_def(PrettyUsize(defaults.assgn_params.min_gts)));
-        println!("    {:KEY$} {:VAL$}  Number of attempts per step [{}].",
-            "    --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.attempts));
+            super::fmt_def(PrettyUsize(defaults.assgn_params.def_min_gts)));
+        println!("    {:KEY$} {:VAL$}  Default number of attempts per solver [{}].",
+            "    --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.def_attempts));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
             "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), super::fmt_def("auto"));
-        println!("    {:KEY$} {:VAL$}  Normalize depth likelihoods based on sum window weight across\n\
-            {EMPTY}  genotype, raised to this power (0 - no normalization) [{}].",
-            "    --depth-norm".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.depth_norm_power));
-        println!("        {} {}, {} {}, {} {}, {} {}\n\
-            {EMPTY}  Solver parameters (see documentation).",
-            "--greedy".green(), "STR".yellow(), "--anneal".green(), "STR".yellow(),
-            "--highs".green(), "STR".yellow(), "--gurobi".green(), "STR".yellow());
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -319,7 +311,7 @@ fn print_help(extended: bool) {
         {EMPTY}  input and program version.",
         "-s, --seed".green(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Save debug CSV files: 0 = none, 1 = some, 2 = all.",
-        "    --debug".green(), "[INT]".yellow());
+        "    --debug".green(), "INT".yellow());
     if extended {
         println!("    {:KEY$} {:VAL$}  Strobealign executable [{}].",
             "    --strobealign".green(), "EXE".yellow(), super::fmt_def(defaults.strobealign.display()));
@@ -421,14 +413,14 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     parser.value()?.parse()?,
                 ),
 
-            Short('S') | Long("stages") => args.scheme_params.stages = parser.value()?.parse()?,
+            Short('S') | Long("solver") => args.solvers.push(parser.value()?.parse()?),
             Long("filt-diff") | Long("filt-difference") | Long("filter-diff") =>
                 args.assgn_params.filt_diff = Ln::from_log10(parser.value()?.parse()?),
             Long("prob-thresh") | Long("prob-threshold") =>
                 args.assgn_params.prob_thresh = Ln::from_log10(parser.value()?.parse()?),
             Long("min-gts") | Long("min-genotypes") =>
-                args.assgn_params.min_gts = parser.value()?.parse::<PrettyUsize>()?.get(),
-            Long("attempts") => args.assgn_params.attempts = parser.value()?.parse()?,
+                args.assgn_params.def_min_gts = parser.value()?.parse::<PrettyUsize>()?.get(),
+            Long("attempts") => args.assgn_params.def_attempts = parser.value()?.parse()?,
             Short('t') | Long("tweak") => {
                 let val = parser.value()?;
                 args.assgn_params.tweak = if val == "auto" {
@@ -437,11 +429,6 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     Some(val.parse()?)
                 };
             }
-            Long("depth-norm") => args.assgn_params.depth_norm_power = parser.value()?.parse()?,
-            Long("greedy") => args.scheme_params.greedy_params.push(parser.value()?.parse()?),
-            Long("anneal") => args.scheme_params.anneal_params.push(parser.value()?.parse()?),
-            Long("highs") => args.scheme_params.highs_params.push(parser.value()?.parse()?),
-            Long("gurobi") => args.scheme_params.gurobi_params.push(parser.value()?.parse()?),
             Short('O') | Long("out-bams") => args.assgn_params.out_bams = parser.value()?.parse::<PrettyUsize>()?.get(),
 
             Short('^') | Long("interleaved") => args.in_files.interleaved = true,
@@ -1001,7 +988,7 @@ fn analyze_locus(
 
     let genotyping = if all_alns.reads().is_empty() {
         log::error!("[{}] No available reads", locus.set.tag());
-        scheme::Genotyping::empty_result(locus.set.tag().to_string(), vec![scheme::GenotypingWarning::NoReads])
+        solve::Genotyping::empty_result(locus.set.tag().to_string(), vec![solve::GenotypingWarning::NoReads])
     } else {
         if bg_distr.insert_distr().is_paired_end() && args.debug >= DebugLvl::Full {
             let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
@@ -1025,7 +1012,7 @@ fn analyze_locus(
             None
         };
 
-        let data = scheme::Data {
+        let data = solve::Data {
             scheme: Arc::clone(scheme),
             contigs: Arc::clone(contigs),
             contig_distances,
@@ -1036,7 +1023,7 @@ fn analyze_locus(
             is_paired_end: bg_distr.insert_distr().is_paired_end(),
             all_alns, genotypes, priors, contig_infos,
         };
-        scheme::solve(data, bg_distr, &locus.out_dir, &mut rng)?
+        solve::solve(data, bg_distr, &locus.out_dir, &mut rng)?
     };
 
     let res_filename = locus.out_dir.join(paths::RES_JSON);
@@ -1097,7 +1084,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         return Ok(());
     }
 
-    let scheme = Arc::new(Scheme::create(&args.scheme_params)?);
+    let scheme = Arc::new(Scheme::create(&args.solvers, &args.assgn_params)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, &args.assgn_params.alt_cn));
     let mut successes = 0;
     for locus in loci.iter() {

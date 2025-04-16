@@ -6,7 +6,7 @@ use std::{
 };
 use htslib::bam;
 use crate::{
-    solvers::scheme,
+    solvers::solve,
     seq::{
         contigs::{Genotype, ContigNames, ContigId},
         cigar::CigarItem,
@@ -343,8 +343,9 @@ fn generate_unused_single_end_records(
 pub fn write_bam(
     bam_path: &Path,
     gt: &Genotype,
-    data: &scheme::Data,
+    data: &solve::Data,
     contig_to_tid: &mut Vec<Option<i32>>,
+    attempts: u16,
     assgn_counts: &[u16],
 ) -> htslib::errors::Result<()>
 {
@@ -361,10 +362,10 @@ pub fn write_bam(
         let read_alns = gt_alns.possible_read_alns(rp);
         if data.is_paired_end {
             generate_paired_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, &mut records,
-                &mut counts_iter, data.assgn_params.attempts, &mut buffer1, &mut buffer2, &mut buffer3)?;
+                &mut counts_iter, attempts, &mut buffer1, &mut buffer2, &mut buffer3)?;
         } else {
             generate_single_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, &mut records,
-                &mut counts_iter, data.assgn_params.attempts, &mut buffer1, &mut buffer2, &mut buffer3)?;
+                &mut counts_iter, attempts, &mut buffer1, &mut buffer2, &mut buffer3)?;
         }
     }
     assert!(counts_iter.next().is_none(), "Too many assignment counts");
