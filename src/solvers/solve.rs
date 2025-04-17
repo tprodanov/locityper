@@ -2,10 +2,9 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    thread, iter,
+    thread, iter, fmt,
     cmp::{min, max},
     io::Write,
-    fmt::{self, Write as FmtWrite},
     time::{Instant, Duration},
     path::{Path, PathBuf},
     sync::{
@@ -96,7 +95,7 @@ fn run_filter(
     threads: usize,
 ) -> crate::Result<()>
 {
-    stage.describe(ixs.len());
+    stage.describe();
     let contig_ids: Vec<_> = contigs.ids().collect();
     let best_aln_matrix = all_alns.best_aln_matrix(&contig_ids);
     // Vector (genotype index, score).
@@ -203,19 +202,26 @@ impl Stage {
         self.solver.is_none()
     }
 
-    fn describe(&self, inp_gts: usize) {
+    fn describe(&self) {
         const N_NUMS: usize = 10;
         const LATIN_NUMS: [&'static str; N_NUMS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
-        let mut s = format!("*** Stage {:>3}. ", if self.ix < N_NUMS { LATIN_NUMS[self.ix] } else { "..." });
-        match &self.solver {
-            Some(solver) => write!(s, "{:?}, {} attempts,", solver, self.attempts).unwrap(),
-            None => write!(s, "Preliminary filtering,").unwrap(),
+        let prefix = format!("*** Stage {:>3}.", if self.ix < N_NUMS { LATIN_NUMS[self.ix] } else { "..." });
+        let solver = match &self.solver {
+            Some(solver) => solver,
+            None => {
+                log::info!("{} Preliminary filtering", prefix);
+                return;
+            }
         };
-        write!(s, "input: {} gts", inp_gts).unwrap();
-        if !self.last {
-            write!(s, ", output: {} gts", self.out_size).unwrap();
-        }
-        log::info!("{}", s);
+
+        let params = solver.describe_params();
+        log::info!("{} {:<20}   [a={}{}{}]", prefix, solver, self.attempts,
+            if params.is_empty() { "" } else { "," }, params);
+    }
+
+    #[inline]
+    fn should_run(&self, n_gts: usize) -> bool {
+        self.last || self.out_size < n_gts
     }
 }
 
@@ -774,10 +780,11 @@ fn solve_single_thread(
 
     let distr_cache = data.distr_cache.deref();
     for stage in &data.scheme.stages {
-        let solver = match &stage.solver {
-            None => continue,
-            Some(solver) => solver,
-        };
+        let Some(solver) = &stage.solver else { continue };
+        if !data.assgn_params.dont_skip && !stage.should_run(predictions.curr_len()) {
+            log::info!("::: Skipping {}, not enough genotypes", solver);
+            continue;
+        }
 
         let mut curr_sol_writer: Option<&mut GzFile> =
             if data.debug == DebugLvl::None && !stage.last
@@ -924,7 +931,7 @@ pub fn solve(
     writeln!(sol_writer, "stage\tgenotype\tscore").map_err(add_path!(!))?;
     let mut predictions = Predictions::new(n_gts);
     let stage0 = &data.scheme.stages[0];
-    if stage0.is_filter() && (data.debug != DebugLvl::None || n_gts > stage0.out_size) {
+    if stage0.is_filter() && (data.assgn_params.dont_skip || stage0.should_run(n_gts)) {
         let curr_sol_writer = if data.debug != DebugLvl::None || data.scheme.len() == 1
             { Some(&mut sol_writer) } else { None };
         run_filter(stage0, &data.contigs, &data.genotypes, &mut predictions.ixs,
@@ -1024,7 +1031,11 @@ impl MainWorker {
         let mut rem_jobs = Vec::with_capacity(n_workers);
 
         for stage in &scheme.stages {
-            if stage.is_filter() { continue; }
+            let Some(solver) = &stage.solver else { continue };
+            if !data.assgn_params.dont_skip && !stage.should_run(predictions.curr_len()) {
+                log::info!("::: Skipping solver {}, not enough genotypes", solver);
+                continue;
+            }
 
             logger.start_stage(stage, predictions.curr_len());
             let m = predictions.curr_len();
@@ -1169,7 +1180,7 @@ impl Logger {
         }
         self.solved_genotypes = 0;
         self.last_msg = self.stage_start;
-        stage.describe(self.curr_genotypes);
+        stage.describe();
     }
 
     fn update(&mut self, gt: &Genotype, lik: f64) {

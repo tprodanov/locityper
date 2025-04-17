@@ -115,6 +115,11 @@ impl Solver for GreedySolver {
         }
         Ok(assignments)
     }
+
+    fn describe_params(&self) -> String {
+        format!("x0={},s={},p={}", if self.best_start { "best" } else { "random" },
+            self.sample_size, self.plato_size)
+    }
 }
 
 impl super::SetParams for GreedySolver {
@@ -133,13 +138,6 @@ impl super::SetParams for GreedySolver {
 impl fmt::Display for GreedySolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Stoch.Greedy")
-    }
-}
-
-impl fmt::Debug for GreedySolver {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}, {} start, sample size: {}, plato size: {}", self,
-            if self.best_start { "best" } else { "random" }, self.sample_size, self.plato_size)
     }
 }
 
@@ -239,6 +237,10 @@ impl Solver for SimAnneal {
         }
         Ok(assignments)
     }
+
+    fn describe_params(&self) -> String {
+        format!("i={:.3},n={},p={}", self.init_prob, self.anneal_steps, self.plato_size)
+    }
 }
 
 impl super::SetParams for SimAnneal {
@@ -257,12 +259,5 @@ impl super::SetParams for SimAnneal {
 impl fmt::Display for SimAnneal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Sim.Anneal")
-    }
-}
-
-impl fmt::Debug for SimAnneal {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}, init.prob: {}, {} anneal.steps, plato size: {}",
-            self, self.init_prob, self.anneal_steps, self.plato_size)
     }
 }

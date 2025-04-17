@@ -142,9 +142,3 @@ impl fmt::Display for GurobiSolver {
         write!(f, "Gurobi ILP")
     }
 }
-
-impl fmt::Debug for GurobiSolver {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}

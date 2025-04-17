@@ -280,6 +280,8 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Solvers, can be specified multiple times (see documentation).\n\
             {EMPTY}  Default: {}.",
             "-S, --solver".green(), "STR".yellow(), super::fmt_def(Scheme::DEFAULT_STAGES));
+        println!("    {:KEY$} {:VAL$}  Never skip intermediate solvers.",
+            "    --dont-skip".green(), super::flag());
         println!("    {:KEY$} {:VAL$}  During pre-filtering, discard genotypes that have 10^{}\n\
             {EMPTY}  worse alignment probability than the best genotype [{}].",
             "    --filt-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
@@ -414,6 +416,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 ),
 
             Short('S') | Long("solver") => args.solvers.push(parser.value()?.parse()?),
+            Long("dont-skip") => args.assgn_params.dont_skip = true,
             Long("filt-diff") | Long("filt-difference") | Long("filter-diff") =>
                 args.assgn_params.filt_diff = Ln::from_log10(parser.value()?.parse()?),
             Long("prob-thresh") | Long("prob-threshold") =>

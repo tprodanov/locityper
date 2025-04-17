@@ -42,7 +42,7 @@ pub trait SetParams {
 }
 
 /// General trait for all solvers.
-pub trait Solver: Send + Sync + SetParams + CloneSolver + fmt::Display + fmt::Debug {
+pub trait Solver: Send + Sync + SetParams + CloneSolver + fmt::Display {
     /// Distribute reads between several haplotypes in the best way,
     /// when at least one read pair has several possible locations.
     fn solve_nontrivial<'a>(
@@ -66,6 +66,8 @@ pub trait Solver: Send + Sync + SetParams + CloneSolver + fmt::Display + fmt::De
             self.solve_nontrivial(gt_alns, rng)
         }
     }
+
+    fn describe_params(&self) -> String { String::new() }
 }
 
 /// We cannot ask `Solver` to inherit `Clone`, because then the trait is not object-safe.

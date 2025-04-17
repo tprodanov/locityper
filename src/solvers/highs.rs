@@ -131,14 +131,17 @@ impl super::Solver for HighsSolver {
             new_assgn
         }))
     }
+
+    fn describe_params(&self) -> String {
+        format!("m={}", self.mode)
+    }
 }
 
 impl super::SetParams for HighsSolver {
     fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()> {
-        if key == "mode" || key == "type" {
-            self.set_mode(val)?;
-        } else {
-            log::error!("{} solver: unknown parameter {:?}", HIGHS_NAME, key);
+        match key {
+            "m" | "mode" => self.set_mode(val)?,
+            _ => return Err(super::ParamErr::Unknown),
         }
         Ok(())
     }
@@ -147,11 +150,5 @@ impl super::SetParams for HighsSolver {
 impl fmt::Display for HighsSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{} ILP", HIGHS_NAME)
-    }
-}
-
-impl fmt::Debug for GurobiSolver {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}, mode: {}", self, self.mode)
     }
 }

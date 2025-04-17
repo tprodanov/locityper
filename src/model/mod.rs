@@ -54,6 +54,8 @@ pub struct Params {
     pub def_attempts: u16,
     /// Minimal number of genotypes after each step of solving.
     pub def_min_gts: usize,
+    /// Do not skip intermediate solvers.
+    pub dont_skip: bool,
 
     /// Generate BAM files for this many best genotypes.
     pub out_bams: usize,
@@ -84,6 +86,7 @@ impl Default for Params {
 
             def_attempts: 20,
             def_min_gts: 500,
+            dont_skip: false,
         }
     }
 }
