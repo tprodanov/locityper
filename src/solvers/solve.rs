@@ -2,9 +2,10 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    thread, fmt, iter,
+    thread, iter,
     cmp::{min, max},
     io::Write,
+    fmt::{self, Write as FmtWrite},
     time::{Instant, Duration},
     path::{Path, PathBuf},
     sync::{
@@ -95,9 +96,7 @@ fn run_filter(
     threads: usize,
 ) -> crate::Result<()>
 {
-    log::info!("*** Stage {:>3}. Filtering genotypes based on read alignment likelihoods",
-        stage_prefix(stage.ix));
-
+    stage.describe(ixs.len());
     let contig_ids: Vec<_> = contigs.ids().collect();
     let best_aln_matrix = all_alns.best_aln_matrix(&contig_ids);
     // Vector (genotype index, score).
@@ -122,15 +121,9 @@ fn run_filter(
     Ok(())
 }
 
-#[inline]
-fn stage_prefix(i: usize) -> &'static str {
-    const N_NUMS: usize = 10;
-    const LATIN_NUMS: [&'static str; N_NUMS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
-    if i < N_NUMS { LATIN_NUMS[i] } else { "..." }
-}
-
 struct Stage {
     ix: usize,
+    last: bool,
     /// None if pre-filter.
     solver: Option<Box<dyn Solver>>,
     /// Number of attempts per genotype.
@@ -199,7 +192,10 @@ impl Stage {
         validate_param!(solver.is_none() || attempts > 0,
             "At least one attempt is required for each stage (`{}`)", s);
         validate_param!(out_size > 0, "At least one output genotype is required for each stage (`{}`)", s);
-        Ok(Self { ix, solver, attempts, out_size })
+        Ok(Self {
+            ix, solver, attempts, out_size,
+            last: false,
+        })
     }
 
     #[inline]
@@ -207,11 +203,19 @@ impl Stage {
         self.solver.is_none()
     }
 
-    fn name(&self) -> &'static str {
+    fn describe(&self, inp_gts: usize) {
+        const N_NUMS: usize = 10;
+        const LATIN_NUMS: [&'static str; N_NUMS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
+        let mut s = format!("*** Stage {:>3}. ", if self.ix < N_NUMS { LATIN_NUMS[self.ix] } else { "..." });
         match &self.solver {
-            Some(solver) => solver.name(),
-            None => "filter",
+            Some(solver) => write!(s, "{:?}, {} attempts,", solver, self.attempts).unwrap(),
+            None => write!(s, "Preliminary filtering,").unwrap(),
+        };
+        write!(s, "input: {} gts", inp_gts).unwrap();
+        if !self.last {
+            write!(s, ", output: {} gts", self.out_size).unwrap();
         }
+        log::info!("{}", s);
     }
 }
 
@@ -228,12 +232,14 @@ impl Scheme {
         vec![
             Stage {
                 ix: 0,
+                last: false,
                 solver: None,
                 attempts: 1,
                 out_size: assgn_params.def_min_gts,
             },
             Stage {
                 ix: 1,
+                last: true,
                 solver: Some(Box::new(super::SimAnneal::default())),
                 attempts: assgn_params.def_attempts,
                 out_size: 1,
@@ -242,7 +248,7 @@ impl Scheme {
     }
 
     pub fn create(solvers: &[String], assgn_params: &AssgnParams) -> crate::Result<Self> {
-        let stages = if solvers.is_empty() {
+        let mut stages = if solvers.is_empty() {
             Self::default_stages(assgn_params)
         } else {
             solvers.iter().enumerate()
@@ -252,6 +258,7 @@ impl Scheme {
         if stages.is_empty() {
             Err(error!(InvalidInput, "No solving stages selected"))
         } else {
+            stages.last_mut().unwrap().last = true;
             Ok(Self { stages })
         }
     }
@@ -763,24 +770,24 @@ fn solve_single_thread(
 {
     const ONE_THREAD: usize = 1;
     let total_genotypes = data.genotypes.len();
-    let mut logger = Logger::new(&data.scheme, total_genotypes);
+    let mut logger = Logger::new(total_genotypes);
 
     let distr_cache = data.distr_cache.deref();
-    for (stage_ix, stage) in data.scheme.stages.iter().enumerate() {
+    for stage in &data.scheme.stages {
         let solver = match &stage.solver {
             None => continue,
             Some(solver) => solver,
         };
 
         let mut curr_sol_writer: Option<&mut GzFile> =
-            if data.debug == DebugLvl::None && stage_ix + 1 < data.scheme.len()
+            if data.debug == DebugLvl::None && !stage.last
             { None } else { Some(sol_writer) };
 
-        logger.start_stage(stage_ix, predictions.curr_len());
+        logger.start_stage(stage, predictions.curr_len());
         let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
         for &ix in predictions.ixs.iter() {
             let gt = &data.genotypes[ix];
-            let prefix = format!("{}\t{}\t", stage_ix + 1, gt);
+            let prefix = format!("{}\t{}\t", stage.ix + 1, gt);
             let prior = data.priors[ix];
             let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns,
                 &data.assgn_params);
@@ -806,7 +813,7 @@ fn solve_single_thread(
                 writeln!(w, "{}{:.4}", prefix, Ln::to_log10(lik_mean)).map_err(add_path!(!))?;
             }
         }
-        if stage_ix + 1 < data.scheme.len() {
+        if !stage.last {
             predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh,
                 stage, ONE_THREAD);
         }
@@ -1013,13 +1020,13 @@ impl MainWorker {
         let data = self.data.deref();
         let scheme = data.scheme.deref();
         let total_genotypes = data.genotypes.len();
-        let mut logger = Logger::new(&scheme, total_genotypes);
+        let mut logger = Logger::new(total_genotypes);
         let mut rem_jobs = Vec::with_capacity(n_workers);
 
-        for (stage_ix, stage) in scheme.stages.iter().enumerate() {
+        for stage in &scheme.stages {
             if stage.is_filter() { continue; }
 
-            logger.start_stage(stage_ix, predictions.curr_len());
+            logger.start_stage(stage, predictions.curr_len());
             let m = predictions.curr_len();
 
             rem_jobs.clear();
@@ -1033,14 +1040,14 @@ impl MainWorker {
                 let rem_workers = n_workers - i;
                 let curr_jobs = (m - start).fast_ceil_div(rem_workers);
                 let task = predictions.ixs[start..start + curr_jobs].to_vec();
-                sender.send((stage_ix, task)).expect("Genotyping worker has failed!");
+                sender.send((stage.ix, task)).expect("Genotyping worker has failed!");
                 start += curr_jobs;
                 rem_jobs.push(curr_jobs);
             }
             assert_eq!(start, m);
 
             let mut curr_sol_writer: Option<&mut GzFile> =
-                if data.debug == DebugLvl::None && stage_ix + 1 < scheme.len() { None } else { Some(sol_writer) };
+                if data.debug == DebugLvl::None && !stage.last { None } else { Some(sol_writer) };
             while logger.solved_genotypes < m {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
@@ -1048,7 +1055,7 @@ impl MainWorker {
                         let gt = &data.genotypes[ix];
                         logger.update(gt, pred.lik_mean);
                         if let Some(ref mut w) = curr_sol_writer {
-                            writeln!(w, "{}\t{}\t{:.4}", stage_ix + 1, gt, Ln::to_log10(pred.lik_mean))
+                            writeln!(w, "{}\t{}\t{:.4}", stage.ix + 1, gt, Ln::to_log10(pred.lik_mean))
                                 .map_err(add_path!(!))?;
                         }
                         predictions.predictions[ix] = Some(pred);
@@ -1056,7 +1063,7 @@ impl MainWorker {
                     }
                 }
             }
-            if stage_ix + 1 < scheme.len() {
+            if !stage.last {
                 predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh,
                     stage, data.threads);
             }
@@ -1124,9 +1131,7 @@ impl Worker {
     }
 }
 
-struct Logger<'a> {
-    scheme: &'a Scheme,
-    stage_ix: usize,
+struct Logger {
     solved_genotypes: usize,
     curr_genotypes: usize,
     num_width: usize,
@@ -1139,11 +1144,9 @@ struct Logger<'a> {
     last_msg: Duration,
 }
 
-impl<'a> Logger<'a> {
-    fn new(scheme: &'a Scheme, total_genotypes: usize) -> Self {
+impl Logger {
+    fn new(total_genotypes: usize) -> Self {
         Self {
-            scheme,
-            stage_ix: 0,
             solved_genotypes: 0,
             curr_genotypes: total_genotypes,
             num_width: math::num_digits(total_genotypes as f64) as usize,
@@ -1157,9 +1160,8 @@ impl<'a> Logger<'a> {
         }
     }
 
-    fn start_stage(&mut self, stage_ix: usize, curr_genotypes: usize) {
+    fn start_stage(&mut self, stage: &Stage, curr_genotypes: usize) {
         self.stage_start = self.timer.elapsed();
-        self.stage_ix = stage_ix;
         assert!(curr_genotypes <= self.curr_genotypes);
         if curr_genotypes < self.curr_genotypes {
             self.curr_genotypes = curr_genotypes;
@@ -1167,8 +1169,7 @@ impl<'a> Logger<'a> {
         }
         self.solved_genotypes = 0;
         self.last_msg = self.stage_start;
-        log::info!("*** Stage {:>3}.  {} on {} genotypes",
-            stage_prefix(stage_ix), self.scheme.stages[stage_ix].name(), self.curr_genotypes);
+        stage.describe(self.curr_genotypes);
     }
 
     fn update(&mut self, gt: &Genotype, lik: f64) {

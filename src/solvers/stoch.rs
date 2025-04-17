@@ -50,8 +50,13 @@ impl Default for GreedySolver {
 }
 
 impl GreedySolver {
-    pub fn set_best_start(&mut self, best_start: bool) {
-        self.best_start = best_start;
+    pub fn set_start(&mut self, s: &str) -> Result<(), super::ParamErr> {
+        self.best_start = match s {
+            "b" | "best" => true,
+            "r" | "rand" | "random" => false,
+            _ => return Err(super::ParamErr::Invalid(format!("Invalid start value {}", s))),
+        };
+        Ok(())
     }
 
     pub fn set_sample_size(&mut self, sample_size: usize) -> Result<(), super::ParamErr> {
@@ -69,10 +74,6 @@ impl GreedySolver {
 }
 
 impl Solver for GreedySolver {
-    fn name(&self) -> &'static str {
-        "Stoch.Greedy"
-    }
-
     /// Stochastic greedy algorithm to find the best read assignment.
     fn solve_nontrivial<'a>(
         &self,
@@ -120,9 +121,9 @@ impl super::SetParams for GreedySolver {
     /// Sets solver parameters.
     fn set_param(&mut self, key: &str, val: &str) -> Result<(), super::ParamErr> {
         match &key.to_lowercase() as &str {
-            "best" | "best-start" => self.set_best_start(val.parse()?),
-            "sample" | "sample-size" => self.set_sample_size(val.parse()?)?,
-            "plato" => self.set_plato_size(val.parse()?),
+            "x0" | "start" => self.set_start(val)?,
+            "s" | "sample" => self.set_sample_size(val.parse()?)?,
+            "p" | "plato" => self.set_plato_size(val.parse()?),
             _ => return Err(super::ParamErr::Unknown),
         }
         Ok(())
@@ -131,7 +132,13 @@ impl super::SetParams for GreedySolver {
 
 impl fmt::Display for GreedySolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Greedy({} start, {} reads/iter, plato {})",
+        write!(f, "Stoch.Greedy")
+    }
+}
+
+impl fmt::Debug for GreedySolver {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}, {} start, sample size: {}, plato size: {}", self,
             if self.best_start { "best" } else { "random" }, self.sample_size, self.plato_size)
     }
 }
@@ -185,10 +192,6 @@ impl SimAnneal {
 }
 
 impl Solver for SimAnneal {
-    fn name(&self) -> &'static str {
-        "Sim.Annealing"
-    }
-
     /// Run simulated annealing to find the best read assignment.
     fn solve_nontrivial<'a>(
         &self,
@@ -242,9 +245,9 @@ impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
     fn set_param(&mut self, key: &str, val: &str) -> Result<(), super::ParamErr> {
         match &key.to_lowercase() as &str {
-            "steps" => self.set_anneal_steps(val.parse()?)?,
-            "init" | "init-prob" => self.set_init_prob(val.parse()?)?,
-            "plato" => self.set_plato_size(val.parse()?),
+            "i" | "init" | "init-prob" => self.set_init_prob(val.parse()?)?,
+            "n" | "steps" => self.set_anneal_steps(val.parse()?)?,
+            "p" | "plato" => self.set_plato_size(val.parse()?),
             _ => return Err(super::ParamErr::Unknown),
         }
         Ok(())
@@ -253,6 +256,13 @@ impl super::SetParams for SimAnneal {
 
 impl fmt::Display for SimAnneal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SimAnneal(init.prob {}, steps {}, plato {})", self.init_prob, self.anneal_steps, self.plato_size)
+        write!(f, "Sim.Anneal")
+    }
+}
+
+impl fmt::Debug for SimAnneal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}, init.prob: {}, {} anneal.steps, plato size: {}",
+            self, self.init_prob, self.anneal_steps, self.plato_size)
     }
 }

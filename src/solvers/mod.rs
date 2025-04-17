@@ -1,4 +1,6 @@
-use std::fmt::Display;
+use std::{
+    fmt,
+};
 use crate::{
     model::assgn::{GenotypeAlignments, ReadAssignment},
     ext::rand::XoshiroRng,
@@ -24,21 +26,15 @@ pub enum ParamErr {
 }
 
 impl From<std::num::ParseFloatError> for ParamErr {
-    fn from(_: std::num::ParseFloatError) -> Self {
-        Self::Parse
-    }
+    fn from(_: std::num::ParseFloatError) -> Self { Self::Parse }
 }
 
 impl From<std::num::ParseIntError> for ParamErr {
-    fn from(_: std::num::ParseIntError) -> Self {
-        Self::Parse
-    }
+    fn from(_: std::num::ParseIntError) -> Self { Self::Parse }
 }
 
 impl From<std::str::ParseBoolError> for ParamErr {
-    fn from(_: std::str::ParseBoolError) -> Self {
-        Self::Parse
-    }
+    fn from(_: std::str::ParseBoolError) -> Self { Self::Parse }
 }
 
 pub trait SetParams {
@@ -46,9 +42,7 @@ pub trait SetParams {
 }
 
 /// General trait for all solvers.
-pub trait Solver: Send + Sync + SetParams + CloneSolver + Display {
-    fn name(&self) -> &'static str;
-
+pub trait Solver: Send + Sync + SetParams + CloneSolver + fmt::Display + fmt::Debug {
     /// Distribute reads between several haplotypes in the best way,
     /// when at least one read pair has several possible locations.
     fn solve_nontrivial<'a>(

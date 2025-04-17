@@ -100,10 +100,6 @@ impl HighsSolver {
 }
 
 impl super::Solver for HighsSolver {
-    fn name(&self) -> &'static str {
-        "HiGHS ILP"
-    }
-
     /// Distribute reads between several haplotypes in a best way.
     fn solve_nontrivial<'a>(
         &self,
@@ -150,6 +146,12 @@ impl super::SetParams for HighsSolver {
 
 impl fmt::Display for HighsSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}-{}", HIGHS_NAME, self.mode)
+        write!(f, "{} ILP", HIGHS_NAME)
+    }
+}
+
+impl fmt::Debug for GurobiSolver {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}, mode: {}", self, self.mode)
     }
 }
