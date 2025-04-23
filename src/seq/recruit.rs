@@ -87,8 +87,8 @@ impl Params {
         validate_param!(match_length >= 200 && match_length <= 100_000,
             "Matching stretch length ({}) should be between 200 and 100,000", match_length);
         if match_length < READ_LENGTH_THRESH {
-            log::warn!("Matching stretch length ({}) is too small, it is not be used for short reads in any case",
-            match_length);
+            log::warn!("Matching stretch length ({}) is too small (note that it is only used for long reads)",
+                match_length);
         }
         validate_param!(thresh_kmer_count > 0, "k-mer threshold must be positive");
 
@@ -102,8 +102,7 @@ impl Params {
         let stretch_minims = (2 * match_length).fast_ceil_div(u32::from(minimizer_w) + 1);
         let stretch_score = f64::from(stretch_minims)
             * (f64::from(SUBSUM_BONUS + SUBSUM_PENALTY) * match_frac - f64::from(SUBSUM_PENALTY));
-        assert!(stretch_score > 0.0);
-        let stretch_score = stretch_score.ceil() as u32;
+        let stretch_score = stretch_score.max(f64::from(SUBSUM_BONUS)).ceil() as u32;
         Ok(Self {
             minimizer_k, minimizer_w, match_frac, match_length, thresh_kmer_count,
             stretch_minims, stretch_score, thresholds,
