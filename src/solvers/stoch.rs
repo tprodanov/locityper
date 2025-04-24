@@ -7,7 +7,10 @@ use rand::{
     seq::IndexedRandom,
 };
 use crate::{
-    ext::rand::XoshiroRng,
+    ext::{
+        rand::XoshiroRng,
+        fmt::PrettyUsize,
+    },
     model::assgn::{GenotypeAlignments, ReadAssignment, ReassignmentTarget},
 };
 use super::Solver;
@@ -30,7 +33,7 @@ fn minimum_allowed_diff(max_abs_diff: f64) -> f64 {
 /// In one step, the solver examines `sample_size` read pairs, and selects the best read pair to switch location.
 /// If no improvement was made for `plato_size` iterations, the solver stops.
 #[derive(Clone)]
-pub struct GreedySolver {
+pub struct Greedy {
     /// If true, start with best read alignments, otherwise, assign initial alignments randomly.
     best_start: bool,
     /// Number of read-pairs, examined per iteration.
@@ -39,7 +42,7 @@ pub struct GreedySolver {
     plato_size: usize,
 }
 
-impl Default for GreedySolver {
+impl Default for Greedy {
     fn default() -> Self {
         Self {
             best_start: true,
@@ -49,7 +52,7 @@ impl Default for GreedySolver {
     }
 }
 
-impl GreedySolver {
+impl Greedy {
     pub fn set_start(&mut self, s: &str) -> Result<(), super::ParamErr> {
         self.best_start = match s {
             "b" | "best" => true,
@@ -73,7 +76,7 @@ impl GreedySolver {
     }
 }
 
-impl Solver for GreedySolver {
+impl Solver for Greedy {
     /// Stochastic greedy algorithm to find the best read assignment.
     fn solve_nontrivial<'a>(
         &self,
@@ -118,24 +121,24 @@ impl Solver for GreedySolver {
 
     fn describe_params(&self) -> String {
         format!("x0={},s={},p={}", if self.best_start { "best" } else { "random" },
-            self.sample_size, self.plato_size)
+            PrettyUsize(self.sample_size), PrettyUsize(self.plato_size))
     }
 }
 
-impl super::SetParams for GreedySolver {
+impl super::SetParams for Greedy {
     /// Sets solver parameters.
     fn set_param(&mut self, key: &str, val: &str) -> Result<(), super::ParamErr> {
         match &key.to_lowercase() as &str {
             "x0" | "start" => self.set_start(val)?,
-            "s" | "sample" => self.set_sample_size(val.parse()?)?,
-            "p" | "plato" => self.set_plato_size(val.parse()?),
+            "s" | "sample" => self.set_sample_size(val.parse::<PrettyUsize>()?.0)?,
+            "p" | "plato" => self.set_plato_size(val.parse::<PrettyUsize>()?.0),
             _ => return Err(super::ParamErr::Unknown),
         }
         Ok(())
     }
 }
 
-impl fmt::Display for GreedySolver {
+impl fmt::Display for Greedy {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Stoch.Greedy")
     }
@@ -239,7 +242,7 @@ impl Solver for SimAnneal {
     }
 
     fn describe_params(&self) -> String {
-        format!("i={:.3},n={},p={}", self.init_prob, self.anneal_steps, self.plato_size)
+        format!("n={},p={},P={:.3}", self.init_prob, self.anneal_steps, self.plato_size)
     }
 }
 
@@ -247,9 +250,9 @@ impl super::SetParams for SimAnneal {
     /// Sets solver parameters.
     fn set_param(&mut self, key: &str, val: &str) -> Result<(), super::ParamErr> {
         match &key.to_lowercase() as &str {
-            "i" | "init" | "init-prob" => self.set_init_prob(val.parse()?)?,
-            "n" | "steps" => self.set_anneal_steps(val.parse()?)?,
-            "p" | "plato" => self.set_plato_size(val.parse()?),
+            "n" | "steps" => self.set_anneal_steps(val.parse::<PrettyUsize>()?.0)?,
+            "p" | "plato" => self.set_plato_size(val.parse::<PrettyUsize>()?.0),
+            "P" | "prob" | "init-prob" => self.set_init_prob(val.parse()?)?,
             _ => return Err(super::ParamErr::Unknown),
         }
         Ok(())

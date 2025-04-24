@@ -290,11 +290,6 @@ fn print_help(extended: bool) {
             {EMPTY}  smaller probability than 10^{} to be best [{}].",
             "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
-        println!("    {:KEY$} {:VAL$}  Default number of genotypes after each solver [{}].",
-            "    --min-gts".green(), "INT".yellow(),
-            super::fmt_def(PrettyUsize(defaults.assgn_params.def_min_gts)));
-        println!("    {:KEY$} {:VAL$}  Default number of attempts per solver [{}].",
-            "    --attempts".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.def_attempts));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
             "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), super::fmt_def("auto"));
     }
@@ -421,9 +416,6 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 args.assgn_params.filt_diff = Ln::from_log10(parser.value()?.parse()?),
             Long("prob-thresh") | Long("prob-threshold") =>
                 args.assgn_params.prob_thresh = Ln::from_log10(parser.value()?.parse()?),
-            Long("min-gts") | Long("min-genotypes") =>
-                args.assgn_params.def_min_gts = parser.value()?.parse::<PrettyUsize>()?.get(),
-            Long("attempts") => args.assgn_params.def_attempts = parser.value()?.parse()?,
             Short('t') | Long("tweak") => {
                 let val = parser.value()?;
                 args.assgn_params.tweak = if val == "auto" {
@@ -1087,7 +1079,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         return Ok(());
     }
 
-    let scheme = Arc::new(Scheme::create(&args.solvers, &args.assgn_params)?);
+    let scheme = Arc::new(Scheme::parse(&args.solvers)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, &args.assgn_params.alt_cn));
     let mut successes = 0;
     for locus in loci.iter() {

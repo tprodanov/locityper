@@ -24,6 +24,7 @@ use crate::{
         sys::GzFile,
         vec::{F64Ext, IterExt},
         rand::XoshiroRng,
+        fmt::PrettyUsize,
     },
     bg::{BgDistr, ReadDepth},
     math::{
@@ -84,7 +85,6 @@ fn truncate_ixs(
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
 fn run_filter(
-    stage: &Stage,
     contigs: &ContigNames,
     genotypes: &[Genotype],
     ixs: &mut Vec<usize>,
@@ -92,10 +92,11 @@ fn run_filter(
     all_alns: &AllAlignments,
     mut writer: Option<&mut impl Write>,
     params: &AssgnParams,
+    out_size: usize,
     threads: usize,
 ) -> crate::Result<()>
 {
-    stage.describe();
+    describe_stage(None);
     let contig_ids: Vec<_> = contigs.ids().collect();
     let best_aln_matrix = all_alns.best_aln_matrix(&contig_ids);
     // Vector (genotype index, score).
@@ -112,48 +113,56 @@ fn run_filter(
         }
         let score = prior + gt_best_probs.iter().sum::<f64>();
         if let Some(ref mut w) = writer {
-            writeln!(w, "{}\t{}\t{:.3}", stage.ix, gt, Ln::to_log10(score)).map_err(add_path!(!))?;
+            writeln!(w, "0\t{}\t{:.3}", gt, Ln::to_log10(score)).map_err(add_path!(!))?;
         }
         scores[i] = score;
     }
-    truncate_ixs(ixs, &scores, genotypes, params.filt_diff, stage.out_size, threads);
+    truncate_ixs(ixs, &scores, genotypes, params.filt_diff, out_size, threads);
     Ok(())
+}
+
+fn describe_stage(stage: Option<&Stage>) {
+    let Some(stage) = stage else {
+        log::info!("*** Preliminary filtering");
+        return;
+    };
+
+    const N_NUMS: usize = 10;
+    const LATIN_NUMS: [&'static str; N_NUMS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
+    let params = stage.solver.describe_params();
+    log::info!("*** Stage {:>3}. {:<20}   [a={}{}{}]",
+        if stage.ix < N_NUMS { LATIN_NUMS[stage.ix] } else { "..." },
+        stage.solver.to_string(), stage.attempts, if params.is_empty() { "" } else { "," }, params);
 }
 
 struct Stage {
     ix: usize,
-    last: bool,
-    /// None if pre-filter.
-    solver: Option<Box<dyn Solver>>,
+    solver: Box<dyn Solver>,
     /// Number of attempts per genotype.
     attempts: u16,
-    /// Minimal number of output genotypes.
-    out_size: usize,
+    /// Take approximately this number of top genotypes.
+    in_size: usize,
 }
 
 impl Stage {
     /// Parse stage from string, with format
     /// SOLVER[:PARAM=VALUE,PARAM=VALUE,...]
-    pub fn parse(ix: usize, s: &str, mut attempts: u16, mut out_size: usize) -> crate::Result<Self> {
+    pub fn parse(ix: usize, s: &str) -> crate::Result<Self> {
         let (solver_name, params) = s.split_once(':').unwrap_or_else(|| (s, ""));
-        let mut solver: Option<Box<dyn Solver>> = match solver_name {
-            "filter" | "filtering" => {
-                validate_param!(ix == 0, "Filtering step can only come before all other solvers");
-                None
-            }
-            "greedy" => Some(Box::new(super::GreedySolver::default())),
+        let mut solver: Box<dyn Solver> = match solver_name {
+            "greedy" => Box::new(super::Greedy::default()),
             "anneal" | "simanneal" | "annealing" | "simannealing"
-                => Some(Box::new(super::SimAnneal::default())),
+                => Box::new(super::SimAnneal::default()),
             "highs" => {
                 #[cfg(feature = "highs")]
-                { Some(Box::new(super::HighsSolver::default())) }
+                { Box::new(super::HighsSolver::default()) }
                 #[cfg(not(feature = "highs"))]
                 { return Err(error!(RuntimeError,
                     "HiGHS solver is disabled. Please recompile with `highs` feature.")) }
             }
             "gurobi" => {
                 #[cfg(feature = "gurobi")]
-                { Some(Box::new(super::GurobiSolver::default())) }
+                { Box::new(super::GurobiSolver::default()) }
                 #[cfg(not(feature = "gurobi"))]
                 { return Err(error!(RuntimeError,
                     "Gurobi solver is disabled. Please recompile with `gurobi` feature.")) }
@@ -161,21 +170,20 @@ impl Stage {
             _ => return Err(error!(InvalidInput, "Unknown solver {:?}", solver_name)),
         };
 
+        let mut in_size = 1000;
+        let mut attempts = 20;
         if !params.is_empty() {
             for kv in params.split(',') {
                 let (key, val) = kv.split_once("=")
                     .ok_or_else(|| error!(InvalidInput, "Could not parse solver definition `{}`", s))?;
                 match key {
+                    "i" | "input" | "in-size" => in_size = val.parse::<PrettyUsize>()
+                        .map_err(|_| error!(InvalidInput, "Could not parse `{}` in solver definition `{}`", kv, s))?
+                        .0,
                     "a" | "attempts" => attempts = val.parse()
                         .map_err(|_| error!(InvalidInput, "Could not parse `{}` in solver definition `{}`", kv, s))?,
-                    "o" | "out" | "out-size" => out_size = val.parse()
-                        .map_err(|_| error!(InvalidInput, "Could not parse `{}` in solver definition `{}`", kv, s))?,
                     _ => {
-                        // For filter, automatically set parameter as unknown.
-                        let set_res = solver.as_mut()
-                            .ok_or_else(|| super::ParamErr::Unknown)
-                            .and_then(|solver| solver.set_param(key, val));
-                        match set_res {
+                        match solver.set_param(key, val) {
                             Err(super::ParamErr::Unknown) =>
                                 log::error!("Unknown parameter `{}` for solver `{}` in `{}`", key, solver_name, s),
                             Err(super::ParamErr::Parse) => return Err(error!(InvalidInput,
@@ -188,40 +196,9 @@ impl Stage {
                 }
             }
         }
-        validate_param!(solver.is_none() || attempts > 0,
-            "At least one attempt is required for each stage (`{}`)", s);
-        validate_param!(out_size > 0, "At least one output genotype is required for each stage (`{}`)", s);
-        Ok(Self {
-            ix, solver, attempts, out_size,
-            last: false,
-        })
-    }
-
-    #[inline]
-    fn is_filter(&self) -> bool {
-        self.solver.is_none()
-    }
-
-    fn describe(&self) {
-        const N_NUMS: usize = 10;
-        const LATIN_NUMS: [&'static str; N_NUMS] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
-        let prefix = format!("*** Stage {:>3}.", if self.ix < N_NUMS { LATIN_NUMS[self.ix] } else { "..." });
-        let solver = match &self.solver {
-            Some(solver) => solver,
-            None => {
-                log::info!("{} Preliminary filtering", prefix);
-                return;
-            }
-        };
-
-        let params = solver.describe_params();
-        log::info!("{} {:<20}   [a={}{}{}]", prefix, solver, self.attempts,
-            if params.is_empty() { "" } else { "," }, params);
-    }
-
-    #[inline]
-    fn should_run(&self, n_gts: usize) -> bool {
-        self.last || self.out_size < n_gts
+        validate_param!(attempts > 0, "At least one attempt is required for each stage (`{}`)", s);
+        validate_param!(in_size > 0, "At least one input genotype is required for each stage (`{}`)", s);
+        Ok(Self { ix, solver, attempts, in_size })
     }
 }
 
@@ -231,46 +208,45 @@ pub struct Scheme {
     stages: Vec<Stage>,
 }
 
-impl Scheme {
-    pub const DEFAULT_STAGES: &'static str = "-S filter -S anneal";
-
-    fn default_stages(assgn_params: &AssgnParams) -> Vec<Stage> {
-        vec![
+impl Default for Scheme {
+    fn default() -> Self {
+        Self { stages: vec![
             Stage {
                 ix: 0,
-                last: false,
-                solver: None,
+                solver: Box::new(super::Greedy::default()),
                 attempts: 1,
-                out_size: assgn_params.def_min_gts,
+                in_size: 5000,
             },
             Stage {
                 ix: 1,
-                last: true,
-                solver: Some(Box::new(super::SimAnneal::default())),
-                attempts: assgn_params.def_attempts,
-                out_size: 1,
+                solver: Box::new(super::SimAnneal::default()),
+                attempts: 20,
+                in_size: 50,
             },
-        ]
+        ]}
     }
+}
 
-    pub fn create(solvers: &[String], assgn_params: &AssgnParams) -> crate::Result<Self> {
-        let mut stages = if solvers.is_empty() {
-            Self::default_stages(assgn_params)
-        } else {
-            solvers.iter().enumerate()
-                .map(|(i, s)| Stage::parse(i, s, assgn_params.def_attempts, assgn_params.def_min_gts))
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        if stages.is_empty() {
-            Err(error!(InvalidInput, "No solving stages selected"))
-        } else {
-            stages.last_mut().unwrap().last = true;
-            Ok(Self { stages })
+impl Scheme {
+    pub const DEFAULT_STAGES: &'static str = "-S greedy:i=5k,a=1 -S anneal:i=50,a=20";
+
+    pub fn parse(solvers: &[String]) -> crate::Result<Self> {
+        if solvers.is_empty() {
+            return Ok(Self::default());
         }
-    }
 
-    pub fn len(&self) -> usize {
-        self.stages.len()
+        let stages = solvers.iter().enumerate()
+            .map(|(i, s)| Stage::parse(i, s))
+            .collect::<Result<Vec<_>, _>>()?;
+        debug_assert!(!stages.is_empty());
+        for i in 0..stages.len() - 1 {
+            if stages[i].in_size <= stages[i + 1].in_size {
+                log::warn!(
+                    "Stage {} is redundant (input size {} not greater than next input size {}). May be skipped",
+                    i + 1, stages[i].in_size, stages[i + 1].in_size);
+            }
+        }
+        Ok(Self { stages })
     }
 }
 
@@ -428,12 +404,12 @@ impl Predictions {
         &mut self,
         genotypes: &[Genotype],
         prob_thresh: f64,
-        stage: &Stage,
+        mut out_size: usize,
         threads: usize,
     ) {
         let n = self.ixs.len();
-        let min_gts = stage.out_size.max(threads);
-        if prob_thresh == f64::NEG_INFINITY || min_gts >= n {
+        out_size = out_size.max(threads);
+        if prob_thresh == f64::NEG_INFINITY || out_size >= n {
             return;
         }
 
@@ -446,27 +422,31 @@ impl Predictions {
             genotypes[worst_ix], Ln::to_log10(worst.lik_mean),
             genotypes[best_ix], Ln::to_log10(best.lik_mean));
 
-        // Stop when encountered 5 unlikely genotypes.
-        const STOP_COUNT: u32 = 5;
-        let mut dropped = 0;
-        let mut new_ixs = self.ixs[..min_gts].to_vec();
+        // Only run sophisticated genotype comparison if output size is at most 500.
+        const SOPHISTICATED_COUNT: usize = 500;
 
-        let mut ixs_iter = self.ixs[min_gts..].iter().copied();
-        while let Some(ix) = ixs_iter.next() {
-            let pred = self.predictions[ix].as_ref().unwrap();
-            let ln_pval = compare_two_likelihoods(pred, &best);
-            if ln_pval >= prob_thresh {
-                new_ixs.push(ix);
-            } else {
-                dropped += 1;
-                self.predictions[ix].as_mut().unwrap().assgn_counts = None;
-                if dropped >= STOP_COUNT {
-                    break;
+        let mut new_ixs = self.ixs[..out_size].to_vec();
+        let mut rem_ixs = self.ixs[out_size..].iter().copied();
+        if out_size <= SOPHISTICATED_COUNT {
+            // Stop when encountered 5 unlikely genotypes.
+            const STOP_COUNT: u32 = 5;
+            let mut dropped = 0;
+            while let Some(ix) = rem_ixs.next() {
+                let pred = self.predictions[ix].as_ref().unwrap();
+                let ln_pval = compare_two_likelihoods(pred, &best);
+                if ln_pval >= prob_thresh {
+                    new_ixs.push(ix);
+                } else {
+                    dropped += 1;
+                    self.predictions[ix].as_mut().unwrap().assgn_counts = None;
+                    if dropped >= STOP_COUNT {
+                        break;
+                    }
                 }
             }
         }
         // Remove dropped assignment counts.
-        for ix in ixs_iter {
+        for ix in rem_ixs {
             self.predictions[ix].as_mut().unwrap().assgn_counts = None;
         }
         let m = new_ixs.len();
@@ -780,17 +760,18 @@ fn solve_single_thread(
 
     let distr_cache = data.distr_cache.deref();
     for stage in &data.scheme.stages {
-        let Some(solver) = &stage.solver else { continue };
-        if !data.assgn_params.dont_skip && !stage.should_run(predictions.curr_len()) {
-            log::info!("::: Skipping {}, not enough genotypes", solver);
+        describe_stage(Some(stage));
+        let n_gts = predictions.curr_len();
+        let out_size = data.scheme.stages.get(stage.ix + 1).map(|next_stage| next_stage.in_size);
+        if !(data.assgn_params.dont_skip || out_size.map(|s| s < n_gts).unwrap_or(true)) {
+            log::info!("    Skipping stage, not enough genotypes");
             continue;
         }
 
         let mut curr_sol_writer: Option<&mut GzFile> =
-            if data.debug == DebugLvl::None && !stage.last
-            { None } else { Some(sol_writer) };
+            if data.debug == DebugLvl::None && out_size.is_some() { None } else { Some(sol_writer) };
 
-        logger.start_stage(stage, predictions.curr_len());
+        logger.reset(n_gts);
         let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
         for &ix in predictions.ixs.iter() {
             let gt = &data.genotypes[ix];
@@ -802,7 +783,7 @@ fn solve_single_thread(
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
                 gt_alns.apply_tweak(rng, distr_cache, &data.assgn_params);
-                let assgns = solver.solve(&gt_alns, rng)?;
+                let assgns = stage.solver.solve(&gt_alns, rng)?;
                 *lik = prior + assgns.likelihood();
                 let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
                 if let Some(w) = &mut files.depth_writer {
@@ -820,9 +801,8 @@ fn solve_single_thread(
                 writeln!(w, "{}{:.4}", prefix, Ln::to_log10(lik_mean)).map_err(add_path!(!))?;
             }
         }
-        if !stage.last {
-            predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh,
-                stage, ONE_THREAD);
+        if let Some(s) = out_size {
+            predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh, s, ONE_THREAD);
         }
         logger.finish_stage();
     }
@@ -930,12 +910,11 @@ pub fn solve(
     let mut sol_writer = ext::sys::create_gzip(&locus_dir.join("sol.csv.gz"))?;
     writeln!(sol_writer, "stage\tgenotype\tscore").map_err(add_path!(!))?;
     let mut predictions = Predictions::new(n_gts);
-    let stage0 = &data.scheme.stages[0];
-    if stage0.is_filter() && (data.assgn_params.dont_skip || stage0.should_run(n_gts)) {
-        let curr_sol_writer = if data.debug != DebugLvl::None || data.scheme.len() == 1
-            { Some(&mut sol_writer) } else { None };
-        run_filter(stage0, &data.contigs, &data.genotypes, &mut predictions.ixs,
-            &data.priors, &data.all_alns, curr_sol_writer, &data.assgn_params, data.threads)?;
+    let out_size0 = data.scheme.stages[0].in_size;
+    if data.assgn_params.dont_skip || out_size0 < n_gts {
+        let curr_sol_writer = if data.debug == DebugLvl::None { None } else { Some(&mut sol_writer) };
+        run_filter(&data.contigs, &data.genotypes, &mut predictions.ixs,
+            &data.priors, &data.all_alns, curr_sol_writer, &data.assgn_params, out_size0, data.threads)?;
     }
 
     let mut files = DebugFiles::new(locus_dir, data.threads, data.debug)?;
@@ -1031,35 +1010,35 @@ impl MainWorker {
         let mut rem_jobs = Vec::with_capacity(n_workers);
 
         for stage in &scheme.stages {
-            let Some(solver) = &stage.solver else { continue };
-            if !data.assgn_params.dont_skip && !stage.should_run(predictions.curr_len()) {
-                log::info!("::: Skipping solver {}, not enough genotypes", solver);
+            describe_stage(Some(stage));
+            let n_gts = predictions.curr_len();
+            let out_size = data.scheme.stages.get(stage.ix + 1).map(|next_stage| next_stage.in_size);
+            if !(data.assgn_params.dont_skip || out_size.map(|s| s < n_gts).unwrap_or(true)) {
+                log::info!("    Skipping stage, not enough genotypes");
                 continue;
             }
 
-            logger.start_stage(stage, predictions.curr_len());
-            let m = predictions.curr_len();
-
+            logger.reset(n_gts);
             rem_jobs.clear();
             let mut start = 0;
             // Shuffle indices to better distribute them to threads.
             predictions.ixs.shuffle(rng);
             for (i, sender) in self.senders.iter().enumerate() {
-                if start == m {
+                if start == n_gts {
                     break;
                 }
                 let rem_workers = n_workers - i;
-                let curr_jobs = (m - start).fast_ceil_div(rem_workers);
+                let curr_jobs = (n_gts - start).fast_ceil_div(rem_workers);
                 let task = predictions.ixs[start..start + curr_jobs].to_vec();
                 sender.send((stage.ix, task)).expect("Genotyping worker has failed!");
                 start += curr_jobs;
                 rem_jobs.push(curr_jobs);
             }
-            assert_eq!(start, m);
+            assert_eq!(start, n_gts);
 
             let mut curr_sol_writer: Option<&mut GzFile> =
-                if data.debug == DebugLvl::None && !stage.last { None } else { Some(sol_writer) };
-            while logger.solved_genotypes < m {
+                if data.debug == DebugLvl::None && out_size.is_some() { None } else { Some(sol_writer) };
+            while logger.solved_genotypes < n_gts {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, pred) = receiver.recv().expect("Genotyping worker has failed!");
@@ -1074,9 +1053,9 @@ impl MainWorker {
                     }
                 }
             }
-            if !stage.last {
+            if let Some(s) = out_size {
                 predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh,
-                    stage, data.threads);
+                    s, data.threads);
             }
             logger.finish_stage();
         }
@@ -1104,8 +1083,6 @@ impl Worker {
         // Block thread and wait for the shipment.
         while let Ok((stage_ix, task)) = self.receiver.recv() {
             let stage = &scheme.stages[stage_ix];
-            let solver = stage.solver.as_ref().expect("Worker called on filtering step");
-
             let n = task.len();
             assert_ne!(n, 0, "Received empty task");
 
@@ -1119,7 +1096,7 @@ impl Worker {
                 let mut counts = gt_alns.create_counts();
                 for (attempt, lik) in liks.iter_mut().enumerate() {
                     gt_alns.apply_tweak(&mut self.rng, distr_cache, &data.assgn_params);
-                    let assgns = solver.solve(&gt_alns, &mut self.rng)?;
+                    let assgns = stage.solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = prior + assgns.likelihood();
                     let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
                     if let Some(w) = &mut self.files.depth_writer {
@@ -1171,7 +1148,7 @@ impl Logger {
         }
     }
 
-    fn start_stage(&mut self, stage: &Stage, curr_genotypes: usize) {
+    fn reset(&mut self, curr_genotypes: usize) {
         self.stage_start = self.timer.elapsed();
         assert!(curr_genotypes <= self.curr_genotypes);
         if curr_genotypes < self.curr_genotypes {
@@ -1180,7 +1157,6 @@ impl Logger {
         }
         self.solved_genotypes = 0;
         self.last_msg = self.stage_start;
-        stage.describe();
     }
 
     fn update(&mut self, gt: &Genotype, lik: f64) {

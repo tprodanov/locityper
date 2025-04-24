@@ -65,6 +65,21 @@ impl Debug for Duration {
     }
 }
 
+#[derive(Debug)]
+pub struct PrettyIntParseError(String);
+
+impl Display for PrettyIntParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PrettyIntParseError {
+    fn description(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Integer with pretty formatting (k, M, G suffixes, as well as writing `inf` when MAX) and parsing.
 macro_rules! impl_pretty_int {
     ($name:ident, $prim:ty) => {
@@ -102,7 +117,7 @@ macro_rules! impl_pretty_int {
         }
 
         impl std::str::FromStr for $name {
-            type Err = String;
+            type Err = PrettyIntParseError;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 if s == "inf" || s == "Inf" || s == "INF" {
@@ -111,13 +126,14 @@ macro_rules! impl_pretty_int {
 
                 let mut rev_bytes = s.as_bytes().iter().rev();
                 let (mut n, mut mult) = match rev_bytes.next().copied() {
-                    None => return Err("Cannot parse an empty string into int".to_owned()),
+                    None => return Err(PrettyIntParseError("Cannot parse an empty string into int".to_owned())),
                     Some(b'G') | Some(b'g') | Some(b'B') | Some(b'b') => (0, 1_000_000_000),
                     Some(b'M') | Some(b'm') => (0, 1_000_000),
                     Some(b'K') | Some(b'k') => (0, 1000),
                     Some(c @ b'0' ..= b'9') => (<$prim>::from(c - b'0'), 10),
-                    Some(c) => return Err(format!("Cannot parse string {:?} to int, unexpected last symbol '{}'",
-                        s, char::from(c))),
+                    Some(c) => return Err(PrettyIntParseError(
+                        format!("Cannot convert string `{}` to int, unexpected last symbol '{}'",
+                        s, char::from(c)))),
                 };
 
                 let mut was_digit = mult == 10;
@@ -129,15 +145,16 @@ macro_rules! impl_pretty_int {
                             mult *= 10;
                         },
                         b',' | b'_' => was_digit = false,
-                        c => return Err(format!("Cannot parse string {:?} to int, unexpected symbol '{}'",
-                            s, char::from(c))),
+                        c => return Err(PrettyIntParseError(
+                            format!("Cannot convert string `{}` to int, unexpected symbol '{}'",
+                            s, char::from(c)))),
                     }
                 }
 
                 if was_digit {
                     Ok(Self(n))
                 } else {
-                    Err(format!("Cannot parse string {:?} to int, unexpected first letter", s))
+                    Err(PrettyIntParseError(format!("Cannot convert string `{}` to int, unexpected first letter", s)))
                 }
             }
         }

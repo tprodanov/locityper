@@ -13,7 +13,7 @@ pub mod gurobi;
 #[cfg(feature = "highs")]
 pub mod highs;
 
-pub use self::stoch::{GreedySolver, SimAnneal};
+pub use self::stoch::{Greedy, SimAnneal};
 #[cfg(feature = "gurobi")]
 pub use self::gurobi::GurobiSolver;
 #[cfg(feature = "highs")]
@@ -35,6 +35,10 @@ impl From<std::num::ParseIntError> for ParamErr {
 
 impl From<std::str::ParseBoolError> for ParamErr {
     fn from(_: std::str::ParseBoolError) -> Self { Self::Parse }
+}
+
+impl From<crate::ext::fmt::PrettyIntParseError> for ParamErr {
+    fn from(_: crate::ext::fmt::PrettyIntParseError) -> Self { Self::Parse }
 }
 
 pub trait SetParams {

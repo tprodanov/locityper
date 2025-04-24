@@ -50,13 +50,8 @@ pub struct Params {
     /// Discard genotypes with low probability to be best (after each step).
     pub prob_thresh: f64,
 
-    /// Number of attempts with different tweak sizes.
-    pub def_attempts: u16,
-    /// Minimal number of genotypes after each step of solving.
-    pub def_min_gts: usize,
     /// Do not skip intermediate solvers.
     pub dont_skip: bool,
-
     /// Generate BAM files for this many best genotypes.
     pub out_bams: usize,
 }
@@ -82,11 +77,8 @@ impl Default for Params {
 
             filt_diff: Ln::from_log10(100.0),
             prob_thresh: Ln::from_log10(-4.0),
-            out_bams: 0,
-
-            def_attempts: 20,
-            def_min_gts: 500,
             dont_skip: false,
+            out_bams: 0,
         }
     }
 }
