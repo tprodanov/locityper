@@ -7,7 +7,7 @@ use std::{
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
     ops::{Add, Sub, AddAssign},
 };
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 use rand::Rng;
 use crate::{
     err::{validate_param, add_path},
@@ -239,32 +239,26 @@ impl Progress {
     }
 }
 
-/// Four values are: common-backward, rare-backward, common-forward and rare-forward.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 struct BaseMatchCount<T> {
-    /// Common and rare backward & forward reads.
-    backward: [T; 2],
-    forward: [T; 2],
+    /// Four values are: common-backward, common-forward, rare-backward rare-forward.
+    arr: [T; 4],
 }
 
 impl<T: num_traits::ConstZero + Copy> BaseMatchCount<T> {
     const ZERO: Self = Self {
-        backward: [T::ZERO; 2],
-        forward: [T::ZERO; 2],
+        arr: [T::ZERO; 4],
     };
 }
 
-impl<T: num_traits::ConstOne + AddAssign> BaseMatchCount<T> {
+impl<T: AddAssign + From<bool>> BaseMatchCount<T> {
     #[inline(always)]
-    fn inc<G>(&mut self, forward: bool, info: &LocusMinimInfo<G>) {
-        if info.direction[usize::from(forward)] {
-            self.forward[usize::from(info.rare)].add_assign(T::ONE);
-        }
-        // Not else-if because both can be true.
-        if info.direction[usize::from(!forward)] {
-            self.backward[usize::from(info.rare)].add_assign(T::ONE);
-        }
+    fn inc(&mut self, forward: bool, info: MinimInfo) {
+        let i = u8::from(info.rare) << 1;
+        // Updating common/rare - backward.
+        self.arr[usize::from(i)].add_assign(T::from(info.is_directed_to(!forward)));
+        self.arr[usize::from(i | 1)].add_assign(T::from(info.is_directed_to(forward)));
     }
 }
 
@@ -274,9 +268,7 @@ impl<T: Copy + Add<Output = T> + Sub<Output = T> + PartialOrd> BaseMatchCount<T>
     /// - divisor and numerators of the match fraction.
     #[inline(always)]
     fn characterize(self, total: T) -> (bool, T, T) {
-        let [bw_c, bw_r] = self.backward;
-        let [fw_c, fw_r] = self.forward;
-        // Subtract
+        let [bw_c, fw_c, bw_r, fw_r] = self.arr;
         if fw_c + fw_r >= bw_c + bw_r {
             (true, fw_r, total - fw_c)
         } else {
@@ -520,40 +512,48 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
 }
 
 #[derive(Clone, Copy, Debug)]
-struct LocusMinimInfo<T> {
-    /// Locus information, if given.
-    locus: T,
-    // Use two booleans for backward and forward directions since it is possible that both directions appear.
-    direction: [bool; 2],
+struct MinimInfo {
+    // 0 = 00 - none, 1 = 01 - backward, 2 = 10 - forward, 3 = 11 - both.
+    direction: u8,
     rare: bool,
 }
 
-impl<T: Default> Default for LocusMinimInfo<T> {
-    #[inline]
+impl Default for MinimInfo {
+    #[inline(always)]
     fn default() -> Self {
         Self {
-            locus: T::default(),
-            direction: [false, false],
+            direction: 0,
             rare: true,
         }
     }
 }
 
-impl LocusMinimInfo<u16> {
+impl MinimInfo {
     #[inline]
-    fn new(locus: u16, forward: bool, rare: bool) -> Self {
+    fn new(forward: bool, rare: bool) -> Self {
         Self {
-            locus,
-            direction: [!forward, forward],
+            direction: 1 + u8::from(forward),
             rare,
         }
+    }
+
+    #[inline]
+    fn update(&mut self, forward: bool, rare: bool) {
+        self.direction |= 1 + u8::from(forward);
+        self.rare &= rare;
+    }
+
+    #[inline]
+    fn is_directed_to(self, forward: bool) -> bool {
+        self.direction & (1 + u8::from(forward)) != 0
     }
 }
 
 const CAPACITY: usize = 4;
 /// Key: minimizer,
 /// value: vector of (locus index, minimizer information).
-type MinimToLoci = IntMap<Minimizer, SmallVec<[LocusMinimInfo<u16>; CAPACITY]>>;
+type MinimToLoci = IntMap<Minimizer, SmallVec<[(u16, MinimInfo); CAPACITY]>>;
+type LocusMinims = Vec<IntMap<Minimizer, MinimInfo>>;
 
 /// Target builder. Can be converted to targets using `finalize()`.
 pub struct TargetBuilder {
@@ -564,7 +564,7 @@ pub struct TargetBuilder {
     /// Map minimizer -> all locus indices, where the minimizer occurs.
     minim_to_loci: MinimToLoci,
     /// For each locus, map minimizer -> minimizer info without locus index.
-    locus_minimizers: Vec<IntMap<Minimizer, LocusMinimInfo<()>>>,
+    locus_minimizers: LocusMinims,
 }
 
 impl TargetBuilder {
@@ -592,7 +592,7 @@ impl TargetBuilder {
         };
 
         let mut too_short_alleles = 0;
-        let mut locus_minimizers = IntMap::default();
+        let mut locus_minimizers = IntMap::<Minimizer, MinimInfo>::default();
         for (seq, counts) in contig_set.seqs().iter().zip(kmer_counts.iter()) {
             assert_eq!((seq.len() + 1).saturating_sub(base_k as usize), counts.len(),
                 "Sequence and k-mer lengths do not match");
@@ -610,26 +610,15 @@ impl TargetBuilder {
                     counts[pos] < self.params.thresh_kmer_count && counts[pos + shift] < self.params.thresh_kmer_count
                 };
 
-                match self.minim_to_loci.entry(minimizer) {
-                    hash_map::Entry::Occupied(entry) => {
-                        let entry = entry.into_mut();
-                        let last = entry.last_mut().unwrap();
-                        if last.locus == locus_ix {
-                            last.direction[usize::from(forward)] = true;
-                            last.rare &= rare;
-                        } else {
-                            entry.push(LocusMinimInfo::new(locus_ix, forward, rare));
-                        }
-                    }
-                    hash_map::Entry::Vacant(entry) => {
-                        entry.insert(smallvec![LocusMinimInfo::new(locus_ix, forward, rare)]);
-                    }
+                let v = self.minim_to_loci.entry(minimizer).or_default();
+                match v.last_mut() {
+                    Some((last_locus, last_info)) if *last_locus == locus_ix => last_info.update(forward, rare),
+                    _ => v.push((locus_ix, MinimInfo::new(forward, rare))),
                 }
-                let info: &mut LocusMinimInfo<()> = locus_minimizers.entry(minimizer).or_default();
-                info.direction[usize::from(forward)] = true;
-                info.rare &= rare;
+                locus_minimizers.entry(minimizer).or_default().update(forward, rare);
             }
         }
+
         self.total_seqs += contig_set.len() as u32;
         self.locus_minimizers.push(locus_minimizers);
         if mean_read_len >= f64::from(self.params.match_length) && too_short_alleles > 0 {
@@ -711,7 +700,7 @@ pub struct Targets {
     params: Params,
     /// Minimizers appearing across the targets.
     minim_to_loci: MinimToLoci,
-    locus_minimizers: Vec<IntMap<Minimizer, LocusMinimInfo<()>>>,
+    locus_minimizers: LocusMinims,
 
     show_recruited: bool,
 }
@@ -736,9 +725,9 @@ impl Targets {
 
         matches.clear();
         for &(minimizer, forward) in buffer.iter() {
-            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
-            for info in infos {
-                let counts = matches.get_or_insert(info.locus, SHORT_ZERO_MATCHES);
+            let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
+            for &(locus_ix, info) in entries {
+                let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
                 let counts = unsafe { &mut counts.short };
                 // Both backwards means that read and haplotype face the same direction.
                 counts.first.inc(forward, info);
@@ -772,9 +761,9 @@ impl Targets {
         kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, buffer);
         let total1 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
         for &(minimizer, forward) in buffer.iter() {
-            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
-            for info in infos {
-                let counts = matches.get_or_insert(info.locus, SHORT_ZERO_MATCHES);
+            let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
+            for &(locus_ix, info) in entries {
+                let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
                 let counts = unsafe { &mut counts.short };
                 counts.first.inc(forward, info);
             }
@@ -786,10 +775,10 @@ impl Targets {
         kmers::canon_minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, buffer);
         let total2 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
         for &(minimizer, forward) in buffer.iter() {
-            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
-            for info in infos {
+            let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
+            for &(locus_ix, info) in entries {
                 // No reason to insert new loci if they did not match the first read end.
-                let Some(counts) = matches.get_mut(info.locus) else { continue };
+                let Some(counts) = matches.get_mut(locus_ix) else { continue };
                 let counts = unsafe { &mut counts.short };
                 counts.second.inc(forward, info);
             }
@@ -826,7 +815,7 @@ impl Targets {
             match locus_minimizers.get(&minimizer) {
                 None => s = s.saturating_sub(SUBSUM_PENALTY),
                 Some(info) if info.rare => {
-                    if info.direction[usize::from(forward == direction)] {
+                    if info.is_directed_to(forward == direction) {
                         s += SUBSUM_BONUS;
                         if s >= self.params.stretch_score {
                             return true;
@@ -835,7 +824,7 @@ impl Targets {
                         s = s.saturating_sub(SUBSUM_PENALTY);
                     }
                 }
-                _ => {}
+                _ => {} // minimizer present, but common.
             }
         }
         false
@@ -855,9 +844,9 @@ impl Targets {
 
         matches.clear();
         for &(minimizer, forward) in buffer.iter() {
-            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
-            for info in infos {
-                let counts = matches.get_or_insert(info.locus, LONG_ZERO_MATCHES);
+            let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
+            for &(locus_ix, info) in entries {
+                let counts = matches.get_or_insert(locus_ix, LONG_ZERO_MATCHES);
                 let counts = unsafe { &mut counts.long };
                 counts.inc(forward, info);
             }
