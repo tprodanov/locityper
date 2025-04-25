@@ -242,7 +242,7 @@ impl Solver for SimAnneal {
     }
 
     fn describe_params(&self) -> String {
-        format!("n={},p={},P={:.3}", self.init_prob, self.anneal_steps, self.plato_size)
+        format!("n={},p={},P={:.3}", PrettyUsize(self.anneal_steps), PrettyUsize(self.plato_size), self.init_prob)
     }
 }
 

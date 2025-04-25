@@ -1,5 +1,5 @@
 use std::{
-    cmp::{min, Ord},
+    cmp::Ord,
     ops::{Shl, Shr, BitOr, BitAnd},
 };
 use crate::algo::IntSet;
@@ -102,26 +102,40 @@ impl Minimizer for u128 {
 /// Output data structure for k-mers or minimizers.
 /// Either Vec<(position, kmer)>, Vec<kmer> or IntSet<kmer>.
 pub trait Output<K: Kmer> {
-    fn push(&mut self, pos: u32, kmer: K);
+    fn push(&mut self, pos: u32, kmer: K, forward: bool);
 }
 
 impl<K: Kmer> Output<K> for Vec<(u32, K)> {
     #[inline(always)]
-    fn push(&mut self, pos: u32, kmer: K) {
+    fn push(&mut self, pos: u32, kmer: K, _forward: bool) {
         self.push((pos, kmer));
     }
 }
 
 impl<K: Kmer> Output<K> for Vec<K> {
     #[inline(always)]
-    fn push(&mut self, _pos: u32, kmer: K) {
+    fn push(&mut self, _pos: u32, kmer: K, _forward: bool) {
         self.push(kmer);
+    }
+}
+
+impl<K: Kmer> Output<K> for Vec<(u32, K, bool)> {
+    #[inline(always)]
+    fn push(&mut self, pos: u32, kmer: K, forward: bool) {
+        self.push((pos, kmer, forward));
+    }
+}
+
+impl<K: Kmer> Output<K> for Vec<(K, bool)> {
+    #[inline(always)]
+    fn push(&mut self, _pos: u32, kmer: K, forward: bool) {
+        self.push((kmer, forward));
     }
 }
 
 impl<K: Kmer + std::hash::Hash + nohash::IsEnabled> Output<K> for IntSet<K> {
     #[inline(always)]
-    fn push(&mut self, _pos: u32, kmer: K) {
+    fn push(&mut self, _pos: u32, kmer: K, _forward: bool) {
         self.insert(kmer);
     }
 }
@@ -157,7 +171,7 @@ where K: Kmer,
             _ => {
                 reset = i + k;
                 if i + 1 >= k {
-                    output.push(i - k_1, K::UNDEF);
+                    output.push(i - k_1, K::UNDEF, true);
                 }
                 continue;
             },
@@ -166,10 +180,11 @@ where K: Kmer,
         if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(3 - fw_enc) << rv_shift); }
 
         if i >= reset {
-            output.push(i - k_1, if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer });
+            let (kmer, forward) = if CANON && rv_kmer < fw_kmer { (rv_kmer, false) } else { (fw_kmer, true) };
+            output.push(i - k_1, kmer, forward);
         } else if i + 1 >= k {
-            output.push(i - k_1, K::UNDEF);
-        } // else { }
+            output.push(i - k_1, K::UNDEF, true);
+        }
     }
 }
 
@@ -252,6 +267,7 @@ where K: Minimizer,
 
     // Hashes in a window, stored in a cycling array.
     let mut hashes = CircArray::new(K::UNDEF);
+    let mut forward = CircArray::new(true);
     let mut last_pos = -1_i32;
     let mut best_pos = 0;
     let mut best_hash = K::UNDEF;
@@ -273,9 +289,10 @@ where K: Minimizer,
         };
         fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
         if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift); }
-        let kmer = if CANON { min(fw_kmer, rv_kmer) } else { fw_kmer };
+        let (kmer, fw) = if CANON && rv_kmer < fw_kmer { (rv_kmer, false) } else { (fw_kmer, true) };
         let h = if i < first_kmer { K::UNDEF } else { kmer.fast_hash() };
         hashes[i] = h;
+        forward[i] = fw;
 
         if h < best_hash {
             best_hash = h;
@@ -295,7 +312,7 @@ where K: Minimizer,
         }
         if best_pos as i32 > last_pos {
             last_pos = best_pos as i32;
-            output.push(best_pos - k_1, best_hash);
+            output.push(best_pos - k_1, best_hash, forward[best_pos]);
         }
     }
 }

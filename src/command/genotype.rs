@@ -190,7 +190,7 @@ fn print_help(extended: bool) {
         "-p, --preproc".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
     println!("    {:KEY$} {:VAL$}  Database directory (see {}).\n\
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
-        "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " add").underline());
+        "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " target").underline());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",
@@ -951,7 +951,6 @@ fn analyze_locus(
         return Ok(());
     }
 
-    log::info!("    Calculating read alignment probabilities");
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 

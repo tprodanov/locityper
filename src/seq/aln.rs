@@ -211,8 +211,9 @@ impl Alignment {
     }
 
     /// Returns probability of two alignments: probability of first * probability of second * insert size probability.
+    #[inline]
     pub fn paired_prob(&self, mate: &Alignment, insert_distr: &InsertDistr) -> f64 {
-        self.ln_prob + mate.ln_prob + insert_distr.ln_prob(self.insert_size(mate), self.pair_orientation(mate))
+        self.ln_prob + mate.ln_prob + insert_distr.ln_prob(self.insert_size(mate))
     }
 
     /// Counts operations in the alignment, excluding operations outside the boundary of the `region`.

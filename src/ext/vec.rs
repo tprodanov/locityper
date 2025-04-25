@@ -213,9 +213,9 @@ impl IterExt {
     /// Calculates cumulative sums over iterator and returns the vector of length `len(iter) + 1`.
     /// First element = 0.
     pub fn cumul_sums<T, U>(it: impl Iterator<Item = T>) -> Vec<U>
-    where U: From<T> + num_traits::Zero + AddAssign + Copy,
+    where U: From<T> + num_traits::ConstZero + AddAssign + Copy,
     {
-        let mut c = U::zero();
+        let mut c = U::ZERO;
         let mut res = vec![c];
         for el in it {
             c += U::from(el);

@@ -2,9 +2,10 @@
 
 use std::{
     io, thread,
-    cmp::{min, max},
+    cmp::{min, max, PartialOrd},
     time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
+    ops::{Add, Sub, AddAssign},
 };
 use smallvec::{smallvec, SmallVec};
 use rand::Rng;
@@ -109,15 +110,9 @@ impl Params {
         })
     }
 
-    /// Returns true if the read has enough matching minimizers to be recruited.
-    #[inline]
-    fn short_read_passes(&self, usable_matches: u16, unusable_matches: u16, total_minims: u16) -> bool {
-        usable_matches >= self.thresholds[usize::from(total_minims - unusable_matches)]
-    }
-
-    #[inline]
+    #[inline(always)]
     fn long_read_threshold(&self, n_minims: u32) -> u32 {
-        max(1, (f64::from(n_minims) * self.match_frac).ceil() as u32)
+        max(1, (f64::from(min(self.stretch_minims, n_minims)) * self.match_frac).ceil() as u32)
     }
 
     /// k-mer size within the minimizers.
@@ -244,21 +239,62 @@ impl Progress {
     }
 }
 
+/// Four values are: common-backward, rare-backward, common-forward and rare-forward.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ShortMatchCount {
-    usable1: u16,
-    unusable1: u16,
-    usable2: u16,
-    unusable2: u16,
+#[derive(Default, Clone, Copy, Debug)]
+struct BaseMatchCount<T> {
+    /// Common and rare backward & forward reads.
+    backward: [T; 2],
+    forward: [T; 2],
+}
+
+impl<T: num_traits::ConstZero + Copy> BaseMatchCount<T> {
+    const ZERO: Self = Self {
+        backward: [T::ZERO; 2],
+        forward: [T::ZERO; 2],
+    };
+}
+
+impl<T: num_traits::ConstOne + AddAssign> BaseMatchCount<T> {
+    #[inline(always)]
+    fn inc<G>(&mut self, forward: bool, info: &LocusMinimInfo<G>) {
+        if info.direction[usize::from(forward)] {
+            self.forward[usize::from(info.rare)].add_assign(T::ONE);
+        }
+        // Not else-if because both can be true.
+        if info.direction[usize::from(!forward)] {
+            self.backward[usize::from(info.rare)].add_assign(T::ONE);
+        }
+    }
+}
+
+impl<T: Copy + Add<Output = T> + Sub<Output = T> + PartialOrd> BaseMatchCount<T> {
+    /// Given the total number of minimizer matches, returns
+    /// - direction of the match (forward if true),
+    /// - divisor and numerators of the match fraction.
+    #[inline(always)]
+    fn characterize(self, total: T) -> (bool, T, T) {
+        let [bw_c, bw_r] = self.backward;
+        let [fw_c, fw_r] = self.forward;
+        // Subtract
+        if fw_c + fw_r >= bw_c + bw_r {
+            (true, fw_r, total - fw_c)
+        } else {
+            (false, bw_r, total - bw_c)
+        }
+    }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct LongMatchCount {
-    usable: u32,
-    unusable: u32,
+struct ShortMatchCount {
+    first: BaseMatchCount<u16>,
+    second: BaseMatchCount<u16>,
 }
+
+// #[repr(C)]
+// #[derive(Clone, Copy, Default)]
+// struct LongMatchCount(GenericMatchCount<u32>);
 
 /// During read recruitment, we count minimizer matches within 8 bytes,
 /// but use them differently for short and long reads.
@@ -266,23 +302,18 @@ struct LongMatchCount {
 #[derive(Clone, Copy)]
 pub(crate) union MatchCount {
     short: ShortMatchCount,
-    long: LongMatchCount,
+    long: BaseMatchCount<u32>,
 }
 
 const SHORT_ZERO_MATCHES: MatchCount = MatchCount {
     short: ShortMatchCount {
-        usable1: 0,
-        unusable1: 0,
-        usable2: 0,
-        unusable2: 0,
+        first: BaseMatchCount::<u16>::ZERO,
+        second: BaseMatchCount::<u16>::ZERO,
     },
 };
 
 const LONG_ZERO_MATCHES: MatchCount = MatchCount {
-    long: LongMatchCount {
-        usable: 0,
-        unusable: 0,
-    },
+    long: BaseMatchCount::<u32>::ZERO,
 };
 
 /// To which loci is the read recruited?
@@ -454,7 +485,7 @@ pub(crate) trait RecruitableRecord : fastx::WritableRecord + Send + 'static {
     fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
         answer: &mut M::Answer,
-        minimizers: &mut Vec<Minimizer>,
+        minimizers: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     );
 }
@@ -464,7 +495,7 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
     fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
         answer: &mut M::Answer,
-        minimizers: &mut Vec<Minimizer>,
+        minimizers: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
         let seq = self.seq();
@@ -481,28 +512,59 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
     fn recruit<M: MatchesBuffer>(&self,
         targets: &Targets,
         answer: &mut M::Answer,
-        minimizers: &mut Vec<Minimizer>,
+        minimizers: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
         targets.recruit_read_pair(self[0].seq(), self[1].seq(), answer, minimizers, matches);
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LocusMinimInfo<T> {
+    /// Locus information, if given.
+    locus: T,
+    // Use two booleans for backward and forward directions since it is possible that both directions appear.
+    direction: [bool; 2],
+    rare: bool,
+}
+
+impl<T: Default> Default for LocusMinimInfo<T> {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            locus: T::default(),
+            direction: [false, false],
+            rare: true,
+        }
+    }
+}
+
+impl LocusMinimInfo<u16> {
+    #[inline]
+    fn new(locus: u16, forward: bool, rare: bool) -> Self {
+        Self {
+            locus,
+            direction: [!forward, forward],
+            rare,
+        }
+    }
+}
+
 const CAPACITY: usize = 4;
 /// Key: minimizer,
-/// value: vector of loci indices, where the minimizer appears + is k-mer usable (not common).
-type MinimToLoci = IntMap<Minimizer, SmallVec<[(u16, bool); CAPACITY]>>;
+/// value: vector of (locus index, minimizer information).
+type MinimToLoci = IntMap<Minimizer, SmallVec<[LocusMinimInfo<u16>; CAPACITY]>>;
 
 /// Target builder. Can be converted to targets using `finalize()`.
 pub struct TargetBuilder {
     params: Params,
     total_seqs: u32,
-    buffer: Vec<(u32, Minimizer)>,
+    buffer: Vec<(u32, Minimizer, bool)>,
 
     /// Map minimizer -> all locus indices, where the minimizer occurs.
     minim_to_loci: MinimToLoci,
-    /// For each locus, map minimizer -> usable/unusable k-mer (entry is present only if k-mer appears in the locus).
-    locus_minimizers: Vec<IntMap<Minimizer, bool>>,
+    /// For each locus, map minimizer -> minimizer info without locus index.
+    locus_minimizers: Vec<IntMap<Minimizer, LocusMinimInfo<()>>>,
 }
 
 impl TargetBuilder {
@@ -538,9 +600,9 @@ impl TargetBuilder {
             let n_counts = counts.len();
             self.buffer.clear();
             kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, &mut self.buffer);
-            for &(pos, minimizer) in self.buffer.iter() {
+            for &(pos, minimizer, forward) in self.buffer.iter() {
                 let pos = pos as usize;
-                let is_usable = if u32::from(self.params.minimizer_k) <= base_k {
+                let rare = if u32::from(self.params.minimizer_k) <= base_k {
                     // Check Jellyfish k-mer that is centered around k-mer at `pos`.
                     counts[min(pos.saturating_sub(shift), n_counts - 1)] < self.params.thresh_kmer_count
                 } else {
@@ -550,18 +612,22 @@ impl TargetBuilder {
 
                 match self.minim_to_loci.entry(minimizer) {
                     hash_map::Entry::Occupied(entry) => {
-                        let loci_ixs = entry.into_mut();
-                        let last = loci_ixs.last_mut().unwrap();
-                        if last.0 == locus_ix {
-                            last.1 &= is_usable; // All counts must be usable.
+                        let entry = entry.into_mut();
+                        let last = entry.last_mut().unwrap();
+                        if last.locus == locus_ix {
+                            last.direction[usize::from(forward)] = true;
+                            last.rare &= rare;
                         } else {
-                            loci_ixs.push((locus_ix, is_usable));
+                            entry.push(LocusMinimInfo::new(locus_ix, forward, rare));
                         }
                     }
-                    hash_map::Entry::Vacant(entry) => { entry.insert(smallvec![(locus_ix, is_usable)]); }
+                    hash_map::Entry::Vacant(entry) => {
+                        entry.insert(smallvec![LocusMinimInfo::new(locus_ix, forward, rare)]);
+                    }
                 }
-                locus_minimizers.entry(minimizer)
-                    .and_modify(|was_usable| *was_usable &= is_usable).or_insert(is_usable);
+                let info: &mut LocusMinimInfo<()> = locus_minimizers.entry(minimizer).or_default();
+                info.direction[usize::from(forward)] = true;
+                info.rare &= rare;
             }
         }
         self.total_seqs += contig_set.len() as u32;
@@ -645,7 +711,7 @@ pub struct Targets {
     params: Params,
     /// Minimizers appearing across the targets.
     minim_to_loci: MinimToLoci,
-    locus_minimizers: Vec<IntMap<Minimizer, bool>>,
+    locus_minimizers: Vec<IntMap<Minimizer, LocusMinimInfo<()>>>,
 
     show_recruited: bool,
 }
@@ -661,27 +727,82 @@ impl Targets {
         &self,
         seq: &[u8],
         answer: &mut M::Answer,
-        minimizers: &mut Vec<Minimizer>,
+        buffer: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
-        minimizers.clear();
-        kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
-        let total = u16::try_from(minimizers.len()).expect("Short read has too many minimizers");
+        buffer.clear();
+        kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, buffer);
+        let total = u16::try_from(buffer.len()).expect("Short read has too many minimizers");
 
         matches.clear();
-        for minimizer in minimizers.iter() {
-            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
-            for &(locus_ix, is_usable) in loci_ixs.iter() {
-                let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
+        for &(minimizer, forward) in buffer.iter() {
+            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
+            for info in infos {
+                let counts = matches.get_or_insert(info.locus, SHORT_ZERO_MATCHES);
                 let counts = unsafe { &mut counts.short };
-                if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
+                // Both backwards means that read and haplotype face the same direction.
+                counts.first.inc(forward, info);
             }
         }
 
         answer.clear();
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };
-            if self.params.short_read_passes(counts.usable1, counts.unusable1, total) {
+            let (_, divisor, numerator) = counts.first.characterize(total);
+            if divisor >= self.params.thresholds[usize::from(numerator)] {
+                answer.push(locus_ix);
+            }
+        }
+    }
+
+    /// Record one read pair to one or more loci.
+    /// The read is recruited when both read mates satisfy the recruitment thresholods.
+    fn recruit_read_pair<M: MatchesBuffer>(
+        &self,
+        seq1: &[u8],
+        seq2: &[u8],
+        answer: &mut M::Answer,
+        buffer: &mut Vec<(Minimizer, bool)>,
+        matches: &mut M,
+    ) {
+        answer.clear();
+        matches.clear();
+        // First mate.
+        buffer.clear();
+        kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, buffer);
+        let total1 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
+        for &(minimizer, forward) in buffer.iter() {
+            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
+            for info in infos {
+                let counts = matches.get_or_insert(info.locus, SHORT_ZERO_MATCHES);
+                let counts = unsafe { &mut counts.short };
+                counts.first.inc(forward, info);
+            }
+        }
+        if matches.is_empty() { return }
+
+        // Second mate.
+        buffer.clear();
+        kmers::canon_minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, buffer);
+        let total2 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
+        for &(minimizer, forward) in buffer.iter() {
+            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
+            for info in infos {
+                // No reason to insert new loci if they did not match the first read end.
+                let Some(counts) = matches.get_mut(info.locus) else { continue };
+                let counts = unsafe { &mut counts.short };
+                counts.second.inc(forward, info);
+            }
+        }
+
+        for (locus_ix, counts) in matches.iter() {
+            let counts = unsafe { counts.short };
+            let (fw1, divisor1, numerator1) = counts.first.characterize(total1);
+            let (fw2, divisor2, numerator2) = counts.second.characterize(total2);
+            if fw1 != fw2
+                && divisor1 >= self.params.thresholds[usize::from(numerator1)]
+                && divisor2 >= self.params.thresholds[usize::from(numerator2)]
+            {
                 answer.push(locus_ix);
             }
         }
@@ -691,20 +812,30 @@ impl Targets {
     /// Unusable matches `locus_minims[minim] = false` are ignored,
     /// Otherwise each mismatch is penalized by -1, each matches rewarded by +1.
     /// Read is recruited if there is a subarray with sum >= req_sum.
-    fn has_matching_stretch(&self, minimizers: &[Minimizer], locus_ix: u16) -> bool {
+    fn has_matching_stretch(
+        &self,
+        minimizers: &[(Minimizer, bool)],
+        locus_ix: u16,
+        direction: bool,
+    ) -> bool
+    {
         let locus_minimizers = &self.locus_minimizers[usize::from(locus_ix)];
-        let mut s = 0;
-        for minim in minimizers {
+        let mut s = 0_u32;
+        for &(minimizer, forward) in minimizers {
             // Optimized Kadane's algorithm for finding max subsum.
-            match locus_minimizers.get(minim) {
-                Some(false) => {}
-                Some(true) => {
-                    s += SUBSUM_BONUS;
-                    if s >= self.params.stretch_score {
-                        return true;
+            match locus_minimizers.get(&minimizer) {
+                None => s = s.saturating_sub(SUBSUM_PENALTY),
+                Some(info) if info.rare => {
+                    if info.direction[usize::from(forward == direction)] {
+                        s += SUBSUM_BONUS;
+                        if s >= self.params.stretch_score {
+                            return true;
+                        }
+                    } else {
+                        s = s.saturating_sub(SUBSUM_PENALTY);
                     }
                 }
-                None => s = s.saturating_sub(SUBSUM_PENALTY),
+                _ => {}
             }
         }
         false
@@ -715,81 +846,30 @@ impl Targets {
         &self,
         seq: &[u8],
         answer: &mut M::Answer,
-        minimizers: &mut Vec<Minimizer>,
+        buffer: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
-        minimizers.clear();
-        kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, minimizers);
-        let total_minims = u32::try_from(minimizers.len()).expect("Long read has too many minimizers");
+        buffer.clear();
+        kmers::canon_minimizers(seq, self.params.minimizer_k, self.params.minimizer_w, buffer);
+        let total = u32::try_from(buffer.len()).expect("Long read has too many minimizers");
 
         matches.clear();
-        for minimizer in minimizers.iter() {
-            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
-            for &(locus_ix, is_usable) in loci_ixs.iter() {
-                let counts = matches.get_or_insert(locus_ix, LONG_ZERO_MATCHES);
+        for &(minimizer, forward) in buffer.iter() {
+            let Some(infos) = self.minim_to_loci.get(&minimizer) else { continue };
+            for info in infos {
+                let counts = matches.get_or_insert(info.locus, LONG_ZERO_MATCHES);
                 let counts = unsafe { &mut counts.long };
-                if is_usable { counts.usable += 1 } else { counts.unusable += 1 };
+                counts.inc(forward, info);
             }
         }
 
         answer.clear();
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.long };
-            let total_wo_unusable = total_minims - counts.unusable;
-            if counts.usable >= self.params.long_read_threshold(min(self.params.stretch_minims, total_wo_unusable)) {
-                if total_wo_unusable < self.params.stretch_minims || self.has_matching_stretch(minimizers, locus_ix) {
-                    answer.push(locus_ix);
-                }
-            }
-        }
-    }
-
-    /// Record one paired-end read to one or more loci.
-    /// The read is recruited when both read mates satisfy the recruitment thresholods.
-    fn recruit_read_pair<M: MatchesBuffer>(
-        &self,
-        seq1: &[u8],
-        seq2: &[u8],
-        answer: &mut M::Answer,
-        minimizers: &mut Vec<Minimizer>,
-        matches: &mut M,
-    ) {
-        answer.clear();
-        matches.clear();
-        // First mate.
-        minimizers.clear();
-        kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, minimizers);
-        let total1 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
-        for minimizer in minimizers.iter() {
-            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
-            for &(locus_ix, is_usable) in loci_ixs.iter() {
-                let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
-                let counts = unsafe { &mut counts.short };
-                if is_usable { counts.usable1 += 1 } else { counts.unusable1 += 1 };
-            }
-        }
-
-        if matches.is_empty() { return; }
-
-        // Second mate.
-        minimizers.clear();
-        kmers::canon_minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, minimizers);
-        let total2 = u16::try_from(minimizers.len()).expect("Paired end read has too many minimizers");
-        for minimizer in minimizers.iter() {
-            let Some(loci_ixs) = self.minim_to_loci.get(minimizer) else { continue };
-            for &(locus_ix, is_usable) in loci_ixs.iter() {
-                // No reason to insert new loci if they did not match the first read end.
-                if let Some(counts) = matches.get_mut(locus_ix) {
-                    let counts = unsafe { &mut counts.short };
-                    if is_usable { counts.usable2 += 1 } else { counts.unusable2 += 1 };
-                }
-            }
-        }
-
-        for (locus_ix, counts) in matches.iter() {
-            let counts = unsafe { counts.short };
-            if self.params.short_read_passes(counts.usable1, counts.unusable1, total1)
-                    && self.params.short_read_passes(counts.usable2, counts.unusable2, total2) {
+            let (direction, divisor, numerator) = counts.characterize(total);
+            if divisor >= self.params.long_read_threshold(numerator) && (numerator < self.params.stretch_minims
+                || self.has_matching_stretch(buffer, locus_ix, direction))
+            {
                 answer.push(locus_ix);
             }
         }
@@ -900,7 +980,7 @@ struct Worker<T, M: MatchesBuffer> {
     receiver: Receiver<Shipment<T, M::Answer>>,
     /// Sends already recruited reads back to the main thread.
     sender: Sender<Shipment<T, M::Answer>>,
-    buffer1: Vec<Minimizer>,
+    buffer1: Vec<(Minimizer, bool)>,
     buffer2: M,
 }
 

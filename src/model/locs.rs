@@ -505,10 +505,14 @@ fn identify_contig_pair_alns(
         let mut max_prob1 = f64::NEG_INFINITY;
         for (ix2, max_prob2) in (j..k).zip(buffer.iter_mut()) {
             let aln2 = unsafe { alignments.get_unchecked(ix2) };
-            let prob = aln1.paired_prob(aln2, insert_distr);
-            max_prob1 = max_prob1.max(prob);
-            *max_prob2 = max_prob2.max(prob);
-            aln_pairs.push(PairAlignment::new_both(ix1, aln1.interval(), ix2, aln2.interval(), prob));
+            if aln1.strand() != aln2.strand() {
+                let prob = aln1.paired_prob(aln2, insert_distr);
+                if prob.is_finite() {
+                    max_prob1 = max_prob1.max(prob);
+                    *max_prob2 = max_prob2.max(prob);
+                    aln_pairs.push(PairAlignment::new_both(ix1, aln1.interval(), ix2, aln2.interval(), prob));
+                }
+            }
         }
 
         // Only add alignment `aln1,unmapped2` if it is better than any existing paired alignment to the same contig.

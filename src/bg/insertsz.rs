@@ -36,23 +36,14 @@ pub fn group_mates<'a>(alns: &'a [NamedAlignment]) -> crate::Result<Vec<(usize, 
     Ok(pairs.into_values().filter_map(|[opt_i, opt_j]| opt_i.zip(opt_j)).collect())
 }
 
-/// Allow read-pair orientation, if at least 5% pairs support it.
-const ORIENT_THRESH: f64 = 0.05;
-
 fn cache_size(distr: &NBinom) -> usize {
     const MAX_CACHE_SIZE: usize = 65536;
     MAX_CACHE_SIZE.min(distr.quantile(0.99999) as usize)
 }
 
-fn allowed_forbidden(v: bool) -> &'static str {
-    if v { "allowed" } else { "forbidden" }
-}
-
 /// Insert size distribution.
 #[derive(Debug, Clone)]
 pub struct InsertDistr {
-    /// Are different read-pair orientation allowed? (FR/RF v. RR/FF)
-    orient_allowed: [bool; 2],
     /// Cached insert size distribution.
     distr: Option<LinearCache<NBinom>>,
     /// ln-probability at the mode of the insert size distribution.
@@ -62,7 +53,6 @@ pub struct InsertDistr {
 impl InsertDistr {
     pub fn undefined() -> Self {
         Self {
-            orient_allowed: [false; 2],
             distr: None,
             mode_prob: f64::NAN,
         }
@@ -124,11 +114,15 @@ impl InsertDistr {
         // First: FR/RF, Second: FF/RR.
         let total = (orient_counts[0] + orient_counts[1]) as f64;
         let orient_frac = [orient_counts[0] as f64 / total, orient_counts[1] as f64 / total];
-        let orient_allowed = [orient_frac[0] >= ORIENT_THRESH, orient_frac[1] >= ORIENT_THRESH];
         for i in 0..2 {
-            log::info!("    {}: {:8} ({:.3}%),  {}",
-                if i == 0 { "FR/RF" } else { "FF/RR" },
-                orient_counts[i], orient_frac[i], allowed_forbidden(orient_allowed[i]));
+            log::info!("    {}: {:8} ({:.3}%)",
+                if i == 0 { "FR/RF" } else { "FF/RR" }, orient_counts[i], orient_frac[i]);
+        }
+
+        /// Allow read-pair orientation, if at least 5% pairs support it.
+        const ORIENT_THRESH: f64 = 0.05;
+        if orient_frac[0] < ORIENT_THRESH || orient_frac[1] >= ORIENT_THRESH {
+            return Err(error!(InvalidData, "FF orientation is not supported by Locityper"));
         }
 
         let est_limit = INS_QUANTILE_MULT * F64Ext::interpol_quantile(&mut insert_sizes, INS_QUANTILE);
@@ -143,7 +137,6 @@ impl InsertDistr {
         let size = cache_size(&distr);
         let distr = distr.cached(size);
         Ok(Self {
-            orient_allowed,
             mode_prob: distr.ln_pmf(distr.inner().mode()),
             distr: Some(distr),
         })
@@ -153,17 +146,12 @@ impl InsertDistr {
     pub fn describe(&self) {
         let Some(distr) = &self.distr else { return };
         log::info!("Insert size: {:.1} ± {:.1}", distr.mean(), distr.variance().sqrt());
-        log::info!("    FR/RF {},  FF/RR {}",
-            allowed_forbidden(self.orient_allowed[0]), allowed_forbidden(self.orient_allowed[1]));
     }
 
     /// Ln-probability of the insert size. `same_orient` is true if FF/RR, false if FR/RF.
-    pub fn ln_prob(&self, sz: u32, same_orient: bool) -> f64 {
-        if self.orient_allowed[usize::from(same_orient)] {
-            self.distr.as_ref().unwrap().ln_pmf(sz)
-        } else {
-            f64::NEG_INFINITY
-        }
+    #[inline]
+    pub fn ln_prob(&self, sz: u32) -> f64 {
+        self.distr.as_ref().unwrap().ln_pmf(sz)
     }
 
     /// Returns insert size confidence interval for the correspoding level between 0 and 1.
@@ -196,8 +184,6 @@ impl JsonSer for InsertDistr {
     fn save(&self) -> json::JsonValue {
         if let Some(distr) = &self.distr {
             json::object!{
-                fr_allowed: self.orient_allowed[0],
-                ff_allowed: self.orient_allowed[1],
                 n: distr.inner().n(),
                 p: distr.inner().p(),
             }
@@ -211,12 +197,11 @@ impl JsonSer for InsertDistr {
             return Ok(Self::undefined());
         }
 
-        json_get!(obj => n (as_f64), p (as_f64), fr_allowed (as_bool), ff_allowed (as_bool));
+        json_get!(obj => n (as_f64), p (as_f64));
         let distr = NBinom::new(n, p);
         let size = cache_size(&distr);
         let distr = distr.cached(size);
         Ok(Self {
-            orient_allowed: [fr_allowed, ff_allowed],
             mode_prob: distr.ln_pmf(distr.inner().mode()),
             distr: Some(distr),
         })
