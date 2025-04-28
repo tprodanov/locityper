@@ -570,7 +570,7 @@ fn discard_identical(entries: Vec<NamedSeq>, locus_dir: &Path) -> crate::Result<
     Ok(selected)
 }
 
-/// Process alleles: write FASTA, PAF, kmers files, cluster sequences.
+/// Process alleles: write FASTA, kmers files, cluster sequences.
 fn process_alleles(
     locus: &str,
     locus_dir: &Path,
@@ -586,7 +586,8 @@ fn process_alleles(
     let fasta_filename = locus_dir.join(paths::LOCUS_FASTA);
     let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
     for entry in entries.iter() {
-        seq::write_fasta(&mut fasta_writer, entry.name().as_bytes(), entry.seq()).map_err(add_path!(fasta_filename))?;
+        seq::write_multiline_fasta(&mut fasta_writer, entry.name().as_bytes(), entry.seq())
+            .map_err(add_path!(fasta_filename))?;
         seqs.push(entry.seq().to_vec());
     }
     std::mem::drop(fasta_filename);

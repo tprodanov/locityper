@@ -30,6 +30,12 @@ use crate::{
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct NameHash(u64);
 
+impl NameHash {
+    pub fn new(name: &[u8]) -> Self {
+        Self(get_hash(name))
+    }
+}
+
 impl fmt::Display for NameHash {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use base64ct::Encoding;
@@ -174,7 +180,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
         let name = std::str::from_utf8(self.record.qname())
             .map_err(|_| Error::Utf8("read name", self.record.qname().to_vec()))?;
-        let name_hash = NameHash(get_hash(self.record.qname()));
+        let name_hash = NameHash::new(self.record.qname());
 
         // Check if everything is correct.
         if read_end == ReadEnd::First {

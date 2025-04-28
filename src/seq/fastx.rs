@@ -24,11 +24,7 @@ use crate::{
 // ------------------------------------------- Helper functions -------------------------------------------
 
 /// Write a single sequence to the FASTA file.
-/// Use this function instead of `bio::fasta::Writer` as the latter
-/// writes the sequence into a single line, without splitting.
-///
-/// `name` may include description after a space, if needed.
-pub fn write_fasta(
+pub fn write_multiline_fasta(
     writer: &mut impl io::Write,
     name: &[u8],
     seq: &[u8]
@@ -43,6 +39,20 @@ pub fn write_fasta(
         writer.write_all(&seq[i..min(i + WIDTH, n)])?;
         writer.write_all(b"\n")?;
     }
+    Ok(())
+}
+
+/// Writes a single sequence to the FASTA file, without splitting the sequence.
+pub fn write_fasta(
+    writer: &mut impl io::Write,
+    name: &[u8],
+    seq: &[u8]
+) -> io::Result<()> {
+    writer.write_all(b">")?;
+    writer.write_all(name)?;
+    writer.write_all(b"\n")?;
+    writer.write_all(&seq)?;
+    writer.write_all(b"\n")?;
     Ok(())
 }
 

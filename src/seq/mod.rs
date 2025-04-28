@@ -15,7 +15,7 @@ pub mod div;
 
 pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames, ContigSet};
-pub use fastx::write_fasta;
+pub use fastx::{write_fasta, write_multiline_fasta};
 
 use std::io::{Read, Seek};
 use bio::io::fasta;

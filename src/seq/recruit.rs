@@ -2,6 +2,7 @@
 
 use std::{
     io, thread,
+    fmt::{self, Display},
     cmp::{min, max, PartialOrd},
     time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
@@ -277,6 +278,13 @@ impl<T: Copy + Add<Output = T> + Sub<Output = T> + PartialOrd> BaseMatchCount<T>
     }
 }
 
+impl<T: Copy + Display> Display for BaseMatchCount<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let [bw_c, fw_c, bw_r, fw_r] = self.arr;
+        write!(f, "rare: {}, {}; common: {}, {}", fw_r, bw_r, fw_c, bw_c)
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ShortMatchCount {
@@ -507,6 +515,8 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
         minimizers: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
+        println!("{} {}", std::str::from_utf8(self[0].name()).unwrap(),
+            crate::model::locs::NameHash::new(self[0].name()));
         targets.recruit_read_pair(self[0].seq(), self[1].seq(), answer, minimizers, matches);
     }
 }
@@ -546,6 +556,15 @@ impl MinimInfo {
     #[inline]
     fn is_directed_to(self, forward: bool) -> bool {
         self.direction & (1 + u8::from(forward)) != 0
+    }
+}
+
+impl Display for MinimInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}{}{}", if self.rare { 'r' } else { 'c' },
+            if self.is_directed_to(false) { "<" } else { "" },
+            if self.is_directed_to(true) { ">" } else { "" },
+        )
     }
 }
 
@@ -634,6 +653,11 @@ impl TargetBuilder {
         log::info!("Collected {} minimizers across {} loci and {} sequences",
             total_minims, self.locus_minimizers.len(), self.total_seqs);
         assert!(total_minims > 0, "No minimizers for recruitment");
+        println!("Targets:");
+        for (minimizer, entries) in self.minim_to_loci.iter() {
+            println!("    {:016X} {}", minimizer, entries[0].1);
+        }
+        println!("Recruit:");
         Targets {
             params: self.params,
             minim_to_loci: self.minim_to_loci,
@@ -754,6 +778,9 @@ impl Targets {
         buffer: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
+        use std::fmt::Write;
+        let mut s = String::new();
+
         answer.clear();
         matches.clear();
         // First mate.
@@ -761,7 +788,12 @@ impl Targets {
         kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, buffer);
         let total1 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
         for &(minimizer, forward) in buffer.iter() {
+            if !s.is_empty() {
+                write!(s, ", ").unwrap();
+            }
+            write!(s, "{:016X}{}", minimizer, if forward { '>' } else { '<' }).unwrap();
             let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
+            write!(s, "!").unwrap();
             for &(locus_ix, info) in entries {
                 let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
                 let counts = unsafe { &mut counts.short };
@@ -769,13 +801,20 @@ impl Targets {
             }
         }
         if matches.is_empty() { return }
+        println!("    M {}", s);
+        s.clear();
 
         // Second mate.
         buffer.clear();
         kmers::canon_minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, buffer);
         let total2 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
         for &(minimizer, forward) in buffer.iter() {
+            if !s.is_empty() {
+                write!(s, ", ").unwrap();
+            }
+            write!(s, "{:016X}{}", minimizer, if forward { '>' } else { '<' }).unwrap();
             let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
+            write!(s, "!").unwrap();
             for &(locus_ix, info) in entries {
                 // No reason to insert new loci if they did not match the first read end.
                 let Some(counts) = matches.get_mut(locus_ix) else { continue };
@@ -786,12 +825,16 @@ impl Targets {
 
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };
+            println!("    {} / {}", counts.first, total1);
+            println!("    M {}", s);
+            println!("    {} / {}", counts.second, total2);
             let (fw1, divisor1, numerator1) = counts.first.characterize(total1);
             let (fw2, divisor2, numerator2) = counts.second.characterize(total2);
             if fw1 != fw2
                 && divisor1 >= self.params.thresholds[usize::from(numerator1)]
                 && divisor2 >= self.params.thresholds[usize::from(numerator2)]
             {
+                println!("    OK");
                 answer.push(locus_ix);
             }
         }
