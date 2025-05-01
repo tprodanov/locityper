@@ -6,7 +6,7 @@ use std::{
     cmp::{min, max, PartialOrd},
     time::{Instant, Duration},
     sync::mpsc::{self, Sender, Receiver, TryRecvError},
-    ops::{Add, Sub, AddAssign},
+    ops::{Add, AddAssign, Sub, Mul},
 };
 use smallvec::SmallVec;
 use rand::Rng;
@@ -18,7 +18,7 @@ use crate::{
         counts::KmerCount,
         fastx::{self, FastxRead},
     },
-    math::RoundDiv,
+    math::{RoundDiv, Fraction},
     algo::{IntMap, hash_map},
     ext::rand::XoshiroRng,
 };
@@ -32,11 +32,7 @@ pub const DEFAULT_MINIM_KW: (u8, u8) = (15, 10);
 pub const DEFAULT_MATCH_LEN: u32 = 2000;
 
 /// Reads shorter than 500 bp are considered short, larger - long.
-/// Note that there must be < 256 minimizers per read end.
 const READ_LENGTH_THRESH: u32 = 500;
-
-/// Store this many minimizer thresholds for short reads.
-const STORE_THRESHOLDS: usize = READ_LENGTH_THRESH as usize + Minimizer::MAX_KMER_SIZE as usize;
 
 /// Reward matching k-mers by +3, penalize mismatching k-mers by -1.
 /// Bigger bonus requires bigger score to achieve `(BONUS + 1) * match_frac - PENALTY`,
@@ -53,6 +49,8 @@ pub struct Params {
     /// Recruit the read if it has at has at least `match_frac` matching k-mers
     /// on a stretch of `min(match_length, read_length)`.
     match_frac: f64,
+    /// Rational approximations of match_frac.
+    match_frac_short: Fraction<u16>,
     match_length: u32,
 
     /// Use k-mers with multiplicity LESS than this number.
@@ -63,8 +61,6 @@ pub struct Params {
     /// If each matching k-mer has bonus +1 and each non-matching is penalized by -1,
     /// stretch of `stretch_minims` k-mers would have a sum of `strech_score`.
     stretch_score: u32,
-    /// Threshold number of matches of short reads.
-    thresholds: [u16; STORE_THRESHOLDS],
 }
 
 impl Params {
@@ -94,11 +90,6 @@ impl Params {
         }
         validate_param!(thresh_kmer_count > 0, "k-mer threshold must be positive");
 
-        let mut thresholds = [0; STORE_THRESHOLDS];
-        for i in 0..STORE_THRESHOLDS {
-            thresholds[i] = max(1, (i as f64 * match_frac).ceil() as u16);
-        }
-
         // As per https://doi.org/10.1093/bioinformatics/btaa472,
         // there are 2L/(w + 1) minimizers per sequence of length of L.
         let stretch_minims = (2 * match_length).fast_ceil_div(u32::from(minimizer_w) + 1);
@@ -107,7 +98,8 @@ impl Params {
         let stretch_score = stretch_score.max(f64::from(SUBSUM_BONUS)).ceil() as u32;
         Ok(Self {
             minimizer_k, minimizer_w, match_frac, match_length, thresh_kmer_count,
-            stretch_minims, stretch_score, thresholds,
+            stretch_minims, stretch_score,
+            match_frac_short: Fraction::approximate(match_frac),
         })
     }
 
@@ -243,7 +235,7 @@ impl Progress {
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 struct BaseMatchCount<T> {
-    /// Four values are: common-backward, common-forward, rare-backward rare-forward.
+    /// Four values are: common-backward, common-forward, rare-backward, rare-forward.
     arr: [T; 4],
 }
 
@@ -263,17 +255,113 @@ impl<T: AddAssign + From<bool>> BaseMatchCount<T> {
     }
 }
 
-impl<T: Copy + Add<Output = T> + Sub<Output = T> + PartialOrd> BaseMatchCount<T> {
-    /// Given the total number of minimizer matches, returns
-    /// - direction of the match (forward if true),
-    /// - divisor and numerators of the match fraction.
+impl<T: num_traits::ConstZero + PartialEq> BaseMatchCount<T> {
+    #[inline]
+    fn has_rare(self) -> bool {
+        self.arr[2] != T::ZERO || self.arr[3] != T::ZERO
+    }
+}
+
+impl<T> BaseMatchCount<T>
+where T: Copy + PartialOrd + Add<Output = T> + Sub<Output = T>,
+{
+    /// Fraction of rare minimizers, not accounting for common minimizers.
     #[inline(always)]
-    fn characterize(self, total: T) -> (bool, T, T) {
+    fn rare_fraction(self, total: T) -> Fraction<T> {
         let [bw_c, fw_c, bw_r, fw_r] = self.arr;
-        if fw_c + fw_r >= bw_c + bw_r {
-            (true, fw_r, total - fw_c)
+        if fw_r >= bw_r {
+            Fraction::new(fw_r, total - fw_c)
         } else {
-            (false, bw_r, total - bw_c)
+            Fraction::new(bw_r, total - bw_c)
+        }
+    }
+}
+
+/// Relative worth of a rare k-mer.
+trait RareWorth {
+    const WORTH: Self;
+}
+
+impl RareWorth for u16 {
+    const WORTH: u16 = 3;
+}
+
+// impl RareWorth for u32 {
+//     const WORTH: u32 = 3;
+// }
+
+impl<T> BaseMatchCount<T>
+where T: Copy + PartialOrd + Add<Output = T> + Sub<Output = T> + Mul<Output = T> + RareWorth,
+{
+    // Fractions return (Wr + c) / (Wr + c + Wm),
+    // where r = rare matches, c = common matches and m = mismatches = n - r - c.
+    // Wr + c + Wm = W(n - c) + c.
+
+    #[inline(always)]
+    fn forward_numerator(self) -> T {
+        let fw_c = self.arr[1];
+        let fw_r = self.arr[3];
+        T::WORTH * fw_r + fw_c
+    }
+
+    #[inline(always)]
+    fn backward_numerator(self) -> T {
+        let bw_c = self.arr[0];
+        let bw_r = self.arr[2];
+        T::WORTH * bw_r + bw_c
+    }
+
+    #[inline(always)]
+    fn forward_denominator(self, total: T) -> T {
+        let fw_c = self.arr[1];
+        T::WORTH * (total - fw_c) + fw_c
+    }
+
+    #[inline(always)]
+    fn backward_denominator(self, total: T) -> T {
+        let bw_c = self.arr[0];
+        T::WORTH * (total - bw_c) + bw_c
+    }
+
+    // #[inline(always)]
+    // fn forward_fraction(self, total: T) -> Fraction<T> {
+    //     Fraction::new(self.forward_numerator(), self.forward_denominator(total))
+    // }
+
+    // #[inline(always)]
+    // fn backward_fraction(self, total: T) -> Fraction<T> {
+    //     Fraction::new(self.backward_numerator(), self.backward_denominator(total))
+    // }
+
+    /// Returns approximately max(forward_fraction, backward_fraction).
+    /// May be incorrect if the two values are similar and there are many common k-mers.
+    #[inline(always)]
+    fn better_fraction(self, total: T) -> Fraction<T> {
+        let fw_numer = self.forward_numerator();
+        let bw_numer = self.backward_numerator();
+        if fw_numer >= bw_numer {
+            Fraction::new(fw_numer, self.forward_denominator(total))
+        } else {
+            Fraction::new(bw_numer, self.backward_denominator(total))
+        }
+    }
+
+    #[inline(always)]
+    fn better_pair_fraction(self, second: Self, total1: T, total2: T) -> (Fraction<T>, Fraction<T>) {
+        let fw_numer1 = self.forward_numerator();
+        let bw_numer1 = self.backward_numerator();
+        let fw_numer2 = second.forward_numerator();
+        let bw_numer2 = second.backward_numerator();
+        if fw_numer1 + bw_numer2 >= bw_numer1 + fw_numer2 {
+            (
+                Fraction::new(fw_numer1, self.forward_denominator(total1)),
+                Fraction::new(bw_numer2, second.backward_denominator(total2)),
+            )
+        } else {
+            (
+                Fraction::new(bw_numer1, self.backward_denominator(total1)),
+                Fraction::new(fw_numer2, second.forward_denominator(total2)),
+            )
         }
     }
 }
@@ -291,10 +379,6 @@ struct ShortMatchCount {
     first: BaseMatchCount<u16>,
     second: BaseMatchCount<u16>,
 }
-
-// #[repr(C)]
-// #[derive(Clone, Copy, Default)]
-// struct LongMatchCount(GenericMatchCount<u32>);
 
 /// During read recruitment, we count minimizer matches within 8 bytes,
 /// but use them differently for short and long reads.
@@ -761,8 +845,7 @@ impl Targets {
         answer.clear();
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };
-            let (_, divisor, numerator) = counts.first.characterize(total);
-            if divisor >= self.params.thresholds[usize::from(numerator)] {
+            if counts.first.has_rare() && counts.first.better_fraction(total) >= self.params.match_frac_short {
                 answer.push(locus_ix);
             }
         }
@@ -828,12 +911,12 @@ impl Targets {
             println!("    {} / {}", counts.first, total1);
             println!("    M {}", s);
             println!("    {} / {}", counts.second, total2);
-            let (fw1, divisor1, numerator1) = counts.first.characterize(total1);
-            let (fw2, divisor2, numerator2) = counts.second.characterize(total2);
-            if fw1 != fw2
-                && divisor1 >= self.params.thresholds[usize::from(numerator1)]
-                && divisor2 >= self.params.thresholds[usize::from(numerator2)]
-            {
+
+            if !counts.first.has_rare() && !counts.second.has_rare() {
+                continue;
+            }
+            let (frac1, frac2) = counts.first.better_pair_fraction(counts.second, total1, total2);
+            if frac1 >= self.params.match_frac_short && frac2 >= self.params.match_frac_short {
                 println!("    OK");
                 answer.push(locus_ix);
             }
@@ -844,30 +927,29 @@ impl Targets {
     /// Unusable matches `locus_minims[minim] = false` are ignored,
     /// Otherwise each mismatch is penalized by -1, each matches rewarded by +1.
     /// Read is recruited if there is a subarray with sum >= req_sum.
+    ///
+    /// Uses optimized Kadane's algorihm for finding max subsum.
     fn has_matching_stretch(
         &self,
         minimizers: &[(Minimizer, bool)],
         locus_ix: u16,
-        direction: bool,
     ) -> bool
     {
         let locus_minimizers = &self.locus_minimizers[usize::from(locus_ix)];
-        let mut s = 0_u32;
+        let mut s_fw = 0_u32;
+        let mut s_bw = 0_u32;
+
         for &(minimizer, forward) in minimizers {
-            // Optimized Kadane's algorithm for finding max subsum.
-            match locus_minimizers.get(&minimizer) {
-                None => s = s.saturating_sub(SUBSUM_PENALTY),
-                Some(info) if info.rare => {
-                    if info.is_directed_to(forward == direction) {
-                        s += SUBSUM_BONUS;
-                        if s >= self.params.stretch_score {
-                            return true;
-                        }
-                    } else {
-                        s = s.saturating_sub(SUBSUM_PENALTY);
-                    }
-                }
-                _ => {} // minimizer present, but common.
+            if let Some(info) = locus_minimizers.get(&minimizer) {
+                // Counteract penalty in any case, also add bonus if the minimizer is rare.
+                let x = SUBSUM_PENALTY + u32::from(info.rare) * SUBSUM_BONUS;
+                s_fw += u32::from(info.is_directed_to(forward)) * x;
+                s_bw += u32::from(info.is_directed_to(!forward)) * x;
+            }
+            s_fw = s_fw.saturating_sub(SUBSUM_PENALTY);
+            s_bw = s_bw.saturating_sub(SUBSUM_PENALTY);
+            if s_fw >= self.params.stretch_score || s_bw >= self.params.stretch_score {
+                return true;
             }
         }
         false
@@ -898,9 +980,9 @@ impl Targets {
         answer.clear();
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.long };
-            let (direction, divisor, numerator) = counts.characterize(total);
-            if divisor >= self.params.long_read_threshold(numerator) && (numerator < self.params.stretch_minims
-                || self.has_matching_stretch(buffer, locus_ix, direction))
+            let frac = counts.rare_fraction(total);
+            if frac.numerator() >= self.params.long_read_threshold(frac.denominator())
+                && (frac.denominator() < self.params.stretch_minims || self.has_matching_stretch(buffer, locus_ix))
             {
                 answer.push(locus_ix);
             }

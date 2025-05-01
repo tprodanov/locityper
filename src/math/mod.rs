@@ -1,8 +1,10 @@
 pub mod distr;
+pub mod frac;
 
 use statrs::distribution::{StudentsT, ContinuousCDF};
 
 pub struct Ln;
+pub use frac::Fraction;
 
 impl Ln {
     /// log(10).
@@ -229,16 +231,18 @@ pub trait RoundDiv {
     fn fast_round_div(self, rhs: Self) -> Self;
 }
 
-impl<T: num_traits::PrimInt + num_traits::Unsigned> RoundDiv for T {
+impl<T> RoundDiv for T
+where T: num_traits::PrimInt + num_traits::Unsigned + num_traits::ConstZero + num_traits::ConstOne
+{
     #[inline]
     fn correct_ceil_div(self, rhs: Self) -> Self {
         let d = self / rhs;
-        if self % rhs == Self::zero() { d } else { d + Self::one() }
+        if self % rhs == Self::ZERO { d } else { d + Self::ONE }
     }
 
     #[inline]
     fn fast_ceil_div(self, rhs: Self) -> Self {
-        (self + rhs - Self::one()) / rhs
+        (self + rhs - Self::ONE) / rhs
     }
 
     #[inline]
