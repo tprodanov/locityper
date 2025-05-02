@@ -256,6 +256,7 @@ impl<T: AddAssign + From<bool>> BaseMatchCount<T> {
 }
 
 impl<T: num_traits::ConstZero + PartialEq> BaseMatchCount<T> {
+    #[allow(dead_code)]
     #[inline]
     fn has_rare(self) -> bool {
         self.arr[2] != T::ZERO || self.arr[3] != T::ZERO

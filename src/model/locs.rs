@@ -552,6 +552,7 @@ fn identify_contig_pair_alns(
 fn identify_paired_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
+    mut weight: f64,
     max_alns: usize,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
@@ -601,7 +602,7 @@ fn identify_paired_end_alignments(
             buffer, insert_distr, params);
     }
 
-    let weight = contig_infos.explicit_read_weight(&aln_pairs);
+    weight *= contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob *= weight;
@@ -619,6 +620,7 @@ fn identify_paired_end_alignments(
 fn identify_single_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
+    mut weight: f64,
     max_alns: usize,
     contig_infos: &ContigInfos,
     params: &super::Params,
@@ -646,7 +648,7 @@ fn identify_single_end_alignments(
         }
     }
 
-    let weight = contig_infos.explicit_read_weight(&aln_pairs);
+    weight *= contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob *= weight;
@@ -662,14 +664,27 @@ fn identify_single_end_alignments(
 
 struct UniqueKmers {
     k: u8,
+    /// k - 2
+    k_2: usize,
     unique_kmers: HashSet<u128>,
     kmers_buf: Vec<u128>,
-    min_kmers: u16,
+    /// Recruit reads with >= hard_threshold unique k-mers. If < soft_threshold, downweight them.
+    // soft_threshold: u16,
+    hard_threshold: u16,
+    /// Calculate read weight as (x - Th + 1) / (Ts - Th + 1).
+    /// Weight multiplier = 1 / (Ts - Th + 1),
+    weight_mult: f64,
+    /// Intercept = (1 - Th) * weight_mult.
+    weight_interc: f64,
 }
 
 impl UniqueKmers {
     /// Stores all k-mers, unique to the current locus.
-    fn new(contig_set: &ContigSet, min_kmers: u16) -> Self {
+    fn new(
+        contig_set: &ContigSet,
+        hard_threshold: u16,
+        soft_threshold: u16,
+    ) -> Self {
         let kmer_counts = contig_set.kmer_counts();
         let k = u8::try_from(kmer_counts.k()).unwrap();
         assert!(k > 1);
@@ -690,11 +705,24 @@ impl UniqueKmers {
         }
         log::info!("    {} k-mers unique to this locus, {} k-mers appear off target",
             unique_kmers.len(), off_target_kmers.len());
-        Self { k, unique_kmers, kmers_buf, min_kmers }
+
+        assert!(hard_threshold <= soft_threshold);
+        let weight_mult = 1.0 / f64::from(soft_threshold + 1 - hard_threshold);
+        let weight_interc = (1.0 - f64::from(hard_threshold)) * weight_mult;
+        Self {
+            k, unique_kmers, kmers_buf, hard_threshold, weight_mult, weight_interc,
+            k_2: usize::from(k - 2),
+        }
     }
 
-    /// Count the number of unique k-mers in both read mates and returns true if this read/read pair can be used.
-    fn can_use_read(&mut self, read_data: &mut ReadData, dbg_writer: &mut impl Write) -> io::Result<bool> {
+    /// Counts the number of unique k-mers in both read mates and
+    // returns weight the read/read pair (can be zero).
+    fn read_weight(
+        &mut self,
+        read_data: &mut ReadData,
+        dbg_writer: &mut impl Write,
+    ) -> io::Result<f64>
+    {
         let mut paired_count = 0_u16;
         write!(dbg_writer, "{}\t", read_data.name_hash)?;
         for mate_data in read_data.mates.iter_mut() {
@@ -709,7 +737,7 @@ impl UniqueKmers {
                         count = count.saturating_add(1);
                         // Skip several k-mers because we are interested in non-overlapping k-mers.
                         // NOTE: Should instead use `advance_by(k - 1)`, but it is not yet stable.
-                        kmers_iter.nth(usize::from(self.k) - 2);
+                        kmers_iter.nth(self.k_2);
                     }
                 }
                 write!(dbg_writer, "{}\t", count)?;
@@ -719,9 +747,13 @@ impl UniqueKmers {
                 write!(dbg_writer, "*\t")?;
             }
         }
-        let use_read = paired_count >= self.min_kmers;
-        writeln!(dbg_writer, "{}", if use_read { 'T' } else { 'F' })?;
-        Ok(use_read)
+        let weight = if paired_count < self.hard_threshold {
+            0.0
+        } else {
+            f64::min(1.0, self.weight_interc + f64::from(paired_count) * self.weight_mult)
+        };
+        writeln!(dbg_writer, "{:.2}", weight)?;
+        Ok(weight)
     }
 }
 
@@ -789,12 +821,13 @@ impl AllAlignments {
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over twice boundary size = {})", contigs.tag(), 2 * boundary);
-        let mut unique_kmers = UniqueKmers::new(contig_set, params.min_unique_kmers);
+        // TODO: Provide hard threshold from CLI.
+        let mut unique_kmers = UniqueKmers::new(contig_set, params.kmer_hard_thresh, params.kmer_soft_thresh);
 
         log::info!("    Loading read alignments");
         writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tu5\tread_name")
             .map_err(add_path!(!))?;
-        writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tuse").map_err(add_path!(!))?;
+        writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
         if let Some(w) = &mut dbg_writer3 {
             writeln!(w, "read_hash\tread_end\tinterval\told_lik\tnew_lik\toverall_weight\tweights")
                 .map_err(add_path!(!))?;
@@ -833,20 +866,20 @@ impl AllAlignments {
                 continue;
             }
 
-            let use_read = unique_kmers.can_use_read(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
-            counts.few_kmers += u32::from(!use_read);
-            let max_alns = if use_read { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+            let weight = unique_kmers.read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
+            let max_alns = if weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut tmp_alns, max_alns,
-                    &mut buffer, bg_distr.insert_distr(), contig_infos, params)
+                identify_paired_end_alignments(read_data, &mut tmp_alns, weight,
+                    max_alns, &mut buffer, bg_distr.insert_distr(), contig_infos, params)
             } else {
-                identify_single_end_alignments(read_data, &mut tmp_alns, max_alns,
-                    contig_infos, params)
+                identify_single_end_alignments(read_data, &mut tmp_alns, weight,
+                    max_alns, contig_infos, params)
             };
-            if use_read {
+            if groupped_alns.weight() >= params.min_weight {
                 reads.push(groupped_alns);
             } else {
                 unused_reads.push(groupped_alns);
+                counts.few_kmers += 1;
             }
         }
         log::debug!("    {}", counts.to_string(reads.len(), is_paired_end));

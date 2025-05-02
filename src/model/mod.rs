@@ -32,8 +32,9 @@ pub struct Params {
     pub kmers_weight_calc: Option<WeightCalculator>,
     /// and another for linguistic complexity of the window.
     pub compl_weight_calc: Option<WeightCalculator>,
-    /// Require at least this number of unique k-mers.
-    pub min_unique_kmers: u16,
+    /// Soft and hard thresholds for the number of unique k-mers per read/read pair.
+    pub kmer_soft_thresh: u16,
+    pub kmer_hard_thresh: u16,
 
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
@@ -67,7 +68,8 @@ impl Default for Params {
 
             kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),
             compl_weight_calc: Some(WeightCalculator::new(0.5, 4.0).unwrap()),
-            min_unique_kmers: 5,
+            kmer_soft_thresh: 5,
+            kmer_hard_thresh: 1,
 
             min_weight: 0.001,
 
@@ -118,6 +120,10 @@ impl Params {
         }
         validate_param!(self.alt_cn.len() <= bayes::N_ALTS, "Too many alternative CNs ({}, max {})",
             self.alt_cn.len(), bayes::N_ALTS);
+
+        validate_param!(self.kmer_hard_thresh <= self.kmer_soft_thresh,
+            "Hard k-mer threshold ({}) should not be greater than the soft k-mer threshold ({})",
+            self.kmer_hard_thresh, self.kmer_soft_thresh);
 
         validate_param!(self.filt_diff >= 0.0,
             "Filtering likelihood difference ({}) must be non-negative (log10-space)", Ln::to_log10(self.filt_diff));

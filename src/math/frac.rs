@@ -1,6 +1,7 @@
 use std::{
     fmt::{self, Display, Debug},
     cmp::{PartialOrd, Ordering},
+    ops::Div,
 };
 use num_traits::{
     ConstZero, ConstOne, CheckedAdd, CheckedMul,
@@ -32,9 +33,12 @@ impl<T: Copy> Fraction<T> {
     }
 }
 
-impl<T: AsPrimitive<f64>> Fraction<T> {
+impl<T> Fraction<T> {
     #[allow(dead_code)]
-    pub fn eval(self) -> f64 {
+    pub fn eval<U>(self) -> U
+    where T: Copy + AsPrimitive<U>,
+          U: Copy + Div<Output = U> + 'static,
+    {
         self.numerator.as_() / self.denominator.as_()
     }
 }
