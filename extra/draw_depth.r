@@ -37,7 +37,7 @@ full_depth <- read.csv(file.path(dir, 'depth.csv.gz'), sep = '\t', comment = '#'
 if (nrow(full_depth) == 0) {
     stop('Cannot find any of the genotypes!')
 }
-full_sol <- read.csv(file.path(dir, 'sol.csv.gz'), sep = '\t', comment = '#') |> filter(genotype %in% args$genotypes)
+full_sol <- read.csv(file.path(dir, 'sol_ext.csv.gz'), sep = '\t', comment = '#') |> filter(genotype %in% args$genotypes)
 
 # Select scale limits.
 

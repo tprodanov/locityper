@@ -599,8 +599,6 @@ impl<T: fastx::SingleRecord + fastx::WritableRecord + Send + 'static> Recruitabl
         minimizers: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
-        println!("{} {}", std::str::from_utf8(self[0].name()).unwrap(),
-            crate::model::locs::NameHash::new(self[0].name()));
         targets.recruit_read_pair(self[0].seq(), self[1].seq(), answer, minimizers, matches);
     }
 }
@@ -737,11 +735,6 @@ impl TargetBuilder {
         log::info!("Collected {} minimizers across {} loci and {} sequences",
             total_minims, self.locus_minimizers.len(), self.total_seqs);
         assert!(total_minims > 0, "No minimizers for recruitment");
-        println!("Targets:");
-        for (minimizer, entries) in self.minim_to_loci.iter() {
-            println!("    {:016X} {}", minimizer, entries[0].1);
-        }
-        println!("Recruit:");
         Targets {
             params: self.params,
             minim_to_loci: self.minim_to_loci,
@@ -861,9 +854,6 @@ impl Targets {
         buffer: &mut Vec<(Minimizer, bool)>,
         matches: &mut M,
     ) {
-        use std::fmt::Write;
-        let mut s = String::new();
-
         answer.clear();
         matches.clear();
         // First mate.
@@ -871,12 +861,7 @@ impl Targets {
         kmers::canon_minimizers(seq1, self.params.minimizer_k, self.params.minimizer_w, buffer);
         let total1 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
         for &(minimizer, forward) in buffer.iter() {
-            if !s.is_empty() {
-                write!(s, ", ").unwrap();
-            }
-            write!(s, "{:016X}{}", minimizer, if forward { '>' } else { '<' }).unwrap();
             let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
-            write!(s, "!").unwrap();
             for &(locus_ix, info) in entries {
                 let counts = matches.get_or_insert(locus_ix, SHORT_ZERO_MATCHES);
                 let counts = unsafe { &mut counts.short };
@@ -884,20 +869,13 @@ impl Targets {
             }
         }
         if matches.is_empty() { return }
-        println!("    M {}", s);
-        s.clear();
 
         // Second mate.
         buffer.clear();
         kmers::canon_minimizers(seq2, self.params.minimizer_k, self.params.minimizer_w, buffer);
         let total2 = u16::try_from(buffer.len()).expect("Paired end read has too many minimizers");
         for &(minimizer, forward) in buffer.iter() {
-            if !s.is_empty() {
-                write!(s, ", ").unwrap();
-            }
-            write!(s, "{:016X}{}", minimizer, if forward { '>' } else { '<' }).unwrap();
             let Some(entries) = self.minim_to_loci.get(&minimizer) else { continue };
-            write!(s, "!").unwrap();
             for &(locus_ix, info) in entries {
                 // No reason to insert new loci if they did not match the first read end.
                 let Some(counts) = matches.get_mut(locus_ix) else { continue };
@@ -908,17 +886,11 @@ impl Targets {
 
         for (locus_ix, counts) in matches.iter() {
             let counts = unsafe { counts.short };
-            println!("    {} / {}", counts.first, total1);
-            println!("    M {}", s);
-            println!("    {} / {}", counts.second, total2);
-
-            if !counts.first.has_rare() && !counts.second.has_rare() {
-                continue;
-            }
-            let (frac1, frac2) = counts.first.better_pair_fraction(counts.second, total1, total2);
-            if frac1 >= self.params.match_frac_short && frac2 >= self.params.match_frac_short {
-                println!("    OK");
-                answer.push(locus_ix);
+            if counts.first.has_rare() || counts.second.has_rare() {
+                let (frac1, frac2) = counts.first.better_pair_fraction(counts.second, total1, total2);
+                if frac1 >= self.params.match_frac_short && frac2 >= self.params.match_frac_short {
+                    answer.push(locus_ix);
+                }
             }
         }
     }
