@@ -22,7 +22,10 @@ use crate::{
     algo::{bisect, TwoU32, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
     math::Ln,
     model::windows::ContigInfos,
-    ext::sys::GzFile,
+    ext::{
+        sys::GzFile,
+        vec::VecExt,
+    },
 };
 
 // ------------------------- Read-end and pair-end data, such as sequences and qualities -------------------------
@@ -168,11 +171,13 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     ///
     /// If read is unmapped, or best edit distance is too high, does not add any new alignments.
     ///
-    /// Returns true if any of the reads were well mapped.
+    /// Multiplies input weight by the weight of the best alignment.
+    /// Returns true if any of the alignments were good, otherwise the input vector did not change.
     fn next_alns(
         &mut self,
         read_end: ReadEnd,
         alns: &mut Vec<Alignment>,
+        weight: &mut f64,
         read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
     ) -> crate::Result<bool>
@@ -209,19 +214,15 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
 
         let start_len = alns.len();
         // Does any alignment have good edit distance?
-        let mut any_good = false;
+        let mut best_edit = u32::MAX;
         let mut max_prob = f64::NEG_INFINITY;
         self.found_alns.clear();
         let mut primary = true;
-        let mut u5 = f64::NAN;
 
         loop {
             let mut cigar = Cigar::from_raw(self.record.raw_cigar());
             if primary {
                 assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
-                if self.are_short_reads {
-                    u5 = seq::compl::frac_unique_kmers(&self.record.seq().as_bytes(), 5, &mut self.buffer_set);
-                }
             } else {
                 cigar.hard_to_soft();
             }
@@ -229,52 +230,34 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             let contig_len = self.contigs.get_len(aln.contig_id());
             let read_prof = aln.count_region_operations_fast(contig_len);
             let dist = read_prof.edit_distance();
-            let (mut good_dist, mut passable_dist) = self.edit_dist_cache.get(dist.read_len());
-            if u5 <= 0.85 {
-                // let diff = good_dist * 2;
-                // good_dist += diff;
-                // passable_dist += diff;
-                good_dist = 75;
-                passable_dist = 80;
-            }
-            // } else if u5 <= 0.75 {
-            //     good_dist *= 2;
-            //     passable_dist *= 2;
-            // }
-
-            let is_good_dist = dist.edit() <= good_dist;
-            // Discard all alignments with edit distance over half of the read length.
-            let is_passable_dist = dist.edit() <= passable_dist;
-            any_good |= is_good_dist;
+            best_edit = best_edit.min(dist.edit());
             let aln_prob = self.err_prof.ln_prob(&read_prof);
+            max_prob = aln_prob.max(max_prob);
+            aln.set_distance(dist);
+            aln.set_ln_prob(aln_prob);
 
-            write!(dbg_writer, "{}\t{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
-                dist, if is_good_dist { '+' } else if is_passable_dist { '~' } else { '-' },
-                Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
+            write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
+                dist, Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
-                write!(dbg_writer, "\t{:.5}\t{}", u5, read_data.name).map_err(add_path!(!))?;
+                write!(dbg_writer, "\t{}", read_data.name).map_err(add_path!(!))?;
                 primary = false;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
 
-            aln.set_ln_prob(aln_prob);
-            aln.set_distance(dist);
-            if is_passable_dist {
-                match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
-                    Entry::Occupied(entry) => {
-                        let aln_ix = *entry.get();
-                        // Already seen this alignment.
-                        if aln_prob > alns[aln_ix].ln_prob() {
-                            alns[aln_ix] = aln;
-                        }
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(alns.len());
-                        alns.push(aln);
+            match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
+                Entry::Occupied(entry) => {
+                    let aln_ix = *entry.get();
+                    // Already seen this alignment.
+                    if aln_prob > alns[aln_ix].ln_prob() {
+                        alns[aln_ix] = aln;
                     }
                 }
-                max_prob = aln_prob.max(max_prob);
+                Entry::Vacant(entry) => {
+                    entry.insert(alns.len());
+                    alns.push(aln);
+                }
             }
+
             if self.reader.read(&mut self.record).transpose()?.is_none() {
                 self.has_more = false;
                 break;
@@ -287,13 +270,26 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 "Read {} first alignment is not primary", String::from_utf8_lossy(self.record.qname()));
         }
 
-        if any_good {
-            alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
-            Ok(true)
-        } else {
+        let read_len = alns[start_len].distance().unwrap().read_len();
+        let (good_dist, passable_dist) = self.edit_dist_cache.get(read_len);
+        // TODO: Use parameter.
+        let threshold_dist = if self.are_short_reads { read_len / 2 } else { good_dist };
+        if best_edit > threshold_dist {
             alns.truncate(start_len);
-            Ok(false)
+            return Ok(false);
         }
+
+        alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
+        // TODO: Use parameter.
+        let prob_thresh = Ln::from_log10(-20.0);
+        if self.are_short_reads {
+            VecExt::unstable_retain(alns, start_len, |aln| aln.ln_prob() >= prob_thresh);
+        } else {
+            VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() >= passable_dist);
+        }
+
+        *weight *= if best_edit <= good_dist { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
+        Ok(true)
     }
 
     fn has_more(&self) -> bool {
@@ -668,9 +664,6 @@ struct UniqueKmers {
     k_2: usize,
     unique_kmers: HashSet<u128>,
     kmers_buf: Vec<u128>,
-    /// Recruit reads with >= hard_threshold unique k-mers. If < soft_threshold, downweight them.
-    // soft_threshold: u16,
-    hard_threshold: u16,
     /// Calculate read weight as (x - Th + 1) / (Ts - Th + 1).
     /// Weight multiplier = 1 / (Ts - Th + 1),
     weight_mult: f64,
@@ -710,7 +703,7 @@ impl UniqueKmers {
         let weight_mult = 1.0 / f64::from(soft_threshold + 1 - hard_threshold);
         let weight_interc = (1.0 - f64::from(hard_threshold)) * weight_mult;
         Self {
-            k, unique_kmers, kmers_buf, hard_threshold, weight_mult, weight_interc,
+            k, unique_kmers, kmers_buf, weight_mult, weight_interc,
             k_2: usize::from(k - 2),
         }
     }
@@ -747,17 +740,13 @@ impl UniqueKmers {
                 write!(dbg_writer, "*\t")?;
             }
         }
-        let weight = if paired_count < self.hard_threshold {
-            0.0
-        } else {
-            f64::min(1.0, self.weight_interc + f64::from(paired_count) * self.weight_mult)
-        };
+        let weight = (self.weight_interc + f64::from(paired_count) * self.weight_mult).clamp(0.0, 1.0);
         writeln!(dbg_writer, "{:.2}", weight)?;
         Ok(weight)
     }
 }
 
-// ------------------------- All alignments for all read pairs -------------------------
+// ------------------------- Reading alignments for all read pairs -------------------------
 
 /// Checks if any of the alignments is within the "central" region: not in the boundary.
 fn in_bounds(alns: &[Alignment], boundary: u32, contigs: &ContigNames) -> bool {
@@ -847,13 +836,15 @@ impl AllAlignments {
             let mut read_data = ReadData::default();
             counts.total += 1;
             tmp_alns.clear();
-            let has_first = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+            let mut weight = 1.0;
+            let has_first = reader.next_alns(
+                ReadEnd::First, &mut tmp_alns, &mut weight, &mut read_data, &mut dbg_writer1)?;
             if !hashes.insert(read_data.name_hash) {
                 log::debug!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
-            let has_second = is_paired_end
-                && reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+            let has_second = is_paired_end && reader.next_alns(
+                ReadEnd::Second, &mut tmp_alns, &mut weight, &mut read_data, &mut dbg_writer1)?;
 
             if !has_first && !has_second {
                 counts.both_unmapped += 1;
@@ -866,7 +857,7 @@ impl AllAlignments {
                 continue;
             }
 
-            let weight = unique_kmers.read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
+            weight *= unique_kmers.read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
             let max_alns = if weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
                 identify_paired_end_alignments(read_data, &mut tmp_alns, weight,
@@ -875,6 +866,7 @@ impl AllAlignments {
                 identify_single_end_alignments(read_data, &mut tmp_alns, weight,
                     max_alns, contig_infos, params)
             };
+            // TODO: Rethink this, reads may be needed for read depth!
             if groupped_alns.weight() >= params.min_weight {
                 reads.push(groupped_alns);
             } else {

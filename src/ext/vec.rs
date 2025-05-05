@@ -47,6 +47,22 @@ impl VecExt {
     //     Self::sort(a);
     //     Self::quantile_sorted(a, q)
     // }
+
+    /// Discard all elements, not satisfying the condition `pred`. Order of elements is not conserved.
+    pub fn unstable_retain<T>(
+        v: &mut Vec<T>,
+        start: usize,
+        pred: impl Fn(&T) -> bool,
+    ) {
+        let mut i = v.len();
+        while i > start && i <= v.len() {
+            i -= 1;
+            if !pred(&v[i]) {
+                v.swap_remove(i);
+                i += 1;
+            }
+        }
+    }
 }
 
 /// Static methods related to vectors over f64.

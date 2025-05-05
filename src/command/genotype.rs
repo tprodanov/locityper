@@ -266,11 +266,11 @@ fn print_help(extended: bool) {
             "    --reg-weights".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
-        println!("    {:KEY$} {:VAL$}  Soft and hard thresholds for the number of\n\
-            {EMPTY}  unique non-overlapping k-mers per read/pair [{} {}].",
-            "    --min-kmers".green(), "INT [INT]".yellow(),
-            super::fmt_def(defaults.assgn_params.kmer_soft_thresh),
-            super::fmt_def(defaults.assgn_params.kmer_hard_thresh));
+        println!("    {} {}  Hard and soft thresholds for the number of\n\
+            {EMPTY}  unique non-overlapping k-mers per read/read pair [{} {}].",
+            "    --read-kmers".green(), "INT INT".yellow(),
+            super::fmt_def(defaults.assgn_params.kmer_hard_thresh),
+            super::fmt_def(defaults.assgn_params.kmer_soft_thresh));
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
             {EMPTY}  matter more; Positive: read depth matters more.",
             "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
@@ -405,13 +405,9 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("min-weight") => args.assgn_params.min_weight = parser.value()?.parse()?,
-            Long("min-kmers") => {
-                let mut vals = parser.values()?;
-                args.assgn_params.kmer_soft_thresh = vals.next()
-                    .expect("First argument is always present").parse()?;
-                if let Some(v) = vals.next() {
-                    args.assgn_params.kmer_hard_thresh = v.parse()?;
-                }
+            Long("read-kmers") => {
+                args.assgn_params.kmer_hard_thresh = parser.value()?.parse()?;
+                args.assgn_params.kmer_soft_thresh = parser.value()?.parse()?;
             }
             Long("edit-pval") | Long("edit-pvalue") =>
                 args.assgn_params.edit_pvals = (
