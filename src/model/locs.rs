@@ -98,11 +98,24 @@ impl MateData {
 }
 
 /// Read information: read name, two sequences and qualities (for both mates).
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ReadData {
     name: String,
     name_hash: NameHash,
     mates: [Option<MateData>; 2],
+    /// Read pair weight, taken from edit distance.
+    weight: f64,
+}
+
+impl Default for ReadData {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            name_hash: NameHash::default(),
+            mates: Default::default(),
+            weight: 1.0,
+        }
+    }
 }
 
 impl ReadData {
@@ -136,7 +149,8 @@ struct FilteredReader<'a, R: bam::Read> {
     /// Buffer, used for discrard alignments with the same positions.
     /// Key (contig id, alignment start), value: index of the previous position.
     found_alns: IntMap<TwoU32, usize>,
-    buffer_set: IntSet<u16>,
+    /// Unmapped penalty + probability difference.
+    prob_thresh: f64,
 }
 
 #[inline]
@@ -150,6 +164,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         contigs: Arc<ContigNames>,
         bg_distr: &'a BgDistr,
         edit_dist_cache: &'a EditDistCache,
+        params: &'a super::Params,
     ) -> crate::Result<Self> {
         let mut record = bam::Record::new();
         // Reader would return None if there are no more records.
@@ -157,9 +172,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
         Ok(FilteredReader {
             found_alns: IntMap::default(),
-            buffer_set: IntSet::default(),
             are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
             err_prof: bg_distr.error_profile(),
+            prob_thresh: params.unmapped_penalty - params.prob_diff,
             reader, record, contigs, edit_dist_cache, has_more,
         })
     }
@@ -177,7 +192,6 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         &mut self,
         read_end: ReadEnd,
         alns: &mut Vec<Alignment>,
-        weight: &mut f64,
         read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
     ) -> crate::Result<bool>
@@ -280,15 +294,14 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
-        // TODO: Use parameter.
-        let prob_thresh = Ln::from_log10(-20.0);
         if self.are_short_reads {
-            VecExt::unstable_retain(alns, start_len, |aln| aln.ln_prob() >= prob_thresh);
+            VecExt::unstable_retain(alns, start_len, |aln| aln.ln_prob() >= self.prob_thresh);
         } else {
             VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() >= passable_dist);
         }
 
-        *weight *= if best_edit <= good_dist { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
+        read_data.weight *= if best_edit <= good_dist
+            { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
         Ok(true)
     }
 
@@ -548,7 +561,6 @@ fn identify_contig_pair_alns(
 fn identify_paired_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
-    mut weight: f64,
     max_alns: usize,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
@@ -598,7 +610,7 @@ fn identify_paired_end_alignments(
             buffer, insert_distr, params);
     }
 
-    weight *= contig_infos.explicit_read_weight(&aln_pairs);
+    let weight = read_data.weight * contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob *= weight;
@@ -616,7 +628,6 @@ fn identify_paired_end_alignments(
 fn identify_single_end_alignments(
     read_data: ReadData,
     tmp_alns: &mut Vec<Alignment>,
-    mut weight: f64,
     max_alns: usize,
     contig_infos: &ContigInfos,
     params: &super::Params,
@@ -644,7 +655,7 @@ fn identify_single_end_alignments(
         }
     }
 
-    weight *= contig_infos.explicit_read_weight(&aln_pairs);
+    let weight = read_data.weight * contig_infos.explicit_read_weight(&aln_pairs);
     let mut max_lik = f64::NEG_INFINITY;
     for aln in aln_pairs.iter_mut() {
         aln.ln_prob *= weight;
@@ -810,7 +821,6 @@ impl AllAlignments {
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over twice boundary size = {})", contigs.tag(), 2 * boundary);
-        // TODO: Provide hard threshold from CLI.
         let mut unique_kmers = UniqueKmers::new(contig_set, params.kmer_hard_thresh, params.kmer_soft_thresh);
 
         log::info!("    Loading read alignments");
@@ -821,7 +831,7 @@ impl AllAlignments {
             writeln!(w, "read_hash\tread_end\tinterval\told_lik\tnew_lik\toverall_weight\tweights")
                 .map_err(add_path!(!))?;
         }
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr, edit_dist_cache)?;
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr, edit_dist_cache, params)?;
 
         let is_paired_end = bg_distr.insert_distr().is_paired_end();
         let mut hashes = IntSet::default();
@@ -836,15 +846,14 @@ impl AllAlignments {
             let mut read_data = ReadData::default();
             counts.total += 1;
             tmp_alns.clear();
-            let mut weight = 1.0;
             let has_first = reader.next_alns(
-                ReadEnd::First, &mut tmp_alns, &mut weight, &mut read_data, &mut dbg_writer1)?;
+                ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
             if !hashes.insert(read_data.name_hash) {
                 log::debug!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
             let has_second = is_paired_end && reader.next_alns(
-                ReadEnd::Second, &mut tmp_alns, &mut weight, &mut read_data, &mut dbg_writer1)?;
+                ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
 
             if !has_first && !has_second {
                 counts.both_unmapped += 1;
@@ -857,13 +866,13 @@ impl AllAlignments {
                 continue;
             }
 
-            weight *= unique_kmers.read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
-            let max_alns = if weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+            read_data.weight *= unique_kmers.read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
+            let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
             let groupped_alns = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut tmp_alns, weight,
+                identify_paired_end_alignments(read_data, &mut tmp_alns,
                     max_alns, &mut buffer, bg_distr.insert_distr(), contig_infos, params)
             } else {
-                identify_single_end_alignments(read_data, &mut tmp_alns, weight,
+                identify_single_end_alignments(read_data, &mut tmp_alns,
                     max_alns, contig_infos, params)
             };
             // TODO: Rethink this, reads may be needed for read depth!

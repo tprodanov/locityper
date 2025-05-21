@@ -368,10 +368,10 @@ pub struct ContigInfo {
     kmers_weight_calc: Option<WeightCalculator>,
     compl_weight_calc: Option<WeightCalculator>,
 
-    /// Cumulateve number of G/C across the contig. Size = len(contig) + 1.
-    cumul_gc: Vec<u32>,
-    /// Cumulative number of unique k-mers across the contig. Size = len(contig) + 1.
-    cumul_uniq_kmers: Vec<u32>,
+    /// G-C content for each moving window.
+    gc_content: Vec<u8>,
+    /// Fraction of unique k-mers for each moving window.
+    uniq_kmer_frac: Vec<f64>,
     /// Linguistic complexity for each moving window.
     mov_complexities: Vec<f64>,
     /// Explicitely set weights.
@@ -410,18 +410,30 @@ impl ContigInfo {
         let right_padding = neighb_size - window - left_padding;
 
         // Unique k-mers should have count = 0 because `kmer_counts` only stores off-target matches.
-        let cumul_uniq_kmers = IterExt::cumul_sums(kmer_counts.get(contig_id.ix()).iter().map(|&count| count == 0));
-        let cumul_gc = IterExt::cumul_sums(seq.iter().map(|&ch| ch == b'C' || ch == b'G'));
+        let kmer_size = kmer_counts.k();
+        let cumul_uniq_kmers: Vec<u32> = IterExt::cumul_sums(kmer_counts.get(contig_id.ix()).iter()
+            .map(|&count| count == 0));
+        let mult = 1.0 / f64::from(neighb_size + 1 - kmer_size);
+        let uniq_kmer_frac: Vec<f64> = cumul_uniq_kmers.iter()
+            .zip(&cumul_uniq_kmers[(neighb_size + 1 - kmer_size) as usize..])
+            .map(|(&c1, &c2)| f64::from(c2 - c1) * mult).collect();
+
+        let cumul_gc: Vec<u32> = IterExt::cumul_sums(seq.iter().map(|&ch| ch == b'C' || ch == b'G'));
+        let mult = 100.0 / f64::from(neighb_size);
+        let gc_content: Vec<u8> = cumul_gc.iter().zip(&cumul_gc[neighb_size as usize..])
+            .map(|(&c1, &c2)| (mult * f64::from(c2 - c1)).round() as u8).collect();
         let mut res = Self {
-            contig_len, left_padding, right_padding, cumul_gc, cumul_uniq_kmers,
-            kmer_size: kmer_counts.k(),
+            contig_len, left_padding, right_padding, gc_content, kmer_size, uniq_kmer_frac, explicit_weights,
             window_getter: WindowGetter::new(reg_start, reg_end, window),
             kmers_weight_calc: params.kmers_weight_calc.clone(),
             compl_weight_calc: params.compl_weight_calc.clone(),
             default_weights: Vec::with_capacity(n_windows as usize),
             mov_complexities: seq::compl::linguistic_complexity_123(seq, neighb_size as usize),
-            explicit_weights,
         };
+
+        let mut buf1 = Default::default();
+        let mut buf2 = Default::default();
+        let simple_complexities = seq::compl::simple_complexity(seq, 5, neighb_size as usize, &mut buf1, &mut buf2);
 
         for i in 0..n_windows {
             let (start, end) = res.window_getter.ith_window(i);
@@ -436,23 +448,19 @@ impl ContigInfo {
 
     /// Returns GC-content, kmer fraction, window complexity and window weight for `start..end`.
     pub fn window_characteristics(&self, start: u32, end: u32) -> WindowCharacteristics {
-        let padded_start = start.saturating_sub(self.left_padding);
-        let padded_end = min(self.contig_len, end + self.right_padding);
-        let gc_content = (100.0 * f64::from(self.cumul_gc[padded_end as usize] - self.cumul_gc[padded_start as usize])
-            / f64::from(padded_end - padded_start)).round() as u8;
-        let ling_compl = self.mov_complexities[padded_start as usize];
+        let i = start.saturating_sub(self.left_padding) as usize;
+        let uniq_kmer_frac = self.uniq_kmer_frac[i];
+        let ling_compl = self.mov_complexities[i];
         let explicit_weight = self.explicit_weights.as_ref()
             .map(|weights| weights.average(start, end)).unwrap_or(1.0);
-
-        let kmer_start = padded_start.saturating_sub(self.kmer_size / 2);
-        let kmer_end = min(self.contig_len - self.kmer_size + 1, padded_end - self.kmer_size / 2);
-        let uniq_kmer_frac =
-            f64::from(self.cumul_uniq_kmers[kmer_end as usize] - self.cumul_uniq_kmers[kmer_start as usize])
-            / f64::from(kmer_end - kmer_start);
         let weight = self.kmers_weight_calc.as_ref().map(|calc| calc.get(uniq_kmer_frac)).unwrap_or(1.0)
             * self.compl_weight_calc.as_ref().map(|calc| calc.get(ling_compl)).unwrap_or(1.0)
             * explicit_weight;
-        WindowCharacteristics { gc_content, uniq_kmer_frac, ling_compl, explicit_weight, weight }
+
+        WindowCharacteristics {
+            uniq_kmer_frac, ling_compl, explicit_weight, weight,
+            gc_content: self.gc_content[i],
+        }
     }
 
     #[inline(always)]

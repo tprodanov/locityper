@@ -1,23 +1,49 @@
 use std::cmp::min;
 use crate::{
     seq::kmers::{self, NON_CANONICAL},
-    algo::IntSet,
+    algo::{IntSet, IntMap},
 };
 
-type Kmer = u8;
-type Count = u16;
+trait Counts<K>
+where usize: From<K>,
+{
+    fn get_mut(&mut self, kmer: K) -> &mut u16;
+}
+
+impl Counts<u8> for [u16] {
+    #[inline(always)]
+    fn get_mut(&mut self, kmer: u8) -> &mut u16 {
+        &mut self[usize::from(kmer)]
+    }
+}
+
+impl<const N: usize> Counts<u8> for [u16; N] {
+    #[inline(always)]
+    fn get_mut(&mut self, kmer: u8) -> &mut u16 {
+        &mut self[usize::from(kmer)]
+    }
+}
+
+impl Counts<u16> for IntMap<u16, u16> {
+    #[inline(always)]
+    fn get_mut(&mut self, kmer: u16) -> &mut u16 {
+        self.entry(kmer).or_default()
+    }
+}
 
 /// Adds a new k-mer and removes one k-mer from k-mer counts.
-fn remove_add_kmer(counts: &mut [Count], remove: Kmer, add: Kmer, unique: &mut u16) {
+fn remove_add_kmer<K, T>(counts: &mut T, remove: K, add: K, unique: &mut u16)
+where usize: From<K>,
+      K: PartialEq,
+      T: Counts<K>,
+{
     if remove != add {
-        if counts[add as usize] == 0 {
-            *unique += 1;
-        }
-        counts[add as usize] += 1;
-        if counts[remove as usize] == 1 {
-            *unique -= 1;
-        }
-        counts[remove as usize] -= 1;
+        let c1 = counts.get_mut(add);
+        *unique += u16::from(*c1 == 0);
+        *c1 += 1;
+        let c2 = counts.get_mut(remove);
+        *unique -= u16::from(*c2 == 1);
+        *c2 -= 1;
     }
 }
 
@@ -35,9 +61,9 @@ fn encode_nt(nt: &u8) -> u8 {
 /// Linguistic complexity of a sequence = U1 × U2 × U3, where Uk is the fraction of unique k-mers out of max available.
 /// Sequence must not contain Ns.
 pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
-    const MASK1: Kmer = 0b000011;
-    const MASK2: Kmer = 0b001111;
-    const MASK3: Kmer = 0b111111;
+    const MASK1: u8 = 0b000011;
+    const MASK2: u8 = 0b001111;
+    const MASK3: u8 = 0b111111;
 
     let n = seq.len();
     assert!(3 <= w, "Window size ({}) must be over 3", w);
@@ -84,4 +110,40 @@ pub fn frac_unique_kmers(seq: &[u8], k: u8, set: &mut IntSet<u16>) -> f64 {
     set.clear();
     kmers::kmers::<u16, _, NON_CANONICAL>(seq, k, set);
     set.len() as f64 / (seq.len() + 1 - k as usize) as f64
+}
+
+/// Calculate simple complexity (fraction of unique k-mers) across each moving window of size w.
+/// kmers and counts are buffers, and will be completely rewritten.
+pub fn simple_complexity(
+    seq: &[u8],
+    k: u8,
+    w: usize,
+    kmers: &mut Vec<u16>,
+    counts: &mut IntMap<u16, u16>,
+) -> Vec<f64>
+{
+    let n = seq.len();
+    debug_assert!(k <= <u16 as kmers::Kmer>::MAX_KMER_SIZE);
+    debug_assert!(w < n && w < usize::from(u16::MAX) && w > 3 * usize::from(k));
+
+    kmers.clear();
+    kmers::kmers::<u16, _, NON_CANONICAL>(seq, k, kmers);
+
+    let k = k as usize;
+    let mult = 1.0 / (w + 1 - k) as f64;
+    counts.clear();
+    let mut unique = 0;
+    for &kmer in &kmers[..(w - k + 1)] {
+        let c = counts.entry(kmer).or_default();
+        unique += u16::from(*c == 0);
+        *c += 1;
+    }
+
+    let mut res = Vec::with_capacity(n - w + 1);
+    res.push(unique as f64 * mult);
+    for (&lag_kmer, &kmer) in kmers.iter().zip(&kmers[(w - k + 1)..]) {
+        remove_add_kmer(counts, lag_kmer, kmer, &mut unique);
+        res.push(unique as f64 * mult);
+    }
+    res
 }

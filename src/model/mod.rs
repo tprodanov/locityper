@@ -27,7 +27,6 @@ pub struct Params {
     pub unmapped_penalty: f64,
     /// Edit distance p-value thresholds, first for good alignments, second for passable.
     pub edit_pvals: (f64, f64),
-
     /// Two window weight calculators: one for the fraction of unique k-mers,
     pub kmers_weight_calc: Option<WeightCalculator>,
     /// and another for linguistic complexity of the window.
