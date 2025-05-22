@@ -959,13 +959,12 @@ fn analyze_locus(
     let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
     let contigs = locus.set.contigs();
 
-    let contig_infos = if args.debug >= DebugLvl::Some {
+    let windows_writer = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
-        let windows_writer = ext::sys::create_gzip(&windows_filename)?;
-        ContigInfos::new(&locus.set, explicit_weights, bg_distr.depth(), &args.assgn_params, windows_writer)?
-    } else {
-        ContigInfos::new(&locus.set, explicit_weights, bg_distr.depth(), &args.assgn_params, io::sink())?
-    };
+        Some(ext::sys::create_gzip(&windows_filename)?)
+    } else { None };
+    let contig_infos = ContigInfos::new(&locus.set, explicit_weights, bg_distr.depth(), &args.assgn_params,
+        windows_writer)?;
 
     let all_alns = if args.debug >= DebugLvl::Full {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;

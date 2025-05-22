@@ -1,7 +1,7 @@
 use std::{
     cmp::min,
     path::Path,
-    io::{Write, BufRead},
+    io::{self, Write, BufRead},
     sync::Arc,
     ops::Index,
 };
@@ -37,17 +37,12 @@ pub struct WindowGetter {
     start: u32,
     end: u32,
     window: u32,
-    // /// Half window: size that needs to be covered in `get_significant` - 1.
-    // halfw: u32,
 }
 
 impl WindowGetter {
     #[inline]
     pub fn new(start: u32, end: u32, window: u32) -> Self {
-        Self {
-            start, end, window,
-            // halfw: window.checked_sub(1).unwrap() / 2,
-        }
+        Self { start, end, window, }
     }
 
     /// Returns boundaries of the i-th window.
@@ -61,24 +56,6 @@ impl WindowGetter {
     pub fn len(&self) -> u32 {
         self.end - self.start
     }
-
-    // /// Returns range of windows (start_ix..end_ix),
-    // /// covered by the alignment (at least by 1 bp).
-    // pub fn covered_any(&self, aln_start: u32, aln_end: u32) -> (u32, u32) {
-    //     (
-    //         min(aln_start, self.end).saturating_sub(self.start) / self.window,
-    //         (min(aln_end, self.end) + self.window - 1).saturating_sub(self.start) / self.window,
-    //     )
-    // }
-
-    // /// Returns range of windows (start_ix..end_ix),
-    // /// middle of which are covered by the alignment.
-    // pub fn covered_middle(&self, aln_start: u32, aln_end: u32) -> (u32, u32) {
-    //     (
-    //         (min(aln_start, self.end) + self.halfw).saturating_sub(self.start) / self.window,
-    //         (min(aln_end, self.end) + self.halfw).saturating_sub(self.start) / self.window,
-    //     )
-    // }
 
     /// Returns window that is covered by the alignment middle.
     #[inline]
@@ -339,15 +316,29 @@ fn load_explicit_weights(
     Ok(weights)
 }
 
-/// Characteristics of a window.
-pub struct WindowCharacteristics {
+/// Characteristics of an extended window.
+#[derive(Clone)]
+pub struct NeighbInfo {
     pub gc_content: u8,
     pub uniq_kmer_frac: f64,
-    pub ling_compl: f64,
+    /// Linguistic complexity (U1 * U2 * U3).
+    pub ling_complexity: f64,
+    /// Simple complexity (Uk) with user-defined k (default = 5).
+    pub simple_complexity: f64,
     /// User-provided weight.
     pub explicit_weight: f64,
-    /// Total weight.
-    pub weight: f64,
+}
+
+impl Default for NeighbInfo {
+    fn default() -> Self {
+        Self {
+            gc_content: 0,
+            uniq_kmer_frac: f64::NAN,
+            ling_complexity: f64::NAN,
+            simple_complexity: f64::NAN,
+            explicit_weight: 1.0,
+        }
+    }
 }
 
 /// Set of windows for one contig.
@@ -357,28 +348,16 @@ pub struct ContigInfo {
     contig_len: u32,
     /// Window padding, used to find GC-content and fraction of unique k-mers.
     left_padding: u32,
-    right_padding: u32,
-    /// K-mer size.
-    kmer_size: u32,
-
-    /// Structure, that stores start, end and window.
-    window_getter: WindowGetter,
+    n_windows: u32,
 
     /// Window weight calculators.
     kmers_weight_calc: Option<WeightCalculator>,
     compl_weight_calc: Option<WeightCalculator>,
-
-    /// G-C content for each moving window.
-    gc_content: Vec<u8>,
-    /// Fraction of unique k-mers for each moving window.
-    uniq_kmer_frac: Vec<f64>,
-    /// Linguistic complexity for each moving window.
-    mov_complexities: Vec<f64>,
-    /// Explicitely set weights.
+    /// Structure, that stores start, end and window.
+    window_getter: WindowGetter,
+    /// Moving window info with size = neighbourhood size.
+    mov_info: Vec<NeighbInfo>,
     explicit_weights: Option<ExplicitWeights>,
-
-    /// Default window weights (without boundary tweaking).
-    default_weights: Vec<f64>,
 }
 
 impl ContigInfo {
@@ -390,93 +369,93 @@ impl ContigInfo {
         depth: &ReadDepth,
         explicit_weights: Option<ExplicitWeights>,
         params: &super::Params,
-        dbg_writer: &mut impl Write,
     ) -> crate::Result<Self>
     {
         let contig_len = seq.len() as u32;
-        let contig_name = contigs.get_name(contig_id);
-        let window = depth.window_size();
+        let window_size = depth.window_size();
         let neighb_size = depth.neighb_size();
-        if contig_len < window + 2 * params.boundary_size {
+        if contig_len < window_size + 2 * params.boundary_size {
             return Err(error!(RuntimeError, "Contig {} is too short (len = {})",
                 contigs.get_name(contig_id), contig_len));
         }
         debug_assert_eq!(contig_len, contigs.get_len(contig_id));
-        let n_windows = (contig_len - 2 * params.boundary_size) / window;
-        let sum_len = n_windows * window;
+        let n_windows = (contig_len - 2 * params.boundary_size) / window_size;
+        let sum_len = n_windows * window_size;
         let reg_start = (contig_len - sum_len) / 2;
         let reg_end = reg_start + sum_len;
-        let left_padding = (neighb_size - window) / 2;
-        let right_padding = neighb_size - window - left_padding;
+        let left_padding = (neighb_size - window_size) / 2;
+
+        let mut mov_info = vec![NeighbInfo::default(); (contig_len - neighb_size + 1) as usize];
+        let cumul_gc: Vec<u32> = IterExt::cumul_sums(seq.iter().map(|&ch| ch == b'C' || ch == b'G'));
+        let mult = 100.0 / f64::from(neighb_size);
+        for ((&c1, &c2), w) in cumul_gc.iter().zip(&cumul_gc[neighb_size as usize..]).zip(&mut mov_info) {
+            w.gc_content = (mult * f64::from(c2 - c1)).round() as u8;
+        }
 
         // Unique k-mers should have count = 0 because `kmer_counts` only stores off-target matches.
         let kmer_size = kmer_counts.k();
-        let cumul_uniq_kmers: Vec<u32> = IterExt::cumul_sums(kmer_counts.get(contig_id.ix()).iter()
-            .map(|&count| count == 0));
+        let cumul_uniq_kmers: Vec<u32> = IterExt::cumul_sums(
+            kmer_counts.get(contig_id.ix()).iter().map(|&count| count == 0));
         let mult = 1.0 / f64::from(neighb_size + 1 - kmer_size);
-        let uniq_kmer_frac: Vec<f64> = cumul_uniq_kmers.iter()
+        for ((&c1, &c2), w) in cumul_uniq_kmers.iter()
             .zip(&cumul_uniq_kmers[(neighb_size + 1 - kmer_size) as usize..])
-            .map(|(&c1, &c2)| f64::from(c2 - c1) * mult).collect();
+            .zip(&mut mov_info)
+        {
+            w.uniq_kmer_frac = f64::from(c2 - c1) * mult;
+        }
 
-        let cumul_gc: Vec<u32> = IterExt::cumul_sums(seq.iter().map(|&ch| ch == b'C' || ch == b'G'));
-        let mult = 100.0 / f64::from(neighb_size);
-        let gc_content: Vec<u8> = cumul_gc.iter().zip(&cumul_gc[neighb_size as usize..])
-            .map(|(&c1, &c2)| (mult * f64::from(c2 - c1)).round() as u8).collect();
-        let mut res = Self {
-            contig_len, left_padding, right_padding, gc_content, kmer_size, uniq_kmer_frac, explicit_weights,
-            window_getter: WindowGetter::new(reg_start, reg_end, window),
+        let ling_complexity = seq::compl::linguistic_complexity_123(seq, neighb_size as usize);
+        let simple_complexity = seq::compl::simple_complexity(seq, 5, neighb_size as usize);
+        for ((&lc, &sc), w) in ling_complexity.iter().zip(&simple_complexity).zip(&mut mov_info) {
+            w.ling_complexity = lc;
+            w.simple_complexity = sc;
+        }
+
+        if let Some(weights) = &explicit_weights {
+            for (i, w) in mov_info.iter_mut().enumerate() {
+                // Add padding since information is for the bigger window (neighbourhood size).
+                let start = i as u32 + left_padding;
+                w.explicit_weight = weights.average(start, start + window_size);
+            }
+        }
+
+        Ok(Self {
+            contig_len, left_padding, n_windows, mov_info, explicit_weights,
+            window_getter: WindowGetter::new(reg_start, reg_end, window_size),
             kmers_weight_calc: params.kmers_weight_calc.clone(),
             compl_weight_calc: params.compl_weight_calc.clone(),
-            default_weights: Vec::with_capacity(n_windows as usize),
-            mov_complexities: seq::compl::linguistic_complexity_123(seq, neighb_size as usize),
-        };
-
-        let mut buf1 = Default::default();
-        let mut buf2 = Default::default();
-        let simple_complexities = seq::compl::simple_complexity(seq, 5, neighb_size as usize, &mut buf1, &mut buf2);
-
-        for i in 0..n_windows {
-            let (start, end) = res.window_getter.ith_window(i);
-            let chars = res.window_characteristics(start, end);
-            res.default_weights.push(chars.weight);
-            writeln!(dbg_writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}\t{:.5}\t{:.5}",
-                contig_name, start, end, chars.gc_content, chars.uniq_kmer_frac, chars.ling_compl,
-                chars.explicit_weight, chars.weight).map_err(add_path!(!))?;
-        }
-        Ok(res)
+        })
     }
 
-    /// Returns GC-content, kmer fraction, window complexity and window weight for `start..end`.
-    pub fn window_characteristics(&self, start: u32, end: u32) -> WindowCharacteristics {
-        let i = start.saturating_sub(self.left_padding) as usize;
-        let uniq_kmer_frac = self.uniq_kmer_frac[i];
-        let ling_compl = self.mov_complexities[i];
-        let explicit_weight = self.explicit_weights.as_ref()
-            .map(|weights| weights.average(start, end)).unwrap_or(1.0);
-        let weight = self.kmers_weight_calc.as_ref().map(|calc| calc.get(uniq_kmer_frac)).unwrap_or(1.0)
-            * self.compl_weight_calc.as_ref().map(|calc| calc.get(ling_compl)).unwrap_or(1.0)
-            * explicit_weight;
-
-        WindowCharacteristics {
-            uniq_kmer_frac, ling_compl, explicit_weight, weight,
-            gc_content: self.gc_content[i],
+    pub fn write(&self, contig_name: &str, writer: &mut impl Write) -> io::Result<()> {
+        for i in 0..self.n_windows {
+            let (start, end) = self.window_getter.ith_window(i);
+            let (info, weight) = self.neighb_info(start);
+            writeln!(writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}\t{:.5}\t{:.5}\t{:.5}",
+                contig_name, start, end, info.gc_content, info.uniq_kmer_frac,
+                info.ling_complexity, info.simple_complexity, info.explicit_weight, weight)?;
         }
+        Ok(())
+    }
+
+    /// Returns neighbourhood information and its weight for a window with given start.
+    #[inline]
+    pub fn neighb_info(&self, start: u32) -> (&NeighbInfo, f64) {
+        let info = &self.mov_info[start.saturating_sub(self.left_padding) as usize];
+        let weight = self.kmers_weight_calc.as_ref().map(|calc| calc.get(info.uniq_kmer_frac)).unwrap_or(1.0)
+            * self.compl_weight_calc.as_ref().map(|calc| calc.get(info.ling_complexity)).unwrap_or(1.0)
+            * info.explicit_weight;
+        (info, weight)
     }
 
     #[inline(always)]
     pub fn n_windows(&self) -> u32 {
-        self.default_weights.len() as u32
+        self.n_windows
     }
 
     #[inline(always)]
     pub fn window_size(&self) -> u32 {
         self.window_getter.window
-    }
-
-    /// Default window weights (can change due to random tweaking).
-    #[inline(always)]
-    pub fn default_weights(&self) -> &[f64] {
-        &self.default_weights
     }
 
     /// Returns window range within the contig based on the read alignment range.
@@ -604,7 +583,7 @@ impl ContigInfos {
         weights_filename: Option<&Path>,
         depth: &ReadDepth,
         params: &super::Params,
-        mut dbg_writer: impl Write,
+        dbg_writer: Option<impl Write>,
     ) -> crate::Result<Self>
     {
         let contigs = set.contigs();
@@ -615,13 +594,18 @@ impl ContigInfos {
         let has_explicit_weights = explicit_weights[0].is_some();
 
         let seqs = set.seqs();
-        writeln!(dbg_writer, "#contig\tstart\tend\tGC\tfrac_unique\tcomplexity\texplicit_weight\tweight")
-            .map_err(add_path!(!))?;
         let mut infos = Vec::with_capacity(seqs.len());
         for (id, (seq, curr_weights)) in contigs.ids().zip(seqs.iter().zip(explicit_weights.into_iter())) {
             infos.push(
-                ContigInfo::new(id, contigs, seq, set.kmer_counts(), depth, curr_weights, params, &mut dbg_writer)
-                .map(Arc::new)?);
+                ContigInfo::new(id, contigs, seq, set.kmer_counts(), depth, curr_weights, params).map(Arc::new)?);
+        }
+        if let Some(mut writer) = dbg_writer {
+            writeln!(writer,
+                "#contig\tstart\tend\tGC\tfrac_unique\tling_complexity\tsimple_complexity\texplicit_weight\tweight")
+                .map_err(add_path!(!))?;
+            for (name, info) in contigs.names().iter().zip(&infos) {
+                info.write(name, &mut writer).map_err(add_path!(!))?;
+            }
         }
         Ok(Self { infos, has_explicit_weights })
     }

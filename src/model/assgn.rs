@@ -139,12 +139,12 @@ impl GenotypeAlignments {
 
         self.depth_distrs.truncate(REG_WINDOW_SHIFT as usize);
         for contig_info in self.gt_windows.contig_infos() {
-            for (wstart, wend) in contig_info.generate_windows(tweak, rng) {
-                let chars = contig_info.window_characteristics(wstart, wend);
-                if chars.weight < params.min_weight {
+            for (wstart, _) in contig_info.generate_windows(tweak, rng) {
+                let (neighb_info, weight) = contig_info.neighb_info(wstart);
+                if weight < params.min_weight {
                     self.depth_distrs.push(WindowDistr::TRIVIAL);
                 } else {
-                    self.depth_distrs.push(distr_cache.get_distribution(chars.gc_content, chars.weight));
+                    self.depth_distrs.push(distr_cache.get_distribution(neighb_info.gc_content, weight));
                 }
             }
         }
