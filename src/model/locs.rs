@@ -152,6 +152,7 @@ struct FilteredReader<'a, R: bam::Read> {
     found_alns: IntMap<TwoU32, usize>,
     /// Unmapped penalty + probability difference.
     prob_thresh: f64,
+    compl_poor_aln_thresh: f64,
 }
 
 #[inline]
@@ -177,6 +178,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
             err_prof: bg_distr.error_profile(),
             prob_thresh: params.unmapped_penalty - params.prob_diff,
+            compl_poor_aln_thresh: params.compl_poor_aln_thresh,
             reader, record, contigs, contig_infos, edit_dist_cache, has_more,
         })
     }
@@ -222,7 +224,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         assert!(old_option.is_none(), "Mate data defined twice");
 
         if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{}\t{}\t*\tNA\t-\t{}", name_hash, read_end, name).map_err(add_path!(!))?;
+            writeln!(dbg_writer, "{}\t{}\t*\tNA\tNA\tNA\t{}", name_hash, read_end, name).map_err(add_path!(!))?;
             // Read the next record, and save false to `has_more` if there are no more records left.
             self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
             return Ok(false);
@@ -256,7 +258,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
                 dist, Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
-                neighb_complexity = self.contig_infos.neighb_complexity(&aln);
+                neighb_complexity = if self.are_short_reads { self.contig_infos.neighb_complexity(&aln) } else { 1.0 };
                 write!(dbg_writer, "\t{:.5}\t{}", neighb_complexity, read_data.name).map_err(add_path!(!))?;
                 primary = false;
             }
@@ -292,9 +294,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         let (good_dist, mut passable_dist) = self.edit_dist_cache.get(read_len);
         let mut threshold_dist = good_dist;
 
-        if neighb_complexity < params.edit_complexity_thresh {
+        if neighb_complexity <= self.compl_poor_aln_thresh {
             threshold_dist = min(threshold_dist, 7 * read_len / 10);
-            passable_dist += threshold_dist - good_dist;
+            passable_dist += 2 * (threshold_dist - good_dist);
         }
         if best_edit > threshold_dist {
             alns.truncate(start_len);
@@ -828,7 +830,7 @@ impl AllAlignments {
         let mut unique_kmers = UniqueKmers::new(contig_set, params.kmer_hard_thresh, params.kmer_soft_thresh);
 
         log::info!("    Loading read alignments");
-        writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tedit_status\tlik\tu5\tread_name")
+        writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tlik\tneighb_complexity\tread_name")
             .map_err(add_path!(!))?;
         writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
         if let Some(w) = &mut dbg_writer3 {

@@ -245,29 +245,36 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
             "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
+        println!("    {:KEY$} {:VAL$}  Calculate linguistic complexity as a fraction\n\
+            {EMPTY}  of non-repeated k-mers of this size [{}].",
+            "    --complexity".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.complexity_k));
         println!("    {:KEY$} {}\n\
-            {EMPTY}  Calculate window weight based on the fraction of unique k-mers [{} {}].\n\
-            {EMPTY}  * {} = breakpoint (0, 1), such that the weight at breakpoint will be 1/2.\n\
+            {EMPTY}  Calculate weight based on the linguistic complexity [{} {}].\n\
+            {EMPTY}  * {} = breakpoint (0, 1), weight at breakpoint will be 1/2.\n\
             {EMPTY}  * {} = power > 0. Regulates sigmoid slope (bigger = steeper).\n\
             {EMPTY}  Use {} to disable weights.",
-            "    --kmers-weight".green(), "FLOAT FLOAT | off".yellow(),
-            super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().breakpoint()),
-            super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().power()),
-            "FLOAT_1".yellow(), "FLOAT_2".yellow(), "off".yellow());
-        println!("    {:KEY$} {}\n\
-            {EMPTY}  Calculate window weight based on the linguistic complexity\n\
-            {EMPTY}  of the window sequence [{} {}]. Same format as {}.",
             "    --compl-weight".green(), "FLOAT FLOAT | off".yellow(),
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().breakpoint()),
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().power()),
+            "FLOAT_1".yellow(), "FLOAT_2".yellow(), "off".yellow());
+        println!("    {:KEY$} {}\n\
+            {EMPTY}  Calculate weight based on the fraction of region-specific k-mers [{} {}].\n\
+            {EMPTY}  Same format as {}.",
+            "    --kmers-weight".green(), "FLOAT FLOAT | off".yellow(),
+            super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().breakpoint()),
+            super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().power()),
             "--kmers-weight".green());
         println!("    {:KEY$} {:VAL$}  Explicit haplotype subregion weights, for example\n\
             {EMPTY}  based on exons/introns (see documentation).",
             "    --reg-weights".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
+        println!("    {:KEY$} {:VAL$}  Downweight, but allow poor alignments for short reads\n\
+            {EMPTY}  in regions with complexity under {} [{}]. Use 0 to disable.",
+            "    --poor-compl".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            super::fmt_def_f64(defaults.assgn_params.compl_poor_aln_thresh));
         println!("    {} {}  Hard and soft thresholds for the number of\n\
-            {EMPTY}  unique non-overlapping k-mers per read/read pair [{} {}].",
+            {EMPTY}  region-specific non-overlapping k-mers per read/read pair [{} {}].",
             "    --read-kmers".green(), "INT INT".yellow(),
             super::fmt_def(defaults.assgn_params.kmer_hard_thresh),
             super::fmt_def(defaults.assgn_params.kmer_soft_thresh));
@@ -386,6 +393,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
                 args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
+            Long("complexity") => args.assgn_params.complexity_k = parser.value()?.parse()?,
             Long("kmers-weight") => {
                 let first = parser.value()?;
                 if first == "off" {
@@ -404,6 +412,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                         WeightCalculator::new(first.parse()?, parser.value()?.parse()?)?);
                 }
             }
+            Long("poor-compl") | Long("poor-complexity") =>
+                args.assgn_params.compl_poor_aln_thresh = parser.value()?.parse()?,
             Long("min-weight") => args.assgn_params.min_weight = parser.value()?.parse()?,
             Long("read-kmers") => {
                 args.assgn_params.kmer_hard_thresh = parser.value()?.parse()?;

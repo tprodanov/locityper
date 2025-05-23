@@ -10,6 +10,7 @@ use crate::{
         distr::bayes,
     },
     err::{validate_param},
+    seq::kmers::Kmer,
 };
 use windows::WeightCalculator;
 
@@ -27,17 +28,17 @@ pub struct Params {
     pub unmapped_penalty: f64,
     /// Edit distance p-value thresholds, first for good alignments, second for passable.
     pub edit_pvals: (f64, f64),
-    /// Two window weight calculators: one for the fraction of unique k-mers,
-    pub kmers_weight_calc: Option<WeightCalculator>,
-    /// and another for linguistic complexity of the window.
+    /// Calculate linguistic complexity as fraction of non-repetitive k-mers.
+    pub complexity_k: u8,
+    /// Allow worse alignments in regions with low complexity.
+    pub compl_poor_aln_thresh: f64,
+    /// Two window weight calculators: one for linguistic complexity of the window
+    /// and another for the fraction of region-specific k-mers.
     pub compl_weight_calc: Option<WeightCalculator>,
+    pub kmers_weight_calc: Option<WeightCalculator>,
     /// Soft and hard thresholds for the number of unique k-mers per read/read pair.
     pub kmer_soft_thresh: u16,
     pub kmer_hard_thresh: u16,
-
-    /// For short reads within low-complexity regions (Uk <= thresh), allow reads with poorer alignments.
-    pub edit_complexity_k: u8,
-    pub edit_complexity_thresh: f64,
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
 
@@ -67,14 +68,12 @@ impl Default for Params {
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
             edit_pvals: (0.01, 0.001),
-
-            kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),
+            complexity_k: 5,
             compl_weight_calc: Some(WeightCalculator::new(0.5, 4.0).unwrap()),
+            kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),
             kmer_soft_thresh: 5,
             kmer_hard_thresh: 1,
-
-            edit_complexity_k: 5,
-            edit_complexity_thresh: 0.5,
+            compl_poor_aln_thresh: 0.5,
             min_weight: 0.001,
 
             tweak: None,
@@ -117,6 +116,10 @@ impl Params {
             self.edit_pvals.1, self.edit_pvals.0);
         validate_param!(0.0 <= self.min_weight && self.min_weight <= 0.5,
             "Minimal weight ({}) must be within [0, 0.5].", self.min_weight);
+        validate_param!(0 < self.complexity_k && self.complexity_k <= u32::MAX_KMER_SIZE,
+            "Complexity k size ({}) must be between 1 and {}", self.complexity_k, u32::MAX_KMER_SIZE);
+        validate_param!(0.0 <= self.compl_poor_aln_thresh && self.compl_poor_aln_thresh <= 1.0,
+            "Complexity threshold ({}) must be between 0 and 1.", self.compl_poor_aln_thresh);
 
         for &cn in &self.alt_cn {
             validate_param!(cn > 0.0 && cn != 1.0,

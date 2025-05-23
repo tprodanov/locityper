@@ -321,10 +321,8 @@ fn load_explicit_weights(
 pub struct NeighbInfo {
     pub gc_content: u8,
     pub uniq_kmer_frac: f64,
-    /// Linguistic complexity (U1 * U2 * U3).
-    pub ling_complexity: f64,
-    /// Simple complexity (Uk) with user-defined k (default = 5).
-    pub simple_complexity: f64,
+    /// Complexity (Uk) with user-defined k (default = 5).
+    pub complexity: f64,
     /// User-provided weight.
     pub explicit_weight: f64,
 }
@@ -334,8 +332,7 @@ impl Default for NeighbInfo {
         Self {
             gc_content: 0,
             uniq_kmer_frac: f64::NAN,
-            ling_complexity: f64::NAN,
-            simple_complexity: 1.0,
+            complexity: f64::NAN,
             explicit_weight: 1.0,
         }
     }
@@ -404,16 +401,9 @@ impl ContigInfo {
         {
             w.uniq_kmer_frac = f64::from(c2 - c1) * mult;
         }
-
-        let ling_complexity = seq::compl::linguistic_complexity_123(seq, neighb_size as usize);
-        for (&lc, w) in ling_complexity.iter().zip(&mut mov_info) {
-            w.ling_complexity = lc;
-        }
-        if params.edit_complexity_k > 0 {
-            let simple_complexity = seq::compl::simple_complexity(seq, params.edit_complexity_k, neighb_size as usize);
-            for (&sc, w) in simple_complexity.iter().zip(&mut mov_info) {
-                w.simple_complexity = sc;
-            }
+        let complexities = seq::compl::linguistic_complexity(seq, params.complexity_k, neighb_size as usize);
+        for (&c, w) in complexities.iter().zip(&mut mov_info) {
+            w.complexity = c;
         }
 
         if let Some(weights) = &explicit_weights {
@@ -437,9 +427,9 @@ impl ContigInfo {
         for i in 0..self.n_windows {
             let (start, end) = self.window_getter.ith_window(i);
             let (info, weight) = self.neighb_info(start);
-            writeln!(writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}\t{:.5}\t{:.5}\t{:.5}",
+            writeln!(writer, "{}\t{}\t{}\t{}\t{:.3}\t{:.5}\t{:.5}\t{:.5}",
                 contig_name, start, end, info.gc_content, info.uniq_kmer_frac,
-                info.ling_complexity, info.simple_complexity, info.explicit_weight, weight)?;
+                info.complexity, info.explicit_weight, weight)?;
         }
         Ok(())
     }
@@ -449,7 +439,7 @@ impl ContigInfo {
     pub fn neighb_info(&self, start: u32) -> (&NeighbInfo, f64) {
         let info = &self.mov_info[start.saturating_sub(self.left_padding) as usize];
         let weight = self.kmers_weight_calc.as_ref().map(|calc| calc.get(info.uniq_kmer_frac)).unwrap_or(1.0)
-            * self.compl_weight_calc.as_ref().map(|calc| calc.get(info.ling_complexity)).unwrap_or(1.0)
+            * self.compl_weight_calc.as_ref().map(|calc| calc.get(info.complexity)).unwrap_or(1.0)
             * info.explicit_weight;
         (info, weight)
     }
@@ -458,7 +448,7 @@ impl ContigInfo {
     #[inline]
     fn neighb_complexity(&self, middle: u32) -> f64 {
         let i = min(middle.saturating_sub(self.half_neighb_size) as usize, self.mov_info.len() - 1);
-        self.mov_info[i].simple_complexity
+        self.mov_info[i].complexity
     }
 
     #[inline(always)]
@@ -614,7 +604,7 @@ impl ContigInfos {
         }
         if let Some(mut writer) = dbg_writer {
             writeln!(writer,
-                "#contig\tstart\tend\tGC\tfrac_unique\tling_complexity\tsimple_complexity\texplicit_weight\tweight")
+                "#contig\tstart\tend\tGC\tfrac_unique\tling_complexity\texplicit_weight\tweight")
                 .map_err(add_path!(!))?;
             for (name, info) in contigs.names().iter().zip(&infos) {
                 info.write(name, &mut writer).map_err(add_path!(!))?;
