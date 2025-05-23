@@ -35,6 +35,9 @@ pub struct Params {
     pub kmer_soft_thresh: u16,
     pub kmer_hard_thresh: u16,
 
+    /// For short reads within low-complexity regions (Uk <= thresh), allow reads with poorer alignments.
+    pub edit_complexity_k: u8,
+    pub edit_complexity_thresh: f64,
     /// Ignore reads and windows with weight under this value.
     pub min_weight: f64,
 
@@ -70,6 +73,8 @@ impl Default for Params {
             kmer_soft_thresh: 5,
             kmer_hard_thresh: 1,
 
+            edit_complexity_k: 5,
+            edit_complexity_thresh: 0.5,
             min_weight: 0.001,
 
             tweak: None,

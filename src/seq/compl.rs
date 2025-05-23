@@ -69,8 +69,6 @@ pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
     assert!(3 <= w, "Window size ({}) must be over 3", w);
     assert!(w <= n, "Window size ({}) must not be greater than the sequence length ({})", w, n);
     let w_u16 = u16::try_from(w).expect("Window size must fit in two bytes");
-    // Maximum achievable count multiplication.
-    let divisor = (min(4, w) * min(16, w - 1) * min(64, w - 2)) as f64;
 
     let mut counts1 = [0; 4];
     let mut counts2 = [0; 16];
@@ -84,6 +82,7 @@ pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
     let mut uniq3 = 1;
     let mut complexities = Vec::with_capacity(n - w + 1);
 
+    let mult = 1.0 / (min(4, w) * min(16, w - 1) * min(64, w - 2)) as f64;
     let mut lagging_kmer = 0;
     let mut current_kmer = 0;
     let lagging_iter = std::iter::repeat(0).take(w - 2).chain(seq.iter().map(encode_nt));
@@ -95,7 +94,7 @@ pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
         remove_add_kmer(&mut counts2, (lagging_kmer >> 2) & MASK2, current_kmer & MASK2, &mut uniq2);
         remove_add_kmer(&mut counts3, lagging_kmer & MASK3, current_kmer & MASK3, &mut uniq3);
         if i >= w - 1 {
-            complexities.push(f64::from(uniq1 * uniq2 * uniq3) / divisor);
+            complexities.push(mult * f64::from(uniq1 * uniq2 * uniq3));
         }
     }
     assert_eq!(complexities.len(), n - w + 1);
@@ -113,17 +112,18 @@ pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
 // }
 
 /// Calculate simple complexity (fraction of unique k-mers) across each moving window of size w.
-/// kmers and counts are buffers, and will be completely rewritten.
 pub fn simple_complexity(seq: &[u8], k: u8, w: usize) -> Vec<f64> {
+    // TODO: Should we merge it with `linguistic_complexity_123` (and would it be helpful)?
+    // NOTE: Potentially, may have problems with missing nucleotides, currently they are forbidden.
     let n = seq.len();
     debug_assert!(k <= <u16 as kmers::Kmer>::MAX_KMER_SIZE);
-    debug_assert!(w < n && w < usize::from(u16::MAX) && w > 3 * usize::from(k));
+    debug_assert!(usize::from(k) < w && w < n && w < usize::from(u16::MAX));
 
-    let mut kmers = Vec::with_capacity(n - k as usize + 1);
+    let mut kmers = Vec::with_capacity(n - usize::from(k) + 1);
     kmers::kmers::<u16, _, NON_CANONICAL>(seq, k, &mut kmers);
 
-    let k = k as usize;
-    let mult = 1.0 / (w + 1 - k) as f64;
+    let k = usize::from(k);
+    let mult = 1.0 / min(w + 1 - k, 1 << (2 * k)) as f64;
     let mut counts = IntMap::default();
     let mut unique = 0;
     for &kmer in &kmers[..(w - k + 1)] {

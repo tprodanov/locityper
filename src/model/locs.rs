@@ -143,6 +143,7 @@ struct FilteredReader<'a, R: bam::Read> {
     record: bam::Record,
     has_more: bool,
     contigs: Arc<ContigNames>,
+    contig_infos: &'a ContigInfos,
     err_prof: &'a ErrorProfile,
     are_short_reads: bool,
     edit_dist_cache: &'a EditDistCache,
@@ -162,6 +163,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
     fn new(
         mut reader: R,
         contigs: Arc<ContigNames>,
+        contig_infos: &'a ContigInfos,
         bg_distr: &'a BgDistr,
         edit_dist_cache: &'a EditDistCache,
         params: &'a super::Params,
@@ -175,7 +177,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
             err_prof: bg_distr.error_profile(),
             prob_thresh: params.unmapped_penalty - params.prob_diff,
-            reader, record, contigs, edit_dist_cache, has_more,
+            reader, record, contigs, contig_infos, edit_dist_cache, has_more,
         })
     }
 
@@ -232,6 +234,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         let mut max_prob = f64::NEG_INFINITY;
         self.found_alns.clear();
         let mut primary = true;
+        let mut neighb_complexity = f64::NAN;
 
         loop {
             let mut cigar = Cigar::from_raw(self.record.raw_cigar());
@@ -253,7 +256,8 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
                 dist, Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
             if primary {
-                write!(dbg_writer, "\t{}", read_data.name).map_err(add_path!(!))?;
+                neighb_complexity = self.contig_infos.neighb_complexity(&aln);
+                write!(dbg_writer, "\t{:.5}\t{}", neighb_complexity, read_data.name).map_err(add_path!(!))?;
                 primary = false;
             }
             writeln!(dbg_writer).map_err(add_path!(!))?;
@@ -285,21 +289,21 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         let read_len = alns[start_len].distance().unwrap().read_len();
-        let (good_dist, passable_dist) = self.edit_dist_cache.get(read_len);
-        // TODO: Use parameter.
-        let threshold_dist = if self.are_short_reads { read_len / 2 } else { good_dist };
+        let (good_dist, mut passable_dist) = self.edit_dist_cache.get(read_len);
+        let mut threshold_dist = good_dist;
+
+        if neighb_complexity < params.edit_complexity_thresh {
+            threshold_dist = min(threshold_dist, 7 * read_len / 10);
+            passable_dist += threshold_dist - good_dist;
+        }
         if best_edit > threshold_dist {
             alns.truncate(start_len);
             return Ok(false);
         }
 
         alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
-        if self.are_short_reads {
-            VecExt::unstable_retain(alns, start_len, |aln| aln.ln_prob() >= self.prob_thresh);
-        } else {
-            VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() >= passable_dist);
-        }
-
+        VecExt::unstable_retain(alns, start_len,
+            |aln| aln.ln_prob() >= self.prob_thresh && aln.distance().unwrap().edit() >= passable_dist);
         read_data.weight *= if best_edit <= good_dist
             { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
         Ok(true)
@@ -831,7 +835,8 @@ impl AllAlignments {
             writeln!(w, "read_hash\tread_end\tinterval\told_lik\tnew_lik\toverall_weight\tweights")
                 .map_err(add_path!(!))?;
         }
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), bg_distr, edit_dist_cache, params)?;
+        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), contig_infos,
+            bg_distr, edit_dist_cache, params)?;
 
         let is_paired_end = bg_distr.insert_distr().is_paired_end();
         let mut hashes = IntSet::default();
@@ -846,14 +851,13 @@ impl AllAlignments {
             let mut read_data = ReadData::default();
             counts.total += 1;
             tmp_alns.clear();
-            let has_first = reader.next_alns(
-                ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+            let has_first = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
             if !hashes.insert(read_data.name_hash) {
                 log::debug!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
-            let has_second = is_paired_end && reader.next_alns(
-                ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+            let has_second = is_paired_end
+                && reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
 
             if !has_first && !has_second {
                 counts.both_unmapped += 1;

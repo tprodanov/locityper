@@ -335,7 +335,7 @@ impl Default for NeighbInfo {
             gc_content: 0,
             uniq_kmer_frac: f64::NAN,
             ling_complexity: f64::NAN,
-            simple_complexity: f64::NAN,
+            simple_complexity: 1.0,
             explicit_weight: 1.0,
         }
     }
@@ -348,6 +348,7 @@ pub struct ContigInfo {
     contig_len: u32,
     /// Window padding, used to find GC-content and fraction of unique k-mers.
     left_padding: u32,
+    half_neighb_size: u32,
     n_windows: u32,
 
     /// Window weight calculators.
@@ -405,10 +406,14 @@ impl ContigInfo {
         }
 
         let ling_complexity = seq::compl::linguistic_complexity_123(seq, neighb_size as usize);
-        let simple_complexity = seq::compl::simple_complexity(seq, 5, neighb_size as usize);
-        for ((&lc, &sc), w) in ling_complexity.iter().zip(&simple_complexity).zip(&mut mov_info) {
+        for (&lc, w) in ling_complexity.iter().zip(&mut mov_info) {
             w.ling_complexity = lc;
-            w.simple_complexity = sc;
+        }
+        if params.edit_complexity_k > 0 {
+            let simple_complexity = seq::compl::simple_complexity(seq, params.edit_complexity_k, neighb_size as usize);
+            for (&sc, w) in simple_complexity.iter().zip(&mut mov_info) {
+                w.simple_complexity = sc;
+            }
         }
 
         if let Some(weights) = &explicit_weights {
@@ -424,6 +429,7 @@ impl ContigInfo {
             window_getter: WindowGetter::new(reg_start, reg_end, window_size),
             kmers_weight_calc: params.kmers_weight_calc.clone(),
             compl_weight_calc: params.compl_weight_calc.clone(),
+            half_neighb_size: neighb_size / 2,
         })
     }
 
@@ -446,6 +452,13 @@ impl ContigInfo {
             * self.compl_weight_calc.as_ref().map(|calc| calc.get(info.ling_complexity)).unwrap_or(1.0)
             * info.explicit_weight;
         (info, weight)
+    }
+
+    /// Returns neighbourhood complexity given its middle.
+    #[inline]
+    fn neighb_complexity(&self, middle: u32) -> f64 {
+        let i = min(middle.saturating_sub(self.half_neighb_size) as usize, self.mov_info.len() - 1);
+        self.mov_info[i].simple_complexity
     }
 
     #[inline(always)]
@@ -686,6 +699,11 @@ impl ContigInfos {
             s += f64::max(info.read_end_weight(pair.middle1()), info.read_end_weight(pair.middle2()));
         }
         s / pair_alns.len() as f64
+    }
+
+    #[inline]
+    pub fn neighb_complexity(&self, aln: &Alignment) -> f64 {
+        self.infos[aln.contig_id().ix()].neighb_complexity(aln.interval().middle())
     }
 }
 
