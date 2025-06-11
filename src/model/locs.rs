@@ -291,7 +291,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         let read_len = alns[start_len].distance().unwrap().read_len();
-        let (good_dist, mut passable_dist) = self.edit_dist_cache.get(read_len);
+        // let (good_dist, mut passable_dist) = self.edit_dist_cache.get(read_len);
+        let good_dist = (0.03 * read_len as f64).ceil() as u32;
+        let mut passable_dist = good_dist * 2;
         let mut threshold_dist = good_dist;
 
         if neighb_complexity <= self.compl_poor_aln_thresh {
