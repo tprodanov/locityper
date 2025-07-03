@@ -220,7 +220,7 @@ fn print_help(extended: bool) {
             super::fmt_def(defaults.minimizer_kw.0), super::fmt_def(defaults.minimizer_kw.1));
         println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference.\n\
             {EMPTY}  Default: {}.",
-            "-M, --match-frac".green(), "FLOAT".yellow(), fmt_def_match_frac());
+            "-M, --match-frac".green(), "NUM".yellow(), fmt_def_match_frac());
         println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
             "-L, --match-len".green(), "INT".yellow(),
             super::fmt_def(defaults.match_len));
@@ -231,36 +231,34 @@ fn print_help(extended: bool) {
             "-c, --chunk-len".green(), "INT".yellow(),
             super::fmt_def(PrettyU64(defaults.chunk_length)));
 
-        println!("\n{}", "Model parameters:".bold());
+        println!("\n{}", "Filtering reads:".bold());
         println!("    {:KEY$} {:VAL$}\n\
             {EMPTY}  Discard reads that do not pass the first threshold, and read alignments\n\
             {EMPTY}  that do not pass the second threshold. Format: frac|pval thresh1 thresh2.\n\
             {EMPTY}  {}: {} (compare edit dist. with fraction of read len.)\n\
             {EMPTY}  long r.:  {} (check edit dist. p-value).",
-            "    --edit-thresh".green(), "STR FLOAT FLOAT".yellow(),
+            "    --edit-thresh".green(), "STR NUM NUM".yellow(),
             "illumina".cyan(), super::fmt_def(EditThresh::default_for(Technology::Illumina)),
             super::fmt_def(EditThresh::default_for(Technology::HiFi)));
         println!("    {} {}  In regions with complexity < {} [{}] allow short reads with\n\
             {EMPTY}  edit distance up to {} of read length [{}].",
-            "    --poor-compl".green(), "FLOAT FLOAT".yellow(),
-            "FLOAT_1".yellow(), super::fmt_def_f64(defaults.assgn_params.poor_compl),
-            "FLOAT_2".yellow(), super::fmt_def_f64(defaults.assgn_params.poor_compl_edit),
-        ); // TODO: NUM instead of FLOAT?
+            "    --poor-compl".green(), "NUM NUM".yellow(),
+            "NUM_1".yellow(), super::fmt_def_f64(defaults.assgn_params.poor_compl),
+            "NUM_2".yellow(), super::fmt_def_f64(defaults.assgn_params.poor_compl_edit));
         println!("    {} {}  Hard and soft thresholds for the number of region-specific\n\
             {EMPTY}  non-overlapping k-mers per read/read pair [{} {}].",
             "    --read-kmers".green(), "INT INT".yellow(),
             super::fmt_def(defaults.assgn_params.kmer_hard_thresh),
             super::fmt_def(defaults.assgn_params.kmer_soft_thresh));
+        println!("    {:KEY$} {:VAL$}  Ignore read alignments 10^{} times worse than the best alignment [{}].",
+            "-D, --prob-diff".green(), "NUM".yellow(), "NUM".yellow(),
+            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_diff)));
 
         println!("\n{}", "Model parameters:".bold());
-        println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
+        println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. Ploidy over 2 currently not tested.",
             "-P, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
-        println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
-            {EMPTY}  the best alignment [{}].",
-            "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_diff)));
         println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
-            "-U, --unmapped".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            "-U, --unmapped".green(), "NUM".yellow(), "NUM".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
         println!("    {:KEY$} {:VAL$}  Calculate linguistic complexity as a fraction\n\
             {EMPTY}  of non-repeated k-mers of this size [{}].",
@@ -270,14 +268,14 @@ fn print_help(extended: bool) {
             {EMPTY}  * {} = breakpoint (0, 1), weight at breakpoint will be 1/2.\n\
             {EMPTY}  * {} = power > 0. Regulates sigmoid slope (bigger = steeper).\n\
             {EMPTY}  Use {} to disable weights.",
-            "    --compl-weight".green(), "FLOAT FLOAT | off".yellow(),
+            "    --compl-weight".green(), "NUM NUM | off".yellow(),
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().breakpoint()),
             super::fmt_def_f64(defaults.assgn_params.compl_weight_calc.as_ref().unwrap().power()),
-            "FLOAT_1".yellow(), "FLOAT_2".yellow(), "off".yellow());
+            "NUM_1".yellow(), "NUM_2".yellow(), "off".yellow());
         println!("    {:KEY$} {}\n\
             {EMPTY}  Calculate weight based on the fraction of region-specific k-mers [{} {}].\n\
             {EMPTY}  Same format as {}.",
-            "    --kmers-weight".green(), "FLOAT FLOAT | off".yellow(),
+            "    --kmers-weight".green(), "NUM NUM | off".yellow(),
             super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().breakpoint()),
             super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().power()),
             "--kmers-weight".green());
@@ -285,10 +283,10 @@ fn print_help(extended: bool) {
             {EMPTY}  based on exons/introns (see documentation).",
             "    --reg-weights".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
-            "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
+            "    --min-weight".green(), "NUM".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
             {EMPTY}  matter more; Positive: read depth matters more.",
-            "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
+            "    --skew".green(), "NUM".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
         println!("    {:KEY$} {:VAL$}  Compare read depth probability at copy number 1\n\
             {EMPTY}  against other copy numbers (possibly fractional) [{}].",
             "-A, --alt-cn".green(), "STR".yellow(), super::fmt_def(defaults.assgn_params.default_alt_cn));
@@ -301,11 +299,11 @@ fn print_help(extended: bool) {
             "    --dont-skip".green(), super::flag());
         println!("    {:KEY$} {:VAL$}  During pre-filtering, discard genotypes that have 10^{}\n\
             {EMPTY}  worse alignment probability than the best genotype [{}].",
-            "    --filt-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            "    --filt-diff".green(), "NUM".yellow(), "NUM".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.filt_diff)));
         println!("    {:KEY$} {:VAL$}  After each step, discard genotypes that have\n\
             {EMPTY}  smaller probability than 10^{} to be best [{}].",
-            "    --prob-thresh".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            "    --prob-thresh".green(), "NUM".yellow(), "NUM".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
             "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), super::fmt_def("auto"));

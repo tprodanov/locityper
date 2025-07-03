@@ -138,7 +138,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Skip divergence calculation.",
         "-s, --skip-div".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Do not align sequences with bigger divergence than this [{}].",
-        "-D, --max-div".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.max_div));
+        "-D, --max-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.max_div));
     println!("    {:KEY$} {:VAL$}  One or more k-mer size for backbone alignment,\n\
         {EMPTY}  separated by comma [{}].",
         "-k, --backbone".green(), "INT".yellow(), super::fmt_def(&defaults.backbone_ks));

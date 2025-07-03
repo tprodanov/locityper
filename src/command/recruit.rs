@@ -193,7 +193,7 @@ fn print_help() {
         "INT_1".yellow(), recruit::Minimizer::MAX_KMER_SIZE, "INT_2".yellow(),
         super::fmt_def(defaults.minimizer_kw.0), super::fmt_def(defaults.minimizer_kw.1));
     println!("    {:KEY$} {:VAL$}  Minimal fraction of minimizers that need to match reference [{}].",
-        "-M, --match-frac".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.match_frac));
+        "-M, --match-frac".green(), "NUM".yellow(), super::fmt_def_f64(defaults.match_frac));
     println!("    {:KEY$} {:VAL$}  Recruit long reads with a matching subregion of this length [{}].",
         "-L, --match-len".green(), "INT".yellow(),
         super::fmt_def(defaults.match_len));
@@ -213,7 +213,7 @@ fn print_help() {
 
     println!("\n{}", "Subsampling:".bold());
     println!("    {:KEY$} {:VAL$}  Before recruitment, subsample reads at this rate [{}].",
-        "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
+        "    --subsample".green(), "NUM".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
     println!("    {:KEY$} {:VAL$}  Subsampling seed (optional). Ensures reproducibility\n\
         {EMPTY}  for the same input and program version.",
         "    --seed".green(), "INT".yellow());

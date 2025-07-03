@@ -148,7 +148,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per allele [{}]\n\
         {EMPTY}  (relative to the allele length). Variants that have no known\n\
         {EMPTY}  variation in the input VCF pangenome are ignored.",
-        "-u, --unknown".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.unknown_frac));
+        "-u, --unknown".green(), "NUM".yellow(), super::fmt_def_f64(defaults.unknown_frac));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
     println!("    {}   {} (k,w)-minimizers for sequence divergence calculation [{} {}].",

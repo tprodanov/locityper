@@ -428,18 +428,17 @@ fn print_help(extended: bool) {
             "    --skip-recruit".green(), super::flag());
         println!("    {:KEY$} {:VAL$}  Number of threads, used for read recruitment [{}].\n\
             {EMPTY}  Fraction of the total number of threads, if under 1.",
-            "    --recr-threads".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.recr_threads));
+            "    --recr-threads".green(), "NUM".yellow(), super::fmt_def_f64(defaults.recr_threads));
 
         println!("\n{}", "Insert size and error profile estimation:".bold());
         println!("    {:KEY$} {:VAL$}  Ignore reads with mapping quality less than {} [{}].",
             "-q, --min-mapq".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.min_mapq));
-        println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping over {} * read length [{}].",
-            "-c, --max-clipping".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+        println!("    {:KEY$} {:VAL$}  Ignore reads with soft/hard clipping > {} * read length [{}].",
+            "-c, --max-clipping".green(), "NUM".yellow(), "NUM".yellow(),
             super::fmt_def_f64(defaults.max_clipping));
-        println!("    {:KEY$} {:VAL$}\n\
-            {EMPTY}  Two p-value thresholds for filtering recruited reads:\n\
+        println!("    {} {} Two p-value thresholds for filtering recruited reads:\n\
             {EMPTY}  on insert size [{}], and on edit distance [{}].",
-            "    --pval-thresh".green(), "FLOAT FLOAT".yellow(),
+            "    --pval-thresh".green(), "NUM NUM".yellow(),
             super::fmt_def_f64(defaults.bg_params.insert_pval),
             super::fmt_def_f64(defaults.bg_params.edit_pval));
 
@@ -453,19 +452,19 @@ fn print_help(extended: bool) {
             "    --boundary".green(), "INT".yellow(), "INT".yellow(),
             super::fmt_def(PrettyU32(defaults.bg_params.depth.boundary_size)));
         println!("    {:KEY$} {:VAL$}  Ignore windows, where less than {}% k-mers are unique [{}].",
-            "    --kmer-perc".green(), "FLOAT".yellow(), "FLOAT".yellow(),
+            "    --kmer-perc".green(), "NUM".yellow(), "NUM".yellow(),
             super::fmt_def_f64(defaults.bg_params.depth.uniq_kmer_perc));
         println!("    {:KEY$} {:VAL$}  This fraction of all windows is used in LOESS during read depth\n\
             {EMPTY}  estimation [{}]. Smaller values lead to less robust estimates,\n\
             {EMPTY}  larger values - to similar estimates across different GC-contents.",
-            "    --frac-windows".green(), "FLOAT".yellow(),
+            "    --frac-windows".green(), "NUM".yellow(),
             super::fmt_def_f64(defaults.bg_params.depth.frac_windows));
         println!("    {:KEY$} {}\n\
             {EMPTY}  Read depth estimates are blured for windows with extreme GC-content\n\
             {EMPTY}  (less than {} windows with smaller/larger GC). There, read depth\n\
             {EMPTY}  is set to the last non-extreme depth, while variance is increased\n\
             {EMPTY}  by a {} factor for each addition GC value [{} {}].",
-            "    --blur-extreme".green(), "INT FLOAT".yellow(), "INT".yellow(), "FLOAT".yellow(),
+            "    --blur-extreme".green(), "INT NUM".yellow(), "INT".yellow(), "NUM".yellow(),
             super::fmt_def(defaults.bg_params.depth.min_tail_obs),
             super::fmt_def_f64(defaults.bg_params.depth.tail_var_mult));
         println!("    {:KEY$} {:VAL$}  Estimate read depth by comparing file sizes\n\
@@ -475,7 +474,7 @@ fn print_help(extended: bool) {
         println!("\n{}", "Subsampling:".bold());
         println!("    {:KEY$} {:VAL$}  Subsample input reads by this fraction [{}].\n\
             {EMPTY}  Smaller values increase speed, but impact accuracy.",
-            "    --subsample".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
+            "    --subsample".green(), "NUM".yellow(), super::fmt_def_f64(defaults.subsampling_rate));
         println!("    {:KEY$} {:VAL$}  Subsampling seed (optional). Ensures reproducibility\n\
             {EMPTY}  for the same input and program version.",
             "    --seed".green(), "INT".yellow());
