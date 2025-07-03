@@ -65,8 +65,8 @@ impl Default for Params {
         Self {
             boundary_size: 200,
             lik_skew: 0.85,
-            prob_diff: Ln::from_log10(5.0),
-            unmapped_penalty: Ln::from_log10(-5.0),
+            prob_diff: Ln::from_log10(10.0),
+            unmapped_penalty: Ln::from_log10(-10.0),
             complexity_k: 5,
             compl_weight_calc: Some(WeightCalculator::new(0.5, 4.0).unwrap()),
             kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),

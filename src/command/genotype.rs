@@ -121,7 +121,7 @@ impl Default for Args {
             minimizer_kw: recruit::DEFAULT_MINIM_KW,
             match_frac: None,
             match_len: recruit::DEFAULT_MATCH_LEN,
-            thresh_kmer_count: 20,
+            thresh_kmer_count: 50,
             chunk_length: DEFAULT_CHUNK_LENGTH,
 
             edit_thresh: None,
