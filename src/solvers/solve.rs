@@ -208,6 +208,8 @@ pub struct Scheme {
     stages: Vec<Stage>,
 }
 
+pub const DEFAULT_STAGES: &'static str = "-S greedy:i=5k,a=1 -S anneal:i=20,a=20";
+
 impl Default for Scheme {
     fn default() -> Self {
         Self { stages: vec![
@@ -221,15 +223,13 @@ impl Default for Scheme {
                 ix: 1,
                 solver: Box::new(super::SimAnneal::default()),
                 attempts: 20,
-                in_size: 50,
+                in_size: 20,
             },
         ]}
     }
 }
 
 impl Scheme {
-    pub const DEFAULT_STAGES: &'static str = "-S greedy:i=5k,a=1 -S anneal:i=50,a=20";
-
     pub fn parse(solvers: &[String]) -> crate::Result<Self> {
         if solvers.is_empty() {
             return Ok(Self::default());

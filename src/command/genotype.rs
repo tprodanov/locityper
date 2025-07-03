@@ -121,7 +121,7 @@ impl Default for Args {
             minimizer_kw: recruit::DEFAULT_MINIM_KW,
             match_frac: None,
             match_len: recruit::DEFAULT_MATCH_LEN,
-            thresh_kmer_count: 5,
+            thresh_kmer_count: 20,
             chunk_length: DEFAULT_CHUNK_LENGTH,
 
             edit_thresh: None,
@@ -294,7 +294,7 @@ fn print_help(extended: bool) {
         println!("\n{}", "Locus genotyping:".bold());
         println!("    {:KEY$} {:VAL$}  Solvers, can be specified multiple times (see documentation).\n\
             {EMPTY}  Default: {}.",
-            "-S, --solver".green(), "STR".yellow(), super::fmt_def(Scheme::DEFAULT_STAGES));
+            "-S, --solver".green(), "STR".yellow(), super::fmt_def(solve::DEFAULT_STAGES));
         println!("    {:KEY$} {:VAL$}  Never skip intermediate solvers.",
             "    --dont-skip".green(), super::flag());
         println!("    {:KEY$} {:VAL$}  During pre-filtering, discard genotypes that have 10^{}\n\
