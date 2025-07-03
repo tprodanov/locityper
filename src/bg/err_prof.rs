@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    cmp::{min, max},
+    cmp::min,
     io::Write,
     ops::AddAssign,
     cell::RefCell,
@@ -8,13 +8,13 @@ use std::{
     path::Path,
 };
 use crate::{
-    err::{add_path},
+    err::{error, add_path, validate_param},
     seq::{
         aln::{Alignment, NamedAlignment, OpCounter},
         cigar::Operation,
     },
     math::{self, distr::BetaBinomial},
-    bg::ser::{JsonSer, json_get},
+    bg::{Technology, ser::{JsonSer, json_get}},
     algo::IntMap,
     ext,
 };
@@ -360,43 +360,96 @@ impl SingleEditDistCache {
     }
 }
 
+/// Edit distance thresholds.
+#[derive(Clone, Copy)]
+pub enum EditThresh {
+    /// Discard reads/alignments based on fraction edit / read len.
+    Fraction(f64, f64),
+    /// Discard reads/alignments based on edit distance p-values. Store 1 - pvalue = CDF.
+    PValue(f64, f64),
+}
+
+impl EditThresh {
+    pub fn parse(ty: &str, p1: f64, p2: f64) -> crate::Result<Self> {
+        match ty {
+            "frac" | "fraction" => {
+                validate_param!(0.0 <= p1 && p1 <= p2 && p2 <= 1.0,
+                    "Invalid parameters for edit distance thresholds (fraction type). \
+                    Parameters p1 = {} and p2 = {} must satisfy \
+                    condition 0.0 <= p1 <= p2 <= 1.0", p1, p2);
+                Ok(Self::Fraction(p1, p2))
+            }
+            "pval" | "pvalue" | "p-val" | "p-value" => {
+                validate_param!(0.0 <= p2 && p2 <= p1 && p1 <= 1.0,
+                    "Invalid parameters for edit distance thresholds (p-value type). \
+                    Parameters p1 = {} and p2 = {} must satisfy \
+                    condition 0.0 <= p2 <= p1 <= 1.0", p1, p2);
+                Ok(Self::Fraction(1.0 - p1, 1.0 - p2))
+            }
+            _ => Err(error!(InvalidInput, "Unknown threshold type {:?}", ty)),
+        }
+    }
+
+    /// Returns default parameters for a given sequencing technology.
+    pub fn default_for(tech: Technology) -> Self {
+        match tech {
+            Technology::Illumina => Self::Fraction(0.03, 0.06),
+            _ => Self::PValue(0.99, 0.999),
+        }
+    }
+}
+
+impl fmt::Display for EditThresh {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Self::Fraction(p1, p2) => write!(f, "frac {} {}",
+                crate::math::fmt_signif(p1, 5), crate::math::fmt_signif(p2, 5)),
+            Self::PValue(p1, p2) => write!(f, "pval {} {}",
+                crate::math::fmt_signif(1.0 - p1, 5), crate::math::fmt_signif(1.0 - p2, 5)),
+        }
+    }
+}
+
 /// For each read length, stores two edit distances: good and passable.
 pub struct EditDistCache {
+    thresh: EditThresh,
     /// Distribution of edit distance (n = read length).
     edit_distr: BetaBinomial,
-    /// 1 - pvalue.
-    edit_cdf: (f64, f64),
-    /// Adds this number to the good distance (to allow for differences between alleles).
-    good_dist_add: u32,
     /// For each read length, store two maximum allowed edit distances (good and passable).
     cache: RefCell<IntMap<u32, (u32, u32)>>,
 }
 
 impl EditDistCache {
-    pub fn new(err_prof: &ErrorProfile, good_dist_add: u32, (pval1, pval2): (f64, f64)) -> Self {
-        assert!(pval1 >= pval2);
+    pub fn new(err_prof: &ErrorProfile, thresh: EditThresh) -> Self {
         Self {
             edit_distr: err_prof.edit_distr.clone(),
             cache: RefCell::default(),
-            good_dist_add,
-            edit_cdf: (1.0 - pval1, 1.0 - pval2),
+            thresh,
+        }
+    }
+
+    /// Get thresholds without accessing the cache.
+    #[inline(always)]
+    pub fn get_anew(&self, read_len: u32) -> (u32, u32) {
+        match self.thresh {
+            EditThresh::Fraction(p1, p2) => {
+                let read_len = read_len as f64;
+                ((read_len * p1) as u32, (read_len * p2) as u32)
+            }
+            EditThresh::PValue(p1, p2) => self.edit_distr.inv_cdf2(read_len, p1, p2),
         }
     }
 
     /// Returns the maximum allowed edit distance for the given read length.
     /// Values are cached for future use.
     pub fn get(&self, read_len: u32) -> (u32, u32) {
-        *self.cache.borrow_mut().entry(read_len).or_insert_with(|| {
-            let (mut dist1, dist2) = self.edit_distr.inv_cdf2(read_len, self.edit_cdf.0, self.edit_cdf.1);
-            dist1 += self.good_dist_add;
-            (dist1, max(dist1, dist2))
-        })
+        *self.cache.borrow_mut().entry(read_len).or_insert_with(|| self.get_anew(read_len))
     }
 
     pub fn describe_with(&self, mean_read_len: f64) {
         let read_len = math::round_signif(mean_read_len, 2).round() as u32;
         let (dist1, dist2) = self.get(read_len);
-        log::info!("Edit distances for read length {}: {} (good) and {} (passable)",
-            read_len, dist1, dist2);
+        log::info!("Edit distance thresholds for read length {}: {} (good) and {} (passable)", read_len, dist1, dist2);
     }
 }

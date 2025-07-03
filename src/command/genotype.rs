@@ -25,7 +25,7 @@ use crate::{
     },
     bg::{
         TECHNOLOGIES, BgDistr, Technology, SequencingInfo,
-        err_prof::EditDistCache,
+        err_prof::{EditThresh, EditDistCache},
     },
     ext::{
         self,
@@ -91,6 +91,7 @@ struct Args {
     thresh_kmer_count: KmerCount,
     chunk_length: u64,
 
+    edit_thresh: Option<EditThresh>,
     assgn_params: AssgnParams,
     solvers: Vec<String>,
 }
@@ -123,6 +124,7 @@ impl Default for Args {
             thresh_kmer_count: 5,
             chunk_length: DEFAULT_CHUNK_LENGTH,
 
+            edit_thresh: None,
             assgn_params: Default::default(),
             solvers: Vec::new(),
         }
@@ -230,14 +232,29 @@ fn print_help(extended: bool) {
             super::fmt_def(PrettyU64(defaults.chunk_length)));
 
         println!("\n{}", "Model parameters:".bold());
+        println!("    {:KEY$} {:VAL$}\n\
+            {EMPTY}  Discard reads that do not pass the first threshold, and read alignments\n\
+            {EMPTY}  that do not pass the second threshold. Format: frac|pval thresh1 thresh2.\n\
+            {EMPTY}  {}: {} (compare edit dist. with fraction of read len.)\n\
+            {EMPTY}  long r.:  {} (check edit dist. p-value).",
+            "    --edit-thresh".green(), "STR FLOAT FLOAT".yellow(),
+            "illumina".cyan(), super::fmt_def(EditThresh::default_for(Technology::Illumina)),
+            super::fmt_def(EditThresh::default_for(Technology::HiFi)));
+        println!("    {} {}  In regions with complexity < {} [{}] allow short reads with\n\
+            {EMPTY}  edit distance up to {} of read length [{}].",
+            "    --poor-compl".green(), "FLOAT FLOAT".yellow(),
+            "FLOAT_1".yellow(), super::fmt_def_f64(defaults.assgn_params.poor_compl),
+            "FLOAT_2".yellow(), super::fmt_def_f64(defaults.assgn_params.poor_compl_edit),
+        ); // TODO: NUM instead of FLOAT?
+        println!("    {} {}  Hard and soft thresholds for the number of region-specific\n\
+            {EMPTY}  non-overlapping k-mers per read/read pair [{} {}].",
+            "    --read-kmers".green(), "INT INT".yellow(),
+            super::fmt_def(defaults.assgn_params.kmer_hard_thresh),
+            super::fmt_def(defaults.assgn_params.kmer_soft_thresh));
+
+        println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. May be very slow for ploidy over 2.",
             "-P, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
-        println!("    {:KEY$} {:VAL$}\n\
-            {EMPTY}  Two p-value thresholds on edit distance:\n\
-            {EMPTY}  for good alignments [{}], and for passable alignments [{}].",
-            "    --edit-pval".green(), "FLOAT FLOAT".yellow(),
-            super::fmt_def_f64(defaults.assgn_params.edit_pvals.0),
-            super::fmt_def_f64(defaults.assgn_params.edit_pvals.1));
         println!("    {:KEY$} {:VAL$}  Ignore read alignments that are 10^{} times worse than\n\
             {EMPTY}  the best alignment [{}].",
             "-D, --prob-diff".green(), "FLOAT".yellow(), "FLOAT".yellow(),
@@ -269,15 +286,6 @@ fn print_help(extended: bool) {
             "    --reg-weights".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
             "    --min-weight".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
-        println!("    {:KEY$} {:VAL$}  Downweight, but allow poor alignments for short reads\n\
-            {EMPTY}  in regions with complexity under {} [{}]. Use 0 to disable.",
-            "    --poor-compl".green(), "FLOAT".yellow(), "FLOAT".yellow(),
-            super::fmt_def_f64(defaults.assgn_params.compl_poor_aln_thresh));
-        println!("    {} {}  Hard and soft thresholds for the number of\n\
-            {EMPTY}  region-specific non-overlapping k-mers per read/read pair [{} {}].",
-            "    --read-kmers".green(), "INT INT".yellow(),
-            super::fmt_def(defaults.assgn_params.kmer_hard_thresh),
-            super::fmt_def(defaults.assgn_params.kmer_soft_thresh));
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
             {EMPTY}  matter more; Positive: read depth matters more.",
             "    --skew".green(), "FLOAT".yellow(), super::fmt_def_f64(defaults.assgn_params.lik_skew));
@@ -412,18 +420,17 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                         WeightCalculator::new(first.parse()?, parser.value()?.parse()?)?);
                 }
             }
-            Long("poor-compl") | Long("poor-complexity") =>
-                args.assgn_params.compl_poor_aln_thresh = parser.value()?.parse()?,
+            Long("poor-compl") | Long("poor-complexity") => {
+                args.assgn_params.poor_compl = parser.value()?.parse()?;
+                args.assgn_params.poor_compl_edit = parser.value()?.parse()?;
+            }
             Long("min-weight") => args.assgn_params.min_weight = parser.value()?.parse()?,
             Long("read-kmers") => {
                 args.assgn_params.kmer_hard_thresh = parser.value()?.parse()?;
                 args.assgn_params.kmer_soft_thresh = parser.value()?.parse()?;
             }
-            Long("edit-pval") | Long("edit-pvalue") =>
-                args.assgn_params.edit_pvals = (
-                    parser.value()?.parse()?,
-                    parser.value()?.parse()?,
-                ),
+            Long("edit-thresh") => args.edit_thresh = Some(EditThresh::parse(
+                &parser.value()?.parse::<String>()?, parser.value()?.parse()?, parser.value()?.parse()?)?),
 
             Short('S') | Long("solver") => args.solvers.push(parser.value()?.parse()?),
             Long("dont-skip") => args.assgn_params.dont_skip = true,
@@ -1066,9 +1073,8 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         args.match_frac.unwrap_or_else(|| tech.default_match_frac(bg_distr.insert_distr().is_paired_end())),
         args.match_len, args.thresh_kmer_count)?;
 
-    // Add 1 to good edit distance.
-    const GOOD_DISTANCE_ADD: u32 = 1;
-    let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(), GOOD_DISTANCE_ADD, args.assgn_params.edit_pvals);
+    let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(),
+        args.edit_thresh.clone().unwrap_or_else(|| EditThresh::default_for(tech)));
     edit_dist_cache.describe_with(bg_distr.seq_info().mean_read_len());
 
     validate_param!(args.in_files.has_indexed_alignment()

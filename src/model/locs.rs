@@ -1,5 +1,5 @@
 use std::{
-    cmp::min,
+    cmp::{min, max},
     fmt::{self, Write as FmtWrite},
     sync::{Arc, OnceLock},
     io::{self, Write},
@@ -152,7 +152,7 @@ struct FilteredReader<'a, R: bam::Read> {
     found_alns: IntMap<TwoU32, usize>,
     /// Unmapped penalty + probability difference.
     prob_thresh: f64,
-    compl_poor_aln_thresh: f64,
+    params: &'a super::Params,
 }
 
 #[inline]
@@ -178,8 +178,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
             err_prof: bg_distr.error_profile(),
             prob_thresh: params.unmapped_penalty - params.prob_diff,
-            compl_poor_aln_thresh: params.compl_poor_aln_thresh,
-            reader, record, contigs, contig_infos, edit_dist_cache, has_more,
+            reader, record, contigs, contig_infos, edit_dist_cache, has_more, params,
         })
     }
 
@@ -291,14 +290,13 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         let read_len = alns[start_len].distance().unwrap().read_len();
-        // let (good_dist, mut passable_dist) = self.edit_dist_cache.get(read_len);
-        let good_dist = (0.03 * read_len as f64).ceil() as u32;
-        let mut passable_dist = good_dist * 2;
+        let (good_dist, mut passable_dist) = self.edit_dist_cache.get(read_len);
         let mut threshold_dist = good_dist;
 
-        if neighb_complexity <= self.compl_poor_aln_thresh {
-            threshold_dist = min(threshold_dist, 7 * read_len / 10);
-            passable_dist += 2 * (threshold_dist - good_dist);
+        // neighb_complexity will be 1.0 for long reads.
+        if neighb_complexity <= self.params.poor_compl {
+            threshold_dist = max(threshold_dist, (self.params.poor_compl_edit * read_len as f64) as u32);
+            passable_dist += threshold_dist - good_dist;
         }
         if best_edit > threshold_dist {
             alns.truncate(start_len);

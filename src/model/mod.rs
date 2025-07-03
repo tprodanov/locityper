@@ -26,12 +26,12 @@ pub struct Params {
     pub prob_diff: f64,
     /// Unmapped reads receive minimum alignment probability for this read PLUS this penalty.
     pub unmapped_penalty: f64,
-    /// Edit distance p-value thresholds, first for good alignments, second for passable.
-    pub edit_pvals: (f64, f64),
     /// Calculate linguistic complexity as fraction of non-repetitive k-mers.
     pub complexity_k: u8,
-    /// Allow worse alignments in regions with low complexity.
-    pub compl_poor_aln_thresh: f64,
+    /// Poor complexity threshold.
+    pub poor_compl: f64,
+    /// Edit distance threshold as a fraction of read length in regions of low complexity.
+    pub poor_compl_edit: f64,
     /// Two window weight calculators: one for linguistic complexity of the window
     /// and another for the fraction of region-specific k-mers.
     pub compl_weight_calc: Option<WeightCalculator>,
@@ -67,13 +67,13 @@ impl Default for Params {
             lik_skew: 0.85,
             prob_diff: Ln::from_log10(5.0),
             unmapped_penalty: Ln::from_log10(-5.0),
-            edit_pvals: (0.01, 0.001),
             complexity_k: 5,
             compl_weight_calc: Some(WeightCalculator::new(0.5, 4.0).unwrap()),
             kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),
             kmer_soft_thresh: 5,
             kmer_hard_thresh: 1,
-            compl_poor_aln_thresh: 0.5,
+            poor_compl: 0.5,
+            poor_compl_edit: 0.7,
             min_weight: 0.001,
 
             tweak: None,
@@ -108,18 +108,14 @@ impl Params {
         }
         validate_param!(self.unmapped_penalty < 0.0 && self.unmapped_penalty.is_normal(),
             "Unmapped penalty ({:.4}) must be negative", Ln::to_log10(self.unmapped_penalty));
-        for &pval in &[self.edit_pvals.0, self.edit_pvals.1] {
-            validate_param!(0.0 < pval && pval < 0.5, "p-value threshold ({}) must be within (0, 0.5)", pval);
-        }
-        validate_param!(self.edit_pvals.1 <= self.edit_pvals.0,
-            "Second p-value threshold ({}) must not be greater than the first threshold ({})",
-            self.edit_pvals.1, self.edit_pvals.0);
         validate_param!(0.0 <= self.min_weight && self.min_weight <= 0.5,
             "Minimal weight ({}) must be within [0, 0.5].", self.min_weight);
         validate_param!(0 < self.complexity_k && self.complexity_k <= u32::MAX_KMER_SIZE,
             "Complexity k size ({}) must be between 1 and {}", self.complexity_k, u32::MAX_KMER_SIZE);
-        validate_param!(0.0 <= self.compl_poor_aln_thresh && self.compl_poor_aln_thresh <= 1.0,
-            "Complexity threshold ({}) must be between 0 and 1.", self.compl_poor_aln_thresh);
+        validate_param!(0.0 <= self.poor_compl && self.poor_compl <= 1.0,
+            "Complexity threshold ({}) must be between 0 and 1.", self.poor_compl);
+        validate_param!(0.0 <= self.poor_compl_edit && self.poor_compl_edit <= 1.0,
+            "Edit distance threshold ({}) in low complexity regions must be between 0 and 1.", self.poor_compl_edit);
 
         for &cn in &self.alt_cn {
             validate_param!(cn > 0.0 && cn != 1.0,
