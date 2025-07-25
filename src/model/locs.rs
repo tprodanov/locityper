@@ -244,45 +244,53 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             } else {
                 cigar.hard_to_soft();
             }
-            let mut aln = Alignment::new(&self.record, cigar, read_end, Arc::clone(&self.contigs), f64::NAN);
-            let contig_len = self.contigs.get_len(aln.contig_id());
-            let read_prof = aln.count_region_operations_fast(contig_len);
-            let dist = read_prof.edit_distance();
-            best_edit = best_edit.min(dist.edit());
-            let aln_prob = self.err_prof.ln_prob(&read_prof);
-            max_prob = aln_prob.max(max_prob);
-            aln.set_distance(dist);
-            aln.set_ln_prob(aln_prob);
 
-            write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
-                dist, Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
-            if primary {
-                neighb_complexity = if self.are_short_reads { self.contig_infos.neighb_complexity(&aln) } else { 1.0 };
-                write!(dbg_writer, "\t{:.5}\t{}", neighb_complexity, read_data.name).map_err(add_path!(!))?;
-                primary = false;
-            }
-            writeln!(dbg_writer).map_err(add_path!(!))?;
+            if self.record.is_unmapped() {
+                // Do nothing
+            } else if cigar.is_empty() {
+                log::warn!("    Read {} is mapped (flag {}) and has empty CIGAR; skipping this alignment",
+                    std::str::from_utf8(self.record.qname()).unwrap(), self.record.flags());
+            } else {
+                let mut aln = Alignment::new(&self.record, cigar, read_end, Arc::clone(&self.contigs), f64::NAN);
+                let contig_len = self.contigs.get_len(aln.contig_id());
+                let read_prof = aln.count_region_operations_fast(contig_len);
+                let dist = read_prof.edit_distance();
+                aln.set_distance(dist);
+                let aln_prob = self.err_prof.ln_prob(&read_prof);
+                aln.set_ln_prob(aln_prob);
+                best_edit = best_edit.min(dist.edit());
+                max_prob = aln_prob.max(max_prob);
 
-            match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
-                Entry::Occupied(entry) => {
-                    let aln_ix = *entry.get();
-                    // Already seen this alignment.
-                    if aln_prob > alns[aln_ix].ln_prob() {
-                        alns[aln_ix] = aln;
-                    }
+                write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
+                    dist, Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
+                if primary {
+                    neighb_complexity = if self.are_short_reads { self.contig_infos.neighb_complexity(&aln) }
+                                        else { 1.0 };
+                    write!(dbg_writer, "\t{:.5}\t{}", neighb_complexity, read_data.name).map_err(add_path!(!))?;
+                    primary = false;
                 }
-                Entry::Vacant(entry) => {
-                    entry.insert(alns.len());
-                    alns.push(aln);
+                writeln!(dbg_writer).map_err(add_path!(!))?;
+
+                match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
+                    Entry::Occupied(entry) => {
+                        let aln_ix = *entry.get();
+                        // Already seen this alignment.
+                        if aln_prob > alns[aln_ix].ln_prob() {
+                            alns[aln_ix] = aln;
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(alns.len());
+                        alns.push(aln);
+                    }
                 }
             }
 
             if self.reader.read(&mut self.record).transpose()?.is_none() {
                 self.has_more = false;
                 break;
-            }
-            // Next primary record or unmapped read. Either way, it will be a new read or new read end.
-            if is_primary(&self.record) {
+            } else if is_primary(&self.record) {
+                // Next primary record or unmapped read. Either way, it will be a new read or new read end.
                 break;
             }
             assert_eq!(self.record.qname(), read_data.name.as_bytes(),

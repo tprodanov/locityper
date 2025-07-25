@@ -227,7 +227,7 @@ impl Cigar {
 
     /// Replace hard clipping with soft.
     pub fn hard_to_soft(&mut self) {
-        let first = &mut self.tuples[0];
+        let Some(first) = self.tuples.first_mut() else { return };
         if first.op == Operation::Hard {
             first.op = Operation::Soft;
             self.qlen += first.len;
