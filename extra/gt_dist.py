@@ -270,12 +270,13 @@ def calc_gt_distances(genotypes, distances, out, max_entries):
     for gt_str, genotype in genotypes:
         pred_dists = distances.all_distances(genotype)
         if pred_dists is None:
-            out.write(f'{gt_str}\t*\tNA\tNA\tNA\tNA\n')
+            out.write(f'{gt_str}\t*\tNA\tNA\tNA\tNA\tNA\n')
             continue
         pred_dists = sorted(pred_dists.items(), key=operator.itemgetter(1))
         for query, (div, edit, size) in pred_dists[:max_entries]:
             loo = 'T' if is_loo(genotype, query) else 'F'
-            out.write(f'{gt_str}\t{",".join(query)}\t{loo}\t{edit}\t{size}\t{div:.9f}\n')
+            qv = np.inf if div == 0 else -10 * np.log10(div)
+            out.write(f'{gt_str}\t{",".join(query)}\t{loo}\t{edit}\t{size}\t{div:.9f}\t{qv:.4f}\n')
 
 
 def main():
@@ -304,7 +305,7 @@ def main():
     max_entries = args.max_entries or sys.maxsize
     with common.open(args.output, 'w') as out:
         out.write(f'# {" ".join(sys.argv)}\n')
-        out.write('target\tquery\tloo\tedit_dist\taln_size\tdivergence\n')
+        out.write('target\tquery\tloo\tedit_dist\taln_size\tdivergence\tqv\n')
         calc_gt_distances(genotypes, distances, out, max_entries)
 
 

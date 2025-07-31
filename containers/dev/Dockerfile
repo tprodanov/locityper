@@ -38,7 +38,7 @@ RUN curl -L https://github.com/ksahlin/strobealign/archive/refs/tags/v${STROBE_V
     cp build/strobealign ${PREFIX}/bin
 
 WORKDIR /repos
-RUN git clone https://github.com/tprodanov/locityper && \
+RUN git clone --single-branch --branch dev https://github.com/tprodanov/locityper && \
     git clone https://github.com/smarco/WFA2-lib locityper/WFA2 && \
     cargo install --no-track --verbose --root "${PREFIX}" --path locityper
 

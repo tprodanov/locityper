@@ -235,10 +235,10 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}\n\
             {EMPTY}  Discard reads that do not pass the first threshold, and read alignments\n\
             {EMPTY}  that do not pass the second threshold. Format: frac|pval thresh1 thresh2.\n\
-            {EMPTY}  {}: {} (compare edit dist. with fraction of read len.)\n\
-            {EMPTY}  long r.:  {} (check edit dist. p-value).",
+            {EMPTY}  illumina: {} (compare edit dist. with fraction of read len.)\n\
+            {EMPTY}  hifi/ont: {} (check edit distance p-value).",
             "    --edit-thresh".green(), "STR NUM NUM".yellow(),
-            "illumina".cyan(), super::fmt_def(EditThresh::default_for(Technology::Illumina)),
+            super::fmt_def(EditThresh::default_for(Technology::Illumina)),
             super::fmt_def(EditThresh::default_for(Technology::HiFi)));
         println!("    {} {}  In regions with complexity < {} [{}] allow short reads with\n\
             {EMPTY}  edit distance up to {} of read length [{}].",
