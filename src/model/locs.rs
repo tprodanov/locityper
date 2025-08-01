@@ -21,7 +21,10 @@ use crate::{
     },
     algo::{bisect, TwoU32, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
     math::Ln,
-    model::windows::ContigInfos,
+    model::{
+        Polarity,
+        windows::ContigInfos,
+    },
     ext::{
         sys::GzFile,
         vec::VecExt,
@@ -64,6 +67,7 @@ pub struct MateData {
     qualities: Vec<u8>,
     opp_qualities: OnceLock<Vec<u8>>,
     unique_kmers: u16,
+    unmapped_prob: f64,
 }
 
 impl MateData {
@@ -76,6 +80,7 @@ impl MateData {
             qualities: if record.qual().is_empty() { vec![255; record.seq().len()] } else { record.qual().to_vec() },
             opp_qualities: OnceLock::new(),
             unique_kmers: 0,
+            unmapped_prob: f64::NAN,
         }
     }
 
@@ -260,11 +265,11 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
                 let contig_len = self.contigs.get_len(aln.contig_id());
                 let read_prof = aln.count_region_operations_fast(contig_len);
                 let dist = read_prof.edit_distance();
-                aln.set_distance(dist);
                 let aln_prob = self.err_prof.ln_prob(&read_prof);
+                aln.set_distance(dist);
                 aln.set_ln_prob(aln_prob);
                 best_edit = best_edit.min(dist.edit());
-                max_prob = aln_prob.max(max_prob);
+                max_prob = max_prob.max(aln_prob);
 
                 write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
                     dist, Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
@@ -311,15 +316,27 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             threshold_dist = max(threshold_dist, (self.params.poor_compl_edit * read_len as f64) as u32);
             passable_dist += threshold_dist - good_dist;
         }
+        writeln!(dbg_writer, "#dist {}, {}", threshold_dist, passable_dist).map_err(add_path!(!))?;
         if best_edit > threshold_dist {
             alns.truncate(start_len);
             return Ok(false);
         }
 
-        alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
-        VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() >= passable_dist);
+        VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() <= passable_dist);
         read_data.weight *= if best_edit <= good_dist
             { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
+
+        let mut min_prob = f64::INFINITY;
+        for aln in alns[start_len..].iter_mut() {
+            let p = aln.ln_prob() - max_prob;
+            min_prob = min_prob.min(p);
+            aln.set_ln_prob(p);
+        };
+        let unmapped_prob = self.params.unmapped_penalty.1
+            + if self.params.unmapped_penalty.0 == Polarity::Best { 0.0 } else { min_prob };
+        read_data.mates[read_end.ix()].as_mut().unwrap().unmapped_prob = unmapped_prob;
+        writeln!(dbg_writer, "{}\t{}\t*\t*\t{:.2}", name_hash, read_end, Ln::to_log10(max_prob + unmapped_prob))
+            .map_err(add_path!(!))?;
         Ok(true)
     }
 
@@ -578,17 +595,15 @@ fn identify_paired_end_alignments(
     params: &super::Params,
 ) -> GrouppedAlignments
 {
+    let insert_penalty = insert_distr.insert_penalty();
+    let unmapped_prob1 = read_data.mate_data(ReadEnd::First).unmapped_prob + insert_penalty;
+    let unmapped_prob2 = read_data.mate_data(ReadEnd::Second).unmapped_prob + insert_penalty;
+
     // First: by contig (decr.), second: by read end (decr.), third: by aln probability (incr.).
     tmp_alns.sort_unstable_by(|a, b|
         (b.contig_id(), b.read_end(), a.ln_prob()).partial_cmp(&(a.contig_id(), a.read_end(), b.ln_prob())).unwrap());
     let mut alignments = Vec::new();
     let mut aln_pairs = Vec::new();
-
-    let insert_penalty = insert_distr.insert_penalty();
-    let unmapped_prob1 = params.unmapped_penalty * f64::from(read_data.mate_data(ReadEnd::First).len())
-        + insert_penalty;
-    let unmapped_prob2 = params.unmapped_penalty * f64::from(read_data.mate_data(ReadEnd::Second).len())
-        + insert_penalty;
 
     let mut curr_contig = ContigId::new(0);
     // First-end alignments for this contig are stored in i..j,
@@ -675,7 +690,7 @@ fn identify_single_end_alignments(
         aln.ln_prob *= weight;
     }
     GrouppedAlignments {
-        unmapped_prob: weight * params.unmapped_penalty * f64::from(read_data.mate_data(ReadEnd::First).len()),
+        unmapped_prob: weight * read_data.mate_data(ReadEnd::First).unmapped_prob,
         read_data, alignments, aln_pairs, weight,
     }
 }
@@ -888,8 +903,6 @@ impl AllAlignments {
                 identify_single_end_alignments(read_data, &mut tmp_alns,
                     max_alns, contig_infos, params)
             };
-            writeln!(dbg_writer1, "{}\t*\t*\t*\t{:.2}", groupped_alns.read_data.name_hash,
-                Ln::to_log10(groupped_alns.unmapped_prob())).map_err(add_path!(!))?;
             // TODO: Rethink this, reads may be needed for read depth!
             if groupped_alns.weight() >= params.min_weight {
                 reads.push(groupped_alns);

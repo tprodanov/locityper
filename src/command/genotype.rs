@@ -33,6 +33,7 @@ use crate::{
         fmt::{PrettyU32, PrettyU64, PrettyUsize},
     },
     model::{
+        self,
         Params as AssgnParams,
         locs::AllAlignments,
         windows::{ContigInfos, WeightCalculator},
@@ -257,10 +258,13 @@ fn print_help(extended: bool) {
         println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. Ploidy over 2 currently not tested.",
             "-P, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
-        println!("    {:KEY$} {:VAL$}  Penalize unmapped read alignments by this value\n\
-            {EMPTY}  for each 100bp of read length [{}].",
+        println!("    {:KEY$} {:VAL$}  Log10 penalty for unmapped read alignments\n\
+            {EMPTY}  Default: {}.",
             "-U, --unmapped".green(), "NUM".yellow(),
-            super::fmt_def_f64(-100.0 * Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
+            super::describe_defaults(TECHNOLOGIES.iter(), |t| t.to_string(), |t| {
+                    let (polarity, val) = model::default_unmapped_penalty(**t);
+                    format!("{} {}", polarity, crate::math::fmt_signif(Ln::to_log10(val).abs(), 3))
+                }));
         println!("    {:KEY$} {:VAL$}  Calculate linguistic complexity as a fraction\n\
             {EMPTY}  of non-repeated k-mers of this size [{}].",
             "    --complexity".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.complexity_k));
@@ -399,8 +403,10 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             }
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
-                // 0.01 * ... because in help message it is per 100bp, and here per bp.
-                args.assgn_params.unmapped_penalty = Ln::from_log10(-0.01 * parser.value()?.parse::<f64>()?),
+                args.assgn_params.unmapped_penalty = (
+                    parser.value()?.parse::<model::Polarity>()?,
+                    -Ln::from_log10(parser.value()?.parse::<f64>()?).abs(),
+                ),
             Long("complexity") => args.assgn_params.complexity_k = parser.value()?.parse()?,
             Long("kmers-weight") => {
                 let first = parser.value()?;
@@ -1072,6 +1078,9 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         args.minimizer_kw,
         args.match_frac.unwrap_or_else(|| tech.default_match_frac(bg_distr.insert_distr().is_paired_end())),
         args.match_len, args.thresh_kmer_count)?;
+    if args.assgn_params.unmapped_penalty.1.is_nan() {
+        args.assgn_params.unmapped_penalty = model::default_unmapped_penalty(tech);
+    }
 
     let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(),
         args.edit_thresh.clone().unwrap_or_else(|| EditThresh::default_for(tech)));

@@ -54,11 +54,11 @@ impl VecExt {
         start: usize,
         pred: impl Fn(&T) -> bool,
     ) {
-        let mut i = v.len();
-        while i > start && i <= v.len() {
-            i -= 1;
+        let mut i = start;
+        while i < v.len() {
             if !pred(&v[i]) {
                 v.swap_remove(i);
+            } else {
                 i += 1;
             }
         }
@@ -210,6 +210,12 @@ impl IterExt {
     pub fn max(it: impl Iterator<Item = f64>) -> f64 {
         it.fold(f64::NEG_INFINITY, f64::max)
     }
+
+    // /// Returns minimal f64 value across the iterator.
+    // #[inline]
+    // pub fn min(it: impl Iterator<Item = f64>) -> f64 {
+    //     it.fold(f64::INFINITY, f64::min)
+    // }
 
     // /// Finds an index of the minimal value in the iterator and the value itself.
     // /// If the minimal value appears several times, returns the index of the first value.

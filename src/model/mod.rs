@@ -4,6 +4,10 @@ pub mod assgn;
 pub mod distr_cache;
 pub mod bam;
 
+use std::{
+    fmt,
+    str::FromStr,
+};
 use crate::{
     math::{
         Ln,
@@ -11,8 +15,49 @@ use crate::{
     },
     err::{validate_param},
     seq::kmers::Kmer,
+    bg::Technology,
 };
 use windows::WeightCalculator;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Polarity {
+    Best,
+    Worst,
+}
+
+impl Polarity {
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Self::Best => "best",
+            Self::Worst => "worst",
+        }
+    }
+}
+
+impl FromStr for Polarity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "best" => Ok(Self::Best),
+            "worst" => Ok(Self::Worst),
+            _ => Err(format!("Unknown polarity {:?}", s)),
+        }
+    }
+}
+
+impl fmt::Display for Polarity {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.to_str())
+    }
+}
+
+pub fn default_unmapped_penalty(tech: Technology) -> (Polarity, f64) {
+    match tech {
+        Technology::Illumina => (Polarity::Best, Ln::from_log10(-10.0)),
+        Technology::HiFi | Technology::PacBio | Technology::Nanopore => (Polarity::Worst, Ln::from_log10(-20.0)),
+    }
+}
 
 /// Read depth model parameters.
 #[derive(Clone, Debug)]
@@ -24,8 +69,8 @@ pub struct Params {
     /// For each read pair, all alignments to a specific genotype,
     /// less probable than `best_prob - prob_diff` are discarded.
     pub prob_diff: f64,
-    /// Unmapped reads receive this penalty * read length.
-    pub unmapped_penalty: f64,
+    /// Unmapped reads are penalized by float value either relative to the best or to the worst retained alignment.
+    pub unmapped_penalty: (Polarity, f64),
     /// Calculate linguistic complexity as fraction of non-repetitive k-mers.
     pub complexity_k: u8,
     /// Poor complexity threshold.
@@ -66,7 +111,7 @@ impl Default for Params {
             boundary_size: 200,
             lik_skew: 0.85,
             prob_diff: Ln::from_log10(10.0),
-            unmapped_penalty: Ln::from_log10(-0.05),
+            unmapped_penalty: (Polarity::Best, f64::NAN),
             complexity_k: 5,
             compl_weight_calc: Some(WeightCalculator::new(0.5, 4.0).unwrap()),
             kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),
@@ -106,10 +151,6 @@ impl Params {
         if self.prob_diff < 1.0 {
             log::warn!("Note that probability difference ({}) is in log-10 space", Ln::to_log10(self.prob_diff));
         }
-        // From CLI positive value, scaled by 100 is taken.
-        validate_param!(self.unmapped_penalty < 0.0 && self.unmapped_penalty.is_normal(),
-            "Unmapped penalty ({:.4}) must be positive. Perhaps, old definition is used (<v1.0)",
-            -100.0 * Ln::to_log10(self.unmapped_penalty));
         validate_param!(0.0 <= self.min_weight && self.min_weight <= 0.5,
             "Minimal weight ({}) must be within [0, 0.5].", self.min_weight);
         validate_param!(0 < self.complexity_k && self.complexity_k <= u32::MAX_KMER_SIZE,
