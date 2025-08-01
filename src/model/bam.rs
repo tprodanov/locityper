@@ -90,6 +90,7 @@ fn create_record(
     opt_aln: Option<&Alignment>,
     read_data: &ReadData,
     read_end: ReadEnd,
+    total_prob: f64,
     cigar_buffer: &mut bam::record::CigarString,
 ) -> htslib::errors::Result<bam::Record>
 {
@@ -122,8 +123,11 @@ fn create_record(
         if let Some(dist) = aln.distance() {
             record.push_aux(EDIT_TAG, bam::record::Aux::U32(dist.edit()))?;
         }
-        record.push_aux(ALN_LIK_TAG, bam::record::Aux::Float(Ln::to_log10(aln.ln_prob()) as f32))?;
+        if aln.ln_prob() != total_prob {
+            record.push_aux(INIT_LIK_TAG, bam::record::Aux::Float(Ln::to_log10(aln.ln_prob()) as f32))?;
+        }
     }
+    record.push_aux(ALN_LIK_TAG, bam::record::Aux::Float(Ln::to_log10(total_prob) as f32))?;
     record.push_aux(UNIQ_KMERS_TAG, bam::record::Aux::U16(mate_data.unique_kmers()))?;
     Ok(record)
 }
@@ -134,33 +138,44 @@ const EDIT_TAG: &'static [u8; 2] = b"NM";
 const PROB_TAG: &'static [u8; 2] = b"pr";
 const USED_TAG: &'static [u8; 2] = b"us";
 const UNIQ_KMERS_TAG: &'static [u8; 2] = b"uk";
+/// Single-end likelihood.
+const INIT_LIK_TAG: &'static [u8; 2] = b"il";
 const ALN_LIK_TAG: &'static [u8; 2] = b"al";
 
 /// For each alignment pair, sums corresponding `assign_counts`.
 /// Alignment pair may appear several times if the same contig appears multiple times in the genotype.
+///
+/// Returns key for the primary alignment.
 fn count_alignments<const PAIRED: bool>(
     read_alns: &[ReadGtAlns],
     assgn_counts: &mut impl Iterator<Item = u16>,
-    buffer1: &mut IntMap<TwoU32, u16>,
-    buffer2: &mut Vec<(TwoU32, u16)>,
-) {
-    buffer1.clear();
+    buffer: &mut IntMap<TwoU32, (u16, f64)>,
+) -> TwoU32
+{
+    buffer.clear();
+    let mut best_ij = TwoU32(UNMAPPED, UNMAPPED);
+    let mut best_val = (0, f64::NEG_INFINITY);
     for aln in read_alns {
-        let (i, j) = match aln.parent() {
-            None => (UNMAPPED, UNMAPPED),
-            Some((_, aln_pair)) => (
+        let ij = match aln.parent() {
+            None => TwoU32(UNMAPPED, UNMAPPED),
+            Some((_, aln_pair)) => TwoU32(
                 aln_pair.ix1().unwrap_or(UNMAPPED),
                 if PAIRED { aln_pair.ix2().unwrap_or(UNMAPPED) } else { UNMAPPED },
             ),
         };
         let count = assgn_counts.next().expect("Not enough assignment counts");
+        let ln_prob = aln.ln_prob();
         if count > 0 {
-            *buffer1.entry(TwoU32(i, j)).or_default() += count;
+            let val = buffer.entry(ij)
+                .and_modify(|v| v.0 += count)
+                .or_insert((count, ln_prob));
+            if *val > best_val {
+                best_ij = ij;
+                best_val = *val;
+            }
         }
     }
-    buffer2.clear();
-    buffer2.extend(buffer1.iter().map(|(&u, &v)| (u, v)));
-    buffer2.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    best_ij
 }
 
 /// Connect two mates: sets corresponding flags and mate positions.
@@ -215,21 +230,19 @@ fn generate_paired_end_records(
     records: &mut Vec<bam::Record>,
     assgn_counts: &mut impl Iterator<Item = u16>,
     attempts: u16,
-    buffer1: &mut IntMap<TwoU32, u16>,
-    buffer2: &mut Vec<(TwoU32, u16)>,
-    buffer3: &mut bam::record::CigarString,
+    buffer1: &mut IntMap<TwoU32, (u16, f64)>,
+    buffer2: &mut bam::record::CigarString,
 ) -> htslib::errors::Result<()>
 {
-    count_alignments::<true>(read_alns, assgn_counts, buffer1, buffer2);
+    let best_ij = count_alignments::<true>(read_alns, assgn_counts, buffer1);
     let read_data = groupped_alns.read_data();
-    let mut secondary = false;
-    for &(TwoU32(i, j), count) in buffer2.iter() {
-        let opt_aln1 = if i == UNMAPPED { None } else { Some(groupped_alns.ith_aln(i)) };
-        let opt_aln2 = if j == UNMAPPED { None } else { Some(groupped_alns.ith_aln(j)) };
+    for (&ij, &(count, ln_prob)) in buffer1.iter() {
+        let opt_aln1 = if ij.0 == UNMAPPED { None } else { Some(groupped_alns.ith_aln(ij.0)) };
+        let opt_aln2 = if ij.1 == UNMAPPED { None } else { Some(groupped_alns.ith_aln(ij.1)) };
         let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data,
-            ReadEnd::First, buffer3)?;
+            ReadEnd::First, ln_prob, buffer2)?;
         let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data,
-            ReadEnd::Second, buffer3)?;
+            ReadEnd::Second, ln_prob, buffer2)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record1.set_mapq(mapq);
         record2.set_mapq(mapq);
@@ -237,11 +250,10 @@ fn generate_paired_end_records(
         record2.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
         record1.push_aux(USED_TAG, bam::record::Aux::Char(b'T'))?;
         record2.push_aux(USED_TAG, bam::record::Aux::Char(b'T'))?;
-        if secondary {
+        if ij != best_ij {
             record1.set_secondary();
             record2.set_secondary();
         }
-        secondary = true;
         connect_pair(&mut record1, &mut record2, calc_insert_size(opt_aln1, opt_aln2));
         records.push(record1);
         records.push(record2);
@@ -264,8 +276,10 @@ fn generate_unused_paired_end_records(
     for pair in aln_pairs {
         let opt_aln1 = pair.ix1().map(|i| groupped_alns.ith_aln(i));
         let opt_aln2 = pair.ix2().map(|j| groupped_alns.ith_aln(j));
-        let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data, ReadEnd::First, buffer)?;
-        let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data, ReadEnd::Second, buffer)?;
+        let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data,
+            ReadEnd::First, pair.ln_prob(), buffer)?;
+        let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data,
+            ReadEnd::Second, pair.ln_prob(), buffer)?;
         if secondary {
             record1.set_secondary();
             record2.set_secondary();
@@ -289,25 +303,23 @@ fn generate_single_end_records(
     records: &mut Vec<bam::Record>,
     assgn_counts: &mut impl Iterator<Item = u16>,
     attempts: u16,
-    buffer1: &mut IntMap<TwoU32, u16>,
-    buffer2: &mut Vec<(TwoU32, u16)>,
-    buffer3: &mut bam::record::CigarString,
+    buffer1: &mut IntMap<TwoU32, (u16, f64)>,
+    buffer2: &mut bam::record::CigarString,
 ) -> htslib::errors::Result<()>
 {
-    count_alignments::<false>(read_alns, assgn_counts, buffer1, buffer2);
+    let best_ij = count_alignments::<false>(read_alns, assgn_counts, buffer1);
     let read_data = groupped_alns.read_data();
-    let mut secondary = false;
-    for &(TwoU32(i, _), count) in buffer2.iter() {
-        let opt_aln = if i == UNMAPPED { None } else { Some(groupped_alns.ith_aln(i)) };
-        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data, ReadEnd::First, buffer3)?;
+    for (&ij, &(count, ln_prob)) in buffer1.iter() {
+        let opt_aln = if ij.0 == UNMAPPED { None } else { Some(groupped_alns.ith_aln(ij.0)) };
+        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data,
+            ReadEnd::First, ln_prob, buffer2)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record.set_mapq(mapq);
         record.push_aux(PROB_TAG, bam::record::Aux::Float(prob))?;
         record.push_aux(USED_TAG, bam::record::Aux::Char(b'T'))?;
-        if secondary {
+        if ij != best_ij {
             record.set_secondary();
         }
-        secondary = true;
         records.push(record);
     }
     Ok(())
@@ -327,7 +339,8 @@ fn generate_unused_single_end_records(
     let mut secondary = false;
     for pair in aln_pairs {
         let opt_aln = pair.ix1().map(|i| groupped_alns.ith_aln(i));
-        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data, ReadEnd::First, buffer)?;
+        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data,
+            ReadEnd::First, pair.ln_prob(), buffer)?;
         if secondary {
             record.set_secondary();
         }
@@ -356,16 +369,15 @@ pub fn write_bam(
     let gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns, &data.assgn_params);
     let mut counts_iter = assgn_counts.iter().copied();
     let mut buffer1 = Default::default();
-    let mut buffer2 = Default::default();
-    let mut buffer3 = bam::record::CigarString(Vec::new());
+    let mut buffer2 = bam::record::CigarString(Vec::new());
     for (rp, groupped_alns) in data.all_alns.reads().iter().enumerate() {
         let read_alns = gt_alns.possible_read_alns(rp);
         if data.is_paired_end {
             generate_paired_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, &mut records,
-                &mut counts_iter, attempts, &mut buffer1, &mut buffer2, &mut buffer3)?;
+                &mut counts_iter, attempts, &mut buffer1, &mut buffer2)?;
         } else {
             generate_single_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, &mut records,
-                &mut counts_iter, attempts, &mut buffer1, &mut buffer2, &mut buffer3)?;
+                &mut counts_iter, attempts, &mut buffer1, &mut buffer2)?;
         }
     }
     assert!(counts_iter.next().is_none(), "Too many assignment counts");
@@ -379,11 +391,11 @@ pub fn write_bam(
         }
         aln_pairs.sort_unstable_by(|a, b| b.ln_prob().total_cmp(&a.ln_prob()));
         if data.is_paired_end {
-            generate_unused_paired_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, &mut records,
-                &mut buffer3)?;
+            generate_unused_paired_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid,
+                &mut records, &mut buffer2)?;
         } else {
-            generate_unused_single_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, &mut records,
-                &mut buffer3)?;
+            generate_unused_single_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid,
+                &mut records, &mut buffer2)?;
         }
     }
 

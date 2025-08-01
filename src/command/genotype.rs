@@ -250,16 +250,17 @@ fn print_help(extended: bool) {
             "    --read-kmers".green(), "INT INT".yellow(),
             super::fmt_def(defaults.assgn_params.kmer_hard_thresh),
             super::fmt_def(defaults.assgn_params.kmer_soft_thresh));
-        println!("    {:KEY$} {:VAL$}  Ignore read alignments 10^{} times worse than the best alignment [{}].",
+        println!("    {:KEY$} {:VAL$}  Discard read alignments 10^{} times worse than the best alignment [{}].",
             "-D, --prob-diff".green(), "NUM".yellow(), "NUM".yellow(),
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_diff)));
 
         println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. Ploidy over 2 currently not tested.",
             "-P, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
-        println!("    {:KEY$} {:VAL$}  Unmapped read mate receives 10^{} penalty [{}].",
-            "-U, --unmapped".green(), "NUM".yellow(), "NUM".yellow(),
-            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
+        println!("    {:KEY$} {:VAL$}  Penalize unmapped read alignments by this value\n\
+            {EMPTY}  for each 100bp of read length [{}].",
+            "-U, --unmapped".green(), "NUM".yellow(),
+            super::fmt_def_f64(-100.0 * Ln::to_log10(defaults.assgn_params.unmapped_penalty)));
         println!("    {:KEY$} {:VAL$}  Calculate linguistic complexity as a fraction\n\
             {EMPTY}  of non-repeated k-mers of this size [{}].",
             "    --complexity".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.complexity_k));
@@ -398,7 +399,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             }
             Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
-                args.assgn_params.unmapped_penalty = Ln::from_log10(parser.value()?.parse()?),
+                // 0.01 * ... because in help message it is per 100bp, and here per bp.
+                args.assgn_params.unmapped_penalty = Ln::from_log10(-0.01 * parser.value()?.parse::<f64>()?),
             Long("complexity") => args.assgn_params.complexity_k = parser.value()?.parse()?,
             Long("kmers-weight") => {
                 let first = parser.value()?;
