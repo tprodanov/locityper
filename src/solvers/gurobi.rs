@@ -131,7 +131,7 @@ impl super::Solver for GurobiSolver {
 }
 
 impl super::SetParams for GurobiSolver {
-    fn set_param(&mut self, key: &str, _val: &str) -> crate::Result<()> {
+    fn set_param(&mut self, key: &str, _val: &str) -> Result<(), super::ParamErr> {
         log::error!("Gurobi solver: unknown parameter {:?}", key);
         Ok(())
     }

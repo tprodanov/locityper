@@ -27,9 +27,10 @@ impl Default for HighsSolver {
 }
 
 impl HighsSolver {
-    pub fn set_mode(&mut self, mode: &str) -> crate::Result<()> {
-        validate_param!(mode == "choose" || mode == "simplex" || mode == "ipm",
-            "{} solver: unknown mode {:?}", HIGHS_NAME, mode);
+    pub fn set_mode(&mut self, mode: &str) -> Result<(), super::ParamErr> {
+        if mode != "choose" && mode != "simplex" && mode != "ipm" {
+            return Err(super::ParamErr::Invalid(format!("{} solver: unknown mode {:?}", HIGHS_NAME, mode)));
+        }
         self.mode = mode.to_owned();
         Ok(())
     }
@@ -138,7 +139,7 @@ impl super::Solver for HighsSolver {
 }
 
 impl super::SetParams for HighsSolver {
-    fn set_param(&mut self, key: &str, val: &str) -> crate::Result<()> {
+    fn set_param(&mut self, key: &str, val: &str) -> Result<(), super::ParamErr> {
         match key {
             "m" | "mode" => self.set_mode(val)?,
             _ => return Err(super::ParamErr::Unknown),

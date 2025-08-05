@@ -163,6 +163,7 @@ pub fn create_file(filename: &Path) -> crate::Result<BufWriter<File>> {
 }
 
 /// Based on extension, create file.
+#[allow(unused)]
 pub fn create(filename: &Path) -> crate::Result<Box<dyn Write>> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         Ok(Box::new(BufWriter::new(stdout())))

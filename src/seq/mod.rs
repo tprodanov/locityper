@@ -6,9 +6,10 @@ pub mod kmers;
 pub mod panvcf;
 pub mod fastx;
 pub mod recruit;
-pub mod wfa;
 pub mod compl;
 pub mod counts;
+#[cfg(feature = "align")]
+pub mod wfa;
 #[cfg(feature = "align")]
 pub mod dist;
 pub mod div;
