@@ -55,7 +55,7 @@ impl fmt::Display for Polarity {
 pub fn default_unmapped_penalty(tech: Technology) -> (Polarity, f64) {
     match tech {
         Technology::Illumina => (Polarity::Best, Ln::from_log10(-10.0)),
-        Technology::HiFi | Technology::PacBio | Technology::Nanopore => (Polarity::Worst, Ln::from_log10(-20.0)),
+        Technology::HiFi | Technology::PacBio | Technology::Nanopore => (Polarity::Best, Ln::from_log10(-100.0)),
     }
 }
 
