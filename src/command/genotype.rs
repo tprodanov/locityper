@@ -261,7 +261,7 @@ fn print_help(extended: bool) {
             super::describe_defaults(TECHNOLOGIES.iter(), |t| t.to_string(), |&&t|
                 crate::math::fmt_signif(Ln::to_log10(model::default_unmapped_penalty(t)).abs(), 3)));
         println!("    {:KEY$} {:VAL$}  Alignments to the same contig with likelihood difference larger\n\
-            {EMPTY}  than {} (log10) are ignored. Default: same as {}.",
+            {EMPTY}  than {} (log10) are ignored. Default: <{}> + 1.",
             "-D, --prob-diff".green(), "NUM".yellow(), "NUM".yellow(), "-U".yellow());
         println!("    {:KEY$} {:VAL$}  Calculate linguistic complexity as a fraction\n\
             {EMPTY}  of non-repeated k-mers of this size [{}].",
@@ -1077,7 +1077,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         args.assgn_params.unmapped_penalty = model::default_unmapped_penalty(tech);
     }
     if args.assgn_params.prob_diff.is_nan() {
-        args.assgn_params.prob_diff = args.assgn_params.unmapped_penalty.abs();
+        args.assgn_params.prob_diff = args.assgn_params.unmapped_penalty.abs() + Ln::from_log10(1.0);
     }
 
     let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(),
