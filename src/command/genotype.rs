@@ -251,20 +251,18 @@ fn print_help(extended: bool) {
             "    --read-kmers".green(), "INT INT".yellow(),
             super::fmt_def(defaults.assgn_params.kmer_hard_thresh),
             super::fmt_def(defaults.assgn_params.kmer_soft_thresh));
-        println!("    {:KEY$} {:VAL$}  Discard read alignments 10^{} times worse than the best alignment [{}].",
-            "-D, --prob-diff".green(), "NUM".yellow(), "NUM".yellow(),
-            super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_diff)));
 
         println!("\n{}", "Model parameters:".bold());
         println!("    {:KEY$} {:VAL$}  Solution ploidy [{}]. Ploidy over 2 currently not tested.",
             "-P, --ploidy".green(), "INT".yellow(), super::fmt_def(defaults.ploidy));
-        println!("    {:KEY$} {:VAL$}  Log10 penalty for unmapped read alignments\n\
+        println!("    {:KEY$} {:VAL$}  Log10 penalty for unmapped read alignments.\n\
             {EMPTY}  Default: {}.",
             "-U, --unmapped".green(), "NUM".yellow(),
-            super::describe_defaults(TECHNOLOGIES.iter(), |t| t.to_string(), |t| {
-                    let (polarity, val) = model::default_unmapped_penalty(**t);
-                    format!("{} {}", polarity, crate::math::fmt_signif(Ln::to_log10(val).abs(), 3))
-                }));
+            super::describe_defaults(TECHNOLOGIES.iter(), |t| t.to_string(), |&&t|
+                crate::math::fmt_signif(Ln::to_log10(model::default_unmapped_penalty(t)).abs(), 3)));
+        println!("    {:KEY$} {:VAL$}  Alignments to the same contig with likelihood difference larger\n\
+            {EMPTY}  than {} (log10) are ignored. Default: same as {}.",
+            "-D, --prob-diff".green(), "NUM".yellow(), "NUM".yellow(), "-U".yellow());
         println!("    {:KEY$} {:VAL$}  Calculate linguistic complexity as a fraction\n\
             {EMPTY}  of non-repeated k-mers of this size [{}].",
             "    --complexity".green(), "INT".yellow(), super::fmt_def(defaults.assgn_params.complexity_k));
@@ -401,12 +399,9 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                         .map_err(|_| error!(InvalidInput, "Cannot parse -A/--alt-cn {}", alt_cn_str))?);
                 }
             }
-            Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Short('U') | Long("unmapped") =>
-                args.assgn_params.unmapped_penalty = (
-                    parser.value()?.parse::<model::Polarity>()?,
-                    -Ln::from_log10(parser.value()?.parse::<f64>()?).abs(),
-                ),
+                args.assgn_params.unmapped_penalty = -Ln::from_log10(parser.value()?.parse::<f64>()?).abs(),
+            Short('D') | Long("prob-diff") => args.assgn_params.prob_diff = Ln::from_log10(parser.value()?.parse()?),
             Long("complexity") => args.assgn_params.complexity_k = parser.value()?.parse()?,
             Long("kmers-weight") => {
                 let first = parser.value()?;
@@ -1078,8 +1073,11 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         args.minimizer_kw,
         args.match_frac.unwrap_or_else(|| tech.default_match_frac(bg_distr.insert_distr().is_paired_end())),
         args.match_len, args.thresh_kmer_count)?;
-    if args.assgn_params.unmapped_penalty.1.is_nan() {
+    if args.assgn_params.unmapped_penalty.is_nan() {
         args.assgn_params.unmapped_penalty = model::default_unmapped_penalty(tech);
+    }
+    if args.assgn_params.prob_diff.is_nan() {
+        args.assgn_params.prob_diff = args.assgn_params.unmapped_penalty.abs();
     }
 
     let edit_dist_cache = EditDistCache::new(bg_distr.error_profile(),

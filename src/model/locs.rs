@@ -22,7 +22,6 @@ use crate::{
     algo::{bisect, TwoU32, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
     math::Ln,
     model::{
-        Polarity,
         windows::ContigInfos,
     },
     ext::{
@@ -67,7 +66,6 @@ pub struct MateData {
     qualities: Vec<u8>,
     opp_qualities: OnceLock<Vec<u8>>,
     unique_kmers: u16,
-    unmapped_prob: f64,
 }
 
 impl MateData {
@@ -80,7 +78,6 @@ impl MateData {
             qualities: if record.qual().is_empty() { vec![255; record.seq().len()] } else { record.qual().to_vec() },
             opp_qualities: OnceLock::new(),
             unique_kmers: 0,
-            unmapped_prob: f64::NAN,
         }
     }
 
@@ -323,20 +320,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         }
 
         VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() <= passable_dist);
+        alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
         read_data.weight *= if best_edit <= good_dist
             { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
-
-        let mut min_prob = f64::INFINITY;
-        for aln in alns[start_len..].iter_mut() {
-            let p = aln.ln_prob() - max_prob;
-            min_prob = min_prob.min(p);
-            aln.set_ln_prob(p);
-        };
-        let unmapped_prob = self.params.unmapped_penalty.1
-            + if self.params.unmapped_penalty.0 == Polarity::Best { 0.0 } else { min_prob };
-        read_data.mates[read_end.ix()].as_mut().unwrap().unmapped_prob = unmapped_prob;
-        writeln!(dbg_writer, "{}\t{}\t*\t*\t{:.2}", name_hash, read_end, Ln::to_log10(max_prob + unmapped_prob))
-            .map_err(add_path!(!))?;
         Ok(true)
     }
 
@@ -532,8 +518,7 @@ fn identify_contig_pair_alns(
     max_alns: usize,
     buffer: &mut Vec<f64>,
     insert_distr: &InsertDistr,
-    unmapped_prob1: f64,
-    unmapped_prob2: f64,
+    unm_ins_penalty: f64, // Unmapped + insert size penalties
     prob_diff: f64,
 ) {
     let start_len = aln_pairs.len();
@@ -558,7 +543,7 @@ fn identify_contig_pair_alns(
         }
 
         // Only add alignment `aln1,unmapped2` if it is better than any existing paired alignment to the same contig.
-        let alone_prob1 = aln1.ln_prob() + unmapped_prob2;
+        let alone_prob1 = aln1.ln_prob() + unm_ins_penalty;
         if alone_prob1 >= max_prob1 {
             aln_pairs.push(PairAlignment::new_first(ix1, aln1.interval(), alone_prob1));
         }
@@ -566,7 +551,7 @@ fn identify_contig_pair_alns(
 
     for (ix2, &max_prob2) in (j..k).zip(buffer.iter()) {
         let aln2 = unsafe { alignments.get_unchecked(ix2) };
-        let alone_prob2 = aln2.ln_prob() + unmapped_prob1;
+        let alone_prob2 = aln2.ln_prob() + unm_ins_penalty;
         // Only add alignment `unmapped1,aln2` if it is better than existing `aln1,aln2` pairs.
         if alone_prob2 >= max_prob2 {
             aln_pairs.push(PairAlignment::new_second(ix2, aln2.interval(), alone_prob2));
@@ -596,8 +581,7 @@ fn identify_paired_end_alignments(
 ) -> GrouppedAlignments
 {
     let insert_penalty = insert_distr.insert_penalty();
-    let unmapped_prob1 = read_data.mate_data(ReadEnd::First).unmapped_prob + insert_penalty;
-    let unmapped_prob2 = read_data.mate_data(ReadEnd::Second).unmapped_prob + insert_penalty;
+    let unm_ins_penalty = params.unmapped_penalty + insert_penalty;
 
     // First: by contig (decr.), second: by read end (decr.), third: by aln probability (incr.).
     tmp_alns.sort_unstable_by(|a, b|
@@ -617,7 +601,7 @@ fn identify_paired_end_alignments(
             if i < k {
                 // There are some alignments that need to be saved.
                 identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, max_alns,
-                    buffer, insert_distr, unmapped_prob1, unmapped_prob2, params.prob_diff);
+                    buffer, insert_distr, unm_ins_penalty, params.prob_diff);
             }
             curr_contig = aln.contig_id();
             i = k;
@@ -638,7 +622,7 @@ fn identify_paired_end_alignments(
     if i < k {
         // There are some alignments that need to be saved.
         identify_contig_pair_alns(&alignments, i, min(j, k), &mut aln_pairs, max_alns,
-            buffer, insert_distr, unmapped_prob1, unmapped_prob2, params.prob_diff);
+            buffer, insert_distr, unm_ins_penalty, params.prob_diff);
     }
 
     let weight = read_data.weight * contig_infos.explicit_read_weight(&aln_pairs);
@@ -647,8 +631,7 @@ fn identify_paired_end_alignments(
     }
     GrouppedAlignments {
         read_data, alignments, aln_pairs, weight,
-        // insert penalty was accounted for twice, therefore we subtract it.
-        unmapped_prob: weight * (unmapped_prob1 + unmapped_prob2 - insert_penalty),
+        unmapped_prob: weight * (2.0 * params.unmapped_penalty + insert_penalty),
     }
 }
 
@@ -690,7 +673,7 @@ fn identify_single_end_alignments(
         aln.ln_prob *= weight;
     }
     GrouppedAlignments {
-        unmapped_prob: weight * read_data.mate_data(ReadEnd::First).unmapped_prob,
+        unmapped_prob: weight * params.unmapped_penalty,
         read_data, alignments, aln_pairs, weight,
     }
 }

@@ -4,10 +4,10 @@ pub mod assgn;
 pub mod distr_cache;
 pub mod bam;
 
-use std::{
-    fmt,
-    str::FromStr,
-};
+// use std::{
+//     fmt,
+//     str::FromStr,
+// };
 use crate::{
     math::{
         Ln,
@@ -19,43 +19,43 @@ use crate::{
 };
 use windows::WeightCalculator;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Polarity {
-    Best,
-    Worst,
-}
+// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// pub enum Polarity {
+//     Best,
+//     Worst,
+// }
 
-impl Polarity {
-    pub fn to_str(self) -> &'static str {
-        match self {
-            Self::Best => "best",
-            Self::Worst => "worst",
-        }
-    }
-}
+// impl Polarity {
+//     pub fn to_str(self) -> &'static str {
+//         match self {
+//             Self::Best => "best",
+//             Self::Worst => "worst",
+//         }
+//     }
+// }
 
-impl FromStr for Polarity {
-    type Err = String;
+// impl FromStr for Polarity {
+//     type Err = String;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match &s.to_lowercase() as &str {
-            "best" => Ok(Self::Best),
-            "worst" => Ok(Self::Worst),
-            _ => Err(format!("Unknown polarity {:?}", s)),
-        }
-    }
-}
+//     fn from_str(s: &str) -> Result<Self, Self::Err> {
+//         match &s.to_lowercase() as &str {
+//             "best" => Ok(Self::Best),
+//             "worst" => Ok(Self::Worst),
+//             _ => Err(format!("Unknown polarity {:?}", s)),
+//         }
+//     }
+// }
 
-impl fmt::Display for Polarity {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(self.to_str())
-    }
-}
+// impl fmt::Display for Polarity {
+//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         f.write_str(self.to_str())
+//     }
+// }
 
-pub fn default_unmapped_penalty(tech: Technology) -> (Polarity, f64) {
+pub fn default_unmapped_penalty(tech: Technology) -> f64 {
     match tech {
-        Technology::Illumina => (Polarity::Best, Ln::from_log10(-10.0)),
-        Technology::HiFi | Technology::PacBio | Technology::Nanopore => (Polarity::Best, Ln::from_log10(-100.0)),
+        Technology::Illumina => Ln::from_log10(-10.0),
+        Technology::HiFi | Technology::PacBio | Technology::Nanopore => Ln::from_log10(-100.0),
     }
 }
 
@@ -69,8 +69,8 @@ pub struct Params {
     /// For each read pair, all alignments to a specific genotype,
     /// less probable than `best_prob - prob_diff` are discarded.
     pub prob_diff: f64,
-    /// Unmapped reads are penalized by float value either relative to the best or to the worst retained alignment.
-    pub unmapped_penalty: (Polarity, f64),
+    /// Unmapped reads are penalized by float value either relative to the best alignment.
+    pub unmapped_penalty: f64,
     /// Calculate linguistic complexity as fraction of non-repetitive k-mers.
     pub complexity_k: u8,
     /// Poor complexity threshold.
@@ -110,8 +110,6 @@ impl Default for Params {
         Self {
             boundary_size: 200,
             lik_skew: 0.85,
-            prob_diff: Ln::from_log10(10.0),
-            unmapped_penalty: (Polarity::Best, f64::NAN),
             complexity_k: 5,
             compl_weight_calc: Some(WeightCalculator::new(0.5, 4.0).unwrap()),
             kmers_weight_calc: Some(WeightCalculator::new(0.2, 4.0).unwrap()),
@@ -126,6 +124,8 @@ impl Default for Params {
             alt_cn: vec![0.3, 2.0, 3.0, 4.0, 5.0],
 
             filt_diff: Ln::from_log10(100.0),
+            unmapped_penalty: f64::NAN,
+            prob_diff: f64::NAN,
             prob_thresh: Ln::from_log10(-4.0),
             dont_skip: false,
             out_bams: 0,
@@ -143,8 +143,6 @@ const AUTO_TWEAK_MAX: u32 = 200;
 impl Params {
     pub fn validate(&mut self) -> crate::Result<()> {
         validate_param!(self.boundary_size > 0, "Boundary size ({}) cannot be zero.", self.boundary_size);
-        validate_param!(!self.prob_diff.is_nan() && self.prob_diff.is_finite(),
-            "Unexpected probability difference ({:.4}) value", self.prob_diff);
         validate_param!(self.lik_skew >= -1.0 + 1e-10 && self.lik_skew <= 1.0 - 1e-10,
             "Likelihood skew ({}) must be within (-1, 1)", self.lik_skew);
         self.prob_diff = self.prob_diff.abs();
