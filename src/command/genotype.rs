@@ -189,7 +189,7 @@ fn print_help(extended: bool) {
         "-I, --in-list".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Required with input CRAM file ({} alns.cram).",
         "-r, --reference".green(), "FILE".yellow(), "-a".green());
-    println!("    {:KEY$} {:VAL$}  Preprocessed dataset information (see {}).",
+    println!("    {:KEY$} {:VAL$}  Preprocessed dataset directory or `.gz` file (see {}).",
         "-p, --preproc".green(), "DIR".yellow(), concatcp!(super::PROGRAM, " preproc").underline());
     println!("    {:KEY$} {:VAL$}  Database directory (see {}).\n\
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
@@ -1060,9 +1060,14 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let mut rng = ext::rand::init_rng(args.seed);
     let out_dir = args.output.as_ref().unwrap();
     ext::sys::mkdir(out_dir)?;
-    let preproc_dir = args.preproc.as_ref().unwrap();
 
-    let bg_distr = BgDistr::load_from(&preproc_dir.join(paths::BG_DISTR), Some(&preproc_dir.join(paths::SUCCESS)))?;
+    let preproc_path = args.preproc.as_ref().unwrap();
+    let bg_distr = if let Some("gz") = preproc_path.extension().and_then(std::ffi::OsStr::to_str) {
+        BgDistr::load_from(&preproc_path, None)?
+    } else {
+        BgDistr::load_from(&preproc_path.join(paths::BG_DISTR), Some(&preproc_path.join(paths::SUCCESS)))?
+    };
+
     if let Some(depth) = bg_distr.opt_depth() {
         args.assgn_params.set_tweak_size(depth.window_size())?;
     } else if args.stop_after > StopAfter::Map {

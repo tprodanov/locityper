@@ -3,7 +3,7 @@ From: rust:1.76-slim-bookworm
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v0.19.1
+    Version v1.0.1
 
 %post
     PREFIX=/usr/local
@@ -60,7 +60,8 @@ From: rust:1.76-slim-bookworm
 
 %runscript
     if [ "$#" -ne 0 ] && ( [ "$1" = locityper ] || [ "$1" = samtools ] || [ "$1" = minimap2 ] || \
-            [ "$1" = strobealign ] || [ "$1" = jellyfish ]); then
+            [ "$1" = strobealign ] || [ "$1" = jellyfish ] || \
+            [ "1" = bash ] || [ "1" = sh ] ); then
         "$@"
     else
         locityper "$@"
