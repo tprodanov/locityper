@@ -19,7 +19,7 @@ type KmerCache<'a> = HashMap<&'a [u8], SmallVec<[u32; CAPACITY]>>;
 
 /// Creates a HashMap containing all the k-mers in the sequence.
 /// A good rolling hash function should speed up the code.
-fn cache_kmers(seq: &[u8], k: u32) -> KmerCache {
+fn cache_kmers(seq: &[u8], k: u32) -> KmerCache<'_> {
     let mut map = KmerCache::default();
     for (i, kmer) in seq.windows(k as usize).enumerate() {
         map.entry(kmer)

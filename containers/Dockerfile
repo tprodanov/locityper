@@ -1,7 +1,7 @@
-FROM rust:1.88-slim-bookworm
+FROM rust:1.91-slim-bookworm
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.0.1"
+LABEL version="1.1.0"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local

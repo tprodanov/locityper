@@ -42,7 +42,7 @@ struct Args {
 
     ref_name: Option<String>,
     leave_out: HashSet<String>,
-    max_expansion: u32,
+    max_expansion: Vec<u32>,
     moving_window: u32,
     ignore_overlaps: bool,
 
@@ -67,7 +67,7 @@ impl Default for Args {
 
             ref_name: None,
             leave_out: Default::default(),
-            max_expansion: 50000,
+            max_expansion: vec![20_000, 50_000, 200_000],
             moving_window: 500,
             ignore_overlaps: false,
 
@@ -99,6 +99,12 @@ impl Args {
         validate_param!(self.moving_window < u32::from(u16::MAX),
             "Moving window ({}) must fit in two bytes", self.moving_window);
 
+        validate_param!(self.max_expansion[0] != 0 || self.max_expansion.len() == 1,
+            "Max expansion (-e) can be zero only when a single value is provided");
+        // By default, <= is used.
+        validate_param!(self.max_expansion.is_sorted_by(|a, b| a < b),
+            "Max expansion (-a) must contain strictly increasing numbers");
+
         self.jellyfish = ext::sys::find_exe(self.jellyfish)?;
         Ok(self)
     }
@@ -113,7 +119,7 @@ fn print_help() {
     println!("{}", "Adds target locus/loci to the database.".yellow());
 
     print!("\n{}", "Usage:".bold());
-    println!(" {} add -d db -r ref.fa -j counts.jf [-v vars.vcf.gz] -l/-L loci [args]", super::PROGRAM);
+    println!(" {} target -d db -r ref.fa -j counts.jf [-v vars.vcf.gz] -l/-L loci [args]", super::PROGRAM);
 
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Output database directory.",
@@ -138,9 +144,12 @@ fn print_help() {
     println!("\n{}", "Allele extraction parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Name of the reference haplotype [default: tries to guess].",
         "-g, --genome".green(), "STR".yellow());
-    println!("    {:KEY$} {:VAL$}  If needed, expand loci boundaries by at most {} bp [{}].",
-        "-e, --expand".green(), "INT".yellow(), "INT".yellow(),
-        super::fmt_def(PrettyU32(defaults.max_expansion)));
+    println!("    {:KEY$} {:VAL$}  If needed, expand locus coordinates by <= {} bp [{}].\n\
+        {EMPTY}  Boundaries are checked one by one until the locus\n\
+        {EMPTY}  does not overlap any long pangenomic bubbles.",
+        "-e, --expand".green(), "INT+".yellow(), "INT".yellow(),
+        super::fmt_def(defaults.max_expansion.iter().map(|&v| PrettyU32(v).to_string())
+            .collect::<Vec<String>>().join(" ")));
     println!("    {:KEY$} {:VAL$}  Select best locus boundary based on k-mer frequencies in\n\
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(),
@@ -203,7 +212,15 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     args.leave_out.insert(val.parse()?);
                 }
             }
-            Short('e') | Long("expand") => args.max_expansion = parser.value()?.parse::<PrettyU32>()?.get(),
+            Short('e') | Long("expand") => {
+                // args.max_expansion.clear();
+                // for v in parser.values()? {
+                //     args.max_expansion.push(v.parse::<PrettyU32>()?);
+                // }
+                args.max_expansion = parser.values()?
+                    .map(|v| v.parse::<PrettyU32>().map(PrettyU32::get))
+                    .collect::<Result<Vec<u32>, _>>()?;
+            }
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
             Short('m') | Long("minimizer") | Long("minimizers") =>
@@ -303,6 +320,7 @@ fn find_best_boundary<const LEFT: bool>(
     vars: &[VcfRecord],
     k: u32,
     kmer_counts: &[KmerCount],
+    allowed_expansion: u32,
     args: &Args,
 ) -> crate::Result<Option<u32>>
 {
@@ -344,7 +362,7 @@ fn find_best_boundary<const LEFT: bool>(
 
     // Furthest point to the region boundary is penalized by 20%.
     const WEIGHT_DROP: f64 = 0.2;
-    let per_bp_drop = WEIGHT_DROP / f64::from(args.max_expansion);
+    let per_bp_drop = WEIGHT_DROP / f64::from(allowed_expansion);
     let (i, maxval) = if LEFT {
         weights.iter_mut().rev().enumerate().for_each(|(i, w)| *w -= *w * per_bp_drop * i as f64);
         // Last argmax.
@@ -369,10 +387,11 @@ fn expand_locus(
     vcf_file: &mut bcf::IndexedReader,
     hap_names: &panvcf::HaplotypeNames,
     kmer_getter: &JfKmerGetter,
+    allowed_expansion: u32,
     args: &Args,
-) -> crate::Result<NamedInterval>
+) -> crate::Result<Option<NamedInterval>>
 {
-    assert!(args.max_expansion > 0, "This function should not be called if expansion is forbidden");
+    assert!(allowed_expansion > 0, "This function should not be called if expansion is forbidden");
     let inner_interval = locus.interval();
     if inner_interval.len() < args.moving_window {
         return Err(error!(RuntimeError, "Locus {} is shorter ({}) than the moving window ({})",
@@ -383,13 +402,13 @@ fn expand_locus(
     let (inner_start, inner_end) = inner_interval.range();
     // Because we need to calculate the average number of unique k-mers per each moving window,
     // we set left end further, so that we have the same number of moving windows as the potential position shift.
-    let mut left_start = inner_start.saturating_sub(args.max_expansion);
+    let mut left_start = inner_start.saturating_sub(allowed_expansion);
     let left_end = inner_start + args.moving_window;
     let mut left_seq = seq::fetch_seq(fasta_reader, contig_name, left_start.into(), left_end.into())?;
 
     // Same with the right boundary, we extend right start further left so that we have enough moving windows.
     let right_start = inner_end.checked_sub(args.moving_window).unwrap();
-    let mut right_end = min(inner_end + args.max_expansion, contig_len);
+    let mut right_end = min(inner_end + allowed_expansion, contig_len);
     let mut right_seq = seq::fetch_seq(fasta_reader, contig_name, right_start.into(), right_end.into())?;
 
     // Crop left region at the last N.
@@ -427,29 +446,20 @@ fn expand_locus(
     let right_vars = panvcf::filter_variants(vcf_file, hap_names)?;
 
     let kmer_counts = kmer_getter.fetch([left_seq, right_seq])?;
-    // Extend region to the left.
+    // Extend region to the left and then to the right.
     let Some(new_start) = find_best_boundary::<true>(left_start, inner_start + 1, &left_vars,
-            kmer_getter.k(), kmer_counts.get(0), args)? else {
-        return Err(error!(RuntimeError,
-            "Cannot expand locus {} to the left due to a long variant overlapping boundary.\n    \
-            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name()))
-    };
-
-    // Extend region to the right.
+            kmer_getter.k(), kmer_counts.get(0), allowed_expansion, args)? else { return Ok(None) };
     let Some(mut new_end) = find_best_boundary::<false>(inner_end - 1, right_end, &right_vars,
-            kmer_getter.k(), kmer_counts.get(1), args)? else {
-        return Err(error!(RuntimeError,
-            "Cannot expand locus {} to the right due to a long variant overlapping boundary.\n    \
-            Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name()))
-    };
+            kmer_getter.k(), kmer_counts.get(1), allowed_expansion, args)? else { return Ok(None) };
+
     new_end += 1;
     if new_start != inner_start || new_end != inner_end {
         let new_interval = inner_interval.create_at_same_contig(new_start, new_end);
         log::info!("    Extending locus by {} bp left and {} bp right -> {}",
             inner_start - new_start, new_end - inner_end, new_interval);
-        NamedInterval::new(locus.name().to_owned(), new_interval)
+        Some(NamedInterval::new(locus.name().to_owned(), new_interval)).transpose()
     } else {
-        Ok(locus.clone())
+        Ok(Some(locus.clone()))
     }
 }
 
@@ -716,8 +726,24 @@ fn add_locus(
     log::info!("Analyzing {} ({})", locus.name().bold(), locus.interval());
     // VCF file was provided.
     if let Some((vcf_file, hap_names)) = vcf_data {
-        if args.max_expansion > 0 {
-            locus = expand_locus(&locus, fasta_reader, vcf_file, hap_names, kmer_getter, args)?;
+        let mut exp_locus = None;
+        for &allowed_expansion in args.max_expansion.iter() {
+            exp_locus = if allowed_expansion == 0 {
+                Some(locus.clone())
+            } else {
+                expand_locus(&locus, fasta_reader, vcf_file, hap_names, kmer_getter,
+                    allowed_expansion, args)?
+            };
+            if exp_locus.is_none() {
+                log::warn!("Cannot expand locus {} with max boundary {}",
+                    locus.name(), PrettyU32(allowed_expansion));
+            }
+        }
+        match exp_locus {
+            Some(l) => locus = l,
+            None => return Err(error!(RuntimeError,
+                "Cannot expand locus {} to one of the sides due to a long variant overlapping boundary.\n    \
+                    Try increasing -e/--expand parameter or manually modifying region boundaries.", locus.name())),
         }
     }
     let ref_seq = locus.interval().fetch_seq(fasta_reader)?;

@@ -29,6 +29,7 @@ pub trait DiscreteCdf {
     fn cdf(&self, k: u32) -> f64;
 
     /// Survival function: P(X > k).
+    #[allow(dead_code)]
     fn sf(&self, k: u32) -> f64 {
         1.0 - self.cdf(k)
     }
