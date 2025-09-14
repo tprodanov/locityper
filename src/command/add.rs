@@ -737,6 +737,8 @@ fn add_locus(
             if exp_locus.is_none() {
                 log::warn!("Cannot expand locus {} with max boundary {}",
                     locus.name(), PrettyU32(allowed_expansion));
+            } else {
+                break;
             }
         }
         match exp_locus {
