@@ -1,7 +1,7 @@
 FROM rust:1.89-slim-bullseye
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.1.1"
+LABEL version="1.1.2"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local

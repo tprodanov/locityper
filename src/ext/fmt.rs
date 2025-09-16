@@ -22,7 +22,7 @@ pub fn path(path: impl AsRef<Path>) -> String {
 }
 
 /// Format multiple paths via comma.
-pub fn paths(paths: &[impl AsRef<Path>]) -> String {
+pub fn paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> String {
     let mut s = String::new();
     for f in paths {
         if !s.is_empty() {

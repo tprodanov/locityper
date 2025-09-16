@@ -181,10 +181,10 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
-    println!("    {:KEY$} {:VAL$}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
-        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n\
-        {EMPTY}  please specify {} otherwise.",
-        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
+    println!("    {} {}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
+        {EMPTY}  Unless {}, mapped, sorted & indexed BAM/CRAM file is expected.\n\
+        {EMPTY}  If provided, second file should contain path to the alignment index.",
+        "-a, --alignment".green(), "FILE [FILE]".yellow(), "-i/--input".green(), "--no-index".green());
     println!("    {:KEY$} {:VAL$}  File with input filenames (see documentation).",
         "-I, --in-list".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Required with input CRAM file ({} alns.cram).",
@@ -360,8 +360,12 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     args.in_files.reads2.push(val.parse()?);
                 }
             }
-            Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
-                args.in_files.alns.push(parser.value()?.parse()?),
+            Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") => {
+                let mut values = parser.values()?.take(2);
+                let aln_filename = values.next().expect("First argument is always present").parse()?;
+                let idx_filename = values.next().as_ref().map(ValueExt::parse).transpose()?;
+                args.in_files.alns.push((aln_filename, idx_filename));
+            }
             Short('I') | Long("in-list") | Long("input-list") => args.in_files.in_list = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.in_files.reference = Some(parser.value()?.parse()?),
             Short('p') | Long("preproc") | Long("preprocessing") => args.preproc = Some(parser.value()?.parse()?),
@@ -765,14 +769,18 @@ pub(super) fn recruit_to_targets(
 {
     if in_files.has_indexed_alignment() {
         assert!(in_files.alns.len() == 1);
-        let bam_filename = in_files.alns[0].to_path_buf();
-        let mut bam_reader = bam::IndexedReader::from_path(&bam_filename)?;
-        fastx::set_reference(&bam_filename, &mut bam_reader, &in_files.reference, None)?;
+        let (bam_filename, idx_option) = &in_files.alns[0];
+        let mut bam_reader = if let Some(idx_filename) = idx_option {
+            bam::IndexedReader::from_path_and_index(bam_filename, idx_filename)?
+        } else {
+            bam::IndexedReader::from_path(bam_filename)?
+        };
+        fastx::set_reference(bam_filename, &mut bam_reader, &in_files.reference, None)?;
         let contigs = Arc::new(ContigNames::from_bam_header("bam", bam_reader.header())?);
         let fetch_regions = get_targets(&contigs)?;
         let is_paired_end = is_paired_end.map(Ok).unwrap_or_else(|| identify_pairedness(&mut bam_reader))?;
 
-        let reader = fastx::IndexedBamReader::new(bam_filename, bam_reader, fetch_regions)?;
+        let reader = fastx::IndexedBamReader::new(bam_filename.to_path_buf(), bam_reader, fetch_regions)?;
         // Need a lot of if-elses to have compile-time optimizations based on input data and the number of targets :]
         if is_paired_end {
             targets.recruit(fastx::PairedBamReader::new(reader), writers, threads, chunk_size, subsampling)

@@ -78,11 +78,22 @@ fn check_filename(
     Ok(())
 }
 
+// fn identify_aln_index(path: &Path) -> crate::Result<PathBuf> {
+//     match path.extension() {
+//         Some("bam") => Ok(ext::sys::path_append(path, ".bai")),
+//         Some("BAM") => Ok(ext::sys::path_append(path, ".BAI")),
+//         Some("cram") => Ok(ext::sys::path_append(path, ".crai")),
+//         Some("CRAM") => Ok(ext::sys::path_append(path, ".CRAI")),
+//         Some("_") | None => Err(),
+//     }
+// }
+
 /// Collection of input files, same as for `genotype`.
 pub struct InputFiles {
     pub reads1: Vec<PathBuf>,
     pub reads2: Vec<PathBuf>,
-    pub alns: Vec<PathBuf>,
+    /// CRAM/BAM file as well as the corresponding CRAI/BAI file.
+    pub alns: Vec<(PathBuf, Option<PathBuf>)>,
     pub in_list: Option<PathBuf>,
     pub reference: Option<PathBuf>,
     pub interleaved: bool,
@@ -126,45 +137,30 @@ impl InputFiles {
             }
             let trimmed_line = line.trim_end();
             let split: smallvec::SmallVec::<[&str; 3]> = trimmed_line.split_whitespace().collect();
-            validate_param!(split.len() == 2 || (split[0] == "p" && split.len() == 3),
+            let flag = split[0];
+            validate_param!(split.len() == 2 || ((flag == "p" || flag == "a") && split.len() == 3),
                 "Incorrect number of arguments in input line {:?}", trimmed_line);
-            let flag = split[0].to_string();
             let filename1 = split[1];
-            validate_param!(prev_flag.as_ref().map(|val| val == &flag).unwrap_or(true),
-                "All lines in the input list (-I) must contain the same flag ({} != {})", prev_flag.unwrap(), &flag);
-            match &flag as &str {
-                "s" => {
-                    // validate_param!(!self.interleaved,
-                    //     "Cannot provide single-end and paired-end interleaved files together");
-                    self.reads1.push(ext::sys::add_dir(dirname, filename1));
-                }
+            validate_param!(prev_flag.as_ref().map(|val| val == flag).unwrap_or(true),
+                "All lines in the input list (-I) must contain the same flag ({} != {})", prev_flag.unwrap(), flag);
+            match flag {
+                "s" => self.reads1.push(ext::sys::add_dir(dirname, filename1)),
                 "pi" => {
-                    // validate_param!(self.interleaved || self.reads1.is_empty(),
-                    //     "Cannot provide single-end and paired-end interleaved files together");
                     self.interleaved = true;
                     self.reads1.push(ext::sys::add_dir(dirname, filename1));
                 }
                 "a" => {
-                    // validate_param!(!self.no_index,
-                    //     "Cannot provide indexed and non-indexed alignment files together");
-                    self.alns.push(ext::sys::add_dir(dirname, filename1));
+                    let idx_file = if split.len() == 3 { Some(ext::sys::add_dir(dirname, split[2])) } else { None };
+                    self.alns.push((ext::sys::add_dir(dirname, filename1), idx_file));
                 }
                 "u" => {
-                    // validate_param!(self.no_index || self.alns.is_empty(),
-                    //     "Cannot provide indexed and non-indexed alignment files together");
-                    // validate_param!(!self.interleaved,
-                    //     "Cannot provide single-end and paired-end interleaved files together");
                     self.no_index = true;
-                    self.alns.push(ext::sys::add_dir(dirname, filename1));
+                    self.alns.push((ext::sys::add_dir(dirname, filename1), None));
                 }
                 "ui" => {
-                    // validate_param!(self.no_index || self.alns.is_empty(),
-                    //     "Cannot provide indexed and non-indexed alignment files together");
-                    // validate_param!(self.interleaved || self.alns.is_empty(),
-                    //     "Cannot provide single-end and paired-end interleaved files together");
                     self.no_index = true;
                     self.interleaved = true;
-                    self.alns.push(ext::sys::add_dir(dirname, filename1));
+                    self.alns.push((ext::sys::add_dir(dirname, filename1), None));
                 }
                 "p" => {
                     if split.len() == 3 {
@@ -180,7 +176,7 @@ impl InputFiles {
                 }
                 rem => return Err(error!(ParsingError, "Cannot parse line {:?}: unexpected flag {}", trimmed_line, rem)),
             }
-            prev_flag = Some(flag);
+            prev_flag = Some(flag.to_string());
         }
         Ok(())
     }
@@ -200,21 +196,21 @@ impl InputFiles {
 
         if ref_required {
             validate_param!(self.reference.is_some(), "Reference file (-r) is not provided");
-        } else if self.alns.iter().any(|filename| filename.extension()
+        } else if self.alns.iter().any(|(filename, _idx)| filename.extension()
                 .map(|ext| ext == "cram" || ext == "CRAM").unwrap_or(false)) {
             validate_param!(self.reference.is_some(), "Input CRAM file (-a) requires a reference file (-r)");
         }
 
         // Should only be run once, so there is no need for lazy static.
         let re_fastx = RegexBuilder::new(r"\.f(ast)?[aq](\.[^.]{1,3})?$").case_insensitive(true).build().unwrap();
-        let re_bam = RegexBuilder::new(r"\.(bam|cram)$").case_insensitive(true).build().unwrap();
         let fastx_descr = "fasta/fastq[.gz]";
+        let re_bam = RegexBuilder::new(r"\.(bam|cram)$").case_insensitive(true).build().unwrap();
         let bam_descr = "bam/cram";
 
         for filename in self.reads1.iter().chain(&self.reads2) {
             check_filename(filename, &re_fastx, fastx_descr, &re_bam, bam_descr)?;
         }
-        for filename in self.alns.iter() {
+        for (filename, _) in self.alns.iter() {
             check_filename(filename, &re_bam, bam_descr, &re_fastx, fastx_descr)?;
         }
         Ok(())
@@ -234,7 +230,7 @@ impl InputFiles {
     /// Returns sum file size across first and second reads, as well as alignments.
     pub fn sum_file_size(&self) -> crate::Result<u64> {
         let mut s = 0;
-        for filename in self.reads1.iter().chain(&self.reads2).chain(&self.alns) {
+        for filename in self.reads1.iter().chain(&self.reads2).chain(self.alns.iter().map(|(filename, _)| filename)) {
             s += fs::metadata(filename).map_err(add_path!(filename))?.len();
         }
         Ok(s)
@@ -388,10 +384,10 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());
-    println!("    {:KEY$} {:VAL$}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
-        {EMPTY}  By default, mapped, sorted and indexed BAM/CRAM file is expected,\n\
-        {EMPTY}  please specify {} otherwise.",
-        "-a, --alignment".green(), "FILE".yellow(), "-i/--input".green(), "--no-index".green());
+    println!("    {} {}  Reads in BAM/CRAM format, mutually exclusive with {}.\n\
+        {EMPTY}  Unless {}, mapped, sorted & indexed BAM/CRAM file is expected.\n\
+        {EMPTY}  If provided, second file should contain path to the alignment index.",
+        "-a, --alignment".green(), "FILE [FILE]".yellow(), "-i/--input".green(), "--no-index".green());
     println!("    {:KEY$} {:VAL$}  File with input filenames (see documentation).",
         "-I, --in-list".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file. Must be indexed with FAIDX.",
@@ -531,8 +527,12 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     args.in_files.reads2.push(val.parse()?);
                 }
             }
-            Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") =>
-                args.in_files.alns.push(parser.value()?.parse()?),
+            Short('a') | Long("aln") | Long("alns") | Long("alignment") | Long("alignments") => {
+                let mut values = parser.values()?.take(2);
+                let aln_filename = values.next().expect("First argument is always present").parse()?;
+                let idx_filename = values.next().as_ref().map(ValueExt::parse).transpose()?;
+                args.in_files.alns.push((aln_filename, idx_filename));
+            }
             Short('I') | Long("in-list") | Long("input-list") => args.in_files.in_list = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.in_files.reference = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
@@ -773,7 +773,7 @@ fn first_step_str(args: &Args, bg_region: Option<&BgRegion>) -> String {
     s.push_str(" -i ");
     if args.in_files.reads1.len() > 1 || args.in_files.alns.len() > 1 {
         s.push_str("...");
-    } else if let Some(filename) = args.in_files.alns.first() {
+    } else if let Some((filename, _)) = args.in_files.alns.first() {
         s.push_str(&ext::fmt::path(filename));
     } else {
         s.push_str(&ext::fmt::path(&args.in_files.reads1[0]));
@@ -1179,9 +1179,13 @@ fn estimate_bg_distrs(
 
     if args.in_files.has_indexed_alignment() {
         assert!(args.in_files.alns.len() == 1);
-        let alns_filename = &args.in_files.alns[0];
+        let (alns_filename, idx_option) = &args.in_files.alns[0];
         log::debug!("Loading mapped reads into memory ({})", ext::fmt::path(alns_filename));
-        let mut bam_reader = bam::IndexedReader::from_path(alns_filename)?;
+        let mut bam_reader = if let Some(idx_filename) = idx_option {
+            bam::IndexedReader::from_path_and_index(alns_filename, idx_filename)?
+        } else {
+            bam::IndexedReader::from_path(alns_filename)?
+        };
         fastx::set_reference(alns_filename, &mut bam_reader, &args.in_files.reference, Some(ref_contigs))?;
 
         let bg_data = bg_region.expect("Background region must be defined");
@@ -1244,9 +1248,9 @@ fn read_count_factor(
             ext::fmt::path(args.similar_dataset.as_ref().unwrap())))
     };
     let mut total_reads = if !args.in_files.alns.is_empty() {
-        log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.alns));
+        log::info!("Counting reads in {}", ext::fmt::paths(args.in_files.alns.iter().map(|(filename, _)| filename)));
         args.in_files.alns.iter()
-            .map(|filename| fastx::count_reads_bam(filename, &args.samtools, &args.in_files.reference, args.threads))
+            .map(|(fname, _)| fastx::count_reads_bam(fname, &args.samtools, &args.in_files.reference, args.threads))
             .sum::<Result<u64, _>>()?
     } else {
         log::info!("Counting reads in {}", ext::fmt::paths(&args.in_files.reads1));

@@ -194,6 +194,7 @@ pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> crate::Result<V
 
 /// Returns a path with a new suffix appended to the end.
 pub fn path_append(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
+    // NOTE: see future function PathBuf::add_extension
     let mut os_string = path.as_os_str().to_owned();
     os_string.push(suffix.as_ref());
     os_string.into()

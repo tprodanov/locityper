@@ -700,11 +700,10 @@ pub struct DirectBamReader {
 
 impl DirectBamReader {
     pub fn new(
-        filenames: &[PathBuf],
+        filenames: Vec<PathBuf>,
         mut build_reader: impl FnMut(&Path) -> crate::Result<bam::Reader>,
     ) -> crate::Result<Self>
     {
-        let filenames = filenames.to_vec();
         let current_reader = build_reader(&filenames[0])?;
         let future_readers = filenames[1..].iter().rev().map(|f| build_reader(f))
             .collect::<crate::Result<Vec<_>>>()?;
@@ -1031,7 +1030,8 @@ macro_rules! process_readers {
                     #[allow(unused_braces)] $action
                 }
             } else {
-                let bam_reader = fastx::DirectBamReader::new(&$args.alns, |path| {
+                let aln_filenames: Vec<_> = $args.alns.iter().map(|(filename, _)| filename.to_path_buf()).collect();
+                let bam_reader = fastx::DirectBamReader::new(aln_filenames, |path| {
                     let mut inner_reader = bam::Reader::from_path(path)?;
                     fastx::set_reference(path, &mut inner_reader, &$args.reference, $contigs)?;
                     Ok(inner_reader)
