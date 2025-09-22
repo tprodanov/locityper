@@ -401,13 +401,15 @@ const LONG_ZERO_MATCHES: MatchCount = MatchCount {
     long: BaseMatchCount::<u32>::ZERO,
 };
 
+pub(crate) type LocusIx = u32;
+
 /// To which loci is the read recruited?
 pub(crate) trait Answer: Default + Clone + Sync + Send + 'static {
-    type Iter<'a>: Iterator<Item = u16>;
+    type Iter<'a>: Iterator<Item = LocusIx>;
 
     fn clear(&mut self);
 
-    fn push(&mut self, locus_ix: u16);
+    fn push(&mut self, locus_ix: LocusIx);
 
     fn not_empty(&self) -> bool;
 
@@ -415,8 +417,8 @@ pub(crate) trait Answer: Default + Clone + Sync + Send + 'static {
     fn iter(&self) -> Self::Iter<'_>;
 }
 
-impl Answer for Vec<u16> {
-   type Iter<'a> = std::iter::Copied<std::slice::Iter<'a, u16>>;
+impl Answer for Vec<LocusIx> {
+   type Iter<'a> = std::iter::Copied<std::slice::Iter<'a, LocusIx>>;
 
     #[inline(always)]
     fn clear(&mut self) {
@@ -424,7 +426,7 @@ impl Answer for Vec<u16> {
     }
 
     #[inline(always)]
-    fn push(&mut self, locus_ix: u16) {
+    fn push(&mut self, locus_ix: LocusIx) {
         self.push(locus_ix);
     }
 
@@ -435,13 +437,13 @@ impl Answer for Vec<u16> {
 
     #[inline(always)]
     fn iter(&self) -> Self::Iter<'_> {
-        (self as &[u16]).iter().copied()
+        (self as &[LocusIx]).iter().copied()
     }
 }
 
 /// Store answer for a single locus.
 impl Answer for bool {
-    type Iter<'a> = std::option::IntoIter<u16>;
+    type Iter<'a> = std::option::IntoIter<LocusIx>;
 
     #[inline(always)]
     fn clear(&mut self) {
@@ -449,7 +451,7 @@ impl Answer for bool {
     }
 
     #[inline(always)]
-    fn push(&mut self, locus_ix: u16) {
+    fn push(&mut self, locus_ix: LocusIx) {
         debug_assert!(locus_ix == 0);
         *self = true;
     }
@@ -467,15 +469,15 @@ impl Answer for bool {
 
 /// Based on the number of targets, use different buffer structures.
 pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
-    type Iter<'a>: Iterator<Item = (u16, MatchCount)>;
+    type Iter<'a>: Iterator<Item = (LocusIx, MatchCount)>;
 
     type Answer: Answer;
 
     fn clear(&mut self);
 
-    fn get_or_insert(&mut self, locus_ix: u16, val: MatchCount) -> &mut MatchCount;
+    fn get_or_insert(&mut self, locus_ix: LocusIx, val: MatchCount) -> &mut MatchCount;
 
-    fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount>;
+    fn get_mut(&mut self, locus_ix: LocusIx) -> Option<&mut MatchCount>;
 
     fn is_empty(&self) -> bool;
 
@@ -483,12 +485,12 @@ pub(crate) trait MatchesBuffer: Default + Sync + Send + 'static {
 }
 
 /// When there exist more than one target, use IntMap.
-pub(crate) type MatchesMap = IntMap<u16, MatchCount>;
+pub(crate) type MatchesMap = IntMap<LocusIx, MatchCount>;
 
-pub(crate) struct MatchesMapIter<'a>(hash_map::Iter<'a, u16, MatchCount>);
+pub(crate) struct MatchesMapIter<'a>(hash_map::Iter<'a, LocusIx, MatchCount>);
 
 impl<'a> Iterator for MatchesMapIter<'a> {
-    type Item = (u16, MatchCount);
+    type Item = (LocusIx, MatchCount);
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
@@ -499,7 +501,7 @@ impl<'a> Iterator for MatchesMapIter<'a> {
 impl MatchesBuffer for MatchesMap {
     type Iter<'a> = MatchesMapIter<'a>;
 
-    type Answer = Vec<u16>;
+    type Answer = Vec<LocusIx>;
 
     #[inline(always)]
     fn clear(&mut self) {
@@ -507,12 +509,12 @@ impl MatchesBuffer for MatchesMap {
     }
 
     #[inline(always)]
-    fn get_or_insert(&mut self, locus_ix: u16, default: MatchCount) -> &mut MatchCount {
+    fn get_or_insert(&mut self, locus_ix: LocusIx, default: MatchCount) -> &mut MatchCount {
         self.entry(locus_ix).or_insert(default)
     }
 
     #[inline(always)]
-    fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount> {
+    fn get_mut(&mut self, locus_ix: LocusIx) -> Option<&mut MatchCount> {
         self.get_mut(&locus_ix)
     }
 
@@ -531,7 +533,7 @@ impl MatchesBuffer for MatchesMap {
 pub(crate) type SingleMatch = Option<MatchCount>;
 
 impl MatchesBuffer for SingleMatch {
-    type Iter<'a> = std::option::IntoIter<(u16, MatchCount)>;
+    type Iter<'a> = std::option::IntoIter<(LocusIx, MatchCount)>;
 
     type Answer = bool;
 
@@ -541,13 +543,13 @@ impl MatchesBuffer for SingleMatch {
     }
 
     #[inline(always)]
-    fn get_or_insert(&mut self, locus_ix: u16, default: MatchCount) -> &mut MatchCount {
+    fn get_or_insert(&mut self, locus_ix: LocusIx, default: MatchCount) -> &mut MatchCount {
         debug_assert!(locus_ix == 0);
         self.get_or_insert(default)
     }
 
     #[inline(always)]
-    fn get_mut(&mut self, locus_ix: u16) -> Option<&mut MatchCount> {
+    fn get_mut(&mut self, locus_ix: LocusIx) -> Option<&mut MatchCount> {
         debug_assert!(locus_ix == 0);
         self.as_mut()
     }
@@ -654,7 +656,7 @@ impl Display for MinimInfo {
 const CAPACITY: usize = 4;
 /// Key: minimizer,
 /// value: vector of (locus index, minimizer information).
-type MinimToLoci = IntMap<Minimizer, SmallVec<[(u16, MinimInfo); CAPACITY]>>;
+type MinimToLoci = IntMap<Minimizer, SmallVec<[(LocusIx, MinimInfo); CAPACITY]>>;
 type LocusMinims = Vec<IntMap<Minimizer, MinimInfo>>;
 
 /// Target builder. Can be converted to targets using `finalize()`.
@@ -683,8 +685,8 @@ impl TargetBuilder {
 
     /// Add set of locus alleles.
     pub fn add(&mut self, contig_set: &ContigSet, mean_read_len: f64) {
-        let locus_ix = u16::try_from(self.locus_minimizers.len())
-            .expect(const_format::formatcp!("Too many contig sets (allowed at most {})", u16::MAX));
+        let locus_ix = LocusIx::try_from(self.locus_minimizers.len())
+            .expect(const_format::formatcp!("Too many contig sets (allowed at most {})", LocusIx::MAX));
         let kmer_counts = contig_set.kmer_counts();
         let base_k = kmer_counts.k();
         let shift = if u32::from(self.params.minimizer_k) <= base_k {
@@ -786,6 +788,40 @@ impl Sampling for Subsampling {
     fn next(&mut self) -> bool {
         self.rng.random::<u64>() < self.p_int
     }
+}
+
+/// Storage for output writers.
+pub(crate) trait Writers {
+    fn get(&mut self, locus_ix: LocusIx) -> &mut impl io::Write;
+
+    fn len(&self) -> usize;
+
+    const SINGLE_OUTPUT: bool;
+}
+
+impl<T: io::Write> Writers for Vec<T> {
+    #[inline(always)]
+    fn get(&mut self, locus_ix: LocusIx) -> &mut impl io::Write {
+        &mut self[locus_ix as usize]
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    const SINGLE_OUTPUT: bool = false;
+}
+
+/// Single writer: all recruited are written to the same output.
+impl Writers for Box<dyn io::Write> {
+    #[inline(always)]
+    fn get(&mut self, _locus_ix: LocusIx) -> &mut impl io::Write { self }
+
+    #[inline(always)]
+    fn len(&self) -> usize { 1 }
+
+    const SINGLE_OUTPUT: bool = true;
 }
 
 // /// Additional recruitment parameters.
@@ -904,11 +940,11 @@ impl Targets {
     /// Uses optimized Kadane's algorihm for finding max subsum.
     fn has_matching_stretch(
         &self,
+        locus_ix: LocusIx,
         minimizers: &[(Minimizer, bool)],
-        locus_ix: u16,
     ) -> bool
     {
-        let locus_minimizers = &self.locus_minimizers[usize::from(locus_ix)];
+        let locus_minimizers = &self.locus_minimizers[locus_ix as usize];
         let mut s_fw = 0_u32;
         let mut s_bw = 0_u32;
 
@@ -955,21 +991,22 @@ impl Targets {
             let counts = unsafe { counts.long };
             let frac = counts.rare_fraction(total);
             if frac.numerator() >= self.params.long_read_threshold(frac.denominator())
-                && (frac.denominator() < self.params.stretch_minims || self.has_matching_stretch(buffer, locus_ix))
+                && (frac.denominator() < self.params.stretch_minims || self.has_matching_stretch(locus_ix, buffer))
             {
                 answer.push(locus_ix);
             }
         }
     }
 
-    fn recruit_single_thread<T, M>(
+    fn recruit_single_thread<T, M, W>(
         &self,
         mut reader: impl FastxRead<Record = T>,
-        mut writers: Vec<impl io::Write>,
+        mut writers: W,
         mut sampling: impl Sampling,
     ) -> crate::Result<Progress>
     where T: RecruitableRecord,
           M: MatchesBuffer,
+          W: Writers,
     {
         let mut record = T::default();
         let mut answer = M::Answer::default();
@@ -981,7 +1018,8 @@ impl Targets {
             if sampling.next() {
                 record.recruit(self, &mut answer, &mut buffer1, &mut buffer2);
                 for locus_ix in answer.iter() {
-                    record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
+                    record.write_to(writers.get(locus_ix)).map_err(add_path!(!))?;
+                    if W::SINGLE_OUTPUT { break }
                 }
                 progress.add_recruited(answer.not_empty());
             }
@@ -994,7 +1032,7 @@ impl Targets {
     fn recruit_multi_thread<T, M>(
         &self,
         reader: impl FastxRead<Record = T>,
-        writers: Vec<impl io::Write>,
+        writers: impl Writers,
         threads: u16,
         chunk_size: usize,
         sampling: impl Sampling,
@@ -1011,29 +1049,31 @@ impl Targets {
 
     /// Recruit reads to the targets, possibly in multiple threads.
     /// Returns the number of recruited reads and the total number of reads.
-    pub(crate) fn recruit(
+    pub(crate) fn recruit<W: Writers>(
         &self,
         reader: impl FastxRead<Record = impl RecruitableRecord>,
-        writers: Vec<impl io::Write>,
+        writers: W,
         threads: u16,
         chunk_size: usize,
         subsampling: Option<(f64, XoshiroRng)>,
     ) -> crate::Result<Progress>
     {
-        assert_eq!(writers.len(), self.locus_minimizers.len(), "Unexpected number of writers");
+        assert!(W::SINGLE_OUTPUT || (writers.len() == self.locus_minimizers.len()),
+            "Number of writers ({}) does not match the number of target loci ({})",
+            writers.len(), self.locus_minimizers.len());
         assert!(threads >= 1 && self.n_targets() >= 1);
 
         // As read recruitment is very expensive, split into 8 implementations
         // based on the input parameters.
         match (threads, self.n_targets(), subsampling) {
             (1, 1, None) =>
-                self.recruit_single_thread::<_, SingleMatch>(reader, writers, All),
+                self.recruit_single_thread::<_, SingleMatch, W>(reader, writers, All),
             (1, 1, Some(t)) =>
-                self.recruit_single_thread::<_, SingleMatch>(reader, writers, Subsampling::from(t)),
+                self.recruit_single_thread::<_, SingleMatch, W>(reader, writers, Subsampling::from(t)),
             (1, _, None) =>
-                self.recruit_single_thread::<_, MatchesMap>(reader, writers, All),
+                self.recruit_single_thread::<_, MatchesMap, W>(reader, writers, All),
             (1, _, Some(t)) =>
-                self.recruit_single_thread::<_, MatchesMap>(reader, writers, Subsampling::from(t)),
+                self.recruit_single_thread::<_, MatchesMap, W>(reader, writers, Subsampling::from(t)),
             (_, 1, None) =>
                 self.recruit_multi_thread::<_, SingleMatch>(reader, writers, threads, chunk_size, All),
             (_, 1, Some(t)) =>
@@ -1111,7 +1151,7 @@ where R: FastxRead<Record = T>,
     /// Becomes `None`, once the stream has ended.
     reader: Option<R>,
     /// Fasta/q writers for each of the loci.
-    writers: Vec<W>,
+    writers: W,
     /// Senders from the main thread to the workers. Sends reads to be analyzed.
     senders: Vec<Sender<Shipment<T, M::Answer>>>,
     /// Receivers from workers to the main thread. Receives
@@ -1137,13 +1177,13 @@ where R: FastxRead<Record = T>,
 impl<T, R, W, M> MainWorker<T, R, W, M>
 where T: RecruitableRecord,
       R: FastxRead<Record = T>,
-      W: io::Write,
+      W: Writers,
       M: MatchesBuffer
 {
     fn new(
         targets: &Targets,
         reader: R,
-        writers: Vec<W>,
+        writers: W,
         n_workers: usize,
         chunk_size: usize,
     ) -> Self
@@ -1321,18 +1361,20 @@ where T: Clone + Default,
 }
 
 /// Writes recruited records to the output files.
-fn write_shipment<T, A>(
-    writers: &mut [impl io::Write],
+fn write_shipment<T, A, W>(
+    writers: &mut W,
     shipment: &Shipment<T, A>,
     progress: &mut Progress,
 ) -> crate::Result<()>
 where T: fastx::WritableRecord,
       A: Answer,
+      W: Writers,
 {
     for (record, answer) in shipment.data.iter() {
         progress.add_recruited(answer.not_empty());
         for locus_ix in answer.iter() {
-            record.write_to(&mut writers[usize::from(locus_ix)]).map_err(add_path!(!))?;
+            record.write_to(writers.get(locus_ix)).map_err(add_path!(!))?;
+            if W::SINGLE_OUTPUT { break }
         }
     }
     progress.add_processed(u64::from(shipment.total));

@@ -759,7 +759,7 @@ fn identify_pairedness(bam_reader: &mut bam::IndexedReader) -> crate::Result<boo
 pub(super) fn recruit_to_targets(
     targets: &recruit::Targets,
     in_files: &InputFiles,
-    writers: Vec<impl io::Write>,
+    writers: impl recruit::Writers,
     is_paired_end: Option<bool>,
     threads: u16,
     chunk_size: usize,
