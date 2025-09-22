@@ -15,7 +15,7 @@ use crate::{
         fmt::{PrettyU32, PrettyU64},
     },
     seq::{
-        recruit,
+        interv, recruit,
         Interval, ContigNames, ContigSet,
         fastx::{self, FastxRecord, SingleRecord},
         kmers::Kmer,
@@ -325,7 +325,8 @@ fn load_seqs_all(seqs_all: &Path, distinct: bool, output: &str) -> crate::Result
             .map_err(|_| Error::Utf8("read name", record.name().to_vec()))?;
         let locus = if distinct { name } else {
             name.split_once('*').ok_or_else(||error!(InvalidData,
-                "Invalid record name `{}` for -S {}. Symbol `*` required", name, ext::fmt::path(seqs_all)))?
+                "Invalid record name `{}` for -S {}. Symbol `*` required (also see --distinct)",
+                name, ext::fmt::path(seqs_all)))?
                 .0
         };
         let seq = record.seq().to_vec();
@@ -456,7 +457,7 @@ fn load_seqs_list(list_filename: &Path) -> crate::Result<(TargetSeqs, Vec<PathBu
 
 /// Based on the input arguments -s/-S, -o and -l, (list of list of sequences, output files).
 fn load_seqs_and_outputs(args: &Args) -> crate::Result<(TargetSeqs, Vec<PathBuf>)> {
-    let (seqs, files) = match &args.seqs_list {
+    let (seqs, out_paths) = match &args.seqs_list {
         Some(filename) => {
             validate_param!(args.seqs.is_empty() && args.seqs_all.is_none() && args.output.is_none(),
                 "Filename list (-l) is mututally exclusive with -s/-S/-o");
@@ -477,11 +478,10 @@ fn load_seqs_and_outputs(args: &Args) -> crate::Result<(TargetSeqs, Vec<PathBuf>
             }
         }
     };
-    assert_eq!(seqs.len(), files.len());
     if seqs.is_empty() {
         Err(error!(InvalidInput, "No input sequences loaded"))
     } else {
-        Ok((seqs, files))
+        Ok((seqs, out_paths))
     }
 }
 
@@ -550,18 +550,7 @@ fn load_target_regions(contigs: &Arc<ContigNames>, args: &Args) -> crate::Result
     match &args.regions {
         Some(filename) => {
             let mut intervals = Vec::new();
-            let file = ext::sys::open(filename)?;
-            for line in file.lines() {
-                let line = line.map_err(add_path!(filename))?;
-
-                match Interval::parse_bed(&mut line.trim().split('\t'), &contigs) {
-                    Ok(interv) => intervals.push(interv),
-                    Err(Error::ParsingError(e)) => log::error!(
-                        "Cannot parse BED line `{}`, the region may be absent from the BAM/CRAM file: {}",
-                        line.trim(), e),
-                    Err(e) => log::error!("Cannot parse BED line `{}`: {}", line.trim(), e.display()),
-                }
-            }
+            interv::load_bed(filename, contigs, &mut intervals)?;
             const PADDING: u32 = 1000;
             const MERGE_DISTANCE: u32 = 1000;
             Ok(super::genotype::postprocess_targets(intervals, contigs, PADDING, args.alt_contig_len, MERGE_DISTANCE))

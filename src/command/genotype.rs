@@ -18,7 +18,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        recruit, fastx, div, Interval,
+        interv, recruit, fastx, div, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
         counts::KmerCount,
@@ -91,6 +91,7 @@ struct Args {
     match_len: u32,
     thresh_kmer_count: KmerCount,
     chunk_length: u64,
+    recr_bed: String,
 
     edit_thresh: Option<EditThresh>,
     assgn_params: AssgnParams,
@@ -124,6 +125,7 @@ impl Default for Args {
             match_len: recruit::DEFAULT_MATCH_LEN,
             thresh_kmer_count: 50,
             chunk_length: DEFAULT_CHUNK_LENGTH,
+            recr_bed: String::new(),
 
             edit_thresh: None,
             assgn_params: Default::default(),
@@ -231,6 +233,10 @@ fn print_help(extended: bool) {
             {EMPTY}  Impacts runtime in multi-threaded read recruitment.",
             "-c, --chunk-len".green(), "INT".yellow(),
             super::fmt_def(PrettyU64(defaults.chunk_length)));
+        println!("    {:KEY$} {:VAL$}  Take user-defined BED file for recruitment from BAM/CRAM files.\n\
+            {EMPTY}  Do not forget to add alternative contigs. If path starts with ~~,\n\
+            {EMPTY}  remove tildes and use relative paths TARGET_DB/loci/*/{}.bed.",
+            "    --recr-bed".green(), "FILE".yellow(), "STR".yellow());
 
         println!("\n{}", "Filtering reads:".bold());
         println!("    {:KEY$} {:VAL$}\n\
@@ -392,6 +398,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("kmer-thresh") => args.thresh_kmer_count = parser.value()?.parse()?,
             Short('c') | Long("chunk") | Long("chunk-len") =>
                 args.chunk_length = parser.value()?.parse::<PrettyU64>()?.get(),
+            Long("recr-bed") => args.recr_bed = parser.value()?.parse()?,
 
             Short('P') | Long("ploidy") => args.ploidy = parser.value()?.parse()?,
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
@@ -708,25 +715,52 @@ pub(super) fn postprocess_targets(
     merged
 }
 
+fn load_locuswise_targets(
+    contigs: &Arc<ContigNames>,
+    filt_loci: &[&LocusData],
+    bed_basename: &str,
+    intervals: &mut Vec<Interval>,
+) -> crate::Result<()>
+{
+    for locus in filt_loci {
+        let bed_filename = locus.db_locus_dir.join(&bed_basename);
+        for line in ext::sys::open(&bed_filename)?.lines() {
+            let line = line.map_err(add_path!(bed_filename))?;
+            match Interval::parse_bed(&mut line.split('\t'), &contigs) {
+                Ok(interv) => intervals.push(interv),
+                Err(Error::ParsingError(e)) => log::error!(
+                    "[{}] Cannot parse locus coordinates: {}, the region may be absent from the BAM/CRAM file",
+                    locus.set.tag(), e),
+                Err(e) => log::error!("[{}] Cannot parse locus coordinates: {}", locus.set.tag(), e.display()),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Prepare fetch regions for a list of regions.
 /// Additionally, add all contigs from
 fn create_fetch_targets(
     contigs: &Arc<ContigNames>,
     bg_distr: &BgDistr,
     filt_loci: &[&LocusData],
+    recr_bed: &str,
 ) -> crate::Result<Vec<Interval>>
 {
+    // Recruit reads from all contigs under 10 Mb.
+    const ALT_CONTIG_LEN: u32 = 10_000_000;
+    const MERGE_DISTANCE: u32 = 1000;
+
+    let mut alt_contig_len = ALT_CONTIG_LEN;
     let mut intervals = Vec::new();
-    for locus in filt_loci {
-        let bed_filename = locus.db_locus_dir.join(paths::LOCUS_BED);
-        let bed_str = fs::read_to_string(&bed_filename).map_err(add_path!(bed_filename))?;
-        match Interval::parse_bed(&mut bed_str.split('\t'), &contigs) {
-            Ok(interv) => intervals.push(interv),
-            Err(Error::ParsingError(e)) => log::error!(
-                "[{}] Cannot parse locus coordinates: {}, the region may be absent from the BAM/CRAM file",
-                locus.set.tag(), e),
-            Err(e) => log::error!("[{}] Cannot parse locus coordinates: {}", locus.set.tag(), e.display()),
-        }
+
+    if recr_bed.is_empty() {
+        load_locuswise_targets(contigs, filt_loci, paths::LOCUS_BED, &mut intervals)?;
+    } else if let Some(suffix) = recr_bed.strip_prefix("~~") {
+        load_locuswise_targets(contigs, filt_loci, &format!("{}.bed", suffix), &mut intervals)?;
+    } else {
+        interv::load_bed(&Path::new(recr_bed), contigs, &mut intervals)?;
+        alt_contig_len = 0;
     }
 
     let padding = if let Some(distr) = bg_distr.insert_distr().distr() {
@@ -734,10 +768,7 @@ fn create_fetch_targets(
     } else {
         1000
     };
-    // Recruit reads from all contigs under 10 Mb.
-    const ALT_CONTIG_LEN: u32 = 10_000_000;
-    const MERGE_DISTANCE: u32 = 1000;
-    Ok(postprocess_targets(intervals, contigs, padding, ALT_CONTIG_LEN, MERGE_DISTANCE))
+    Ok(postprocess_targets(intervals, contigs, padding, alt_contig_len, MERGE_DISTANCE))
 }
 
 /// Check first read in the BAM/CRAM file, and check if it is paired.
@@ -834,7 +865,7 @@ fn recruit_reads(
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let chunk_size = calculate_chunk_size(args.chunk_length, mean_read_len, is_paired_end);
     recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), args.threads, chunk_size, None,
-        |contigs| create_fetch_targets(contigs, bg_distr, &filt_loci))?;
+        |contigs| create_fetch_targets(contigs, bg_distr, &filt_loci, &args.recr_bed))?;
 
     for locus in filt_loci.iter() {
         fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)

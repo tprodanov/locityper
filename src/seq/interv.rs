@@ -1,15 +1,16 @@
 use std::{
     fmt,
-    io::{Read, Seek},
+    io::{Read, BufRead, Seek},
     sync::Arc,
     cmp::{min, max, Ordering},
+    path::Path,
 };
 use regex::Regex;
 use lazy_static::lazy_static;
 use const_format::formatcp;
 use bio::io::fasta;
 use crate::{
-    err::error,
+    err::{error, add_path},
     ext::fmt::PrettyU32,
 };
 use super::{ContigId, ContigNames};
@@ -239,6 +240,28 @@ impl Interval {
         }
         merged
     }
+}
+
+/// Loads a BED file into vector.
+pub fn load_bed(
+    filename: &Path,
+    contigs: &Arc<ContigNames>,
+    intervals: &mut Vec<Interval>,
+) -> crate::Result<()>
+{
+    let file = crate::ext::sys::open(filename)?;
+    for line in file.lines() {
+        let line = line.map_err(add_path!(filename))?;
+
+        match Interval::parse_bed(&mut line.trim().split('\t'), contigs) {
+            Ok(interv) => intervals.push(interv),
+            Err(crate::Error::ParsingError(e)) => log::error!(
+                "Cannot parse BED line `{}`: {}. Possible, contig missing from reference/BAM/CRAM files",
+                line.trim(), e),
+            Err(e) => log::error!("Cannot parse BED line `{}`: {}", line.trim(), e.display()),
+        }
+    }
+    Ok(())
 }
 
 impl fmt::Debug for Interval {
