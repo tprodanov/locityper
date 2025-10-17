@@ -45,7 +45,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
 
         "h" | "help" | "--help" | "-h" => print_help(),
         "V" | "version" | "--version" | "-V" => print_version(),
-        "cite" => print_citation(),
+        "cite" | "--cite" => print_citation(),
         cmd => {
             log::error!("Unknown command {}", cmd.red());
             std::process::exit(1);
@@ -78,14 +78,11 @@ fn print_citation() {
     println!("{}", "Thank you for using our tool!".bold());
     println!();
 
-    const PREPRINT_LINK: &'static str = "https://doi.org/10.1101/2024.05.03.592358";
-    println!("You can find preprint here:");
-    println!("    T. Prodanov, E. Plender, G. Seebohm, S. Meuth, E. Eichler, T. Marschall. \
-        Locityper: targeted");
-    println!("    genotyping of complex polymorphic genes. {} (2024), {}",
-        "bioRxiv".italic(), PREPRINT_LINK);
-    println!();
-    println!("Please check for peer-reviewed publication later!");
+    const PREPRINT_LINK: &'static str = "https://doi.org/10.1038/s41588-025-02362-4";
+    println!("Please cite our paper:");
+    println!("    T.Prodanov, E.G.Plender, G.Seebohm, S.G.Meuth, E.E.Eichler, T.Marschall.");
+    println!("    Locityper enables targeted genotyping of complex polymorphic genes.");
+    println!("    {} (2025), {}", "Nature Genetics".italic(), PREPRINT_LINK);
 }
 
 fn print_help() {
