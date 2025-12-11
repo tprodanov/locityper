@@ -1,13 +1,13 @@
 FROM rust:1.89-slim-bullseye
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.2.0"
+LABEL version="1.2.1"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local
 ARG SAMTOOLS_VER=1.19
 ARG MM2_VER=2.26
-ARG STROBE_VER=0.13.0
+ARG STROBE_VER=0.14.0
 
 RUN apt-get update && \
     apt-get install --assume-yes --no-install-recommends \

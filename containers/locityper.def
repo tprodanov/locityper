@@ -10,7 +10,7 @@ From: rust:1.76-slim-bookworm
 
     SAMTOOLS_VER=1.19
     MM2_VER=2.26
-    STROBE_VER=0.13.0
+    STROBE_VER=0.14.0
 
     apt-get update
     apt-get install --assume-yes --no-install-recommends  \

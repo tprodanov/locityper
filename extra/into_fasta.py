@@ -98,7 +98,7 @@ def main():
     loci_inters = set(haplotypes.keys()) & set(preds.keys())
     if len(loci_inters) < len(haplotypes):
         sys.stderr.write('WARN: Genotype predictions missing for {} loci, such as {}\n'.format(
-            len(haplotypes) - len(loci_inters), list(set(haplotypes.keys()) - loci_inters)[:5].join(', ')))
+            len(haplotypes) - len(loci_inters), ', '.join(list(set(haplotypes.keys()) - loci_inters)[:5])))
 
     sys.stderr.write('======\n')
     total = len(loci_inters)
