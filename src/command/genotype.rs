@@ -887,9 +887,6 @@ fn create_mapping_command(
 
     let mut cmd: Command;
     if seq_info.technology() == Technology::Illumina {
-        // Force strobealign v0.13 to use more minimizers.
-        let rescue_param = (n_seqs * 4 / 100 + 1).clamp(3, 25000);
-
         cmd = Command::new(&args.strobealign);
         // NOTE: Provide single input FASTQ, and do not use --interleaved option.
         // This is because Strobealign starts to connect read pairs in multiple ways,
@@ -898,7 +895,6 @@ fn create_mapping_command(
             "--no-progress",
             "-M", &n_locs,   // Try as many secondary locations as possible.
             "-N", &n_locs,   // Output as many secondary alignments as possible.
-            "-R", &rescue_param.to_string(),
             "-S", "0.5",     // Try candidate sites with minimizer hits >= FLOAT * best hits.
             "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.
