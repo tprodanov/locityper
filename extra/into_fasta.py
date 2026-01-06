@@ -17,6 +17,16 @@ def parse_float(val):
     return float(val) if val != 'NA' else np.nan
 
 
+def write_fasta(out, name, seq, comment=None, linesize=120):
+    out.write(f'>{name}')
+    if comment is not None:
+        out.write(f' {comment}')
+    out.write('\n')
+    for i in range(0, len(seq), linesize):
+        out.write(seq[i : i + linesize])
+        out.write('\n')
+
+
 def load_haplotypes(path, subset_loci):
     loci_dir = os.path.join(path, 'loci')
     if not os.path.isdir(loci_dir):
@@ -60,13 +70,7 @@ def process_locus(locus, samples, preds, haplotypes, out_dir, compress):
                     ignored += 1 / len(gt)
                     continue
 
-                out.write(f'>{sample}.{i} {allele}')
-                for key, val in features.items():
-                    if key != 'GQ':
-                        out.write(f' {key}={val}')
-                out.write('\n')
-                for i in range(0, len(hap), 120):
-                    out.write(hap[i:i+120] + '\n')
+                write_fasta(out, f'{sample}.{i}', hap)
                 processed += 1 / len(gt)
     return locus, processed, ignored
 
