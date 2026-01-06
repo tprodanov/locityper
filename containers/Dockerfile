@@ -1,4 +1,4 @@
-FROM rust:1.89-slim-bullseye
+FROM rust:1.92-slim-trixie
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
 LABEL version="1.2.3"

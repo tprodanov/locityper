@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: rust:1.76-slim-bookworm
+From: rust:1.92-slim-trixie
 
 %labels
     Author timofey.prodanov@hhu.de
