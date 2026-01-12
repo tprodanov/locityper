@@ -78,11 +78,11 @@ fn print_citation() {
     println!("{}", "Thank you for using our tool!".bold());
     println!();
 
-    const PREPRINT_LINK: &'static str = "https://doi.org/10.1038/s41588-025-02362-4";
+    const LINK: &'static str = "https://doi.org/10.1038/s41588-025-02362-4";
     println!("Please cite our paper:");
     println!("    T.Prodanov, E.G.Plender, G.Seebohm, S.G.Meuth, E.E.Eichler, T.Marschall.");
     println!("    Locityper enables targeted genotyping of complex polymorphic genes.");
-    println!("    {} (2025), {}", "Nature Genetics".italic(), PREPRINT_LINK);
+    println!("    {} {}, 2901-2908 (2025). {}", "Nature Genetics".italic(), "57".bold(), LINK.underline());
 }
 
 fn print_help() {

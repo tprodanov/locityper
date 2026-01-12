@@ -6,3 +6,4 @@ Cargo.lock
 /src/test.rs
 __pycache__
 bin
+/containers/*.tar.gz
