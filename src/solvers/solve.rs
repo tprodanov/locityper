@@ -820,18 +820,6 @@ fn open_gzips(filenames: &[PathBuf]) -> crate::Result<Vec<GzFile>> {
     filenames.iter().map(|path| ext::sys::create_gzip(path)).collect()
 }
 
-/// If there is more than one file, consecutively append all of them to the first file, and keep only the first one.
-fn merge_files(filenames: &[PathBuf]) -> crate::Result<()> {
-    if filenames.len() > 1 {
-        // By this point, all depth_writers should be already dropped.
-        let mut file1 = std::fs::OpenOptions::new().append(true).open(&filenames[0]).map_err(add_path!(filenames[0]))?;
-        ext::sys::concat_files(filenames[1..].iter(), &mut file1)?;
-        filenames[1..].iter().map(|path| std::fs::remove_file(path).map_err(add_path!(path)))
-            .collect::<crate::Result<()>>()?;
-    }
-    Ok(())
-}
-
 struct ThreadDebugFiles {
     depth_writer: Option<GzFile>,
     ext_sol_writer: Option<GzFile>,
@@ -883,10 +871,10 @@ impl DebugFiles {
     fn merge(&self) -> crate::Result<()> {
         debug_assert!(self.depth_writers.is_none() && self.ext_sol_writers.is_none());
         if let Some(filenames) = &self.depth_filenames {
-            merge_files(filenames)?;
+            ext::sys::merge_files(&filenames[0], &filenames[1..])?;
         }
         if let Some(filenames) = &self.ext_sol_filenames {
-            merge_files(filenames)?;
+            ext::sys::merge_files(&filenames[0], &filenames[1..])?;
         }
         Ok(())
     }

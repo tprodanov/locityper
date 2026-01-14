@@ -430,7 +430,7 @@ fn load_seqs_glob(patterns: &[String], output: &str) -> crate::Result<(TargetSeq
 
 /// Loads files from
 fn load_seqs_list(list_filename: &Path) -> crate::Result<(TargetSeqs, Vec<PathBuf>)> {
-    let dirname = ext::sys::parent_unless_redirect(list_filename);
+    let dirname = ext::sys::parent_unless_tty(list_filename);
     let mut out_filenames = HashSet::default();
     let mut seqs = Vec::new();
     let mut out_paths = Vec::new();
@@ -490,7 +490,7 @@ type BufFile = io::BufWriter<fs::File>;
 /// Creates plain-text output file with large buffer,
 fn create_output(filename: impl AsRef<Path>) -> crate::Result<BufFile> {
     let filename = filename.as_ref();
-    if let Some(dir) = ext::sys::parent_unless_redirect(filename) {
+    if let Some(dir) = ext::sys::parent_unless_tty(filename) {
         fs::create_dir_all(dir).map_err(add_path!(dir))?;
     }
     // Output files with a large buffer (4 Mb).
@@ -567,7 +567,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     super::greet();
 
     let sampling = if args.subsampling_rate < 1.0 {
-        Some((args.subsampling_rate, ext::rand::init_rng(args.seed)))
+        Some((args.subsampling_rate, ext::rand::init_rng(args.seed, true)))
     } else { None };
 
     let recr_params = recruit::Params::new(args.minimizer_kw, args.match_frac, args.match_len, args.thresh_kmer_count)?;

@@ -164,14 +164,14 @@ pub fn create_file(filename: &Path) -> crate::Result<BufWriter<File>> {
 
 /// Based on extension, create file.
 #[allow(unused)]
-pub fn create(filename: &Path) -> crate::Result<Box<dyn Write>> {
+pub fn create(filename: &Path) -> crate::Result<Box<dyn Write + Send>> {
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         Ok(Box::new(BufWriter::new(stdout())))
     } else {
         match filename.extension().and_then(OsStr::to_str) {
             Some("gz") => Ok(Box::new(create_gzip(filename)?)),
             Some("lz4") => Ok(Box::new(create_lz4_slow(filename)?)),
-            _ => Ok(Box::new(create_file(filename)?))
+            _ => Ok(Box::new(create_file(filename)?)),
         }
     }
 }
@@ -201,13 +201,13 @@ pub fn path_append(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
 }
 
 /// Returns true if the path is -, starts with /dev/ or starts with proc.
-pub fn redirect_path(path: &Path) -> bool {
+pub fn is_tty(path: &Path) -> bool {
     path.starts_with("/dev") || path.starts_with("/proc") || path == OsStr::new("-")
 }
 
 /// Returns parent directory, unless the path indicates redirection (/proc/..., /dev/..., -).
-pub fn parent_unless_redirect(path: &Path) -> Option<&Path> {
-    if redirect_path(path) {
+pub fn parent_unless_tty(path: &Path) -> Option<&Path> {
+    if is_tty(path) {
         None
     } else {
         path.parent()
@@ -229,18 +229,25 @@ pub fn mkdir(path: impl AsRef<Path>) -> crate::Result<()> {
     }
 }
 
-/// Directly concantenates files, without trying to decompress them.
-/// Therefore, if input files are already gzipped, output writer should be plain, without compression.
-pub fn concat_files(filenames: impl Iterator<Item = impl AsRef<Path>>, mut writer: impl Write) -> crate::Result<()> {
-    for filename in filenames {
-        let mut reader = File::open(&filename).map_err(add_path!(filename))?;
-        io::copy(&mut reader, &mut writer).map_err(add_path!(filename))?;
+/// If filenames not empty, consecutively append all of them to the file1, afterwards delete them.
+pub fn merge_files(mut fname1: &Path, filenames: &[PathBuf]) -> crate::Result<()> {
+    if !filenames.is_empty() {
+        if fname1 == OsStr::new("-") {
+            fname1 = Path::new("/dev/stdout");
+        }
+        let mut file1 = std::fs::OpenOptions::new().append(true).open(fname1).map_err(add_path!(fname1))?;
+        for filename in filenames {
+            let mut reader = File::open(&filename).map_err(add_path!(filename))?;
+            io::copy(&mut reader, &mut file1).map_err(add_path!(fname1, filename))?;
+        }
+        filenames.iter().map(|path| std::fs::remove_file(path).map_err(add_path!(path)))
+            .collect::<crate::Result<()>>()?;
     }
     Ok(())
 }
 
-/// Returns path basename, or `???`, if it is empty.
-fn safe_basename(path: &Path) -> Cow<'_, str> {
+/// Returns UTF-8 path basename.
+fn utf8_basename(path: &Path) -> Cow<'_, str> {
     path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()
 }
 
@@ -249,11 +256,11 @@ fn safe_basename(path: &Path) -> Cow<'_, str> {
 pub fn get_program_version(exe: &Path) -> String {
     let out = match std::process::Command::new(exe).arg("--version").output() {
         Ok(out) => out,
-        Err(_) => return format!("{} version unavailable", safe_basename(exe)),
+        Err(_) => return format!("{} version unavailable", utf8_basename(exe)),
     };
     let msg = if out.stdout.is_empty() { out.stderr } else { out.stdout };
     if msg.is_empty() {
-        return format!("{} version unavailable", safe_basename(exe))
+        return format!("{} version unavailable", utf8_basename(exe))
     }
     const MAX_SIZE: usize = 1000;
     let i = msg.iter().take(MAX_SIZE).position(|&ch| ch == b'\n').unwrap_or(MAX_SIZE.min(msg.len()));
@@ -261,7 +268,7 @@ pub fn get_program_version(exe: &Path) -> String {
     if msg_head.contains(' ') {
         msg_head.trim().to_string()
     } else {
-        format!("{} {}", safe_basename(exe), msg_head.trim())
+        format!("{} {}", utf8_basename(exe), msg_head.trim())
     }
 }
 
@@ -329,8 +336,7 @@ impl PipeGuard {
     /// We already know that the pipe failed, need to kill all steps and collect available information.
     pub fn fail(&mut self) -> String {
         let mut s = String::new();
-        for (exe, (child, output)) in self.executables.iter()
-                .zip(self.children.iter_mut().zip(self.outputs.iter_mut())) {
+        for (exe, child, output) in itertools::izip!(&self.executables, &mut self.children, &mut self.outputs) {
             writeln!(s, "{}", get_program_version(&exe).bold()).unwrap();
             if let Some(mut child) = child.take() {
                 if let Err(e) = child.kill() {

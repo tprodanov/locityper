@@ -386,7 +386,7 @@ impl ContigInfo {
         let mut mov_info = vec![NeighbInfo::default(); (contig_len - neighb_size + 1) as usize];
         let cumul_gc: Vec<u32> = IterExt::cumul_sums(seq.iter().map(|&ch| ch == b'C' || ch == b'G'));
         let mult = 100.0 / f64::from(neighb_size);
-        for ((&c1, &c2), w) in cumul_gc.iter().zip(&cumul_gc[neighb_size as usize..]).zip(&mut mov_info) {
+        for (&c1, &c2, w) in itertools::izip!(&cumul_gc, &cumul_gc[neighb_size as usize..], &mut mov_info) {
             w.gc_content = (mult * f64::from(c2 - c1)).round() as u8;
         }
 
@@ -598,7 +598,7 @@ impl ContigInfos {
 
         let seqs = set.seqs();
         let mut infos = Vec::with_capacity(seqs.len());
-        for (id, (seq, curr_weights)) in contigs.ids().zip(seqs.iter().zip(explicit_weights.into_iter())) {
+        for (id, seq, curr_weights) in itertools::izip!(contigs.ids(), seqs, explicit_weights) {
             infos.push(
                 ContigInfo::new(id, contigs, seq, set.kmer_counts(), depth, curr_weights, params).map(Arc::new)?);
         }

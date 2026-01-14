@@ -268,7 +268,7 @@ fn load_loci(
     }
 
     for filename in bed_files.iter() {
-        let dirname = ext::sys::parent_unless_redirect(filename);
+        let dirname = ext::sys::parent_unless_tty(filename);
         for line in ext::sys::open(filename)?.lines() {
             let line = line.map_err(add_path!(filename))?;
             let mut split = line.trim_end().split('\t');

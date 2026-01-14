@@ -52,7 +52,7 @@ fn check_filename(
     shouldnt_match: &Regex,
     wrong_format: &'static str,
 ) -> crate::Result<()> {
-    if ext::sys::redirect_path(filename) {
+    if ext::sys::is_tty(filename) {
         log::error!("Stdin and other redirect files may not be supported. Continuing for now");
         return Ok(());
     } else if filename == OsStr::new("!") {
@@ -127,7 +127,7 @@ impl InputFiles {
             "Input list (-I) cannot be used together with other input files (-i/-a).");
         validate_param!(!self.interleaved && !self.no_index,
             "Input list (-I) and --interleaved/--no-index cannot be provided together, please see README");
-        let dirname = ext::sys::parent_unless_redirect(&list_filename);
+        let dirname = ext::sys::parent_unless_tty(&list_filename);
 
         let mut prev_flag: Option<String> = None;
         for line in ext::sys::open(&list_filename)?.lines() {
@@ -696,7 +696,7 @@ fn set_mapping_stdin(
 ) -> crate::Result<thread::JoinHandle<Result<Option<u64>, Error>>>
 {
     let sampling = if args.subsampling_rate < 1.0 {
-        Some((args.subsampling_rate, ext::rand::init_rng(args.seed)))
+        Some((args.subsampling_rate, ext::rand::init_rng(args.seed, true)))
     } else { None };
 
     let mut writer = io::BufWriter::new(child_stdin);

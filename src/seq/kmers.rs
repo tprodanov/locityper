@@ -2,19 +2,20 @@ use std::{
     cmp::Ord,
     ops::{Shl, Shr, BitOr, BitAnd},
 };
+use ruint::aliases::U256;
 use crate::algo::IntSet;
 
 /// Store k-mers in integers of different length (15-mers in u32, 31-mers in u64, 63-mers in u128).
-pub trait Kmer: From<u8>
-    + Copy + Ord + Eq
+pub trait Kmer: Copy + Ord + Eq
     + std::fmt::Display + std::fmt::Binary + std::fmt::LowerHex + std::fmt::UpperHex
     + Shl<u8, Output = Self>
     + Shr<u8, Output = Self>
     + BitOr<Self, Output = Self>
     + BitAnd<Self, Output = Self>
 {
-    /// Zero value.
     const ZERO: Self;
+
+    const ONE: Self;
 
     /// Maximum k-mer size `(BITS / 2 - 1)`.
     /// It is actually possible to store `BITS / 2` k-mers in case of minimizers and canonical k-mers, but not in case
@@ -28,12 +29,16 @@ pub trait Kmer: From<u8>
     const UNDEF: Self;
 
     fn create_mask(k: u8) -> Self;
+
+    fn from_u8(val: u8) -> Self;
 }
 
 macro_rules! impl_kmer {
-    ($prim:ty) => {
+    ($prim:ty, $zero:expr, $one:expr) => {
         impl Kmer for $prim {
-            const ZERO: Self = 0;
+            const ZERO: Self = $zero;
+
+            const ONE: Self = $one;
 
             const MAX_KMER_SIZE: u8 = (Self::BITS / 2 - 1) as u8;
 
@@ -43,10 +48,17 @@ macro_rules! impl_kmer {
             fn create_mask(k: u8) -> Self {
                 // if k == 16 { -1_i32 as u32 } else { (1_u32 << 2 * k) - 1 }
                 // Already know that k is not `Self::BITS / 2`.
-                (1 << 2 * k) - 1
+                (Self::ONE << 2 * k) - Self::ONE
+            }
+
+            #[inline]
+            fn from_u8(val: u8) -> Self {
+                Self::from(val)
             }
         }
-    }
+    };
+
+    ($prim:ty) => { impl_kmer!($prim, 0, 1); }
 }
 
 impl_kmer!(u8);
@@ -54,6 +66,7 @@ impl_kmer!(u16);
 impl_kmer!(u32);
 impl_kmer!(u64);
 impl_kmer!(u128);
+impl_kmer!(U256, U256::ZERO, U256::ONE);
 
 pub trait Minimizer: Kmer {
     /// Quickly calculate hash function.
@@ -176,8 +189,8 @@ where K: Kmer,
                 continue;
             },
         };
-        fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
-        if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(3 - fw_enc) << rv_shift); }
+        fw_kmer = ((fw_kmer << 2) | K::from_u8(fw_enc)) & mask;
+        if CANON { rv_kmer = (rv_kmer >> 2) | (K::from_u8(3 - fw_enc) << rv_shift); }
 
         if i >= reset {
             let (kmer, forward) = if CANON && rv_kmer < fw_kmer { (rv_kmer, false) } else { (fw_kmer, true) };
@@ -287,8 +300,8 @@ where K: Minimizer,
                 (0, 0)
             },
         };
-        fw_kmer = ((fw_kmer << 2) | K::from(fw_enc)) & mask;
-        if CANON { rv_kmer = (rv_kmer >> 2) | (K::from(rv_enc) << rv_shift); }
+        fw_kmer = ((fw_kmer << 2) | K::from_u8(fw_enc)) & mask;
+        if CANON { rv_kmer = (rv_kmer >> 2) | (K::from_u8(rv_enc) << rv_shift); }
         let (kmer, fw) = if CANON && rv_kmer < fw_kmer { (rv_kmer, false) } else { (fw_kmer, true) };
         let h = if i < first_kmer { K::UNDEF } else { kmer.fast_hash() };
         hashes[i] = h;

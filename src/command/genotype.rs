@@ -549,7 +549,7 @@ fn load_priors(path: &Path) -> crate::Result<HashMap<String, HashMap<String, f64
 /// Returns a single filename for each locus.
 pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathBuf>> {
     let mut map = HashMap::default();
-    let dirname = ext::sys::parent_unless_redirect(path);
+    let dirname = ext::sys::parent_unless_tty(path);
     for line in ext::sys::open(path)?.lines() {
         let line = line.map_err(add_path!(path))?;
         if line.starts_with('#') {
@@ -1092,7 +1092,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     super::greet();
     let timer = Instant::now();
-    let mut rng = ext::rand::init_rng(args.seed);
+    let mut rng = ext::rand::init_rng(args.seed, true);
     let out_dir = args.output.as_ref().unwrap();
     ext::sys::mkdir(out_dir)?;
 

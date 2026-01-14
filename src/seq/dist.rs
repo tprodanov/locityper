@@ -1,48 +1,199 @@
 use std::{
-    thread,
+    thread, io,
     sync::Arc,
+    cmp::Ordering,
+    fmt::Write as FmtWrite,
 };
+use ruint::aliases::U256;
 use smallvec::SmallVec;
+use rand::{Rng, seq::SliceRandom};
 use crate::{
     seq::{
+        wfa, div,
         NamedSeq,
+        kmers::{self, Kmer},
         wfa::{Aligner, Penalties},
         cigar::{Cigar, Operation},
     },
-    err::error,
-    algo::HashMap,
+    err::{error, validate_param, add_path},
     math::RoundDiv,
 };
 
-const CAPACITY: usize = 4;
-type KmerCache<'a> = HashMap<&'a [u8], SmallVec<[u32; CAPACITY]>>;
-
-/// Creates a HashMap containing all the k-mers in the sequence.
-/// A good rolling hash function should speed up the code.
-fn cache_kmers(seq: &[u8], k: u32) -> KmerCache<'_> {
-    let mut map = KmerCache::default();
-    for (i, kmer) in seq.windows(k as usize).enumerate() {
-        map.entry(kmer)
-            .or_insert_with(SmallVec::new)
-            .push(i as u32);
-    }
-    map
+/// Alignment/divergence calculation parameters.
+#[derive(Clone)]
+pub struct Params {
+    pub skip_div: bool,
+    pub div_k: u8,
+    pub div_w: u8,
+    pub thresh_div: f64,
+    pub penalties: Penalties,
+    pub backbone_ks: Vec<u8>,
+    pub accuracy: u8,
+    pub max_gap: u32,
 }
 
-/// Finds all matches between k-mers in two caches.
-fn find_kmer_matches(cache1: &KmerCache, cache2: &KmerCache) -> Vec<(u32, u32)> {
-    let mut matches = Vec::new();
-    for (kmer1, positions1) in cache1.iter() {
-        if let Some(positions2) = cache2.get(kmer1) {
-            for &pos1 in positions1 {
-                for &pos2 in positions2 {
-                    matches.push((pos1, pos2));
-                }
-            }
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            skip_div: false,
+            div_k: 15,
+            div_w: 15,
+            thresh_div: 0.5,
+            penalties: Default::default(),
+            backbone_ks: vec![25, 51, 101],
+            accuracy: 9,
+            max_gap: 500,
         }
     }
-    matches.sort_unstable();
-    matches
+}
+
+impl Params {
+    pub fn validate(&mut self) -> crate::Result<()> {
+        validate_param!(0 < self.div_k && self.div_k <= u64::MAX_KMER_SIZE,
+            "k-mer size ({}) must be between 1 and {}", self.div_k, u64::MAX_KMER_SIZE);
+        validate_param!(0 < self.div_w && self.div_w <= kmers::MAX_MINIMIZER_W,
+            "Minimizer window ({}) must be between 1 and {}", self.div_w, kmers::MAX_MINIMIZER_W);
+        validate_param!(0.0 <= self.thresh_div && self.thresh_div <= 1.0,
+            "Maximum divergence ({}) must be within [0, 1]", self.thresh_div);
+        validate_param!(1 <= self.accuracy && self.accuracy <= wfa::MAX_ACCURACY,
+            "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, wfa::MAX_ACCURACY);
+
+        if self.thresh_div == 0.0 {
+            // Never run alignment.
+            self.thresh_div = -1.0;
+            self.backbone_ks.clear();
+        } else {
+            validate_param!(!self.backbone_ks.is_empty(), "Expect at least one backbone k-mer");
+            validate_param!(self.backbone_ks.iter().all(|&k| 5 <= k && k <= U256::MAX_KMER_SIZE),
+                "Backbone k-mer sizes must be between 5 and {} ({})", U256::MAX_KMER_SIZE,
+                self.backbone_str());
+        }
+        self.penalties.validate()?;
+        Ok(())
+    }
+
+    /// Combine backbone k via comma.
+    pub fn backbone_str(&self) -> String {
+        self.backbone_ks.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+    }
+}
+
+/// Aligns sequences to each other.
+pub fn align_sequences(
+    entries: Vec<NamedSeq>,
+    mut pairs: Vec<(u32, u32)>,
+    params: &Params,
+    threads: u16,
+    mut outputs: Vec<impl io::Write + Send + 'static>,
+    rng: &mut impl Rng,
+) -> crate::Result<()>
+{
+    let n_entries = entries.len();
+    // Find sequences that actually appear.
+    let mut entry_in_use = vec![false; n_entries];
+    let mut n_rem = n_entries;
+    for &(i, j) in &pairs {
+        // Will do -1 if old value was false.
+        n_rem -= usize::from(std::mem::replace(&mut entry_in_use[i as usize], true));
+        n_rem -= usize::from(std::mem::replace(&mut entry_in_use[j as usize], true));
+        if n_rem == 0 {
+            break;
+        }
+    }
+    let (minimizers, kmers) = fill_kmers_singlethread(&entries, &entry_in_use, params);
+
+    if threads == 1 {
+        align_all_singlethread(&entries, &pairs, &minimizers, &kmers, params, &mut outputs[0])
+    } else {
+        if params.thresh_div < 1.0 {
+            // Shuffle pairs for better job distribution since some alignments may be skipped.
+            pairs.shuffle(rng);
+        }
+        align_all_parallel(entries, pairs, minimizers, kmers, params, usize::from(threads), outputs)
+    }
+}
+
+const CAPACITY: usize = 4;
+type SeqKmers = Vec<(U256, SmallVec<[u32; CAPACITY]>)>;
+
+fn precompute_kmers(seq: &[u8], k: u8, buf: &mut Vec<(u32, U256)>) -> SeqKmers {
+    buf.clear();
+    kmers::kmers::<U256, _, { kmers::NON_CANONICAL }>(seq, k, buf);
+    buf.sort_by(|a, b| a.1.cmp(&b.1));
+
+    // k-mers with combined positions.
+    let mut compressed_kmers: SeqKmers = Vec::with_capacity(buf.len());
+    let mut curr_kmer = buf[0].1;
+    let mut curr_positions = SmallVec::new();
+    for &(pos, kmer) in buf.iter() {
+        if kmer != curr_kmer {
+            compressed_kmers.push((curr_kmer, std::mem::take(&mut curr_positions)));
+            curr_kmer = kmer;
+        }
+        curr_positions.push(pos);
+    }
+    compressed_kmers.push((curr_kmer, curr_positions));
+    compressed_kmers
+}
+
+fn fill_kmers_singlethread(
+    entries: &[NamedSeq],
+    entry_in_use: &[bool],
+    params: &Params,
+) -> (Vec<Vec<u64>>, Vec<SeqKmers>)
+{
+    let mut minimizers = Vec::with_capacity(if params.skip_div { 0 } else { entries.len() });
+    // Backbone ks will be empty if no alignments need to be calculated.
+    let mut kmers = Vec::with_capacity(entries.len() * params.backbone_ks.len());
+
+    let mut kmer_buf = Vec::new();
+    for (entry, &in_use) in entries.iter().zip(entry_in_use) {
+        if !in_use {
+            minimizers.push(Vec::new());
+            for _ in 0..params.backbone_ks.len() {
+                kmers.push(Vec::new());
+            }
+            continue;
+        }
+
+        let seq = entry.seq();
+        if !params.skip_div {
+            // Expected num of minimizers = 2L / (w + 1), here we take 5/2 * ... more to be safe.
+            let mut buf = Vec::with_capacity((5 * seq.len()).fast_round_div(2 * usize::from(params.div_w) + 2));
+            kmers::minimizers::<u64, _, { kmers::NON_CANONICAL }>(seq, params.div_k, params.div_w, &mut buf);
+            buf.sort_unstable();
+            minimizers.push(buf);
+        }
+
+        for &k in &params.backbone_ks {
+            kmers.push(precompute_kmers(seq, k, &mut kmer_buf));
+        }
+    }
+    (minimizers, kmers)
+}
+
+fn get_kmer_matches(kmers1: &SeqKmers, kmers2: &SeqKmers, buf: &mut Vec<(u32, u32)>) {
+    buf.clear();
+    let mut iter1 = kmers1.iter();
+    let mut iter2 = kmers2.iter();
+    let mut opt_x = iter1.next();
+    let mut opt_y = iter2.next();
+    while let (Some(x), Some(y)) = (opt_x, opt_y) {
+        match x.0.cmp(&y.0) {
+            Ordering::Equal => {
+                for &pos1 in &x.1 {
+                    for &pos2 in &y.1 {
+                        buf.push((pos1, pos2));
+                    }
+                }
+                opt_x = iter1.next();
+                opt_y = iter2.next();
+            }
+            Ordering::Less => opt_x = iter1.next(),
+            Ordering::Greater => opt_y = iter2.next(),
+        }
+    }
+    buf.sort_unstable();
 }
 
 #[inline(always)]
@@ -81,8 +232,6 @@ fn align_gap(
     }
 }
 
-/// Aligns two sequences between k-mer matches.
-/// First sequence: reference, sequence: query.
 fn align(
     aligner: &Aligner,
     entry1: &NamedSeq,
@@ -135,17 +284,23 @@ fn align(
 
 fn align_multik(
     aligner: &Aligner,
+    i: usize,
     entry1: &NamedSeq,
+    j: usize,
     entry2: &NamedSeq,
-    kmer_matches: &[Vec<(u32, u32)>],
-    backbone_ks: &[u32],
-    max_gap: u32,
+    kmers: &[SeqKmers],
+    params: &Params,
+    buf: &mut Vec<(u32, u32)>,
 ) -> crate::Result<(Cigar, i32)>
 {
     let mut best_cigar = None;
     let mut best_score = i32::MIN;
-    for (&k, matches) in backbone_ks.iter().zip(kmer_matches) {
-        let (cigar, score) = align(aligner, entry1, entry2, matches, k, max_gap)?;
+    let n_backbones = params.backbone_ks.len();
+    for (&k, kmers1, kmers2) in itertools::izip!(
+            &params.backbone_ks, &kmers[n_backbones * i..], &kmers[n_backbones * j..])
+    {
+        get_kmer_matches(kmers1, kmers2, buf);
+        let (cigar, score) = align(aligner, entry1, entry2, buf, u32::from(k), params.max_gap)?;
         if score > best_score {
             best_score = score;
             best_cigar = Some(cigar);
@@ -155,239 +310,118 @@ fn align_multik(
         .map(|cigar| (cigar, best_score))
 }
 
-/// Aligns sequences to each other.
-pub fn align_sequences(
+fn process_pair(
     entries: &[NamedSeq],
-    pairs: Vec<(u32, u32)>,
-    penalties: &Penalties,
-    backbone_ks: &[u32],
-    accuracy: u8,
-    max_gap: u32,
-    threads: u16,
-) -> crate::Result<Vec<(Cigar, i32)>>
+    i: usize,
+    j: usize,
+    minimizers: &[Vec<u64>],
+    kmers: &[SeqKmers],
+    params: &Params,
+    aligner: &Aligner,
+    buf1: &mut Vec<(u32, u32)>,
+    buf2: &mut String,
+    out: &mut impl io::Write,
+) -> crate::Result<()>
 {
-    let n_entries = entries.len();
-    let n_pairs = pairs.len();
-    let mut all_kmer_matches = vec![Vec::with_capacity(backbone_ks.len()); n_pairs];
-    for &backbone_k in backbone_ks {
-        let mut caches = vec![None; n_entries];
-        for (&(i, j), kmer_matches) in pairs.iter().zip(all_kmer_matches.iter_mut()) {
-            let i = i as usize;
-            let j = j as usize;
-            caches[i].get_or_insert_with(|| cache_kmers(entries[i].seq(), backbone_k));
-            caches[j].get_or_insert_with(|| cache_kmers(entries[j].seq(), backbone_k));
-            kmer_matches.push(find_kmer_matches(caches[i].as_ref().unwrap(), caches[j].as_ref().unwrap()));
-        }
-    }
+    let entry1 = &entries[i as usize];
+    let entry2 = &entries[j as usize];
+    write!(out, "{}\t{len}\t0\t{len}\t+\t", entry2.name(), len = entry2.seq().len()).map_err(add_path!(!))?;
+    write!(out, "{}\t{len}\t0\t{len}\t", entry1.name(), len = entry1.seq().len()).map_err(add_path!(!))?;
 
-    if threads == 1 {
-        let mut alns = Vec::with_capacity(n_pairs);
-        let aligner = Aligner::new(penalties.clone(), accuracy);
-        for (&(i, j), matches) in pairs.iter().zip(&all_kmer_matches) {
-            let i = i as usize;
-            let j = j as usize;
-            alns.push(align_multik(&aligner, &entries[i], &entries[j], matches, backbone_ks, max_gap)?);
+    let opt_div = if params.skip_div { None } else { Some(div::jaccard_distance(&minimizers[i], &minimizers[j])) };
+    buf2.clear();
+    if opt_div.map(|(_, dv)| dv <= params.thresh_div).unwrap_or(false) {
+        let (cigar, score) = align_multik(aligner, i, entry1, j, entry2, kmers, params, buf1)?;
+        let mut nmatches = 0;
+        let mut nerrs = 0;
+        for item in cigar.iter() {
+            match item.operation() {
+                Operation::Equal => nmatches += item.len(),
+                _ => nerrs += item.len(),
+            }
         }
-        Ok(alns)
+        let aln_len = nmatches + nerrs;
+        write!(out, "{}\t{}\t255", nmatches, aln_len).map_err(add_path!(!))?;
+        let dv = f64::from(nerrs) / f64::from(aln_len);
+        let qv = if dv.is_finite() { -10.0 * dv.log10() } else { f64::INFINITY };
+        write!(out, "\tNM:i:{}\tAS:i:{}\tdv:f:{:.9}\tqv:f:{:.6}", nerrs, score, dv, qv).map_err(add_path!(!))?;
+        write!(buf2, "{}", cigar).unwrap();
     } else {
-        multithread_align(entries, pairs, all_kmer_matches, penalties, backbone_ks, accuracy, max_gap, threads)
+        // Skip alignment.
+        write!(out, "0\t0\t255").map_err(add_path!(!))?;
     }
+    if let Some((uniq_minims, minim_dv)) = opt_div {
+        write!(out, "\tum:i:{}\tmd:f:{:.9}", uniq_minims, minim_dv).map_err(add_path!(!))?;
+    }
+    if !buf2.is_empty() {
+        write!(out, "\tcg:Z:{}", buf2).map_err(add_path!(!))?;
+    }
+    writeln!(out).map_err(add_path!(!))?;
+    Ok(())
 }
 
-fn multithread_align(
+fn align_all_singlethread(
     entries: &[NamedSeq],
-    pairs: Vec<(u32, u32)>,
-    // [pair_index][backbone_index] -> indices of matches
-    all_kmer_matches: Vec<Vec<Vec<(u32, u32)>>>,
-    penalties: &Penalties,
-    backbone_ks: &[u32],
-    accuracy: u8,
-    max_gap: u32,
-    threads: u16,
-) -> crate::Result<Vec<(Cigar, i32)>>
+    pairs: &[(u32, u32)],
+    minimizers: &[Vec<u64>],
+    kmers: &[SeqKmers],
+    params: &Params,
+    out: &mut impl io::Write,
+) -> crate::Result<()>
 {
-    let pairs = Arc::new(pairs);
-    let entries = Arc::new(entries.to_vec());
-    let all_kmer_matches = Arc::new(all_kmer_matches);
+    let mut buf1 = Default::default();
+    let mut buf2 = Default::default();
+    let aligner = Aligner::new(params.penalties.clone(), params.accuracy);
+    for &(i, j) in pairs {
+        process_pair(entries, i as usize, j as usize, minimizers, kmers, params, &aligner,
+            &mut buf1, &mut buf2, out)?;
+    }
+    Ok(())
+}
 
-    let threads = usize::from(threads);
+fn align_all_parallel(
+    entries: Vec<NamedSeq>,
+    pairs: Vec<(u32, u32)>,
+    minimizers: Vec<Vec<u64>>,
+    kmers: Vec<SeqKmers>,
+    params: &Params,
+    threads: usize,
+    outputs: Vec<impl io::Write + Send + 'static>,
+) -> crate::Result<()>
+{
+    let entries = Arc::new(entries);
+    let pairs = Arc::new(pairs);
+    let minimizers = Arc::new(minimizers);
+    let kmers = Arc::new(kmers);
+
     let mut handles = Vec::with_capacity(threads);
     let n_pairs = pairs.len();
     let mut start = 0;
-    for worker_ix in 0..threads {
+    debug_assert_eq!(outputs.len(), threads);
+    for (worker_ix, mut out) in outputs.into_iter().enumerate() {
         if start == n_pairs {
             break;
         }
-        let rem_workers = threads - worker_ix;
-        let end = start + (n_pairs - start).fast_ceil_div(rem_workers);
+        let end = start + (n_pairs - start).fast_ceil_div(threads - worker_ix);
         // Closure with cloned data.
         {
             let pairs = Arc::clone(&pairs);
             let entries = Arc::clone(&entries);
-            let all_kmer_matches = Arc::clone(&all_kmer_matches);
-            let penalties = penalties.clone();
-            let curr_backbone_ks = backbone_ks.to_vec();
+            let minimizers = Arc::clone(&minimizers);
+            let kmers = Arc::clone(&kmers);
+            let params = params.clone();
             handles.push(thread::spawn(move || {
-                assert!(start < end);
-                let aligner = Aligner::new(penalties, accuracy);
-                pairs[start..end].iter().zip(all_kmer_matches[start..end].iter())
-                    .map(|(&(i, j), matches)|
-                        align_multik(&aligner, &entries[i as usize], &entries[j as usize],
-                            matches, &curr_backbone_ks, max_gap))
-                    .collect::<crate::Result<Vec<_>>>()
+                let aligner = Aligner::new(params.penalties.clone(), params.accuracy);
+                let mut buf1 = Default::default();
+                let mut buf2 = Default::default();
+                pairs[start..end].iter()
+                    .map(|&(i, j)| process_pair(&entries, i as usize, j as usize, &minimizers, &kmers, &params,
+                        &aligner, &mut buf1, &mut buf2, &mut out))
+                    .collect::<crate::Result<()>>()
             }));
         }
         start = end;
     }
     assert_eq!(start, n_pairs);
-
-    // Collect all results so that even if there is a problem in one of the sequences, all handles are closed.
-    let results: Vec<_> = handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect();
-    let mut alns = Vec::with_capacity(n_pairs);
-    for res in results.into_iter() {
-        alns.extend(res?.into_iter());
-    }
-    Ok(alns)
+    handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect()
 }
-
-// fn create_bam_header(entries: &[NamedSeq], backbone_k: u32, accuracy: u8) -> bam::header::Header {
-//     let mut header = bam::header::Header::new();
-//     let mut prg = bam::header::HeaderRecord::new(b"PG");
-//     prg.push_tag(b"ID", crate::command::PROGRAM);
-//     prg.push_tag(b"PN", crate::command::PROGRAM);
-//     prg.push_tag(b"VN", crate::command::VERSION);
-//     prg.push_tag(b"CL", &std::env::args().collect::<Vec<_>>().join(" "));
-//     header.push_record(&prg);
-//     header.push_comment(format!("backbone-k={};accuracy-lvl={}", backbone_k, accuracy).as_bytes());
-
-//     for entry in entries {
-//         let mut record = bam::header::HeaderRecord::new(b"SQ");
-//         record.push_tag(b"SN", entry.name());
-//         record.push_tag(b"LN", entry.len());
-//         header.push_record(&record);
-//     }
-//     header
-// }
-
-// fn fill_cigar_buffer(buffer: &mut bam::record::CigarString, iter: impl Iterator<Item = CigarItem>) {
-//     buffer.0.clear();
-//     buffer.0.extend(iter.map(CigarItem::to_htslib));
-// }
-
-// fn create_record(
-//     header: &Rc<bam::HeaderView>,
-//     query: &NamedSeq,
-//     refid: usize,
-//     cigar_view: &bam::record::CigarString,
-//     edit_dist: u32,
-//     score: i32,
-//     divergence: f64,
-// ) -> bam::Record
-// {
-//     let mut record = bam::Record::new();
-//     record.set_header(Rc::clone(header));
-//     record.set_tid(refid as i32);
-//     record.set_pos(0);
-//     record.set_mtid(-1);
-//     record.set_mpos(-1);
-//     record.set(query.name().as_bytes(), Some(cigar_view), &[], &[]);
-//     record.push_aux(b"NM", bam::record::Aux::U32(edit_dist)).expect("Cannot set NM tag");
-//     record.push_aux(b"AS", bam::record::Aux::I32(score)).expect("Cannot set AS tag");
-//     record.push_aux(b"dv", bam::record::Aux::Float(divergence as f32)).expect("Cannot set `dv` tag");
-//     record
-// }
-
-// /// Creates BAM file, writes all pairwise records, and returns linear vector of divergences.
-// pub fn write_all(
-//     bam_path: &Path,
-//     entries: &[NamedSeq],
-//     alns: TriangleMatrix<(Cigar, i32)>,
-//     backbone_k: u32,
-//     accuracy: u8,
-// ) -> crate::Result<TriangleMatrix<f64>> {
-//     let header = create_bam_header(entries, backbone_k, accuracy);
-//     let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam)?;
-//     writer.set_compression_level(bam::CompressionLevel::Maximum)?;
-//     let mut cigar_buffer = bam::record::CigarString(Vec::new());
-
-//     let n = entries.len();
-//     let mut pairwise_records = vec![None; n * n];
-//     let mut divergences = TriangleMatrix::new(n, 0.0);
-//     let header_view = Rc::new(bam::HeaderView::from_header(&header));
-//     for (i, refer) in entries.iter().enumerate() {
-//         let rlen = refer.len();
-//         fill_cigar_buffer(&mut cigar_buffer, std::iter::once(CigarItem::new(Operation::Equal, rlen)));
-//         pairwise_records[i * n + i] = Some(create_record(&header_view, refer, i, &cigar_buffer, 0, 0, 0.0));
-
-//         for (j, query) in (i + 1..).zip(&entries[i + 1..]) {
-//             let (cigar, score) = &alns[(i, j)];
-//             if query.len() != cigar.query_len() || rlen != cigar.ref_len() {
-//                 return Err(error!(RuntimeError,
-//                     "Generated invalid alignment between {} ({} bp) and {} ({} bp), CIGAR qlen {}, rlen {}",
-//                     query.name(), query.len(), refer.name(), rlen, cigar.query_len(), cigar.ref_len()));
-//             }
-
-//             let (nmatches, total_size) = cigar.frac_matches();
-//             let edit_dist = total_size - nmatches;
-//             let divergence = f64::from(edit_dist) / f64::from(total_size);
-//             divergences[(i, j)] = divergence;
-//             fill_cigar_buffer(&mut cigar_buffer, cigar.iter().copied());
-//             pairwise_records[i * n + j] = Some(
-//                 create_record(&header_view, query, i, &cigar_buffer, edit_dist, *score, divergence));
-
-//             fill_cigar_buffer(&mut cigar_buffer, cigar.iter().map(CigarItem::invert));
-//             pairwise_records[j * n + i] = Some(
-//                 create_record(&header_view, refer, j, &cigar_buffer, edit_dist, *score, divergence));
-//         }
-//     }
-
-//     for record in pairwise_records.into_iter() {
-//         writer.write(&record.expect("Alignment record is not set"))?;
-//     }
-//     Ok(divergences)
-// }
-
-// /// Loads edit distances between all contigs based on a BAM file.
-// /// All contigs must be present in the BAM file.
-// pub fn load_edit_distances(path: impl AsRef<Path>, contigs: &ContigNames) -> crate::Result<TriangleMatrix<u32>> {
-//     let path = path.as_ref();
-//     let mut reader = bam::Reader::from_path(&path)?;
-//     let mut record = bam::Record::new();
-//     let mut matrix = TriangleMatrix::new(contigs.len(), u32::MAX);
-//     while reader.read(&mut record).transpose()?.is_some() {
-//         let qname = std::str::from_utf8(record.qname())
-//             .map_err(|_| Error::Utf8("contig name", record.qname().to_vec()))?;
-//         let i = match contigs.try_get_id(&qname) {
-//             Some(val) => val.ix(),
-//             None => continue,
-//         };
-//         let rname = reader.header().tid2name(record.tid() as u32);
-//         let rname = std::str::from_utf8(rname).map_err(|_| Error::Utf8("contig name", rname.to_vec()))?;
-//         let j = match contigs.try_get_id(&rname) {
-//             Some(val) => val.ix(),
-//             None => continue,
-//         };
-//         if i >= j {
-//             continue;
-//         }
-//         let edit_dist: u32 = match record.aux(b"NM")
-//             .map_err(|_| error!(InvalidData, "BAM file {} does not contain NM field", ext::fmt::path(&path)))?
-//         {
-//             Aux::I8(val) => val.try_into().unwrap(),
-//             Aux::U8(val) => val.into(),
-//             Aux::I16(val) => val.try_into().unwrap(),
-//             Aux::U16(val) => val.into(),
-//             Aux::I32(val) => val.try_into().unwrap(),
-//             Aux::U32(val) => val,
-//             _ => return Err(error!(InvalidData, "Invalid value for NM field in {}", ext::fmt::path(&path))),
-//         };
-//         matrix[(i, j)] = edit_dist;
-//     }
-//     if let Some(k) = matrix.iter().position(|&val| val == u32::MAX) {
-//         let (i, j) = matrix.from_linear_index(k);
-//         Err(error!(InvalidData, "BAM file {} does not contain alignment between contigs {} and {}",
-//             ext::fmt::path(&path), contigs.get_name(ContigId::new(i)), contigs.get_name(ContigId::new(j))))
-//     } else {
-//         Ok(matrix)
-//     }
-// }

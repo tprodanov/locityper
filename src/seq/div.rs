@@ -12,18 +12,18 @@ use crate::{
 };
 use varint_rs::{VarintWriter, VarintReader};
 
-/// Calculates number of non-matching entries and corresponding Jaccard distance given two sorted vectors..
-fn jaccard_distance(minimizers1: &[u64], minimizers2: &[u64]) -> (u32, f64) {
+/// Calculates number of non-matching entries and corresponding Jaccard distance given two sorted vectors.
+pub fn jaccard_distance(minimizers1: &[u64], minimizers2: &[u64]) -> (u32, f64) {
     let mut iter1 = minimizers1.iter();
     let mut opt_x = iter1.next();
     let mut iter2 = minimizers2.iter();
     let mut opt_y = iter2.next();
 
-    let mut inters: u32 = 0;
+    let mut overlap: u32 = 0;
     while let (Some(x), Some(y)) = (opt_x, opt_y) {
         match x.cmp(y) {
             Ordering::Equal => {
-                inters += 1;
+                overlap += 1;
                 opt_x = iter1.next();
                 opt_y = iter2.next();
             }
@@ -33,9 +33,10 @@ fn jaccard_distance(minimizers1: &[u64], minimizers2: &[u64]) -> (u32, f64) {
     }
     let n1 = minimizers1.len() as u32;
     let n2 = minimizers2.len() as u32;
-    let overlap = n1 + n2 - inters;
-    let non_shared = overlap - inters;
-    (non_shared, f64::from(non_shared) / f64::from(overlap))
+    let union_ = n1 + n2 - overlap;
+    let unique = union_ - overlap;
+    // = 1 - Jaccard index.
+    (unique, f64::from(unique) / f64::from(union_))
 }
 
 /// Calculates all pairwise divergences and returns the distance matrix.

@@ -136,7 +136,7 @@ pub fn polyfit(x: &[f64], y: &[f64], w: &[f64], deg: usize) -> Result<Vec<f64>, 
     let mut a = DMatrix::zeros(nrow, ncol);
     let mut b = DVector::zeros(nrow);
 
-    for (i, ((&xi, &yi), &wi)) in x.iter().zip(y).zip(w).enumerate() {
+    for (i, (&xi, &yi, &wi)) in itertools::izip!(x, y, w).enumerate() {
         a[(i, 0)] = wi;
         b[i] = yi * wi;
 

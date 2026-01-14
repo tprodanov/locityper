@@ -1,9 +1,12 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
-    io::{self, Write, BufRead},
-    fmt::Write as FmtWrite,
+    io::{Write, BufRead},
+    ffi::OsStr,
 };
+use colored::Colorize;
+use smallvec::SmallVec;
+use rand::Rng;
 use crate::{
     err::{error, add_path, validate_param},
     ext::{
@@ -12,35 +15,24 @@ use crate::{
         fmt::PrettyU32,
     },
     seq::{
-        fastx, div, dist,
+        fastx, dist, wfa,
         NamedSeq,
-        cigar::{Cigar, Operation},
-        wfa::{self, Penalties},
-        kmers::{self, Kmer},
+        kmers::Kmer,
     },
     algo::{HashMap, Hasher},
 };
-use colored::Colorize;
-use smallvec::SmallVec;
 
 struct Args {
     input: Option<PathBuf>,
     output: Option<PathBuf>,
+    prefix: Option<PathBuf>,
 
     all_pairs: bool,
     pairs: Vec<String>,
     pairs_file: Option<PathBuf>,
     threads: u16,
 
-    skip_div: bool,
-    div_k: u8,
-    div_w: u8,
-    max_div: f64,
-
-    penalties: Penalties,
-    backbone_ks: String,
-    accuracy: u8,
-    max_gap: u32,
+    params: dist::Params,
 }
 
 impl Default for Args {
@@ -48,21 +40,14 @@ impl Default for Args {
         Self {
             input: None,
             output: None,
+            prefix: None,
 
             all_pairs: false,
             pairs: Vec::new(),
             pairs_file: None,
             threads: 8,
 
-            skip_div: false,
-            div_k: 15,
-            div_w: 15,
-            max_div: 0.5,
-
-            penalties: Default::default(),
-            backbone_ks: "25,51,101".to_string(),
-            accuracy: 9,
-            max_gap: 500,
+            params: Default::default(),
         }
     }
 }
@@ -77,31 +62,8 @@ impl Args {
             + u8::from(self.pairs_file.is_some())
             == 1, "Exactly one argument -p/-P/-A is required");
 
-        validate_param!(0 < self.div_k && self.div_k <= u64::MAX_KMER_SIZE,
-            "k-mer size ({}) must be between 1 and {}", self.div_k, u64::MAX_KMER_SIZE);
-        validate_param!(0 < self.div_w && self.div_w <= kmers::MAX_MINIMIZER_W,
-            "Minimizer window ({}) must be between 1 and {}", self.div_w, kmers::MAX_MINIMIZER_W);
-        validate_param!(0.0 <= self.max_div && self.max_div <= 1.0,
-            "Maximum divergence ({}) must be within [0, 1]", self.max_div);
-        validate_param!(1 <= self.accuracy && self.accuracy <= wfa::MAX_ACCURACY,
-            "Alignment accuracy level ({}) must be between 0 and {}.", self.accuracy, wfa::MAX_ACCURACY);
-        if self.max_div == 0.0 {
-            self.max_div = -1.0;
-        }
-
-        self.penalties.validate()?;
+        self.params.validate()?;
         Ok(self)
-    }
-
-    fn get_backbones(&self) -> crate::Result<Vec<u32>> {
-        let backbones = self.backbone_ks.split(',').map(str::parse)
-            .collect::<Result<Vec<u32>, _>>()
-            .map_err(|_| error!(InvalidInput,
-                "Cannot parse `-k {}`: must be list of integers separated by comma", self.backbone_ks))?;
-        validate_param!(!backbones.is_empty(), "Expect at least one backbone k-mer");
-        validate_param!(backbones.iter().all(|&k| k >= 5),
-            "Backbone k-mer sizes must be at least 5 ({:?})", backbones);
-        Ok(backbones)
     }
 }
 
@@ -121,6 +83,9 @@ fn print_help() {
         "-i, --input".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Output PAF file.",
         "-o, --output".green(), "FILE".yellow());
+    println!("    {:KEY$} {:VAL$}  Prefix for temporary files. Only necessary if multiple threads\n\
+        {EMPTY}  are used and the main output goes to stdout.",
+        "    --prefix".green(), "PATH".yellow());
 
     println!("\n{} (mutually exclusive):", "Alignment pairs".bold());
     println!("    {:KEY$} {:VAL$}  Find alignments for these pairs:\n\
@@ -134,24 +99,25 @@ fn print_help() {
     println!("\n{}", "Alignment arguments:".bold());
     println!("    {} {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
         "-m, --minimizer".green(), "INT INT".yellow(),
-        super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
+        super::fmt_def(defaults.params.div_k), super::fmt_def(defaults.params.div_w));
     println!("    {:KEY$} {:VAL$}  Skip divergence calculation.",
         "-s, --skip-div".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Do not align sequences with bigger divergence than this [{}].",
-        "-D, --max-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.max_div));
-    println!("    {:KEY$} {:VAL$}  One or more k-mer size for backbone alignment,\n\
+    println!("    {:KEY$} {:VAL$}  Do not align sequences with minimizer divergence >= {} [{}].",
+        "-D, --thresh-div".green(), "NUM".yellow(), "NUM".yellow(), super::fmt_def_f64(defaults.params.thresh_div));
+    println!("    {:KEY$} {:VAL$}  One or more k-mer sizes (5 <= k <= {}) for backbone alignment,\n\
         {EMPTY}  separated by comma [{}].",
-        "-k, --backbone".green(), "INT".yellow(), super::fmt_def(&defaults.backbone_ks));
+        "-k, --backbone".green(), "INT".yellow(), ruint::aliases::U256::MAX_KMER_SIZE,
+        super::fmt_def(defaults.params.backbone_str()));
     println!("    {:KEY$} {:VAL$}  Do not complete gaps over this size [{}].",
-        "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.max_gap)));
+        "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.params.max_gap)));
     println!("    {:KEY$} {:VAL$}  Alignment accuracy level (1-{}) [{}].",
-        "-a, --accuracy".green(), "INT".yellow(), wfa::MAX_ACCURACY, super::fmt_def(defaults.accuracy));
+        "-a, --accuracy".green(), "INT".yellow(), wfa::MAX_ACCURACY, super::fmt_def(defaults.params.accuracy));
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
-        "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.penalties.mismatch));
+        "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.params.penalties.mismatch));
     println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
-        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_open));
+        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.params.penalties.gap_open));
     println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
-        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.penalties.gap_extend));
+        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.params.penalties.gap_extend));
 
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
@@ -162,7 +128,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Show version.", "-V, --version".green(), "");
 }
 
-fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
+fn parse_args(argv: &[String]) -> crate::Result<Args> {
     if argv.is_empty() {
         print_help();
         std::process::exit(1);
@@ -175,6 +141,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
         match arg {
             Short('i') | Long("input") => args.input = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
+            Long("prefix") => args.prefix = Some(parser.value()?.parse()?),
 
             Short('p') | Long("pairs") => {
                 for val in parser.values()? {
@@ -186,19 +153,25 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
             {
-                args.div_k = parser.value()?.parse()?;
-                args.div_w = parser.value()?.parse()?;
+                args.params.div_k = parser.value()?.parse()?;
+                args.params.div_w = parser.value()?.parse()?;
             }
-            Short('s') | Long("skip-div") => args.skip_div = true,
-            Short('D') | Long("max-div") => args.max_div = parser.value()?.parse()?,
-            Short('k') | Long("backbone") | Long("backbone-ks") => args.backbone_ks = parser.value()?.parse()?,
-            Short('g') | Long("max-gap") => args.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
-            Short('a') | Long("accuracy") => args.accuracy = parser.value()?.parse()?,
-            Short('M') | Long("mismatch") => args.penalties.mismatch = parser.value()?.parse()?,
+            Short('s') | Long("skip-div") => args.params.skip_div = true,
+            Short('D') | Long("thresh-div") => args.params.thresh_div = parser.value()?.parse()?,
+            Short('k') | Long("backbone") | Long("backbone-ks") => {
+                let backbone_str: String = parser.value()?.parse()?;
+                args.params.backbone_ks = backbone_str.split(',').map(str::parse)
+                    .collect::<Result<Vec<u8>, _>>()
+                    .map_err(|_| error!(InvalidInput,
+                    "Cannot parse `-k {}`: must be list of integers separated by comma", backbone_str))?;
+            }
+            Short('g') | Long("max-gap") => args.params.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
+            Short('a') | Long("accuracy") => args.params.accuracy = parser.value()?.parse()?,
+            Short('M') | Long("mismatch") => args.params.penalties.mismatch = parser.value()?.parse()?,
             Short('O') | Long("gap-open") | Long("gap-opening") =>
-                args.penalties.gap_open = parser.value()?.parse()?,
+                args.params.penalties.gap_open = parser.value()?.parse()?,
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
-                args.penalties.gap_extend = parser.value()?.parse()?,
+                args.params.penalties.gap_extend = parser.value()?.parse()?,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('V') | Long("version") => {
@@ -261,110 +234,95 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
     Ok(pairs)
 }
 
-fn write_paf(
-    seqs: &[NamedSeq],
-    pairs: &[(u32, u32)],
-    calc_aln: &[bool],
-    divergences: &Option<Vec<(u32, f64)>>,
-    alignments: &[(Cigar, i32)],
-    args: &Args,
-    mut f: impl Write,
-) -> io::Result<()>
-{
-    writeln!(f, "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
-        args.div_k, args.div_w, args.max_div, args.backbone_ks, args.accuracy, args.max_gap)?;
+struct TempFilenames(Vec<PathBuf>);
 
-    let mut alns_iter = alignments.iter();
-    let mut cigar_str = String::new();
-    for (k, (&(i, j), &has_aln)) in pairs.iter().zip(calc_aln).enumerate() {
-        let qentry = &seqs[j as usize];
-        let rentry = &seqs[i as usize];
-        write!(f, "{}\t{len}\t0\t{len}\t+\t", qentry.name(), len = qentry.seq().len())?;
-        write!(f, "{}\t{len}\t0\t{len}\t", rentry.name(), len = rentry.seq().len())?;
+impl TempFilenames {
+    fn new(
+        output: &Path,
+        prefix_arg: &Option<PathBuf>,
+        threads: u16,
+        rng: &mut impl Rng,
+    ) -> crate::Result<Self>
+    {
+        if threads <= 1 {
+            return Ok(Self(Vec::new()));
+        }
 
-        cigar_str.clear();
-        if has_aln {
-            let (cigar, score) = alns_iter.next().expect("Too few alignments");
-            let mut nmatches = 0;
-            let mut nerrs = 0;
-            for item in cigar.iter() {
-                match item.operation() {
-                    Operation::Equal => nmatches += item.len(),
-                    _ => nerrs += item.len(),
+        let (mut prefix, middle, extension) = if ext::sys::is_tty(output) {
+            let Some(prefix) = prefix_arg.as_ref() else {
+                return Err(error!(InvalidInput, "Must provide --prefix when using stdout and multiple threads"));
+            };
+            (prefix.to_path_buf(), format!("{:X}.", rng.random::<u32>()), "paf")
+        } else {
+            let prefix = match prefix_arg {
+                Some(val) => val.to_path_buf(),
+                None => output.with_extension(""),
+            };
+            let extension = match output.extension().and_then(OsStr::to_str) {
+                Some("gz") => "paf.gz",
+                Some("lz4") => "paf.lz4",
+                _ => "paf",
+            };
+            (prefix, String::new(), extension)
+        };
+
+        if prefix.is_dir() {
+            prefix.push("locityper-align");
+        }
+        Ok(Self((1..threads).map(|i| prefix.with_added_extension(format!("{}{}.{}", middle, i, extension))).collect()))
+    }
+
+    /// Skip file deletion.
+    fn disarm(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for TempFilenames {
+    fn drop(&mut self) {
+        for filename in &self.0 {
+            if filename.exists() {
+                if let Err(_) = std::fs::remove_file(filename) {
+                    log::error!("Could not remove {}", filename.display());
                 }
             }
-            let aln_len = nmatches + nerrs;
-            write!(f, "{}\t{}\t255", nmatches, aln_len)?;
-            let dv = f64::from(nerrs) / f64::from(aln_len);
-            let qv = if dv.is_finite() { -10.0 * dv.log10() } else { f64::INFINITY };
-            write!(f, "\tNM:i:{}\tAS:i:{}\tdv:f:{:.9}\tqv:f:{:.6}", nerrs, score, dv, qv)?;
-            write!(cigar_str, "{}", cigar).unwrap();
-        } else {
-            write!(f, "0\t0\t255")?;
         }
-        if let Some(divs) = divergences {
-            let (uniq_minims, minim_dv) = divs[k];
-            write!(f, "\tum:i:{}\tmd:f:{:.9}", uniq_minims, minim_dv)?;
-        }
-        if !cigar_str.is_empty() {
-            write!(f, "\tcg:Z:{}", cigar_str)?;
-        }
-        writeln!(f)?;
     }
-    Ok(())
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let args = parse_args(argv)?.validate()?;
-    let backbones = args.get_backbones()?;
+    // let backbones = args.get_backbones()?;
     super::greet();
     let timer = Instant::now();
 
     let mut fasta_reader = fastx::Reader::from_path(args.input.as_ref().unwrap())?;
-    let seqs = fasta_reader.read_all()?;
-    let pairs = load_pairs(&args, &seqs)?;
+    let entries = fasta_reader.read_all()?;
+    let pairs = load_pairs(&args, &entries)?;
     if pairs.is_empty() {
         return Err(error!(InvalidInput, "No alignments to compute"));
     }
-    log::info!("Align {} pairs across {} sequences", pairs.len(), seqs.len());
+    log::info!("Align {} pairs across {} sequences", pairs.len(), entries.len());
+    let threads = usize::from(args.threads).min(pairs.len()) as u16;
 
-    // Create output file now, this way we are sure it can be opened.
+    let mut files = Vec::with_capacity(usize::from(threads));
     let out_filename = args.output.as_ref().unwrap();
-    let out = ext::sys::create(out_filename)?;
+    files.push(ext::sys::create(out_filename)?);
+    writeln!(files[0], "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
+        args.params.div_k, args.params.div_w, args.params.thresh_div,
+        args.params.backbone_str(), args.params.accuracy, args.params.max_gap).map_err(add_path!(out_filename))?;
 
-    let divergences = if args.skip_div {
-        log::debug!("    Skipping minimizer divergences");
-        None
-    } else {
-        log::debug!("    Calculating minimizer divergences");
-        Some(div::minimizer_divergences(&seqs, &pairs, args.div_k, args.div_w, args.threads))
-    };
-    let n_pairs = pairs.len();
-    let (sub_pairs, calc_aln) = if args.skip_div || args.max_div == 1.0 {
-        (pairs.clone(), vec![true; n_pairs])
-    } else {
-        let mut sub_pairs = Vec::with_capacity(n_pairs);
-        let mut calc_aln = Vec::with_capacity(n_pairs);
-        for (&pair, div) in pairs.iter().zip(divergences.as_ref().unwrap()) {
-            if div.1 <= args.max_div {
-                sub_pairs.push(pair);
-                calc_aln.push(true);
-            } else {
-                calc_aln.push(false);
-            }
-        }
-        (sub_pairs, calc_aln)
-    };
-    let alns = if sub_pairs.is_empty() {
-        log::warn!("    Skipping all alignments (divergence too high)");
-        Vec::new()
-    } else {
-        log::debug!("    Find alignments for {} pairs", sub_pairs.len());
-        dist::align_sequences(&seqs, sub_pairs, &args.penalties, &backbones, args.accuracy,
-            args.max_gap, args.threads)?
-    };
+    let mut rng = ext::rand::init_rng(None, false);
+    // Create output file now, this way we are sure it can be opened.
+    let mut temp_filenames = TempFilenames::new(out_filename, &args.prefix, threads, &mut rng)?;
+    for filename in &temp_filenames.0 {
+        files.push(ext::sys::create(filename)?);
+    }
 
-    write_paf(&seqs, &pairs, &calc_aln, &divergences, &alns, &args, out).map_err(add_path!(out_filename))?;
+    dist::align_sequences(entries, pairs, &args.params, threads, files, &mut rng)?;
+    ext::sys::merge_files(out_filename, &temp_filenames.0)?;
+    temp_filenames.disarm();
+
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }
