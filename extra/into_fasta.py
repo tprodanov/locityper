@@ -129,7 +129,7 @@ def main():
         pool.close()
         pool.join()
 
-    sys.stderr.write(f'In total, wrote {total_processed} genotypes, skipped {total_ignored}\n')
+    sys.stderr.write(f'In total, wrote {total_processed:.0f} genotypes, skipped {total_ignored:.0f}\n')
 
 
 if __name__ == '__main__':

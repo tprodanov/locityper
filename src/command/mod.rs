@@ -5,6 +5,7 @@ mod genotype;
 #[cfg(feature = "align")]
 mod align;
 mod recruit;
+mod prune;
 
 use std::{
     fs,
@@ -42,6 +43,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
                 std::process::exit(1);
             }
         }
+        "prune" => prune::run(&argv[2..])?,
 
         "h" | "help" | "--help" | "-h" => print_help(),
         "V" | "version" | "--version" | "-V" => print_version(),
@@ -92,27 +94,29 @@ fn print_help() {
         "Usage:".bold(), PROGRAM);
 
     println!("\n{}", "[ Target loci ]".bold());
-    println!("    {:WIDTH$} Create database with target locus/loci (formerly {})",
+    println!("    {:WIDTH$} Create database with target locus/loci (formerly {}).",
         "t, target".red(), "add".red());
+    println!("    {:WIDTH$} Remove similar target haplotypes.",
+        "   prune".red());
 
     println!("\n{}", "[ Analysing WGS data ]".bold());
-    println!("    {:WIDTH$} Preprocess WGS dataset",
+    println!("    {:WIDTH$} Preprocess WGS dataset.",
         "p, preproc".red());
-    println!("    {:WIDTH$} Genotype target loci",
+    println!("    {:WIDTH$} Genotype target loci.",
         "g, genotype".red());
 
     println!("\n{}", "[ Other utilities ]".bold());
-    println!("    {:WIDTH$} Align medium-size sequences to each other",
+    println!("    {:WIDTH$} Align medium-size sequences to each other.",
         "   align".red());
-    println!("    {:WIDTH$} Recruit reads to one/multiple loci",
+    println!("    {:WIDTH$} Recruit reads to one/multiple loci.",
         "r, recruit".red());
 
     println!("\n{}", "[ General help ]".bold());
-    println!("    {:WIDTH$} Show this help message",
+    println!("    {:WIDTH$} Show this help message.",
         "h, help".red());
-    println!("    {:WIDTH$} Show version",
+    println!("    {:WIDTH$} Show version.",
         "V, version".red());
-    println!("    {:WIDTH$} Show citation information",
+    println!("    {:WIDTH$} Show citation information.",
         "   cite".red());
 }
 

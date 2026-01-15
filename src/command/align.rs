@@ -81,7 +81,8 @@ fn print_help() {
     println!("\n{}", "Input arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input FASTA file.",
         "-i, --input".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Output PAF file.",
+    println!("    {:KEY$} {:VAL$}  Output PAF file. In multithreaded calls, output will be unsorted\n\
+        {EMPTY}  for performance purposes.",
         "-o, --output".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Prefix for temporary files. Only necessary if multiple threads\n\
         {EMPTY}  are used and the main output goes to stdout.",
@@ -292,7 +293,6 @@ impl Drop for TempFilenames {
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let args = parse_args(argv)?.validate()?;
-    // let backbones = args.get_backbones()?;
     super::greet();
     let timer = Instant::now();
 
