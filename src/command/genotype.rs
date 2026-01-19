@@ -571,11 +571,24 @@ pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathB
     Ok(map)
 }
 
-struct LocusData {
+pub(super) struct LocusData {
     set: ContigSet,
     db_locus_dir: PathBuf,
     /// Output directory with locus data.
     out_dir: PathBuf,
+}
+
+impl LocusData {
+    pub fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
+        let out_dir = out_loci_dir.join(set.tag());
+        Self {
+            db_locus_dir: db_locus_dir.to_owned(),
+            set, out_dir,
+        }
+    }
+}
+
+struct Filenames {
     /// Temporary file with recruited reads.
     tmp_reads_filename: PathBuf,
     /// Final file with recruited reads.
@@ -586,16 +599,13 @@ struct LocusData {
     aln_filename: PathBuf,
 }
 
-impl LocusData {
-    fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
-    let out_dir = out_loci_dir.join(set.tag());
+impl Filenames {
+    fn new(out_dir: &Path) -> Self {
         Self {
-            db_locus_dir: db_locus_dir.to_owned(),
             tmp_reads_filename: out_dir.join("reads.tmp.fq"),
             reads_filename: out_dir.join("reads.fq"),
             tmp_aln_filename: out_dir.join("aln.tmp.bam"),
             aln_filename: out_dir.join("aln.bam"),
-            set, out_dir,
         }
     }
 }
@@ -627,8 +637,10 @@ fn clean_dir(dir: &Path, n_warnings: &mut usize) -> crate::Result<()> {
 }
 
 /// Loads all loci from the database. If `subset_loci` is not empty, only loads loci that are contained in it.
-fn load_loci(
-    databases: &[PathBuf],
+/// Depending on the `rerun` argument, cleans output directory.
+/// `out_path` corresponds to base output directory, actual output directories will be `OUT_PATH/loci/LOCUS`.
+pub(super) fn load_loci(
+    databases: &[impl AsRef<Path>],
     out_path: &Path,
     subset_loci: &HashSet<String>,
     rerun: super::Rerun,
@@ -643,7 +655,7 @@ fn load_loci(
     let mut loci_names = HashSet::default();
 
     for db_path in databases {
-        let db_path = db_path.join(paths::LOCI_DIR);
+        let db_path = db_path.as_ref().join(paths::LOCI_DIR);
         if !db_path.exists() {
             log::error!("Database directory {} does not exist", ext::fmt::path(&db_path));
             continue;
@@ -715,9 +727,9 @@ pub(super) fn postprocess_targets(
     merged
 }
 
-fn load_locuswise_targets(
+fn load_recr_targets<'a>(
     contigs: &Arc<ContigNames>,
-    filt_loci: &[&LocusData],
+    filt_loci: impl Iterator<Item = &'a LocusData>,
     bed_basename: &str,
     intervals: &mut Vec<Interval>,
 ) -> crate::Result<()>
@@ -740,10 +752,10 @@ fn load_locuswise_targets(
 
 /// Prepare fetch regions for a list of regions.
 /// Additionally, add all contigs from
-fn create_fetch_targets(
+fn create_fetch_targets<'a>(
     contigs: &Arc<ContigNames>,
     bg_distr: &BgDistr,
-    filt_loci: &[&LocusData],
+    filt_loci: impl Iterator<Item = &'a LocusData>,
     recr_bed: &str,
 ) -> crate::Result<Vec<Interval>>
 {
@@ -755,9 +767,9 @@ fn create_fetch_targets(
     let mut intervals = Vec::new();
 
     if recr_bed.is_empty() {
-        load_locuswise_targets(contigs, filt_loci, paths::LOCUS_BED, &mut intervals)?;
+        load_recr_targets(contigs, filt_loci, paths::LOCUS_BED, &mut intervals)?;
     } else if let Some(suffix) = recr_bed.strip_prefix("~~") {
-        load_locuswise_targets(contigs, filt_loci, &format!("{}.bed", suffix), &mut intervals)?;
+        load_recr_targets(contigs, filt_loci, &format!("{}.bed", suffix), &mut intervals)?;
     } else {
         interv::load_bed(&Path::new(recr_bed), contigs, &mut intervals)?;
         alt_contig_len = 0;
@@ -831,14 +843,14 @@ pub fn calculate_chunk_size(chunk_length: u64, mean_read_len: f64, is_paired_end
 
 /// Recruits reads to all loci, where neither reads nor alignments are available.
 fn recruit_reads(
-    loci: &[LocusData],
+    loci: &[(LocusData, Filenames)],
     bg_distr: &BgDistr,
     args: &Args,
     recr_params: recruit::Params,
 ) -> crate::Result<()>
 {
-    let filt_loci: Vec<&LocusData> = loci.iter()
-        .filter(|locus| !locus.reads_filename.exists() && !locus.aln_filename.exists())
+    let filt_loci: Vec<_> = loci.iter()
+        .filter(|(_, filenames)| !filenames.reads_filename.exists() && !filenames.aln_filename.exists())
         .collect();
     if filt_loci.is_empty() {
         log::info!("Skipping read recruitment");
@@ -854,22 +866,23 @@ fn recruit_reads(
     let mut writers = Vec::with_capacity(n_filt_loci);
     let mean_read_len = bg_distr.seq_info().mean_read_len();
 
-    for locus in filt_loci.iter() {
+    for (locus, filenames) in filt_loci.iter() {
         target_builder.add(&locus.set, mean_read_len);
         // Output files with a large buffer (4 Mb).
         const BUFFER: usize = 4_194_304;
-        writers.push(fs::File::create(&locus.tmp_reads_filename).map_err(add_path!(&locus.tmp_reads_filename))
+        writers.push(fs::File::create(&filenames.tmp_reads_filename)
+            .map_err(add_path!(&filenames.tmp_reads_filename))
             .map(|w| io::BufWriter::with_capacity(BUFFER, w))?);
     }
     let targets = target_builder.finalize();
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let chunk_size = calculate_chunk_size(args.chunk_length, mean_read_len, is_paired_end);
     recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), args.threads, chunk_size, None,
-        |contigs| create_fetch_targets(contigs, bg_distr, &filt_loci, &args.recr_bed))?;
+        |contigs| create_fetch_targets(contigs, bg_distr, filt_loci.iter().map(|t| &t.0), &args.recr_bed))?;
 
-    for locus in filt_loci.iter() {
-        fs::rename(&locus.tmp_reads_filename, &locus.reads_filename)
-            .map_err(add_path!(locus.tmp_reads_filename, &locus.reads_filename))?;
+    for (_, filenames) in filt_loci.iter() {
+        fs::rename(&filenames.tmp_reads_filename, &filenames.reads_filename)
+            .map_err(add_path!(filenames.tmp_reads_filename, &filenames.reads_filename))?;
     }
     Ok(())
 }
@@ -917,8 +930,8 @@ fn create_mapping_command(
     cmd
 }
 
-fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> crate::Result<()> {
-    if locus.aln_filename.exists() {
+fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args: &Args) -> crate::Result<()> {
+    if filenames.aln_filename.exists() {
         log::info!("    Skipping read mapping");
         return Ok(());
     }
@@ -926,7 +939,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> crate::Resul
     let in_fasta = locus.db_locus_dir.join(paths::LOCUS_FASTA);
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
     let start = Instant::now();
-    let mut mapping_cmd = create_mapping_command(&in_fasta, &locus.reads_filename, bg_distr.seq_info(),
+    let mut mapping_cmd = create_mapping_command(&in_fasta, &filenames.reads_filename, bg_distr.seq_info(),
         locus.set.len(), args);
     let mapping_exe = PathBuf::from(mapping_cmd.get_program().to_owned());
     let mut mapping_child = mapping_cmd.spawn().map_err(add_path!(mapping_exe))?;
@@ -941,7 +954,7 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> crate::Resul
     // if !bg_distr.insert_distr().is_paired_end() {
     //     samtools_cmd.arg("-F4"); // ignore unmapped reads in case of single-end reads.
     // }
-    samtools_cmd.arg("-o").arg(&locus.tmp_aln_filename);
+    samtools_cmd.arg("-o").arg(&filenames.tmp_aln_filename);
     samtools_cmd.stdin(Stdio::from(child_stdout)).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     log::debug!("    {} | {}", ext::fmt::command(&mapping_cmd), ext::fmt::command(&samtools_cmd));
@@ -950,8 +963,8 @@ fn map_reads(locus: &LocusData, bg_distr: &BgDistr, args: &Args) -> crate::Resul
     pipe_guard.wait()?;
 
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
-    fs::rename(&locus.tmp_aln_filename, &locus.aln_filename)
-        .map_err(add_path!(locus.tmp_aln_filename, locus.aln_filename))?;
+    fs::rename(&filenames.tmp_aln_filename, &filenames.aln_filename)
+        .map_err(add_path!(filenames.tmp_aln_filename, filenames.aln_filename))?;
     Ok(())
 }
 
@@ -991,6 +1004,7 @@ fn generate_genotypes(
 
 fn analyze_locus(
     locus: &LocusData,
+    filenames: &Filenames,
     bg_distr: &BgDistr,
     edit_dist_cache: &EditDistCache,
     scheme: &Arc<Scheme>,
@@ -1003,13 +1017,13 @@ fn analyze_locus(
 {
     log::info!("{} {}", "Analyzing".bold(), locus.set.tag().bold());
     let timer = Instant::now();
-    map_reads(locus, bg_distr, &args)?;
+    map_reads(locus, filenames, bg_distr, &args)?;
     if args.stop_after <= StopAfter::Map {
         log::warn!("    Stopping after read mapping");
         return Ok(());
     }
 
-    let bam_reader = bam::Reader::from_path(&locus.aln_filename)?;
+    let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
     let contigs = locus.set.contigs();
 
     let windows_writer = if args.debug >= DebugLvl::Some {
@@ -1032,9 +1046,9 @@ fn analyze_locus(
             &args.assgn_params, io::sink(), io::sink(), None)?
     };
 
-    if locus.reads_filename.exists() {
+    if filenames.reads_filename.exists() {
         // Alignments are succesfully loaded, now we can remove file with reads.
-        fs::remove_file(&locus.reads_filename).map_err(add_path!(locus.reads_filename))?;
+        fs::remove_file(&filenames.reads_filename).map_err(add_path!(filenames.reads_filename))?;
     }
 
     let genotyping = if all_alns.reads().is_empty() {
@@ -1139,6 +1153,11 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     if loci.is_empty() {
         return Ok(());
     }
+    let loci: Vec<_> = loci.into_iter()
+        .map(|locus_data| {
+            let filenames = Filenames::new(&locus_data.out_dir);
+            (locus_data, filenames)
+        }).collect();
     recruit_reads(&loci, &bg_distr, &args, recr_params)?;
     if args.stop_after <= StopAfter::Recruit {
         log::warn!("Stopping after read recruitment");
@@ -1148,7 +1167,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let scheme = Arc::new(Scheme::parse(&args.solvers)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, &args.assgn_params.alt_cn));
     let mut successes = 0;
-    for locus in loci.iter() {
+    for (locus, filenames) in loci.iter() {
         // Remove to get ownership of the locus priors.
         let locus_priors = priors.as_ref().and_then(|priors| priors.get(locus.set.tag()));
         if priors.is_some() && locus_priors.is_none() {
@@ -1163,7 +1182,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         let rng_clone = rng.clone();
         // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
         rng.long_jump();
-        match analyze_locus(locus, &bg_distr, &edit_dist_cache, &scheme, &distr_cache,
+        match analyze_locus(locus, filenames, &bg_distr, &edit_dist_cache, &scheme, &distr_cache,
                 locus_priors, locus_weights, rng_clone, &args) {
             Err(e) => log::error!("Error in locus {}: {}", locus.set.tag(), e.display()),
             Ok(()) => successes += 1,
