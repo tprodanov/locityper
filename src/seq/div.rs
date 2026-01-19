@@ -145,5 +145,5 @@ where R: VarintReader<Error = io::Error>,
         let d = f.read_u32_varint().map_err(add_path!(filename))?;
         divs.push(d);
     }
-    Ok((k, w, TriangleMatrix::from_linear(n, divs)))
+    Ok((k, w, TriangleMatrix::from_linear_data(n, divs)))
 }

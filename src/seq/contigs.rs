@@ -51,6 +51,15 @@ impl fmt::Display for ContigId {
     }
 }
 
+impl std::hash::Hash for ContigId {
+    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        hasher.write_u16(self.0)
+    }
+}
+
+impl nohash::IsEnabled for ContigId {}
+
+
 /// Structure that stores contig names.
 /// Contig name and lengths can be accessed using `ContigId`.
 /// Additionally, contig id can be extracting knowing contig name using `id()` method.
@@ -177,7 +186,7 @@ impl ContigNames {
     }
 
     /// Returns true if the contig exists.
-    pub fn exists(&self, name: &str) -> bool {
+    pub fn contains(&self, name: &str) -> bool {
         self.name_to_id.contains_key(name)
     }
 

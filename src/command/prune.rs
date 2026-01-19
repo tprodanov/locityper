@@ -1,14 +1,14 @@
 use std::{
     path::{Path, PathBuf},
     time::Instant,
-    io::{Write, BufRead},
+    io::{self, Write, BufRead},
     ffi::OsStr,
 };
 use colored::Colorize;
 use crate::{
     ext::{self, TriangleMatrix},
-    algo::HashSet,
-    seq::{ContigSet, ContigNames},
+    algo::{HashSet, IntMap},
+    seq::{ContigId, ContigNames, ContigSet},
     err::{self, validate_param, error, add_path},
 };
 use super::genotype::LocusData;
@@ -16,7 +16,7 @@ use super::genotype::LocusData;
 struct Args {
     input: Option<PathBuf>,
     output: Option<PathBuf>,
-    alignments: PathBuf,
+    alignments: String,
     subset_loci: HashSet<String>,
 
     skip_tree: bool,
@@ -30,7 +30,7 @@ impl Default for Args {
         Self {
             input: None,
             output: None,
-            alignments: PathBuf::from("haplotypes.paf.gz"),
+            alignments: "haplotypes.paf.gz".to_string(),
             subset_loci: HashSet::default(),
 
             skip_tree: false,
@@ -48,6 +48,16 @@ impl Args {
         validate_param!(!self.div_field.contains(':'), "PAF divergence field ({}) must not contain :",
             self.div_field);
 
+        if !self.alignments.contains("{}") {
+            // Make path to alignments INPUT/loci/{}/ALIGNMENTS
+            let mut new_alignments = self.input.clone().unwrap();
+            new_alignments.push(super::paths::LOCI_DIR);
+            new_alignments.push("{}");
+            new_alignments.push(&self.alignments);
+            self.alignments = new_alignments.to_str().ok_or_else(|| error!(InvalidInput,
+                "Input database has invalid UTF-8 name `{}`", self.input.as_ref().unwrap().display()))?
+                .to_owned();
+        }
         Ok(self)
     }
 }
@@ -72,7 +82,7 @@ fn print_help() {
         {EMPTY}  Should either contain {{}}, which are then replaced with locus names,\n\
         {EMPTY}  or direct to files located in {}/loci/<locus>/{}.\n\
         {EMPTY}  Alignments can be constructed using {}.",
-        "-a, --alignments".green(), "PATH".yellow(), super::fmt_def(&defaults.alignments.display()),
+        "-a, --alignments".green(), "PATH".yellow(), super::fmt_def(&defaults.alignments),
         "INPUT".yellow(), "PATH".yellow(), const_format::concatcp!(super::PROGRAM, " align").underline());
 
     println!("\n{}", "Optional arguments:".bold());
@@ -130,6 +140,103 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
+fn load_divergences(
+    f: impl BufRead,
+    contigs: &ContigNames,
+    field: &str,
+) -> crate::Result<TriangleMatrix<f64>>
+{
+    let mut n_warnings = 0;
+    let prefix = format!("{}:", field);
+    let crop_length = prefix.as_bytes().len() + 2;
+    let mut divergences = TriangleMatrix::new(contigs.len(), f64::NAN);
+
+    for line in f.lines() {
+        let line = line.map_err(add_path!(!))?;
+        let split: Vec<_> = line.trim_end().split('\t').collect();
+        let Some(id1) = contigs.try_get_id(&split[0]) else { continue };
+        let Some(id2) = contigs.try_get_id(&split[5]) else { continue };
+        if id1 == id2 { continue }
+
+        let mut opt_val: Option<f64> = None;
+        for val_str in &split[12..] {
+            if val_str.starts_with(&prefix) {
+                opt_val = Some(str::from_utf8(&val_str.as_bytes()[crop_length..]).ok()
+                    .and_then(|s| str::parse::<f64>(s).ok())
+                    .ok_or_else(|| error!(ParsingError, "Cannot parse divergence `{}`", val_str))?);
+                break;
+            }
+        }
+        // Warn later.
+        let Some(val) = opt_val else { continue };
+        if val < 0.0 {
+            if n_warnings < 10 {
+                n_warnings += 1;
+                log::warn!("[{}] Cannot use negative divergence values ({} between {} and {})",
+                    contigs.tag(), val, split[0], split[5]);
+            }
+            continue;
+        }
+
+        let i = usize::min(id1.ix(), id2.ix());
+        let j = usize::max(id1.ix(), id2.ix());
+        let d = &mut divergences[(i, j)];
+        if d.is_nan() && *d != val {
+            if n_warnings < 10 {
+                n_warnings += 1;
+                log::warn!("[{}] Multiple divergence values ({}, {}) for haplotypes {} and {}",
+                    contigs.tag(), *d, val, split[0], split[5]);
+            }
+            continue;
+        }
+        *d = val;
+    }
+    let n_nans = divergences.iter().filter(|&d| d.is_nan()).count();
+    if n_nans == divergences.linear_len() {
+        return Err(error!(InvalidInput, "[{}] Divergence missing for all haplotype pairs", contigs.tag()));
+    } else if n_nans > 0 {
+        let k = divergences.iter().enumerate().filter(|(_i, &d)| d.is_nan()).next().unwrap().0;
+        let (i, j) = divergences.from_linear_index(k);
+        log::warn!("[{}] Divergence missing for {}/{} haplotype pairs, for example {} and {}",
+            contigs.tag(), n_nans, divergences.linear_len(),
+            contigs.get_name(ContigId::new(i as u16)), contigs.get_name(ContigId::new(j as u16)));
+    }
+    Ok(divergences)
+}
+
+/// Loads `discarded_haplotypes.txt` file, with lines
+/// haplotype = haplotype2, haplotype3, ...
+fn load_discarded_haplotypes(
+    mut f: impl BufRead,
+    contigs: &ContigNames,
+) -> io::Result<IntMap<ContigId, Vec<String>>>
+{
+    let mut corresp = IntMap::default();
+    let mut eq_warned = false;
+    for line in f.lines() {
+        let line = line?;
+        let split: Vec<_> = line.split_whitespace().collect();
+        let Some(id) = contigs.try_get_id(split[0]) else { continue };
+        if split[1] != "=" && !eq_warned {
+            eq_warned = true;
+            log::warn!("[{}] In discarded_haplotypes.txt, some lines contains `{}` separator. \
+                This will not be reflected in the newick tree", contigs.tag(), split[1]);
+        }
+        let mut curr_haps = Vec::with_capacity(split.len() - 2);
+        for contig in &split[2..] {
+            let contig = contig.strip_suffix(',').unwrap_or(contig);
+            if contigs.contains(contig) {
+                log::warn!("[{}] Haplotype {} is marked as discarded, but present in the haplotypes fasta",
+                    contigs.tag(), contig);
+                continue;
+            }
+            curr_haps.push(contig.to_string());
+        }
+        corresp.insert(id, curr_haps);
+    }
+    Ok(corresp)
+}
+
 // fn cluster_haplotypes(
 //     mut nwk_writer: impl Write,
 //     entries: &[NamedSeq],
@@ -178,49 +285,21 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 //     Ok(keep_seqs)
 // }
 
-fn load_divergences(
-    f: impl BufRead,
-    contig_set: &ContigSet,
-    field: &str,
-) -> crate::Result<TriangleMatrix<f64>>
-{
+fn process_locus(
+    locus_data: &LocusData,
+    args: &Args,
+) -> crate::Result<()> {
+    let contig_set = locus_data.contig_set();
     let contigs = contig_set.contigs();
-    let prefix = format!("{}:", field);
-    let crop_length = prefix.as_bytes().len() + 2;
-    let mut divergences = TriangleMatrix::new(contigs.len(), f64::NAN);
-    // TODO: Reuse lines buffer & split buffer.
-    for line in f.lines() {
-        let line = line.map_err(add_path!(!))?;
-        let split: Vec<_> = line.trim_end().split('\t').collect();
-        let Some(id1) = contigs.try_get_id(&split[0]) else { continue };
-        let Some(id2) = contigs.try_get_id(&split[5]) else { continue };
-        if id1 == id2 { continue; }
+    let paf_filename = args.alignments.replace("{}", contig_set.tag());
+    let divergences = load_divergences(ext::sys::open(&paf_filename)?, contigs, &args.div_field)?;
 
-        let mut opt_val: Option<f64> = None;
-        for val_str in &split[12..] {
-            if val_str.starts_with(&prefix) {
-                let opt_val = Some(str::from_utf8(&val_str.as_bytes()[crop_length..]).ok()
-                    .and_then(|s| str::parse::<f64>(s).ok())
-                    .ok_or_else(|| error!(ParsingError, "Cannot parse divergence `{}`", val_str))?);
-                break;
-            }
-        }
-        // Warn later.
-        let Some(val) = opt_val else { continue };
-        let i = usize::min(id1.ix(), id2.ix());
-        let j = usize::max(id1.ix(), id2.ix());
-        let d = &mut divergences[(i, j)];
-        if d.is_nan() && *d != val {
-            log::warn!("[{}] Multiple divergence values ({}, {}) for haplotypes {} and {}",
-                contig_set.tag(), *d, val, split[0], split[5]);
-            continue;
-        }
-        *d = val;
-    }
-    Ok(divergences)
-}
-
-fn process_locus(locus_data: &LocusData) -> crate::Result<()> {
+    let disc_filename = PathBuf::from(locus_data.out_dir().join(super::paths::DISCARDED_HAPS));
+    let disc_haplotypes = if args.skip_tree || !disc_filename.exists() {
+        Default::default()
+    } else {
+        load_discarded_haplotypes(ext::sys::open(&disc_filename)?, contigs).map_err(add_path!(disc_filename))?
+    };
 
     Ok(())
 }

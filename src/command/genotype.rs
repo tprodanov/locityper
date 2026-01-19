@@ -586,6 +586,21 @@ impl LocusData {
             set, out_dir,
         }
     }
+
+    #[inline(always)]
+    pub fn contig_set(&self) -> &ContigSet {
+        &self.set
+    }
+
+    #[inline(always)]
+    pub fn db_locus_dir(&self) -> &Path {
+        &self.db_locus_dir
+    }
+
+    #[inline(always)]
+    pub fn out_dir(&self) -> &Path {
+        &self.out_dir
+    }
 }
 
 struct Filenames {

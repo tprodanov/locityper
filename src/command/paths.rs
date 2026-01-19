@@ -11,6 +11,8 @@ pub(super) const LOCUS_BED: &'static str = "ref.bed";
 pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
 /// Path to pairwise distances between haplotypes.
 pub(super) const DISTANCES: &'static str = "distances.bin";
+/// Path to file with discarded haplotypes.
+pub(super) const DISCARDED_HAPS: &'static str = "discarded_haplotypes.txt";
 
 /// Background distributions are stored in `output/BG_DISTR`.
 pub(super) const BG_DISTR: &'static str = "distr.gz";

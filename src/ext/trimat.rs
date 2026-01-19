@@ -45,15 +45,14 @@ impl<T> TriangleMatrix<T> {
     }
 
     /// Creates triangle matrix from linear storage (must have correct order: sorted first by row, then by column).
-    #[allow(unused)]
-    pub fn from_linear(side: usize, data: Vec<T>) -> Self {
+    pub fn from_linear_data(side: usize, data: Vec<T>) -> Self {
         assert_eq!(data.len(), Self::expected_len(side), "Incorrect triangle matrix size");
         Self { side, data }
     }
 
     /// Creates triangle matrix by running `f(i, j)` for corresponding indices.
     #[allow(unused)]
-    pub fn create(side: usize, f: impl FnMut((usize, usize)) -> T) -> Self {
+    pub fn new_with(side: usize, f: impl FnMut((usize, usize)) -> T) -> Self {
         Self {
             side,
             data: TriangleMatrix::indices(side).map(f).collect(),

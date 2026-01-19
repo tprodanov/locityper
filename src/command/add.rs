@@ -561,7 +561,7 @@ fn discard_identical(entries: Vec<NamedSeq>, locus_dir: &Path) -> crate::Result<
 
     if n_discarded > 0 {
         log::info!("    Discarded {} duplicate haplotypes", n_discarded);
-        let filename = locus_dir.join("discarded_haplotypes.txt");
+        let filename = locus_dir.join(super::paths::DISCARDED_HAPS);
         let mut f = ext::sys::create_file(&filename)?;
         for (entry, discarded) in selected.iter().zip(&disc_names) {
             if discarded.is_empty() {
@@ -605,7 +605,7 @@ fn process_alleles(
     log::info!("    Calculating sequence divergence for {} alleles", n_entries);
     let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
     let divergences = div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
-    let divergences = TriangleMatrix::from_linear(n_entries, divergences);
+    let divergences = TriangleMatrix::from_linear_data(n_entries, divergences);
     check_divergencies(locus, &entries, &divergences, args.variants.is_some());
     let dist_filename = locus_dir.join(paths::DISTANCES);
     let dist_file = ext::sys::create_file(&dist_filename)?;

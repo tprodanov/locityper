@@ -44,7 +44,8 @@ fn decompress_stream(
 
 /// Returns stdin if filename is `-`.
 /// Otherwise, tries to guess input format (gzip OR lz4 OR no compression).
-pub fn open(filename: &Path) -> crate::Result<Box<dyn BufRead + Send>> {
+pub fn open(filename: impl AsRef<Path>) -> crate::Result<Box<dyn BufRead + Send>> {
+    let filename = filename.as_ref();
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         decompress_stream(BufReader::new(stdin()), filename)
     } else {
