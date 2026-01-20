@@ -820,7 +820,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let succeed = total - failed;
     if succeed == 0 {
-        log::error!("Failed to add {} loci", failed);
+        log::error!("Failed to add all {} loci", failed);
     } else if failed > 0 {
         log::warn!("Successfully added {} loci, failed to add {} loci", succeed, failed);
     } else {

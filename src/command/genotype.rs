@@ -592,6 +592,7 @@ impl LocusData {
         &self.set
     }
 
+    #[allow(unused)]
     #[inline(always)]
     pub fn db_locus_dir(&self) -> &Path {
         &self.db_locus_dir
