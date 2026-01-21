@@ -53,6 +53,12 @@ pub fn open(filename: impl AsRef<Path>) -> crate::Result<Box<dyn BufRead + Send>
     }
 }
 
+/// Opens file that is not compressed. It also should not be - (synonym for /dev/stdin).
+pub fn open_uncompressed(filename: impl AsRef<Path>) -> crate::Result<BufReader<File>> {
+    let filename = filename.as_ref();
+    File::open(filename).map_err(add_path!(filename)).map(BufReader::new)
+}
+
 /// Chain multiple files together.
 pub struct FileChain {
     /// Currently open stream.

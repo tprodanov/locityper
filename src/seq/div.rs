@@ -110,14 +110,18 @@ fn divergences_multithread(
 }
 
 /// Writes the number of non-shared minimizers to a binary file.
-pub fn write_divergences<W>(k: u8, w: u8, divs: &TriangleMatrix<(u32, f64)>, mut f: W) -> io::Result<()>
+pub fn write_divergences<W, T>(
+    mut f: W, k: u8, w: u8,
+    divs: &TriangleMatrix<T>,
+    convert: impl Fn(&T) -> u32,
+) -> io::Result<()>
 where W: VarintWriter<Error = io::Error>,
 {
     f.write(k)?;
     f.write(w)?;
     f.write_u32_varint(divs.side() as u32)?;
-    for &(d, _) in divs.iter() {
-        f.write_u32_varint(d)?;
+    for d in divs.iter() {
+        f.write_u32_varint(convert(d))?;
     }
     Ok(())
 }
@@ -139,7 +143,7 @@ where R: VarintReader<Error = io::Error>,
             fmt::path(filename), n, m));
     }
 
-    let total = TriangleMatrix::<()>::expected_len(n);
+    let total = TriangleMatrix::calc_linear_len(n);
     let mut divs = Vec::with_capacity(total);
     for _ in 0..total {
         let d = f.read_u32_varint().map_err(add_path!(filename))?;

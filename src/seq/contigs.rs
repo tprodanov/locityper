@@ -33,15 +33,15 @@ impl ContigId {
     }
 
     /// Get `u16` value of the contig id.
-    #[inline]
+    #[inline(always)]
     pub fn get(self) -> u16 {
         self.0
     }
 
     /// Converts `ContigId` into `usize`.
-    #[inline]
+    #[inline(always)]
     pub fn ix(self) -> usize {
-        self.0 as usize
+        usize::from(self.0)
     }
 }
 
@@ -59,6 +59,12 @@ impl std::hash::Hash for ContigId {
 
 impl nohash::IsEnabled for ContigId {}
 
+impl Into<usize> for ContigId {
+    #[inline(always)]
+    fn into(self) -> usize {
+        self.ix()
+    }
+}
 
 /// Structure that stores contig names.
 /// Contig name and lengths can be accessed using `ContigId`.

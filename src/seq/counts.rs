@@ -1,6 +1,5 @@
 use std::{
     io::{self, BufRead},
-    fs,
     path::PathBuf,
     cmp::{min, max, Ord},
     process::{Stdio, Command},
@@ -356,7 +355,7 @@ impl JfKmerGetter {
 
 /// Parses Jellyfish counts file header and returns json object.
 fn parse_jellyfish_header(filename: &std::path::Path) -> crate::Result<json::JsonValue> {
-    let mut reader = io::BufReader::new(fs::File::open(filename).map_err(add_path!(filename))?);
+    let mut reader = crate::ext::sys::open_uncompressed(filename)?;
     let mut buffer = Vec::new();
     // Skip until JSON starts.
     if reader.read_until(b'{', &mut buffer).map_err(add_path!(filename))? == 0 {

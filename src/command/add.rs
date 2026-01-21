@@ -609,7 +609,8 @@ fn process_alleles(
     check_divergencies(locus, &entries, &divergences, args.variants.is_some());
     let dist_filename = locus_dir.join(paths::DISTANCES);
     let dist_file = ext::sys::create_file(&dist_filename)?;
-    div::write_divergences(args.div_k, args.div_w, &divergences, dist_file).map_err(add_path!(dist_filename))?;
+    div::write_divergences(dist_file, args.div_k, args.div_w, &divergences, |(int_div, _fl_div)| *int_div)
+        .map_err(add_path!(dist_filename))?;
 
     log::info!("    Counting k-mers");
     // Replace Ns with As in the reference sequence.

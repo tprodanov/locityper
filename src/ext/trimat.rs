@@ -20,6 +20,11 @@ impl TriangleMatrix<()> {
         let side = side as u32;
         (0..side - 1).flat_map(move |i| (i + 1..side).map(move |j| (i, j)))
     }
+
+    #[inline]
+    pub fn calc_linear_len(side: usize) -> usize {
+        side.saturating_sub(1) * side / 2
+    }
 }
 
 impl<T> TriangleMatrix<T> {
@@ -34,11 +39,6 @@ impl<T> TriangleMatrix<T> {
     }
 
     #[inline]
-    pub fn expected_len(side: usize) -> usize {
-        side.saturating_sub(1) * side / 2
-    }
-
-    #[inline]
     fn to_linear_index(&self, i: usize, j: usize) -> usize {
         assert!(i < j && j < self.side, "Incorrect indices ({}, {}) to triangle matrix", i, j);
         (2 * self.side - 3 - i) * i / 2 + j - 1
@@ -46,7 +46,7 @@ impl<T> TriangleMatrix<T> {
 
     /// Creates triangle matrix from linear storage (must have correct order: sorted first by row, then by column).
     pub fn from_linear_data(side: usize, data: Vec<T>) -> Self {
-        assert_eq!(data.len(), Self::expected_len(side), "Incorrect triangle matrix size");
+        assert_eq!(data.len(), TriangleMatrix::calc_linear_len(side), "Incorrect triangle matrix size");
         Self { side, data }
     }
 
@@ -93,13 +93,38 @@ impl<T> TriangleMatrix<T> {
             Ordering::Greater => Some(self.index((j, i))),
         }
     }
+
+    /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`, and `None` when `i == j`.
+    pub fn get_mut_symmetric(&mut self, i: usize, j: usize) -> Option<&mut T> {
+        match i.cmp(&j) {
+            Ordering::Less => Some(self.index_mut((i, j))),
+            Ordering::Equal => None,
+            Ordering::Greater => Some(self.index_mut((j, i))),
+        }
+    }
 }
 
 impl<T: Clone> TriangleMatrix<T> {
     pub fn new(side: usize, val: T) -> Self {
         Self {
             side,
-            data: vec![val; Self::expected_len(side)],
+            data: vec![val; TriangleMatrix::calc_linear_len(side)],
+        }
+    }
+
+    /// Returns submatrix only with the given indices, in the given order.
+    pub fn thin_out<G>(&self, ixs: &[G]) -> TriangleMatrix<T>
+    where G: TryInto<usize> + Copy,
+          G::Error: std::fmt::Debug,
+    {
+        Self {
+            side: ixs.len(),
+            data: TriangleMatrix::indices(ixs.len())
+                .map(|(i, j)| {
+                    let k = ixs[i].try_into().expect("Matrix index out of usize range");
+                    let l = ixs[j].try_into().expect("Matrix index out of usize range");
+                    self.get_symmetric(k, l).unwrap().clone()
+                }).collect(),
         }
     }
 }

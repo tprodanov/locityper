@@ -1085,8 +1085,7 @@ fn analyze_locus(
 
         let dist_filename = locus.db_locus_dir.join(paths::DISTANCES);
         let contig_distances = if dist_filename.exists() {
-            let dist_file = io::BufReader::new(fs::File::open(&dist_filename)
-                .map_err(add_path!(dist_filename))?);
+            let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
             let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;
             Some(dists)
         } else {

@@ -8,7 +8,7 @@ use colored::Colorize;
 use crate::{
     ext::{self, TriangleMatrix},
     algo::HashSet,
-    seq::{fastx, ContigId, ContigNames},
+    seq::{fastx, div, ContigId, ContigNames},
     err::{validate_param, error, add_path},
 };
 use super::{
@@ -183,9 +183,7 @@ fn load_divergences(
             continue;
         }
 
-        let i = usize::min(id1.ix(), id2.ix());
-        let j = usize::max(id1.ix(), id2.ix());
-        let d = &mut divergences[(i, j)];
+        let d: &mut f64 = &mut divergences.get_mut_symmetric(id1.ix(), id2.ix()).expect("id1 != id2");
         if !d.is_nan() && *d != val {
             if n_warnings < 10 {
                 n_warnings += 1;
@@ -253,14 +251,17 @@ struct Cluster {
     actual_size: u32,
     /// Newick representation.
     newick: String,
+    /// Divergence from leaf nodes.
+    div: f64,
 }
 
 impl Cluster {
     fn new(id: ContigId, contigs: &ContigNames) -> Self {
         Self {
             haps: vec![id],
-            actual_size: 1,
             newick: contigs.get_name(id).to_owned(),
+            actual_size: 1,
+            div: 0.0,
         }
     }
 
@@ -275,18 +276,20 @@ impl Cluster {
     }
 
     /// Merges two clusters and clear contents of the original clusters (for memory efficiency).
-    fn merge_and_clear(first: &mut Self, second: &mut Self, distance: f64) -> Self {
+    fn merge_and_clear(first: &mut Self, second: &mut Self, div: f64) -> Self {
         // Larger cluster will be starting.
         if first.actual_size < second.actual_size {
             std::mem::swap(&mut first.haps, &mut second.haps);
         }
         let mut haps = std::mem::take(&mut first.haps);
         haps.extend(std::mem::take(&mut second.haps));
-        let newick = format!("({}:{dist:.8},{}:{dist:.8})", &first.newick, &second.newick, dist = 0.5 * distance);
+        let newick = format!("({}:{:.8},{}:{:.8})",
+            &first.newick, 0.5 * (div - first.div),
+            &second.newick, 0.5 * (div - second.div));
         first.newick.clear();
         second.newick.clear();
         Cluster {
-            haps, newick,
+            haps, newick, div,
             actual_size: first.actual_size + second.actual_size,
         }
     }
@@ -347,7 +350,31 @@ fn cluster_haplotypes(
     }
     assert_eq!(clusters.len(), total_clusters);
     writeln!(nwk_writer, "{};", clusters.last().unwrap().newick)?;
+    keep_ids.sort_unstable();
     Ok(keep_ids)
+}
+
+fn adapt_output_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<()> {
+    let contig_set = locus_data.contig_set();
+    let contigs = contig_set.contigs();
+    let fasta_filename = locus_data.out_dir().join(paths::LOCUS_FASTA);
+    let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
+    for &id in keep_ids {
+        fastx::write_fasta(&mut fasta_writer, contigs.get_name(id).as_bytes(), contig_set.get_seq(id))
+            .map_err(add_path!(fasta_filename))?;
+    }
+
+    let dist_filename = locus_data.db_locus_dir().join(paths::DISTANCES);
+    if dist_filename.exists() {
+        let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
+        let (k, w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;
+        let subdists = dists.thin_out(keep_ids);
+        let new_dist_filename = locus_data.out_dir().join(paths::DISTANCES);
+        let new_dist_file = ext::sys::create(&new_dist_filename)?;
+        div::write_divergences(new_dist_file, k, w, &subdists, |&d| d).map_err(add_path!(new_dist_filename))?;
+    }
+
+    Ok(())
 }
 
 fn process_locus(
@@ -381,17 +408,15 @@ fn process_locus(
             .write_all(&disc_haps_data).map_err(add_path!(out_disc_haps_filename))?;
     }
 
-    let fasta_filename = locus_data.out_dir().join(paths::LOCUS_FASTA);
-    let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
-    for &id in &keep_ids {
-        fastx::write_fasta(&mut fasta_writer, contigs.get_name(id).as_bytes(), contig_set.get_seq(id))
-            .map_err(add_path!(fasta_filename))?;
-    }
     if keep_ids.len() < contigs.len() {
         log::info!("[{}] Retained {} / {} haplotypes", contigs.tag(), keep_ids.len(), contigs.len());
     } else {
         log::info!("[{}] Retained all {} haplotypes", contigs.tag(), contigs.len());
     }
+
+    adapt_output_files(locus_data, &keep_ids)?;
+    // Remains: update distances, kmers, all bed files, and success file.
+
     Ok(())
 }
 
