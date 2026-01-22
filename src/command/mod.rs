@@ -236,7 +236,7 @@ fn greet() {
     log::debug!("{}", command);
     log::debug!("{} v{} @ {}", PROGRAM, VERSION, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
     #[cfg(debug_assertions)] {
-        log::warn!("Debug assertions enabled - faster optimization is available");
+        log::warn!("Debug assertions enabled, faster optimization is available");
     }
 }
 

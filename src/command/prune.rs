@@ -1,14 +1,18 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
     io::{self, Write, BufRead},
     fmt::Write as FmtWrite,
+    ffi::OsStr,
 };
 use colored::Colorize;
 use crate::{
     ext::{self, TriangleMatrix},
     algo::HashSet,
-    seq::{fastx, div, ContigId, ContigNames},
+    seq::{
+        fastx, div, ContigId, ContigNames,
+        counts::KmerCounts,
+    },
     err::{validate_param, error, add_path},
 };
 use super::{
@@ -120,6 +124,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
         match arg {
             Short('i') | Long("input") => args.input = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
+            Short('a') | Long("aln") | Long("alignments") => args.alignments = parser.value()?.parse()?,
 
             Long("subset-loci") | Long("loci-subset") => {
                 for val in parser.values()? {
@@ -354,9 +359,55 @@ fn cluster_haplotypes(
     Ok(keep_ids)
 }
 
-fn adapt_output_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<()> {
+/// In case where no haplotypes are discarded, simply copy all files from input to output directory.
+fn copy_output_files(locus_data: &LocusData) -> crate::Result<bool> {
+    let mut all_present = true;
+    for &(filename, must_have) in &[
+        (paths::LOCUS_FASTA, true),
+        (paths::KMERS, true),
+        (paths::DISTANCES, false),
+        ]
+    {
+        let in_filename = locus_data.db_dir().join(filename);
+        let out_filename = locus_data.out_dir().join(filename);
+        if Path::new(filename).exists() {
+            std::fs::copy(&in_filename, &out_filename).map_err(add_path!(in_filename, out_filename))?;
+        } else if must_have {
+            log::error!("[{}] File {} is missing, output will be incomplete",
+                locus_data.contig_set().tag(), in_filename.display());
+            all_present = false;
+        }
+    }
+    Ok(all_present)
+}
+
+fn copy_bed_files(locus_data: &LocusData) -> crate::Result<bool> {
+    let ref_bed_filename = OsStr::new("ref.bed");
+    let mut has_ref_bed = false;
+    for filename in ext::sys::filenames_with_ext(locus_data.db_dir(), "bed")? {
+        let basename = filename.file_name().expect("File with BED extension must have basename");
+        has_ref_bed |= basename == ref_bed_filename;
+        let out_filename = locus_data.out_dir().join(basename);
+        std::fs::copy(&filename, &out_filename).map_err(add_path!(filename, out_filename))?;
+    }
+    if !has_ref_bed {
+        log::error!("[{}] File {} is missing, output will be incomplete",
+            locus_data.contig_set().tag(), locus_data.db_dir().join(&ref_bed_filename).display());
+    }
+    Ok(has_ref_bed)
+}
+
+/// Thins out files from the input locus directory.
+/// Returns true if all necessary input files are present.
+fn thin_out_output_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<bool> {
+    let mut all_files_present = copy_bed_files(locus_data)?;
     let contig_set = locus_data.contig_set();
     let contigs = contig_set.contigs();
+    if keep_ids.len() == contigs.len() {
+        all_files_present &= copy_output_files(locus_data)?;
+        return Ok(all_files_present);
+    }
+
     let fasta_filename = locus_data.out_dir().join(paths::LOCUS_FASTA);
     let mut fasta_writer = ext::sys::create_gzip(&fasta_filename)?;
     for &id in keep_ids {
@@ -364,7 +415,26 @@ fn adapt_output_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::R
             .map_err(add_path!(fasta_filename))?;
     }
 
-    let dist_filename = locus_data.db_locus_dir().join(paths::DISTANCES);
+    let in_kmers_filename = locus_data.db_dir().join(paths::KMERS);
+    let out_kmers_filename = locus_data.out_dir().join(paths::KMERS);
+    let mut kmers_reader = ext::sys::open(&in_kmers_filename)?;
+    // Read twice because there are k-mer counts in the KMERS file (off-target & on-target).
+    // Currently, only off-target counts are used, but we still need to thin out both.
+    let kmer_counts1 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(in_kmers_filename))?;
+    let kmer_counts2 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(in_kmers_filename))?;
+    if kmer_counts1.validate(contigs).is_ok() && kmer_counts2.validate(contigs).is_ok() {
+        let mut kmers_writer = ext::sys::create_lz4_slow(&out_kmers_filename)?;
+        for counts in [kmer_counts1, kmer_counts2] {
+            counts.thin_out(keep_ids.iter().copied().map(ContigId::ix))
+                .save(&mut kmers_writer).map_err(add_path!(out_kmers_filename))?;
+        }
+    } else {
+        log::warn!("[{}] k-mer counts in {} do not match input haplotypes, output will be incomplete",
+            contigs.tag(), in_kmers_filename.display());
+        all_files_present = false;
+    }
+
+    let dist_filename = locus_data.db_dir().join(paths::DISTANCES);
     if dist_filename.exists() {
         let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
         let (k, w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;
@@ -373,20 +443,21 @@ fn adapt_output_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::R
         let new_dist_file = ext::sys::create(&new_dist_filename)?;
         div::write_divergences(new_dist_file, k, w, &subdists, |&d| d).map_err(add_path!(new_dist_filename))?;
     }
-
-    Ok(())
+    Ok(all_files_present)
 }
 
+/// Returns Err if irreversible error occured,
+///     Ok(false) if process finished, but output is incomplete, and Ok(true) if everything finished successfully.
 fn process_locus(
     locus_data: &LocusData,
     args: &Args,
-) -> crate::Result<()> {
+) -> crate::Result<bool> {
     let contig_set = locus_data.contig_set();
     let contigs = contig_set.contigs();
     let paf_filename = args.alignments.replace("{}", contig_set.tag());
     let divergences = load_divergences(ext::sys::open(&paf_filename)?, contigs, &args.div_field)?;
 
-    let disc_filename = PathBuf::from(locus_data.db_locus_dir().join(paths::DISCARDED_HAPS));
+    let disc_filename = PathBuf::from(locus_data.db_dir().join(paths::DISCARDED_HAPS));
     let mut disc_haps_data = Vec::new();
     let disc_haplotypes = if args.skip_tree || !disc_filename.exists() {
         Default::default()
@@ -414,10 +485,12 @@ fn process_locus(
         log::info!("[{}] Retained all {} haplotypes", contigs.tag(), contigs.len());
     }
 
-    adapt_output_files(locus_data, &keep_ids)?;
-    // Remains: update distances, kmers, all bed files, and success file.
-
-    Ok(())
+    if thin_out_output_files(locus_data, &keep_ids)? {
+        super::write_success_file(locus_data.out_dir().join(paths::SUCCESS))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
@@ -433,13 +506,21 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let loci = super::genotype::load_loci(&[input], &output, &args.subset_loci,
         super::Rerun::from_force(args.force))?;
+    if loci.is_empty() {
+        return Ok(());
+    }
 
     let total = loci.len();
     let mut failed = 0;
+    let mut incomplete = 0;
     for locus in loci {
-        if let Err(e) = process_locus(&locus, &args) {
-            log::error!("Error while analyzing locus {}:\n        {}", locus.contig_set().tag(), e.display());
-            failed += 1;
+        match process_locus(&locus, &args) {
+            Ok(true) => {}
+            Ok(false) => incomplete += 1,
+            Err(e) => {
+                log::error!("Error while analyzing locus {}:\n        {}", locus.contig_set().tag(), e.display());
+                failed += 1;
+            }
         }
     }
 
@@ -450,6 +531,9 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         log::warn!("Successfully pruned {} loci, failed to prune {} loci", succeed, failed);
     } else {
         log::info!("Successfully pruned {} loci", succeed);
+    }
+    if incomplete > 0 {
+        log::warn!("Of the pruned loci, {} output directories were not completely filled", incomplete);
     }
     log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())

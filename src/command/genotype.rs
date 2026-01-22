@@ -573,8 +573,9 @@ pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathB
 
 pub(super) struct LocusData {
     set: ContigSet,
-    db_locus_dir: PathBuf,
-    /// Output directory with locus data.
+    /// Input directory DB/loci/LOCUS
+    db_dir: PathBuf,
+    /// Output directory OUT/loci/LOCUS.
     out_dir: PathBuf,
 }
 
@@ -582,7 +583,7 @@ impl LocusData {
     pub fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
         let out_dir = out_loci_dir.join(set.tag());
         Self {
-            db_locus_dir: db_locus_dir.to_owned(),
+            db_dir: db_locus_dir.to_owned(),
             set, out_dir,
         }
     }
@@ -594,8 +595,8 @@ impl LocusData {
 
     #[allow(unused)]
     #[inline(always)]
-    pub fn db_locus_dir(&self) -> &Path {
-        &self.db_locus_dir
+    pub fn db_dir(&self) -> &Path {
+        &self.db_dir
     }
 
     #[inline(always)]
@@ -751,7 +752,7 @@ fn load_recr_targets<'a>(
 ) -> crate::Result<()>
 {
     for locus in filt_loci {
-        let bed_filename = locus.db_locus_dir.join(&bed_basename);
+        let bed_filename = locus.db_dir.join(&bed_basename);
         for line in ext::sys::open(&bed_filename)?.lines() {
             let line = line.map_err(add_path!(bed_filename))?;
             match Interval::parse_bed(&mut line.split('\t'), &contigs) {
@@ -952,7 +953,7 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
         return Ok(());
     }
 
-    let in_fasta = locus.db_locus_dir.join(paths::LOCUS_FASTA);
+    let in_fasta = locus.db_dir.join(paths::LOCUS_FASTA);
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &filenames.reads_filename, bg_distr.seq_info(),
@@ -1083,7 +1084,7 @@ fn analyze_locus(
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
 
-        let dist_filename = locus.db_locus_dir.join(paths::DISTANCES);
+        let dist_filename = locus.db_dir.join(paths::DISTANCES);
         let contig_distances = if dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
             let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;

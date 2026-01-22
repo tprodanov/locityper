@@ -238,6 +238,15 @@ impl KmerCounts {
             counts: vec![sub_counts],
         }
     }
+
+    /// Returns k-mer counts for given indices, in the given order.
+    pub fn thin_out(&self, ixs: impl Iterator<Item = usize>) -> KmerCounts {
+        Self {
+            k: self.k,
+            max_value: self.max_value,
+            counts: ixs.map(|i| self.counts[i].clone()).collect(),
+        }
+    }
 }
 
 /// Structure, that runs `jellyfish` and queries k-mers per sequence or from the reference file.
