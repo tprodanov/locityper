@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     path::{Path, PathBuf},
     time::Instant,
     io::{self, Write, BufRead},
@@ -20,6 +21,71 @@ use super::{
     genotype::LocusData,
 };
 
+/// Select cluster representative based on the
+/// - smallest mean divergenge,
+/// - smallest mean square divergence,
+/// - smallest max divergence.
+#[derive(Clone, Copy, Debug)]
+enum ReprSelector {
+    Mean,
+    Mse,
+    Max,
+}
+
+impl ReprSelector {
+    fn to_str(self) -> &'static str {
+        match self {
+            Self::Mean => "mean",
+            Self::Mse => "mse",
+            Self::Max => "max",
+        }
+    }
+
+    #[inline]
+    fn update(self, acc: &mut f64, val: f64) {
+        match self {
+            Self::Mean => *acc += val,
+            Self::Mse => *acc += val * val,
+            Self::Max => *acc = acc.max(val),
+        }
+    }
+
+    /// Select best representative according to the selector method.
+    fn select(self, ids: &[ContigId], divergences: &TriangleMatrix<f64>, buf: &mut Vec<f64>) -> ContigId {
+        buf.clear();
+        buf.resize(ids.len(), 0.0);
+        for (i, &id1) in ids.iter().enumerate() {
+            for (j, &id2) in ids[i + 1..].iter().enumerate() {
+                let j = i + j + 1;
+                let div = *divergences.get_symmetric(id1.ix(), id2.ix()).unwrap();
+                self.update(&mut buf[i], div);
+                self.update(&mut buf[j], div);
+            }
+        }
+        let k = ext::vec::F64Ext::argmin(&buf).0;
+        ids[k]
+    }
+}
+
+impl std::str::FromStr for ReprSelector {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "mean" => Ok(Self::Mean),
+            "mse" | "sq" | "square" => Ok(Self::Mse),
+            "max" => Ok(Self::Max),
+            _ => Err(format!("Unknown rerun mode {:?} (allowed modes: mean, mse, max)", s)),
+        }
+    }
+}
+
+impl fmt::Display for ReprSelector {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.to_str())
+    }
+}
+
 struct Args {
     input: Option<PathBuf>,
     output: Option<PathBuf>,
@@ -29,6 +95,7 @@ struct Args {
     skip_tree: bool,
     div_field: String,
     div_thresh: f64,
+    selector: ReprSelector,
     force: bool,
 }
 
@@ -43,6 +110,7 @@ impl Default for Args {
             skip_tree: false,
             div_field: "dv".to_string(),
             div_thresh: 0.0002,
+            selector: ReprSelector::Mse,
             force: false,
         }
     }
@@ -99,6 +167,10 @@ fn print_help() {
         "    --div-field".green(), "STR".yellow(), super::fmt_def(&defaults.div_field));
     println!("    {:KEY$} {:VAL$}  Divergence threshold for pruning [{}].",
         "    --div-thresh".green(), "NUM".yellow(), super::fmt_def_f64(defaults.div_thresh));
+    println!("    {:KEY$} {:VAL$}  Select cluster representative with the smallest:\n\
+        {EMPTY}  mean divergence to other haplotypes ({}); mean square div. ({}, default);\n\
+        {EMPTY}  or smallest max divergence from other haplotypes ({}).",
+        "    --select".green(), "STR".yellow(), "mean".yellow(), "mse".yellow(), "max".yellow());
     println!("    {:KEY$} {:VAL$}  Limit the pruning to loci from this file.",
         "    --subset-loci".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Do not write trees in the output directory.",
@@ -134,6 +206,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("skip-tree") => args.skip_tree = true,
             Long("div-field") => args.div_field = parser.value()?.parse()?,
             Long("div-thresh") => args.div_thresh = parser.value()?.parse()?,
+            Long("select") => args.selector = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
 
             Short('V') | Long("version") => {
@@ -199,17 +272,14 @@ fn load_divergences(
         }
         *d = val;
     }
-    let n_nans = divergences.iter().filter(|&d| d.is_nan()).count();
-    if n_nans == divergences.linear_len() {
-        return Err(error!(InvalidInput, "[{}] Divergence missing for all haplotype pairs", contigs.tag()));
-    } else if n_nans > 0 {
-        let k = divergences.iter().enumerate().filter(|(_i, &d)| d.is_nan()).next().unwrap().0;
+    if let Some((k, _)) = divergences.iter().enumerate().filter(|(_, &d)| d.is_nan()).next() {
         let (i, j) = divergences.from_linear_index(k);
-        log::warn!("[{}] Divergence missing for {}/{} haplotype pairs, for example {} and {}",
-            contigs.tag(), n_nans, divergences.linear_len(),
-            contigs.get_name(ContigId::new(i as u16)), contigs.get_name(ContigId::new(j as u16)));
+        Err(error!(InvalidInput,
+            "Divergence missing for some haplotypes pairs, for example {} and {}",
+            contigs.get_name(ContigId::new(i as u16)), contigs.get_name(ContigId::new(j as u16))))
+    } else {
+        Ok(divergences)
     }
-    Ok(divergences)
 }
 
 /// Loads `discarded_haplotypes.txt` file, with lines
@@ -282,10 +352,6 @@ impl Cluster {
 
     /// Merges two clusters and clear contents of the original clusters (for memory efficiency).
     fn merge_and_clear(first: &mut Self, second: &mut Self, div: f64) -> Self {
-        // Larger cluster will be starting.
-        if first.actual_size < second.actual_size {
-            std::mem::swap(&mut first.haps, &mut second.haps);
-        }
         let mut haps = std::mem::take(&mut first.haps);
         haps.extend(std::mem::take(&mut second.haps));
         let newick = format!("({}:{:.8},{}:{:.8})",
@@ -299,14 +365,22 @@ impl Cluster {
         }
     }
 
-    fn write_discarded_haplotypes(&self, f: &mut impl Write, contigs: &ContigNames) -> io::Result<()> {
-        if self.haps.len() > 1 {
-            write!(f, "{} ~ {}", contigs.get_name(self.haps[0]), contigs.get_name(self.haps[1]))?;
-            for &hap in &self.haps[2..] {
-                write!(f, ", {}", contigs.get_name(hap))?;
+    fn write_discarded_haplotypes(
+        &self,
+        f: &mut impl Write,
+        contigs: &ContigNames,
+        repres: ContigId,
+    ) -> io::Result<()> {
+        assert!(self.haps.len() > 1);
+        write!(f, "{} ", contigs.get_name(repres))?;
+        let mut separator = '~';
+        for &hap in &self.haps {
+            if hap != repres {
+                write!(f, "{} {}", separator, contigs.get_name(hap))?;
+                separator = ',';
             }
-            writeln!(f)?;
         }
+        writeln!(f)?;
         Ok(())
     }
 }
@@ -316,6 +390,7 @@ fn cluster_haplotypes(
     contigs: &ContigNames,
     divergences: TriangleMatrix<f64>,
     thresh: f64,
+    selector: ReprSelector,
     disc_haps: &[(ContigId, Vec<String>)],
     mut nwk_writer: impl Write,
     mut disc_haps_writer: impl Write,
@@ -324,9 +399,8 @@ fn cluster_haplotypes(
     let total_clusters = 2 * n - 1;
     // Use Complete method, meaning that we track maximal distance between two points between two clusters.
     // This is done to cut as little as needed.
-    let mut divergences = divergences.take_linear();
-    let dendrogram = kodama::linkage(&mut divergences, n, kodama::Method::Complete);
-    std::mem::drop(divergences);
+    let mut div_vec = divergences.linear_data().to_vec();
+    let dendrogram = kodama::linkage(&mut div_vec, n, kodama::Method::Complete);
 
     let mut clusters: Vec<_> = contigs.ids().map(|id| Cluster::new(id, contigs)).collect();
     for (id, haps) in disc_haps {
@@ -334,17 +408,22 @@ fn cluster_haplotypes(
     }
     let steps = dendrogram.steps();
     let mut keep_ids = Vec::new();
+    let mut buf = Vec::new();
     for step in steps.iter() {
         if step.dissimilarity > thresh {
             // If this is the first time we exceed divergence threshold,
             // write down discarded haplotypes and clear haplotypes.
             for i in [step.cluster1, step.cluster2] {
                 let cluster = &mut clusters[i];
-                if cluster.haps.is_empty() {
-                    continue;
+                match cluster.haps.len() {
+                    0 => continue, // Divergence exceeded the threshold on one the previous iterations.
+                    1 => keep_ids.push(cluster.haps[0]),
+                    _ => {
+                        let repres = selector.select(&cluster.haps, &divergences, &mut buf);
+                        keep_ids.push(repres);
+                        cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs, repres)?;
+                    }
                 }
-                keep_ids.push(cluster.haps[0]);
-                cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs)?;
                 cluster.haps.clear();
             }
         }
@@ -415,6 +494,7 @@ fn thin_out_output_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate
             .map_err(add_path!(fasta_filename))?;
     }
 
+    // NOTE, that kmers are also read in ContigSet::load, but this is difficult to remove.
     let in_kmers_filename = locus_data.db_dir().join(paths::KMERS);
     let out_kmers_filename = locus_data.out_dir().join(paths::KMERS);
     let mut kmers_reader = ext::sys::open(&in_kmers_filename)?;
@@ -471,7 +551,7 @@ fn process_locus(
     } else {
         Box::new(ext::sys::create_gzip(&locus_data.out_dir().join("all_haplotypes.nwk.gz"))?)
     };
-    let keep_ids = cluster_haplotypes(contigs, divergences, args.div_thresh, &disc_haplotypes,
+    let keep_ids = cluster_haplotypes(contigs, divergences, args.div_thresh, args.selector, &disc_haplotypes,
         nwk_writer, &mut disc_haps_data).map_err(add_path!(!))?;
     if !disc_haps_data.is_empty() {
         let out_disc_haps_filename = locus_data.out_dir().join(paths::DISCARDED_HAPS);

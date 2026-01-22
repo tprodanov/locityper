@@ -262,3 +262,25 @@ pub fn interpolate((x1, x2): (f64, f64), (y1, y2): (f64, f64), x: f64) -> f64 {
 pub fn implies(a: bool, b: bool) -> bool {
     !a || b
 }
+
+// /// Calculator for the power mean, also known as generalized mean or Hölder mean.
+// /// -∞ -> min, +∞ -> max
+// #[derive(Clone, Copy, Debug)]
+// pub struct PowerMean(f64);
+
+// impl PowerMean {
+//     /// Update accumulator.
+//     #[inline]
+//     pub fn update(self, acc: &mut f64, val: f64) {
+//         if self.0 == f64::NEG_INFINITY {
+//             *acc = acc.min(val);
+//         } else if self.0 == f64::INFINITY {
+//             *acc == acc.max(val);
+//         } else {
+//             *acc += val.powf
+//         }
+//     }
+
+//     // /// Calculate inner sum, without normalization.
+//     // pub fn sum(self, )
+// }

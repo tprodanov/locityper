@@ -124,10 +124,10 @@ impl F64Ext {
     //     IterExt::max(a.iter().copied())
     // }
 
-    // /// Returns the index of the minimal value and the value itself.
-    // pub fn argmin(a: &[f64]) -> (usize, f64) {
-    //     IterExt::argmin(a.iter().copied())
-    // }
+    /// Returns the index of the minimal value and the value itself.
+    pub fn argmin(a: &[f64]) -> (usize, f64) {
+        IterExt::argmin(a.iter().copied())
+    }
 
     /// Returns the index of the maximal value and the value itself.
     #[cfg(feature = "highs")]
@@ -217,12 +217,12 @@ impl IterExt {
     //     it.fold(f64::INFINITY, f64::min)
     // }
 
-    // /// Finds an index of the minimal value in the iterator and the value itself.
-    // /// If the minimal value appears several times, returns the index of the first value.
-    // /// Panics on an empty iterator.
-    // pub fn argmin(it: impl Iterator<Item = f64>) -> (usize, f64) {
-    //     Self::arg_optimal(it, |opt, e| opt < e)
-    // }
+    /// Finds an index of the minimal value in the iterator and the value itself.
+    /// If the minimal value appears several times, returns the index of the first value.
+    /// Panics on an empty iterator.
+    pub fn argmin(it: impl Iterator<Item = f64>) -> (usize, f64) {
+        Self::arg_optimal(it, |opt, e| opt < e)
+    }
 
     /// Finds an index of the maximal value in the iterator and the value itself.
     /// If the maximal value appears several times, returns the index of the first value.
