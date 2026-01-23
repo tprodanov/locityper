@@ -284,6 +284,16 @@ impl PowerMean {
         }
     }
 
+    /// Update accumulator as if `val` appeared `mult` times.
+    pub fn update_mult(self, acc: f64, val: f64, mult: f64) -> f64 {
+        match self {
+            Self::Min => acc.min(val),
+            Self::Max => acc.max(val),
+            Self::Pow(0) => acc + mult * val.ln(),
+            Self::Pow(n) => acc + mult * val.powi(i32::from(n)),
+        }
+    }
+
     #[allow(unused)]
     pub fn finalize(self, acc: f64, count: u32) -> f64 {
         let norm_count = acc / f64::from(count);

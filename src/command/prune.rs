@@ -254,8 +254,9 @@ fn load_discarded_haplotypes(
 }
 
 struct Cluster {
-    /// Haplotypes, where the first one is the representative.
-    haps: Vec<ContigId>,
+    /// Haplotypes in the cluster and their multiplicity (number of times identical haplotype appeared,
+    /// taken from old discarded_haplotypes.txt.gz).
+    haps: Vec<(ContigId, u32)>,
     /// Newick representation.
     newick: String,
     /// Divergence from leaf nodes.
@@ -265,13 +266,15 @@ struct Cluster {
 impl Cluster {
     fn new(id: ContigId, contigs: &ContigNames) -> Self {
         Self {
-            haps: vec![id],
+            haps: vec![(id, 1)],
             newick: contigs.get_name(id).to_owned(),
             div: 0.0,
         }
     }
 
     fn add_identical(&mut self, names: &[String]) {
+        debug_assert!(self.haps.len() == 1);
+        self.haps[0].1 += names.len() as u32;
         self.newick.insert(0, '(');
         write!(self.newick, ":0").unwrap();
         for hap in names {
@@ -295,30 +298,31 @@ impl Cluster {
     fn select_representative(
         &self,
         divergences: &TriangleMatrix<f64>,
+        epsilon: f64,
         power: PowerMean,
         buf: &mut Vec<f64>,
     ) -> ContigId
     {
         buf.clear();
         buf.resize(self.haps.len(), 0.0);
-        for (i, &id1) in self.haps.iter().enumerate() {
-            for (j, &id2) in self.haps[i + 1..].iter().enumerate() {
+        for (i, &(id1, mult1)) in self.haps.iter().enumerate() {
+            if mult1 > 1 {
+                buf[i] = power.update_mult(buf[i], epsilon, f64::from(mult1 - 1));
+            }
+            for (j, &(id2, mult2)) in self.haps[i + 1..].iter().enumerate() {
                 let j = i + j + 1;
-                let div = *divergences.get_symmetric(id1.ix(), id2.ix()).unwrap();
-                buf[i] = power.update(buf[i], div);
-                buf[j] = power.update(buf[j], div);
+                let div = epsilon + *divergences.get_symmetric(id1.ix(), id2.ix()).unwrap();
+                buf[i] = power.update_mult(buf[i], div, f64::from(mult2));
+                buf[j] = power.update_mult(buf[j], div, f64::from(mult1));
             }
         }
-        // let count = self.haps.len() as u32 - 1;
-        // buf.iter_mut().for_each(|val| *val = power.finalize(*val, count));
-
         // NOTE: There is no need to finalize the generalized mean,
         // accumulators will be strictly increasing with non-negative power and strictly decreasing otherwise.
         let (k, _) = match power {
             PowerMean::Pow(n) if n < 0 => ext::vec::F64Ext::argmax(&buf),
             _ => ext::vec::F64Ext::argmin(&buf),
         };
-        self.haps[k]
+        self.haps[k].0
     }
 
     fn write_discarded_haplotypes(
@@ -330,7 +334,7 @@ impl Cluster {
         assert!(self.haps.len() > 1);
         write!(f, "{} ", contigs.get_name(repres))?;
         let mut separator = '~';
-        for &hap in &self.haps {
+        for &(hap, _) in &self.haps {
             if hap != repres {
                 write!(f, "{} {}", separator, contigs.get_name(hap))?;
                 separator = ',';
@@ -350,7 +354,16 @@ fn cluster_haplotypes(
     disc_haps: &[(ContigId, Vec<String>)],
     mut nwk_writer: impl Write,
     mut disc_haps_writer: impl Write,
-) -> io::Result<Vec<ContigId>> {
+) -> io::Result<Vec<ContigId>>
+{
+    let min_val = divergences.iter().copied().reduce(f64::min).expect("Empty divergence matrix");
+    if min_val > thresh {
+        log::warn!("[{}] Minimal observed divergence ({}) is larger than the threshold ({}), \
+            all haplotypes will be retained", contigs.tag(), min_val, thresh);
+    }
+    // Value which will replace 0 in generalized mean.
+    let epsilon = f64::max(1e-6 * min_val, 1e-12);
+
     let n = contigs.len();
     let total_clusters = 2 * n - 1;
     // Use Complete method, meaning that we track maximal distance between two points between two clusters.
@@ -373,9 +386,9 @@ fn cluster_haplotypes(
                 let cluster = &mut clusters[i];
                 match cluster.haps.len() {
                     0 => continue, // Divergence exceeded the threshold on one the previous iterations.
-                    1 => keep_ids.push(cluster.haps[0]),
+                    1 => keep_ids.push(cluster.haps[0].0),
                     _ => {
-                        let repres = cluster.select_representative(&divergences, power, &mut buf);
+                        let repres = cluster.select_representative(&divergences, epsilon, power, &mut buf);
                         keep_ids.push(repres);
                         cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs, repres)?;
                     }
@@ -490,6 +503,9 @@ fn process_locus(
 ) -> crate::Result<bool> {
     let contig_set = locus_data.contig_set();
     let contigs = contig_set.contigs();
+    if contigs.is_empty() {
+        return Err(error!(InvalidData, "No haplotypes found"));
+    }
     let paf_filename = args.alignments.replace("{}", contig_set.tag());
     let divergences = load_divergences(ext::sys::open(&paf_filename)?, contigs, &args.div_field)?;
 
