@@ -130,7 +130,6 @@ impl F64Ext {
     }
 
     /// Returns the index of the maximal value and the value itself.
-    #[cfg(feature = "highs")]
     pub fn argmax(a: &[f64]) -> (usize, f64) {
         IterExt::argmax(a.iter().copied())
     }
@@ -227,7 +226,6 @@ impl IterExt {
     /// Finds an index of the maximal value in the iterator and the value itself.
     /// If the maximal value appears several times, returns the index of the first value.
     /// Panics on an empty iterator.
-    #[cfg(feature = "highs")]
     pub fn argmax(it: impl Iterator<Item = f64>) -> (usize, f64) {
         Self::arg_optimal(it, |opt, e| opt > e)
     }

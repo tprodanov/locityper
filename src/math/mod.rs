@@ -1,6 +1,7 @@
 pub mod distr;
 pub mod frac;
 
+use std::fmt;
 use statrs::distribution::{StudentsT, ContinuousCDF};
 
 pub struct Ln;
@@ -261,6 +262,85 @@ pub fn interpolate((x1, x2): (f64, f64), (y1, y2): (f64, f64), x: f64) -> f64 {
 #[inline(always)]
 pub fn implies(a: bool, b: bool) -> bool {
     !a || b
+}
+
+/// Calculator for the power mean, also known as generalized mean or Hölder mean.
+#[derive(Clone, Copy, Debug)]
+pub enum PowerMean {
+    Min,
+    Pow(i8),
+    Max,
+}
+
+impl PowerMean {
+    /// Update accumulator.
+    #[inline(always)]
+    pub fn update(self, acc: f64, val: f64) -> f64 {
+        match self {
+            Self::Min => acc.min(val),
+            Self::Max => acc.max(val),
+            Self::Pow(0) => acc + val.ln(),
+            Self::Pow(n) => acc + val.powi(i32::from(n)),
+        }
+    }
+
+    #[allow(unused)]
+    pub fn finalize(self, acc: f64, count: u32) -> f64 {
+        let norm_count = acc / f64::from(count);
+        match self {
+            Self::Min | Self::Max => acc,
+            Self::Pow(0) => (norm_count).exp(),
+            Self::Pow(1) => norm_count,
+            Self::Pow(2) => norm_count.sqrt(),
+            Self::Pow(-1) => 1.0 / norm_count,
+            Self::Pow(-2) => (1.0 / norm_count).sqrt(),
+            Self::Pow(n) => norm_count.powf(1.0 / f64::from(n)),
+        }
+    }
+
+    /// Calculate inner sum, without normalization.
+    /// Will be sum of logs for the geometric mean Pow(0).
+    #[allow(unused)]
+    pub fn sum(self, values: impl Iterator<Item = f64>) -> f64 {
+        values.fold(0.0, |acc, val| self.update(acc, val))
+    }
+
+    /// Calculate inner sum, without normalization.
+    #[allow(unused)]
+    pub fn mean(self, values: impl Iterator<Item = f64>) -> f64 {
+        let mut acc = 0.0;
+        let mut count: u32 = 0;
+        for val in values {
+            acc = self.update(acc, val);
+            count += 1;
+        }
+        self.finalize(acc, count)
+    }
+}
+
+impl std::str::FromStr for PowerMean {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "min" | "-inf" | "neg-inf" => Ok(Self::Min),
+            "max" | "inf" => Ok(Self::Max),
+            "geom" => Ok(Self::Pow(0)),
+            _ => s.parse::<i8>().map(Self::Pow)
+                .map_err(|_| format!("Cannot parse power mean from {:?}. \
+                    Allowed values are: min|-inf, max|inf, or integers -128 to 127", s)),
+        }
+    }
+}
+
+impl fmt::Display for PowerMean {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Min => f.write_str("min"),
+            Self::Max => f.write_str("max"),
+            Self::Pow(n) => write!(f, "{}", n),
+        }
+    }
 }
 
 // /// Calculator for the power mean, also known as generalized mean or Hölder mean.

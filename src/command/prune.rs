@@ -1,5 +1,4 @@
 use std::{
-    fmt,
     path::{Path, PathBuf},
     time::Instant,
     io::{self, Write, BufRead},
@@ -15,76 +14,12 @@ use crate::{
         counts::KmerCounts,
     },
     err::{validate_param, error, add_path},
+    math::PowerMean,
 };
 use super::{
     paths,
     genotype::LocusData,
 };
-
-/// Select cluster representative based on the
-/// - smallest mean divergenge,
-/// - smallest mean square divergence,
-/// - smallest max divergence.
-#[derive(Clone, Copy, Debug)]
-enum ReprSelector {
-    Mean,
-    Mse,
-    Max,
-}
-
-impl ReprSelector {
-    fn to_str(self) -> &'static str {
-        match self {
-            Self::Mean => "mean",
-            Self::Mse => "mse",
-            Self::Max => "max",
-        }
-    }
-
-    #[inline]
-    fn update(self, acc: &mut f64, val: f64) {
-        match self {
-            Self::Mean => *acc += val,
-            Self::Mse => *acc += val * val,
-            Self::Max => *acc = acc.max(val),
-        }
-    }
-
-    /// Select best representative according to the selector method.
-    fn select(self, ids: &[ContigId], divergences: &TriangleMatrix<f64>, buf: &mut Vec<f64>) -> ContigId {
-        buf.clear();
-        buf.resize(ids.len(), 0.0);
-        for (i, &id1) in ids.iter().enumerate() {
-            for (j, &id2) in ids[i + 1..].iter().enumerate() {
-                let j = i + j + 1;
-                let div = *divergences.get_symmetric(id1.ix(), id2.ix()).unwrap();
-                self.update(&mut buf[i], div);
-                self.update(&mut buf[j], div);
-            }
-        }
-        let k = ext::vec::F64Ext::argmin(&buf).0;
-        ids[k]
-    }
-}
-
-impl std::str::FromStr for ReprSelector {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match &s.to_lowercase() as &str {
-            "mean" => Ok(Self::Mean),
-            "mse" | "sq" | "square" => Ok(Self::Mse),
-            "max" => Ok(Self::Max),
-            _ => Err(format!("Unknown rerun mode {:?} (allowed modes: mean, mse, max)", s)),
-        }
-    }
-}
-
-impl fmt::Display for ReprSelector {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(self.to_str())
-    }
-}
 
 struct Args {
     input: Option<PathBuf>,
@@ -95,7 +30,7 @@ struct Args {
     skip_tree: bool,
     div_field: String,
     div_thresh: f64,
-    selector: ReprSelector,
+    power: PowerMean,
     force: bool,
 }
 
@@ -110,7 +45,7 @@ impl Default for Args {
             skip_tree: false,
             div_field: "dv".to_string(),
             div_thresh: 0.0002,
-            selector: ReprSelector::Mse,
+            power: PowerMean::Pow(2),
             force: false,
         }
     }
@@ -167,10 +102,9 @@ fn print_help() {
         "    --div-field".green(), "STR".yellow(), super::fmt_def(&defaults.div_field));
     println!("    {:KEY$} {:VAL$}  Divergence threshold for pruning [{}].",
         "    --div-thresh".green(), "NUM".yellow(), super::fmt_def_f64(defaults.div_thresh));
-    println!("    {:KEY$} {:VAL$}  Select cluster representative with the smallest:\n\
-        {EMPTY}  mean divergence to other haplotypes ({}); mean square div. ({}, default);\n\
-        {EMPTY}  or smallest max divergence from other haplotypes ({}).",
-        "    --select".green(), "STR".yellow(), "mean".yellow(), "mse".yellow(), "max".yellow());
+    println!("    {:KEY$} {:VAL$}  Select cluster representative with the smallest\n\
+        {EMPTY}  generalized mean of this power [{}].",
+        "    --power".green(), "NUM|min|max".yellow(), super::fmt_def(&defaults.power));
     println!("    {:KEY$} {:VAL$}  Limit the pruning to loci from this file.",
         "    --subset-loci".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Do not write trees in the output directory.",
@@ -204,9 +138,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
             Long("skip-tree") => args.skip_tree = true,
-            Long("div-field") => args.div_field = parser.value()?.parse()?,
-            Long("div-thresh") => args.div_thresh = parser.value()?.parse()?,
-            Long("select") => args.selector = parser.value()?.parse()?,
+            Long("field") | Long("div-field") => args.div_field = parser.value()?.parse()?,
+            Long("thresh") | Long("div-thresh") => args.div_thresh = parser.value()?.parse()?,
+            Long("power") => args.power = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
 
             Short('V') | Long("version") => {
@@ -322,8 +256,6 @@ fn load_discarded_haplotypes(
 struct Cluster {
     /// Haplotypes, where the first one is the representative.
     haps: Vec<ContigId>,
-    /// How many haplotypes are in the cluster, including previously discarded haplotypes.
-    actual_size: u32,
     /// Newick representation.
     newick: String,
     /// Divergence from leaf nodes.
@@ -335,13 +267,11 @@ impl Cluster {
         Self {
             haps: vec![id],
             newick: contigs.get_name(id).to_owned(),
-            actual_size: 1,
             div: 0.0,
         }
     }
 
     fn add_identical(&mut self, names: &[String]) {
-        self.actual_size += names.len() as u32;
         self.newick.insert(0, '(');
         write!(self.newick, ":0").unwrap();
         for hap in names {
@@ -359,10 +289,36 @@ impl Cluster {
             &second.newick, 0.5 * (div - second.div));
         first.newick.clear();
         second.newick.clear();
-        Cluster {
-            haps, newick, div,
-            actual_size: first.actual_size + second.actual_size,
+        Cluster { haps, newick, div }
+    }
+
+    fn select_representative(
+        &self,
+        divergences: &TriangleMatrix<f64>,
+        power: PowerMean,
+        buf: &mut Vec<f64>,
+    ) -> ContigId
+    {
+        buf.clear();
+        buf.resize(self.haps.len(), 0.0);
+        for (i, &id1) in self.haps.iter().enumerate() {
+            for (j, &id2) in self.haps[i + 1..].iter().enumerate() {
+                let j = i + j + 1;
+                let div = *divergences.get_symmetric(id1.ix(), id2.ix()).unwrap();
+                buf[i] = power.update(buf[i], div);
+                buf[j] = power.update(buf[j], div);
+            }
         }
+        // let count = self.haps.len() as u32 - 1;
+        // buf.iter_mut().for_each(|val| *val = power.finalize(*val, count));
+
+        // NOTE: There is no need to finalize the generalized mean,
+        // accumulators will be strictly increasing with non-negative power and strictly decreasing otherwise.
+        let (k, _) = match power {
+            PowerMean::Pow(n) if n < 0 => ext::vec::F64Ext::argmax(&buf),
+            _ => ext::vec::F64Ext::argmin(&buf),
+        };
+        self.haps[k]
     }
 
     fn write_discarded_haplotypes(
@@ -390,7 +346,7 @@ fn cluster_haplotypes(
     contigs: &ContigNames,
     divergences: TriangleMatrix<f64>,
     thresh: f64,
-    selector: ReprSelector,
+    power: PowerMean,
     disc_haps: &[(ContigId, Vec<String>)],
     mut nwk_writer: impl Write,
     mut disc_haps_writer: impl Write,
@@ -419,7 +375,7 @@ fn cluster_haplotypes(
                     0 => continue, // Divergence exceeded the threshold on one the previous iterations.
                     1 => keep_ids.push(cluster.haps[0]),
                     _ => {
-                        let repres = selector.select(&cluster.haps, &divergences, &mut buf);
+                        let repres = cluster.select_representative(&divergences, power, &mut buf);
                         keep_ids.push(repres);
                         cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs, repres)?;
                     }
@@ -441,15 +397,15 @@ fn cluster_haplotypes(
 /// In case where no haplotypes are discarded, simply copy all files from input to output directory.
 fn copy_output_files(locus_data: &LocusData) -> crate::Result<bool> {
     let mut all_present = true;
-    for &(filename, must_have) in &[
+    for &(basename, must_have) in &[
         (paths::LOCUS_FASTA, true),
         (paths::KMERS, true),
         (paths::DISTANCES, false),
         ]
     {
-        let in_filename = locus_data.db_dir().join(filename);
-        let out_filename = locus_data.out_dir().join(filename);
-        if Path::new(filename).exists() {
+        let in_filename = locus_data.db_dir().join(basename);
+        let out_filename = locus_data.out_dir().join(basename);
+        if Path::new(&in_filename).exists() {
             std::fs::copy(&in_filename, &out_filename).map_err(add_path!(in_filename, out_filename))?;
         } else if must_have {
             log::error!("[{}] File {} is missing, output will be incomplete",
@@ -551,7 +507,7 @@ fn process_locus(
     } else {
         Box::new(ext::sys::create_gzip(&locus_data.out_dir().join("all_haplotypes.nwk.gz"))?)
     };
-    let keep_ids = cluster_haplotypes(contigs, divergences, args.div_thresh, args.selector, &disc_haplotypes,
+    let keep_ids = cluster_haplotypes(contigs, divergences, args.div_thresh, args.power, &disc_haplotypes,
         nwk_writer, &mut disc_haps_data).map_err(add_path!(!))?;
     if !disc_haps_data.is_empty() {
         let out_disc_haps_filename = locus_data.out_dir().join(paths::DISCARDED_HAPS);
