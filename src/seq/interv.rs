@@ -109,6 +109,11 @@ impl Interval {
         let end = split.next()
             .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?
             .parse::<u32>().map_err(|e| error!(ParsingError, "Cannot parse BED line: {}", e))?;
+        if end > contigs.get_len(contig_id) {
+            return Err(error!(InvalidInput,
+                "Interval {}:{}-{} out of range on {}. Perhaps, incorrect reference genome is used",
+                contig_name, start+1, end, contig_name));
+        }
         Ok(Self::new(Arc::clone(contigs), contig_id, start, end))
     }
 

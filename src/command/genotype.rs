@@ -758,9 +758,9 @@ fn load_recr_targets<'a>(
             match Interval::parse_bed(&mut line.split('\t'), &contigs) {
                 Ok(interv) => intervals.push(interv),
                 Err(Error::ParsingError(e)) => log::error!(
-                    "[{}] Cannot parse locus coordinates: {}, the region may be absent from the BAM/CRAM file",
+                    "[{}] Cannot parse locus coordinates ({}), the region may be absent from the BAM/CRAM file",
                     locus.set.tag(), e),
-                Err(e) => log::error!("[{}] Cannot parse locus coordinates: {}", locus.set.tag(), e.display()),
+                Err(e) => log::error!("[{}] Cannot parse locus coordinates ({})", locus.set.tag(), e.display()),
             }
         }
     }
