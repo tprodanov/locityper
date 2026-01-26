@@ -1,7 +1,7 @@
 FROM rust:1.92-slim-trixie
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.3.0"
+LABEL version="1.3.1"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local
