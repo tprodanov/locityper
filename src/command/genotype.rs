@@ -92,6 +92,7 @@ struct Args {
     thresh_kmer_count: KmerCount,
     chunk_length: u64,
     recr_bed: String,
+    alt_contig_len: u32,
 
     edit_thresh: Option<EditThresh>,
     assgn_params: AssgnParams,
@@ -126,6 +127,7 @@ impl Default for Args {
             thresh_kmer_count: 50,
             chunk_length: DEFAULT_CHUNK_LENGTH,
             recr_bed: String::new(),
+            alt_contig_len: 10_000_000,
 
             edit_thresh: None,
             assgn_params: Default::default(),
@@ -234,9 +236,12 @@ fn print_help(extended: bool) {
             "-c, --chunk-len".green(), "INT".yellow(),
             super::fmt_def(PrettyU64(defaults.chunk_length)));
         println!("    {:KEY$} {:VAL$}  Take user-defined BED file for recruitment from BAM/CRAM files.\n\
-            {EMPTY}  Do not forget to add alternative contigs. If path starts with ~~,\n\
-            {EMPTY}  remove tildes and use relative paths TARGET_DB/loci/*/{}.bed.",
-            "    --recr-bed".green(), "FILE".yellow(), "STR".yellow());
+            {EMPTY}  BED file should contain target loci coordinates, their copies,\n\
+            {EMPTY}  and any relevant alternative contigs. If path starts with {},\n\
+            {EMPTY}  strip tildes and use relative paths TARGET_DB/loci/*/{}.bed.",
+            "    --recr-bed".green(), "FILE".yellow(), "~~".yellow(), "STR".yellow());
+        println!("    {:KEY$} {:VAL$}  Recruit reads from all contigs shorter than this length [{}].",
+            "    --recr-alt-len".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.alt_contig_len)));
 
         println!("\n{}", "Filtering reads:".bold());
         println!("    {:KEY$} {:VAL$}\n\
@@ -399,6 +404,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Short('c') | Long("chunk") | Long("chunk-len") =>
                 args.chunk_length = parser.value()?.parse::<PrettyU64>()?.get(),
             Long("recr-bed") => args.recr_bed = parser.value()?.parse()?,
+            Long("recr-alt-len") => args.alt_contig_len = parser.value()?.parse::<PrettyU32>()?.get(),
 
             Short('P') | Long("ploidy") => args.ploidy = parser.value()?.parse()?,
             Long("skew") => args.assgn_params.lik_skew = parser.value()?.parse()?,
@@ -768,19 +774,16 @@ fn load_recr_targets<'a>(
 }
 
 /// Prepare fetch regions for a list of regions.
-/// Additionally, add all contigs from
+/// Additionally, add all short contigs.
 fn create_fetch_targets<'a>(
     contigs: &Arc<ContigNames>,
     bg_distr: &BgDistr,
     filt_loci: impl Iterator<Item = &'a LocusData>,
     recr_bed: &str,
+    alt_contig_len: u32,
 ) -> crate::Result<Vec<Interval>>
 {
-    // Recruit reads from all contigs under 10 Mb.
-    const ALT_CONTIG_LEN: u32 = 10_000_000;
     const MERGE_DISTANCE: u32 = 1000;
-
-    let mut alt_contig_len = ALT_CONTIG_LEN;
     let mut intervals = Vec::new();
 
     if recr_bed.is_empty() {
@@ -789,7 +792,6 @@ fn create_fetch_targets<'a>(
         load_recr_targets(contigs, filt_loci, &format!("{}.bed", suffix), &mut intervals)?;
     } else {
         interv::load_bed(&Path::new(recr_bed), contigs, &mut intervals)?;
-        alt_contig_len = 0;
     }
 
     let padding = if let Some(distr) = bg_distr.insert_distr().distr() {
@@ -895,7 +897,8 @@ fn recruit_reads(
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let chunk_size = calculate_chunk_size(args.chunk_length, mean_read_len, is_paired_end);
     recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), args.threads, chunk_size, None,
-        |contigs| create_fetch_targets(contigs, bg_distr, filt_loci.iter().map(|t| &t.0), &args.recr_bed))?;
+        |contigs| create_fetch_targets(contigs, bg_distr, filt_loci.iter().map(|t| &t.0),
+            &args.recr_bed, args.alt_contig_len))?;
 
     for (_, filenames) in filt_loci.iter() {
         fs::rename(&filenames.tmp_reads_filename, &filenames.reads_filename)
