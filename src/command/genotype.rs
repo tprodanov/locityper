@@ -745,7 +745,7 @@ pub(super) fn postprocess_targets(
     }
     intervals.sort();
     let merged = Interval::merge(&intervals, merge_distance);
-    log::debug!("    Fetch reads from {} regions (sum length {:.1} Mb) + unmapped reads", merged.len(),
+    log::info!("Fetch reads from {} regions (sum length {:.1} Mb) + unmapped reads", merged.len(),
         1e-6 * f64::from(merged.iter().map(Interval::len).sum::<u32>()));
     merged
 }
