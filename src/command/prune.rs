@@ -28,8 +28,8 @@ struct Args {
     subset_loci: HashSet<String>,
 
     skip_tree: bool,
-    div_field: String,
-    div_thresh: f64,
+    field: String,
+    threshold: f64,
     n_clusters: Option<usize>,
     power: PowerMean,
     force: bool,
@@ -44,8 +44,8 @@ impl Default for Args {
             subset_loci: HashSet::default(),
 
             skip_tree: false,
-            div_field: "dv".to_string(),
-            div_thresh: 0.0002,
+            field: "dv".to_string(),
+            threshold: 0.0002,
             n_clusters: None,
             power: PowerMean::Pow(2),
             force: false,
@@ -57,10 +57,10 @@ impl Args {
     fn validate(mut self) -> crate::Result<Self> {
         validate_param!(self.input.is_some(), "Input database is not provided (see -i/--input)");
         validate_param!(self.output.is_some(), "Output database is not provided (see -o/--output)");
-        validate_param!(!self.div_field.contains(':'), "PAF divergence field ({}) must not contain :",
-            self.div_field);
-        validate_param!(self.div_thresh >= 0.0, "Divergence threshold ({}) should be non-negative",
-            self.div_thresh);
+        validate_param!(!self.field.contains(':'), "PAF divergence field ({}) must not contain :",
+            self.field);
+        validate_param!(self.threshold >= 0.0, "Divergence threshold ({}) should be non-negative",
+            self.threshold);
         validate_param!(self.n_clusters.unwrap_or(usize::MAX) > 0,
             "Number of clusters (--n-clusters) must be positive");
 
@@ -103,9 +103,9 @@ fn print_help() {
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  PAF field with divergence values [{}].",
-        "    --field".green(), "STR".yellow(), super::fmt_def(&defaults.div_field));
+        "    --field".green(), "STR".yellow(), super::fmt_def(&defaults.field));
     println!("    {:KEY$} {:VAL$}  Divergence threshold for pruning [{}].",
-        "    --threshold".green(), "NUM".yellow(), super::fmt_def_f64(defaults.div_thresh));
+        "    --threshold".green(), "NUM".yellow(), super::fmt_def_f64(defaults.threshold));
     println!("    {:KEY$} {:VAL$}  Use dynamic threshold to get approximately {} clusters.",
         "    --n-clusters".green(), "INT".yellow(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Select cluster representative with the smallest\n\
@@ -144,8 +144,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
             Long("skip-tree") => args.skip_tree = true,
-            Long("field") => args.div_field = parser.value()?.parse()?,
-            Long("thresh") | Long("threshold") => args.div_thresh = parser.value()?.parse()?,
+            Long("field") => args.field = parser.value()?.parse()?,
+            Long("thresh") | Long("threshold") => args.threshold = parser.value()?.parse()?,
             Long("n-clusters") => args.n_clusters = Some(parser.value()?.parse()?),
             Long("power") => args.power = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
@@ -168,6 +168,7 @@ fn load_divergences(
     f: impl BufRead,
     contigs: &ContigNames,
     field: &str,
+    repl_missing: f64,
 ) -> crate::Result<TriangleMatrix<f64>>
 {
     let mut n_warnings = 0;
@@ -213,14 +214,24 @@ fn load_divergences(
         }
         *d = val;
     }
-    if let Some((k, _)) = divergences.iter().enumerate().filter(|(_, &d)| d.is_nan()).next() {
-        let (i, j) = divergences.from_linear_index(k);
-        Err(error!(InvalidInput,
-            "Divergence missing for some haplotypes pairs, for example {} and {}",
-            contigs.get_name(ContigId::new(i as u16)), contigs.get_name(ContigId::new(j as u16))))
-    } else {
-        Ok(divergences)
+
+    let mut missing_count = 0;
+    let mut missing_k: Option<usize> = None;
+    for (k, val) in divergences.iter_mut().enumerate() {
+        if val.is_nan() {
+            missing_count += 1;
+            missing_k = Some(k);
+            *val = repl_missing;
+        }
     }
+    if let Some(k) = missing_k {
+        let (i, j) = divergences.from_linear_index(k);
+        let name1 = contigs.get_name(ContigId::new(i as u16));
+        let name2 = contigs.get_name(ContigId::new(j as u16));
+        log::warn!("[{}] Divergence missing for {:.1}% haplotypes pairs, for example {} and {}. Replacing with {:.5}",
+            contigs.tag(), 100.0 * missing_count as f64 / divergences.linear_len() as f64, name1, name2, repl_missing);
+    }
+    Ok(divergences)
 }
 
 /// Loads `discarded_haplotypes.txt` file, with lines
@@ -546,7 +557,8 @@ fn process_locus(
         return Err(error!(InvalidData, "No haplotypes found"));
     }
     let paf_filename = args.alignments.replace("{}", contig_set.tag());
-    let divergences = load_divergences(ext::sys::open(&paf_filename)?, contigs, &args.div_field)?;
+    let repl_missing = if args.n_clusters.is_some() { f64::INFINITY } else { 10.0 * args.threshold };
+    let divergences = load_divergences(ext::sys::open(&paf_filename)?, contigs, &args.field, repl_missing)?;
 
     let disc_filename = PathBuf::from(locus_data.db_dir().join(paths::DISCARDED_HAPS));
     let mut disc_haps_data = Vec::new();
@@ -562,7 +574,7 @@ fn process_locus(
     } else {
         Box::new(ext::sys::create_gzip(&locus_data.out_dir().join("all_haplotypes.nwk.gz"))?)
     };
-    let keep_ids = cluster_haplotypes(contigs, divergences, args.div_thresh, args.n_clusters, args.power,
+    let keep_ids = cluster_haplotypes(contigs, divergences, args.threshold, args.n_clusters, args.power,
         &disc_haplotypes, nwk_writer, &mut disc_haps_data)?;
     if !disc_haps_data.is_empty() {
         let out_disc_haps_filename = locus_data.out_dir().join(paths::DISCARDED_HAPS);

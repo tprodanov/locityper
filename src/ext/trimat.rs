@@ -85,6 +85,11 @@ impl<T> TriangleMatrix<T> {
         self.data.iter()
     }
 
+    /// Linear iterator over elements (first by row, second by column).
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.data.iter_mut()
+    }
+
     /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`, and `None` when `i == j`.
     pub fn get_symmetric(&self, i: usize, j: usize) -> Option<&T> {
         match i.cmp(&j) {

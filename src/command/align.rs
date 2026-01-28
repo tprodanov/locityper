@@ -103,8 +103,10 @@ fn print_help() {
         super::fmt_def(defaults.params.div_k), super::fmt_def(defaults.params.div_w));
     println!("    {:KEY$} {:VAL$}  Skip divergence calculation.",
         "-s, --skip-div".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Do not align sequences with minimizer divergence >= {} [{}].",
-        "-D, --thresh-div".green(), "NUM".yellow(), "NUM".yellow(), super::fmt_def_f64(defaults.params.thresh_div));
+    println!("    {:KEY$} {:VAL$}  Do not align sequences with minimizer divergence >= {} [{}].\n\
+        {EMPTY}  Use {} to align everything.",
+        "-D, --thresh-div".green(), "NUM".yellow(), "NUM".yellow(), super::fmt_def_f64(defaults.params.thresh_div),
+        "-D 1".green());
     println!("    {:KEY$} {:VAL$}  One or more k-mer sizes (5 <= k <= {}) for backbone alignment,\n\
         {EMPTY}  separated by comma [{}].",
         "-k, --backbone".green(), "INT".yellow(), ruint::aliases::U256::MAX_KMER_SIZE,
