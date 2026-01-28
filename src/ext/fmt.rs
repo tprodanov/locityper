@@ -2,13 +2,12 @@ use std::{
     fmt::{self, Display, Debug},
     path::{Path, PathBuf},
     process::Command,
+    sync::LazyLock,
 };
 
 /// Pretty path formatting: replace $HOME with ~, put quotes around if needed.
 pub fn path(path: impl AsRef<Path>) -> String {
-    lazy_static::lazy_static!{
-        static ref HOME: Option<PathBuf> = std::env::var_os("HOME").map(|s| PathBuf::from(s));
-    }
+    static HOME: LazyLock<Option<PathBuf>> = LazyLock::new(|| std::env::var_os("HOME").map(|s| PathBuf::from(s)));
     let path = path.as_ref();
     if let Some(home) = (*HOME).as_ref() {
         if let Ok(suffix) = path.strip_prefix(home) {

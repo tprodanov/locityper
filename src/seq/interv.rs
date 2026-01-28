@@ -1,12 +1,11 @@
 use std::{
     fmt,
     io::{Read, BufRead, Seek},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     cmp::{min, max, Ordering},
     path::Path,
 };
 use regex::Regex;
-use lazy_static::lazy_static;
 use const_format::formatcp;
 use bio::io::fasta;
 use crate::{
@@ -86,9 +85,7 @@ impl Interval {
 
     /// Parses interval from string "name:start-end", where start is 1-based, inclusive.
     pub fn parse(s: &str, contigs: &Arc<ContigNames>) -> crate::Result<Self> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(INTERVAL_PATTERN).unwrap();
-        }
+        static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(INTERVAL_PATTERN).unwrap());
         let captures = RE.captures(s).ok_or_else(|| error!(ParsingError, "Cannot parse interval '{}'", s))?;
         Self::from_captures(s, &captures, contigs)
     }
@@ -316,9 +313,7 @@ impl<'a> fmt::Display for BedFormat<'a> {
 
 /// Tests if the locus name is allowed.
 pub fn check_locus_name(name: &str) -> crate::Result<()> {
-    lazy_static! {
-        static ref NAME_RE: Regex = Regex::new(NAME_PATTERN).unwrap();
-    }
+    static NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(NAME_PATTERN).unwrap());
     if NAME_RE.is_match(&name) {
         Ok(())
     } else {
