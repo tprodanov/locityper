@@ -30,6 +30,7 @@ struct Args {
     skip_tree: bool,
     div_field: String,
     div_thresh: f64,
+    n_clusters: Option<usize>,
     power: PowerMean,
     force: bool,
 }
@@ -45,6 +46,7 @@ impl Default for Args {
             skip_tree: false,
             div_field: "dv".to_string(),
             div_thresh: 0.0002,
+            n_clusters: None,
             power: PowerMean::Pow(2),
             force: false,
         }
@@ -59,6 +61,8 @@ impl Args {
             self.div_field);
         validate_param!(self.div_thresh >= 0.0, "Divergence threshold ({}) should be non-negative",
             self.div_thresh);
+        validate_param!(self.n_clusters.unwrap_or(usize::MAX) > 0,
+            "Number of clusters (--n-clusters) must be positive");
 
         if !self.alignments.contains("{}") {
             // Make path to alignments INPUT/loci/{}/ALIGNMENTS
@@ -99,14 +103,16 @@ fn print_help() {
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  PAF field with divergence values [{}].",
-        "    --div-field".green(), "STR".yellow(), super::fmt_def(&defaults.div_field));
+        "    --field".green(), "STR".yellow(), super::fmt_def(&defaults.div_field));
     println!("    {:KEY$} {:VAL$}  Divergence threshold for pruning [{}].",
-        "    --div-thresh".green(), "NUM".yellow(), super::fmt_def_f64(defaults.div_thresh));
+        "    --threshold".green(), "NUM".yellow(), super::fmt_def_f64(defaults.div_thresh));
+    println!("    {:KEY$} {:VAL$}  Use dynamic threshold to get approximately {} clusters.",
+        "    --n-clusters".green(), "INT".yellow(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Select cluster representative with the smallest\n\
         {EMPTY}  generalized mean of this power [{}].",
-        "    --power".green(), "NUM|min|max".yellow(), super::fmt_def(&defaults.power));
-    println!("    {:KEY$} {:VAL$}  Limit the pruning to loci from this file.",
-        "    --subset-loci".green(), "FILE".yellow());
+        "    --power".green(), "NUM".yellow(), super::fmt_def(&defaults.power));
+    println!("    {:KEY$} {:VAL$}  Limit the pruning to loci from this list.",
+        "    --subset-loci".green(), "STR+".yellow());
     println!("    {:KEY$} {:VAL$}  Do not write trees in the output directory.",
         "    --skip-tree".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
@@ -138,8 +144,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
             Long("skip-tree") => args.skip_tree = true,
-            Long("field") | Long("div-field") => args.div_field = parser.value()?.parse()?,
-            Long("thresh") | Long("div-thresh") => args.div_thresh = parser.value()?.parse()?,
+            Long("field") => args.div_field = parser.value()?.parse()?,
+            Long("thresh") | Long("threshold") => args.div_thresh = parser.value()?.parse()?,
+            Long("n-clusters") => args.n_clusters = Some(parser.value()?.parse()?),
             Long("power") => args.power = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
 
@@ -285,7 +292,9 @@ impl Cluster {
 
     /// Merges two clusters and clear contents of the original clusters (for memory efficiency).
     fn merge_and_clear(first: &mut Self, second: &mut Self, div: f64) -> Self {
-        let mut haps = std::mem::take(&mut first.haps);
+        // Take old vectors to limit the peak memory usage.
+        let mut haps = Vec::with_capacity(first.haps.len() + second.haps.len());
+        haps.extend(std::mem::take(&mut first.haps));
         haps.extend(std::mem::take(&mut second.haps));
         let newick = format!("({}:{:.8},{}:{:.8})",
             &first.newick, 0.5 * (div - first.div),
@@ -345,16 +354,40 @@ impl Cluster {
     }
 }
 
+/// Select cut threshold.
+fn select_cut_threshold(tag: &str, dendrogram: &kodama::Dendrogram<f64>, n_clusters: usize) -> f64 {
+    let n_haps = dendrogram.observations();
+    // Each step decreases the number of clusters by 1.
+    let Some(i) = n_haps.checked_sub(n_clusters + 1) else {
+        log::warn!("[{}] There are {} haplotypes, smaller or equal \
+            than the required number of pruned haplotypes ({})", tag, n_haps, n_clusters);
+        return 0.0;
+    };
+
+    let steps = dendrogram.steps();
+    // Steps should be always sorted, but since they come from an external library, we cannot guarantee that.
+    let thresh = if steps.windows(2).all(|w| w[0].dissimilarity <= w[1].dissimilarity) {
+        steps[i].dissimilarity
+    } else {
+        let mut steps_sorted = steps.to_vec();
+        steps_sorted.sort_unstable_by(|a, b| a.dissimilarity.total_cmp(&b.dissimilarity));
+        steps_sorted[i].dissimilarity
+    };
+    log::info!("[{}] Use cut threshold of {:.6}", tag, thresh);
+    thresh
+}
+
 /// Cluster haplotypes, cut clusters, write new discarded haplotypes & the newick file.
 fn cluster_haplotypes(
     contigs: &ContigNames,
     divergences: TriangleMatrix<f64>,
-    thresh: f64,
+    mut thresh: f64,
+    n_clusters: Option<usize>,
     power: PowerMean,
     disc_haps: &[(ContigId, Vec<String>)],
     mut nwk_writer: impl Write,
     mut disc_haps_writer: impl Write,
-) -> io::Result<Vec<ContigId>>
+) -> crate::Result<Vec<ContigId>>
 {
     let min_val = divergences.iter().copied().reduce(f64::min).expect("Empty divergence matrix");
     if min_val > thresh {
@@ -364,45 +397,51 @@ fn cluster_haplotypes(
     // Value which will replace 0 in generalized mean.
     let epsilon = f64::max(1e-6 * min_val, 1e-12);
 
-    let n = contigs.len();
-    let total_clusters = 2 * n - 1;
+    let n_haps = contigs.len();
+    let total_clusters = 2 * n_haps - 1;
     // Use Complete method, meaning that we track maximal distance between two points between two clusters.
     // This is done to cut as little as needed.
     let mut div_vec = divergences.linear_data().to_vec();
-    let dendrogram = kodama::linkage(&mut div_vec, n, kodama::Method::Complete);
+    let dendrogram = kodama::linkage(&mut div_vec, n_haps, kodama::Method::Complete);
+    if let Some(n) = n_clusters {
+        thresh = select_cut_threshold(contigs.tag(), &dendrogram, n);
+    }
 
     let mut clusters: Vec<_> = contigs.ids().map(|id| Cluster::new(id, contigs)).collect();
     for (id, haps) in disc_haps {
         clusters[id.ix()].add_identical(&haps);
     }
+
     let steps = dendrogram.steps();
-    let mut keep_ids = Vec::new();
     let mut buf = Vec::new();
-    for step in steps.iter() {
+    let mut keep_ids = Vec::new();
+    for step in steps {
+        let mut curr_clusters = clusters.get_disjoint_mut([step.cluster1, step.cluster2])
+            .expect("Two merged clusters must differ");
         if step.dissimilarity > thresh {
             // If this is the first time we exceed divergence threshold,
             // write down discarded haplotypes and clear haplotypes.
-            for i in [step.cluster1, step.cluster2] {
-                let cluster = &mut clusters[i];
+            for cluster in curr_clusters.iter_mut() {
                 match cluster.haps.len() {
                     0 => continue, // Divergence exceeded the threshold on one the previous iterations.
                     1 => keep_ids.push(cluster.haps[0].0),
                     _ => {
                         let repres = cluster.select_representative(&divergences, epsilon, power, &mut buf);
                         keep_ids.push(repres);
-                        cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs, repres)?;
+                        cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs, repres)
+                            .map_err(add_path!(!))?;
                     }
                 }
                 cluster.haps.clear();
             }
         }
-        let [cluster1, cluster2] = clusters.get_disjoint_mut([step.cluster1, step.cluster2])
-            .expect("Two merged clusters must differ");
+        let [cluster1, cluster2] = curr_clusters;
         let new_cluster = Cluster::merge_and_clear(cluster1, cluster2, step.dissimilarity);
         clusters.push(new_cluster);
     }
+
     assert_eq!(clusters.len(), total_clusters);
-    writeln!(nwk_writer, "{};", clusters.last().unwrap().newick)?;
+    writeln!(nwk_writer, "{};", clusters.last().unwrap().newick).map_err(add_path!(!))?;
     keep_ids.sort_unstable();
     Ok(keep_ids)
 }
@@ -523,8 +562,8 @@ fn process_locus(
     } else {
         Box::new(ext::sys::create_gzip(&locus_data.out_dir().join("all_haplotypes.nwk.gz"))?)
     };
-    let keep_ids = cluster_haplotypes(contigs, divergences, args.div_thresh, args.power, &disc_haplotypes,
-        nwk_writer, &mut disc_haps_data).map_err(add_path!(!))?;
+    let keep_ids = cluster_haplotypes(contigs, divergences, args.div_thresh, args.n_clusters, args.power,
+        &disc_haplotypes, nwk_writer, &mut disc_haps_data)?;
     if !disc_haps_data.is_empty() {
         let out_disc_haps_filename = locus_data.out_dir().join(paths::DISCARDED_HAPS);
         ext::sys::create(&out_disc_haps_filename)?
