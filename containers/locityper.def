@@ -3,7 +3,7 @@ From: rust:1.92-slim-trixie
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v1.3.1
+    Version v1.3.3
 
 %post
     PREFIX=/usr/local

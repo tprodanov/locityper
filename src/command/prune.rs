@@ -224,6 +224,9 @@ fn load_divergences(
             *val = repl_missing;
         }
     }
+    if missing_count == divergences.linear_len() {
+        return Err(error!(InvalidInput, "Divergence missing for all haplotype pairs"));
+    }
     if let Some(k) = missing_k {
         let (i, j) = divergences.from_linear_index(k);
         let name1 = contigs.get_name(ContigId::new(i as u16));
