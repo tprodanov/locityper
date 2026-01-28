@@ -121,7 +121,7 @@ fn print_help() {
     print!("\n{}", "Usage:".bold());
     println!(" {} target -d db -r ref.fa -j counts.jf [-v vars.vcf.gz] -l/-L loci [args]", super::PROGRAM);
 
-    println!("\n{}", "Input arguments:".bold());
+    println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Output database directory.",
         "-d, --database".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",

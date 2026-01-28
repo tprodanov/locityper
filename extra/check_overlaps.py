@@ -112,7 +112,8 @@ def main():
                 sys.stderr.write(f'WARN: Output directory {new_dir} already exists, moving to {rand_dir}\n')
                 new_dir = rand_dir
             os.rename(os.path.join(loci_dir, locus.name), new_dir)
-    sys.stderr.write(f'{len(redundant)} / {len(loci)} redundant loci\n')
+    redundant_str = ', '.join(locus.name for locus in redundant[:5]) + (' ...' if len(redundant) > 5 else '')
+    sys.stderr.write(f'{len(redundant)} / {len(loci)} redundant loci: {redundant_str}\n')
 
 
 if __name__ == '__main__':

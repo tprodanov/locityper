@@ -140,7 +140,7 @@ fn print_help() {
     println!("        (-s seqs.fa | -S all_seqs.fa) -o out.fastq [args]");
 
     println!("\n{}  (please see documentation for more information on {}/{}/{} arguments)",
-        "Input arguments:".bold(), "-i".green(), "-a".green(), "-I".green());
+        "Input/output arguments:".bold(), "-i".green(), "-a".green(), "-I".green());
     println!("    {:KEY$} {:VAL$}  Reads 1 and 2 in FASTA or FASTQ format, optionally gzip compressed.\n\
         {EMPTY}  Reads 1 are required, reads 2 are optional.",
         "-i, --input".green(), "FILE+".yellow());

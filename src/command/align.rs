@@ -31,6 +31,7 @@ struct Args {
     pairs: Vec<String>,
     pairs_file: Option<PathBuf>,
     threads: u16,
+    ordered: bool,
 
     params: dist::Params,
 }
@@ -46,6 +47,7 @@ impl Default for Args {
             pairs: Vec::new(),
             pairs_file: None,
             threads: 8,
+            ordered: false,
 
             params: Default::default(),
         }
@@ -78,7 +80,7 @@ fn print_help() {
     print!("\n{}", "Usage:".bold());
     println!(" {} -i input.fa -o out.paf (-p name,name | -P pairs.txt | -A) [args]", super::PROGRAM);
 
-    println!("\n{}", "Input arguments:".bold());
+    println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input FASTA file.",
         "-i, --input".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Output PAF file. In multithreaded calls, output will be unsorted\n\
@@ -125,6 +127,9 @@ fn print_help() {
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
+    println!("    {:KEY$} {:VAL$}  Order output alignments by pairs from {}/{},\n\
+        {EMPTY}  or all ordered pairs if {}.",
+        "    --ordered".green(), super::flag(), "-p".green(), "-P".green(), "-A".green());
 
     println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -177,6 +182,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 args.params.penalties.gap_extend = parser.value()?.parse()?,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
+            Long("ordered") => args.ordered = true,
             Short('V') | Long("version") => {
                 super::print_version();
                 std::process::exit(0);
@@ -321,7 +327,8 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         files.push(ext::sys::create(filename)?);
     }
 
-    dist::align_sequences(entries, pairs, &args.params, threads, files, &mut rng)?;
+    let opt_rng = if args.ordered { None } else { Some(&mut rng) };
+    dist::align_sequences(entries, pairs, &args.params, threads, files, opt_rng)?;
     ext::sys::merge_files(out_filename, &temp_filenames.0)?;
     temp_filenames.disarm();
 

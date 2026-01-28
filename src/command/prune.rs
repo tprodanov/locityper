@@ -89,7 +89,7 @@ fn print_help() {
     print!("\n{}", "Usage:".bold());
     println!(" {} -i db -o pruned_db [args]", super::PROGRAM);
 
-    println!("\n{}", "Input arguments:".bold());
+    println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory.",
         "-i, --input".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output pruned database directory.",

@@ -6,8 +6,9 @@ use std::{
 };
 use ruint::aliases::U256;
 use smallvec::SmallVec;
-use rand::{Rng, seq::SliceRandom};
+use rand::seq::SliceRandom;
 use crate::{
+    ext::rand::XoshiroRng,
     seq::{
         wfa, div,
         NamedSeq,
@@ -85,7 +86,7 @@ pub fn align_sequences(
     params: &Params,
     threads: u16,
     mut outputs: Vec<impl io::Write + Send + 'static>,
-    rng: &mut impl Rng,
+    opt_rng: Option<&mut XoshiroRng>,
 ) -> crate::Result<()>
 {
     let n_entries = entries.len();
@@ -103,11 +104,13 @@ pub fn align_sequences(
     let (minimizers, kmers) = fill_kmers_singlethread(&entries, &entry_in_use, params);
 
     if threads == 1 {
-        align_all_singlethread(&entries, &pairs, &minimizers, &kmers, params, &mut outputs[0])
+        align_all_singlethread(&entries, &pairs, &minimizers, &kmers, params, &mut outputs[0], true)
     } else {
-        if params.thresh_div < 1.0 {
-            // Shuffle pairs for better job distribution since some alignments may be skipped.
-            pairs.shuffle(rng);
+        if let Some(rng) = opt_rng {
+            if params.thresh_div < 1.0 {
+                // Shuffle pairs for better job distribution since some alignments may be skipped.
+                pairs.shuffle(rng);
+            }
         }
         align_all_parallel(entries, pairs, minimizers, kmers, params, usize::from(threads), outputs)
     }
@@ -360,6 +363,7 @@ fn process_pair(
     Ok(())
 }
 
+/// Total number of threads and `verbose` are needed for logging.
 fn align_all_singlethread(
     entries: &[NamedSeq],
     pairs: &[(u32, u32)],
@@ -367,14 +371,21 @@ fn align_all_singlethread(
     kmers: &[SeqKmers],
     params: &Params,
     out: &mut impl io::Write,
+    verbose: bool,
 ) -> crate::Result<()>
 {
     let mut buf1 = Default::default();
     let mut buf2 = Default::default();
     let aligner = Aligner::new(params.penalties.clone(), params.accuracy);
-    for &(i, j) in pairs {
+    let mult = 100.0 / pairs.len() as f64;
+    // Power of 2 minus 1.
+    const LOG_FREQ: usize = 255;
+    for (ix, &(i, j)) in pairs.iter().enumerate() {
         process_pair(entries, i as usize, j as usize, minimizers, kmers, params, &aligner,
             &mut buf1, &mut buf2, out)?;
+        if verbose && (ix & LOG_FREQ) == LOG_FREQ {
+            log::debug!("    Aligned ≈{:5.1}% pairs", mult * ix as f64);
+        }
     }
     Ok(())
 }
@@ -405,19 +416,14 @@ fn align_all_parallel(
         let end = start + (n_pairs - start).fast_ceil_div(threads - worker_ix);
         // Closure with cloned data.
         {
-            let pairs = Arc::clone(&pairs);
             let entries = Arc::clone(&entries);
+            let pairs = Arc::clone(&pairs);
             let minimizers = Arc::clone(&minimizers);
             let kmers = Arc::clone(&kmers);
             let params = params.clone();
+            let verbose = worker_ix == 0;
             handles.push(thread::spawn(move || {
-                let aligner = Aligner::new(params.penalties.clone(), params.accuracy);
-                let mut buf1 = Default::default();
-                let mut buf2 = Default::default();
-                pairs[start..end].iter()
-                    .map(|&(i, j)| process_pair(&entries, i as usize, j as usize, &minimizers, &kmers, &params,
-                        &aligner, &mut buf1, &mut buf2, &mut out))
-                    .collect::<crate::Result<()>>()
+                align_all_singlethread(&entries, &pairs[start..end], &minimizers, &kmers, &params, &mut out, verbose)
             }));
         }
         start = end;
