@@ -6,7 +6,6 @@ use std::{
 };
 use colored::Colorize;
 use smallvec::SmallVec;
-use rand::Rng;
 use crate::{
     err::{error, add_path, validate_param},
     ext::{
@@ -31,7 +30,6 @@ struct Args {
     pairs: Vec<String>,
     pairs_file: Option<PathBuf>,
     threads: u16,
-    ordered: bool,
 
     params: dist::Params,
 }
@@ -47,7 +45,6 @@ impl Default for Args {
             pairs: Vec::new(),
             pairs_file: None,
             threads: 8,
-            ordered: false,
 
             params: Default::default(),
         }
@@ -83,16 +80,14 @@ fn print_help() {
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input FASTA file.",
         "-i, --input".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Output PAF file. In multithreaded calls, output will be unsorted\n\
-        {EMPTY}  for performance purposes.",
+    println!("    {:KEY$} {:VAL$}  Output PAF[.gz] file.",
         "-o, --output".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Prefix for temporary files. Only necessary if multiple threads\n\
-        {EMPTY}  are used and the main output goes to stdout.",
+    println!("    {:KEY$} {:VAL$}  Prefix for temporary files (for multiple threads).",
         "    --prefix".green(), "PATH".yellow());
 
     println!("\n{} (mutually exclusive):", "Alignment pairs".bold());
-    println!("    {:KEY$} {:VAL$}  Find alignments for these pairs:\n\
-        {EMPTY}  comma-separated sequence names, multiple allowed.",
+    println!("    {:KEY$} {:VAL$}  Find alignments for these pairs (two names separated by comma),\n\
+        {EMPTY}  many pairs allowed.",
         "-p, --pairs".green(), "STR+".yellow());
     println!("    {:KEY$} {:VAL$}  Find alignments for these pairs (two column file).",
         "-P, --pairs-file".green(), "FILE".yellow());
@@ -127,9 +122,6 @@ fn print_help() {
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
-    println!("    {:KEY$} {:VAL$}  Order output alignments by pairs from {}/{},\n\
-        {EMPTY}  or all ordered pairs if {}.",
-        "    --ordered".green(), super::flag(), "-p".green(), "-P".green(), "-A".green());
 
     println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -182,7 +174,6 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 args.params.penalties.gap_extend = parser.value()?.parse()?,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
-            Long("ordered") => args.ordered = true,
             Short('V') | Long("version") => {
                 super::print_version();
                 std::process::exit(0);
@@ -250,7 +241,6 @@ impl TempFilenames {
         output: &Path,
         prefix_arg: &Option<PathBuf>,
         threads: u16,
-        rng: &mut impl Rng,
     ) -> crate::Result<Self>
     {
         if threads <= 1 {
@@ -258,10 +248,19 @@ impl TempFilenames {
         }
 
         let (mut prefix, middle, extension) = if ext::sys::is_tty(output) {
-            let Some(prefix) = prefix_arg.as_ref() else {
-                return Err(error!(InvalidInput, "Must provide --prefix when using stdout and multiple threads"));
+            let prefix = match prefix_arg.as_ref() {
+                Some(prefix) => prefix,
+                None => {
+                    log::warn!("Storing temporary files using `tmp.*` prefix");
+                    Path::new("tmp")
+                }
             };
-            (prefix.to_path_buf(), format!("{:X}.", rng.random::<u32>()), "paf")
+            // Generate random hex suffix.
+            // No need to initialize new XoshiroRng since we only need one integer, not a sequence of numbers.
+            let mut bytes = [0; 4];
+            getrandom::fill(&mut bytes).unwrap();
+            let rand_suffix = u32::from_le_bytes(bytes);
+            (prefix.to_path_buf(), format!("{:X}.", rand_suffix), "paf")
         } else {
             let prefix = match prefix_arg {
                 Some(val) => val.to_path_buf(),
@@ -320,15 +319,13 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         args.params.div_k, args.params.div_w, args.params.thresh_div,
         args.params.backbone_str(), args.params.accuracy, args.params.max_gap).map_err(add_path!(out_filename))?;
 
-    let mut rng = ext::rand::init_rng(None, false);
     // Create output file now, this way we are sure it can be opened.
-    let mut temp_filenames = TempFilenames::new(out_filename, &args.prefix, threads, &mut rng)?;
+    let mut temp_filenames = TempFilenames::new(out_filename, &args.prefix, threads)?;
     for filename in &temp_filenames.0 {
         files.push(ext::sys::create(filename)?);
     }
 
-    let opt_rng = if args.ordered { None } else { Some(&mut rng) };
-    dist::align_sequences(entries, pairs, &args.params, threads, files, opt_rng)?;
+    dist::align_sequences(entries, pairs, &args.params, threads, files)?;
     ext::sys::merge_files(out_filename, &temp_filenames.0)?;
     temp_filenames.disarm();
 

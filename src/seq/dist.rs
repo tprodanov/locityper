@@ -6,9 +6,7 @@ use std::{
 };
 use ruint::aliases::U256;
 use smallvec::SmallVec;
-use rand::seq::SliceRandom;
 use crate::{
-    ext::rand::XoshiroRng,
     seq::{
         wfa, div,
         NamedSeq,
@@ -82,11 +80,10 @@ impl Params {
 /// Aligns sequences to each other.
 pub fn align_sequences(
     entries: Vec<NamedSeq>,
-    mut pairs: Vec<(u32, u32)>,
+    pairs: Vec<(u32, u32)>,
     params: &Params,
     threads: u16,
     mut outputs: Vec<impl io::Write + Send + 'static>,
-    opt_rng: Option<&mut XoshiroRng>,
 ) -> crate::Result<()>
 {
     let n_entries = entries.len();
@@ -106,12 +103,6 @@ pub fn align_sequences(
     if threads == 1 {
         align_all_singlethread(&entries, &pairs, &minimizers, &kmers, params, &mut outputs[0], true)
     } else {
-        if let Some(rng) = opt_rng {
-            if params.thresh_div < 1.0 {
-                // Shuffle pairs for better job distribution since some alignments may be skipped.
-                pairs.shuffle(rng);
-            }
-        }
         align_all_parallel(entries, pairs, minimizers, kmers, params, usize::from(threads), outputs)
     }
 }
