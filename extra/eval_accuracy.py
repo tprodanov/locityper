@@ -21,6 +21,7 @@ def load_distances(cached_dists, locus, excluded_samples, paf_fmt, db_dir):
     locus_dir = f'{db_dir}/loci/{locus}' if db_dir is not None else None
     excl_haps = ()
     if not os.path.exists(paf_filename):
+        sys.stderr.write(f'WARN: Alignment `{paf_filename}` does not exist, skipping.\n')
         dists = None
     elif locus_dir is not None and not os.path.exists(locus_dir):
         sys.stderr.write(f'Database directory `{locus_dir}` does not exist.\n')
@@ -71,9 +72,10 @@ def main():
         help='CSV summary file with Locityper genotyping results.')
     parser.add_argument('-d', '--database', metavar='DIR',
         help='Path to the database, if possible. Uses `discarded_haplotypes.txt` for each locus.')
-    parser.add_argument('-a', '--alignments', metavar='STR', required=True,
+    parser.add_argument('-a', '--alignments', metavar='STR',
         help='Path to PAF files, where locus name is replaced with `{}`. '
-            'Only loci with available distances will be analyzed.')
+            'Only loci with available distances will be analyzed. '
+            'Default: DB/loci/{}/haplotypes.paf.gz')
     parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output CSV file.')
     parser.add_argument('--loo', action='store_true',
@@ -87,6 +89,10 @@ def main():
     elif not os.path.exists(args.database):
         sys.stderr.write(f'Database `{args.database}` does not exist\n')
         exit(1)
+
+    if args.alignments is None:
+        assert args.database is not None, 'ERR: Either or both alignments (-a) or database (-d) must be provided'
+        args.alignments = os.path.join(args.database, 'loci/{}/haplotypes.paf.gz')
 
     excluded_samples = None
     if args.excluded:
