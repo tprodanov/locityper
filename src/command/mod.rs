@@ -47,6 +47,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
 
         "h" | "help" | "--help" | "-h" => print_help(),
         "V" | "version" | "--version" | "-V" => print_version(),
+        "V0" | "-V0" => println!("v{}", VERSION),
         "cite" | "--cite" => print_citation(),
         cmd => {
             log::error!("Unknown command {}", cmd.red());
@@ -57,7 +58,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
 }
 
 fn print_version() {
-    println!("{} {}", PROGRAM.underline(), format!("v{}", VERSION).green());
+    println!("{} {}", PROGRAM, format!("v{}", VERSION).green());
     let authors: Vec<_> = env!("CARGO_PKG_AUTHORS").split(':').collect();
     let n = authors.len();
     if n == 0 {
@@ -114,8 +115,8 @@ fn print_help() {
     println!("\n{}", "[ General help ]".bold());
     println!("    {:WIDTH$} Show this help message.",
         "h, help".red());
-    println!("    {:WIDTH$} Show version.",
-        "V, version".red());
+    println!("    {:WIDTH$} Show version (use {} to show only version).",
+        "V, version".red(), "V0".red());
     println!("    {:WIDTH$} Show citation information.",
         "   cite".red());
 }
