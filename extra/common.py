@@ -1,5 +1,6 @@
 import sys
 import gzip
+import lzma
 import os
 import builtins
 import csv
@@ -11,6 +12,8 @@ def open(filename, mode='r'):
         return sys.stdin if mode == 'r' else sys.stdout
     elif filename.endswith('.gz'):
         return gzip.open(filename, mode + 't')
+    elif filename.endswith('.xz'):
+        return lzma.open(filename, mode + 't')
     else:
         return builtins.open(filename, mode)
 

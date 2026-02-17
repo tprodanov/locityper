@@ -26,6 +26,9 @@ def load_input(args):
                 common.error(f'Path `{path}` does not contain "." component')
             elif len(ixs) > 1:
                 common.error(f'Path `{path}` contains "." component {len(ixs)} times')
+            elif not os.path.isdir(os.path.join(path, 'loci')):
+                sys.stderr.write(f'WARN: Directory `{path}` does not contain "loci" subdirectory\n')
+                continue
             i = ixs[0]
             if i == len(components):
                 common.error(f'Cannot get sample name from path `{path}`')
@@ -45,8 +48,6 @@ def load_input(args):
     for sample, path in paths:
         if sample in samples:
             common.error(f'Sample {sample} appears twice')
-        elif not os.path.isdir(os.path.join(path, 'loci')):
-            common.error(f'Directory `{path}` does not contain "loci" subdirectory')
         samples.add(sample)
     sys.stderr.write(f'Loaded {len(paths)} samples\n')
     return paths

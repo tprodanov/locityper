@@ -159,9 +159,15 @@ fn create_lz4(filename: &Path, level: u32) -> crate::Result<AutoFinishLz4<BufWri
     })
 }
 
+#[inline]
 pub fn create_lz4_slow(filename: &Path) -> crate::Result<AutoFinishLz4<BufWriter<File>>> {
     create_lz4(filename, 7)
 }
+
+// fn create_xz(filename: &Path, level: u32) -> crate::Result<liblzma::AutoFinishXzEncoder<File>> {
+//     let file = create_file(filename)?;
+//     Ok(liblzma::write::XzEncoder::new(create_file(filename)?, level).auto_finish())
+// }
 
 /// Creates buffered output file.
 pub fn create_file(filename: &Path) -> crate::Result<BufWriter<File>> {

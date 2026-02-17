@@ -240,7 +240,8 @@ fn print_help(extended: bool) {
             {EMPTY}  and any relevant alternative contigs. If path starts with {},\n\
             {EMPTY}  strip tildes and use relative paths TARGET_DB/loci/*/{}.bed.",
             "    --recr-bed".green(), "FILE".yellow(), "~~".yellow(), "STR".yellow());
-        println!("    {:KEY$} {:VAL$}  Recruit reads from all contigs shorter than this length [{}].",
+        println!("    {:KEY$} {:VAL$}  Recruit reads from all contigs shorter than this length [{}].\n\
+            {EMPTY}  Unmapped reads are always examined irrespective of this argument.",
             "    --recr-alt-len".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.alt_contig_len)));
 
         println!("\n{}", "Filtering reads:".bold());

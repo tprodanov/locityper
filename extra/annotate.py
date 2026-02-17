@@ -14,7 +14,7 @@ def main():
         help='Locityper CSV file for multiple loci and samples.')
     parser.add_argument('-a', '--annotation', metavar='FILE', required=True,
         help='Tab-separated annotation for locus haplotypes.\n'
-        'Columns: locus, haplotypes, annotation, tag. Tag is an optional column,\n'
+        'Columns: locus, haplotype, annotation, tag. Tag is an optional column,\n'
         'used if the same locus has multiple annotations.')
     parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output CSV file.')
