@@ -20,6 +20,7 @@ def main():
         help='Output CSV file.')
     args = parser.parse_args()
 
+    explicit_tags = False
     with common.open(args.annotation) as f:
         annotation = collections.defaultdict(lambda: collections.defaultdict(dict))
         for line in f:
@@ -33,13 +34,16 @@ def main():
             tag = line[3] if len(line) >= 4 else '*'
             if tag == '':
                 tag = '*'
+            explicit_tags |= tag != '*'
             if hap in annotation[locus][tag]:
                 sys.stderr.write(f'WARN: Haplotype {hap} appears twice for locus {locus}, tag {tag}\n')
             annotation[locus][tag][hap] = annot
 
+    format_tag = (lambda tag: f'\t{tag}') if explicit_tags else (lambda tag: '')
+
     with common.open(args.input) as inp, common.open(args.output, 'w') as out:
         out.write(f'# {" ".join(sys.argv)}\n')
-        out.write('sample\tlocus\ttag\thap1\thap2\n')
+        out.write(f'sample\tlocus{format_tag("tag")}\thap1\thap2\n')
         for row in common.read_csv(inp):
             locus = row['locus']
             locus_annot = annotation.get(locus)
@@ -50,11 +54,11 @@ def main():
             gt = row['genotype']
             if gt == '*':
                 for tag in locus_annot:
-                    out.write(f'{sample}\t{locus}\t{tag}\t<NOCALL>\t<NOCALL>\n')
+                    out.write(f'{sample}\t{locus}{format_tag(tag)}\t<NOCALL>\t<NOCALL>\n')
                 continue
 
             for tag, tag_annot in locus_annot.items():
-                out.write(f'{sample}\t{locus}\t{tag}')
+                out.write(f'{sample}\t{locus}{format_tag(tag)}')
                 for hap in gt.split(','):
                     out.write('\t{}'.format(tag_annot.get(hap, '<UNKNOWN>')))
                 out.write('\n')
