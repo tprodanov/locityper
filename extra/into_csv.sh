@@ -12,7 +12,7 @@ fi
 
 input_dir="$1"
 output_csv="$(realpath "$2")"
-if [ $# -ge 3 ]
+if [ $# -ge 3 ]; then
     threads="$3"
 else
     threads=8
