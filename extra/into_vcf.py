@@ -7,7 +7,6 @@ import os
 from collections import defaultdict
 import multiprocessing
 import operator
-from simpleeval import simple_eval
 
 import common
 
@@ -16,7 +15,7 @@ def parse_float(val):
     return float(val) if val != 'NA' else np.nan
 
 
-def load_predictions(f, expr):
+def load_predictions(f):
     by_locus = defaultdict(dict)
     samples = set()
     for row in common.read_csv(f):
@@ -26,17 +25,19 @@ def load_predictions(f, expr):
         genotype = row['genotype']
         if genotype == '*':
             genotype = None
-            features = {}
         else:
             genotype = genotype.split(',')
-            features = dict(
-                qual=parse_float(row['quality']),
-                reads=int(row['total_reads']),
-                unexpl=int(row['unexpl_reads']),
-                wdist=parse_float(row['weight_dist']),
-                warn=row['warnings'],
-            )
-            features['GQ'] = float(simple_eval(expr, names=features))
+        features = {}
+        if 'qual' in row:
+            features['qual'] = parse_float(row['quality'])
+        if 'total_reads' in row:
+            features['reads'] = int(row['total_reads'])
+        if 'unexpl_reads' in row:
+            features['unexpl'] = int(row['unexpl_reads'])
+        if 'weight_dist' in row:
+            features['wdist'] = parse_float(row['weight_dist'])
+        if 'warn' in row:
+            features['warn'] = row['warnings']
 
         by_locus[locus][sample] = (genotype, features)
         samples.add(sample)
@@ -210,9 +211,9 @@ def main():
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
         help='Analyze loci in this many threads [%(default)s].')
 
-    DEF_EXPR = 'warn == "*" and wdist < 30 and (unexpl < 1000 or unexpl < reads * 0.2)'
-    parser.add_argument('-q', '--quality', metavar='STR', default=DEF_EXPR,
-        help='Expression for calculating genotype quality. Default = `%(default)s`.')
+    # DEF_EXPR = 'warn == "*" and wdist < 30 and (unexpl < 1000 or unexpl < reads * 0.2)'
+    # parser.add_argument('-q', '--quality', metavar='STR', default=DEF_EXPR,
+    #     help='Expression for calculating genotype quality. Default = `%(default)s`.')
     parser.add_argument('--subset-loci', metavar='STR', nargs='+',
         help='Limit the analysis to these loci.')
     args = parser.parse_args()
@@ -220,7 +221,7 @@ def main():
     common.mkdir(args.output)
     loci = load_database(args.database, args.subset_loci)
     with common.open(args.input) as f:
-        preds, samples = load_predictions(f, args.quality)
+        preds, samples = load_predictions(f)
     sys.stderr.write(f'Loaded {len(samples)} samples\n')
     loci_inters = set(loci.keys()) & set(preds.keys())
     if len(loci_inters) < len(loci):

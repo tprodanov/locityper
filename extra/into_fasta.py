@@ -56,7 +56,7 @@ def process_locus(locus, samples, preds, haplotypes, out_dir, compress):
     ignored = 0
     with common.open(f'{out_dir}/{locus}.{extension}', 'w') as out:
         for sample in samples:
-            gt, features = preds[sample]
+            gt, _ = preds[sample]
             if gt is None:
                 sys.stderr.write(f'Unknown genotype for {sample} at {locus}\n')
                 ignored += 1
