@@ -3,19 +3,25 @@
 set -euo pipefail
 
 if [ $# = 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    2>&1 echo "Usage:  into_csv.sh DIR OUT.csv.gz"
+    2>&1 echo "Usage:  into_csv.sh DIR OUT.csv.gz [THREADS]"
     2>&1 echo "    where DIR/SAMPLE contains Locityper results for SAMPLE"
-    2>&1 echo "    all found DIR/*/loci/*/res.json.gz will be taken"
+    2>&1 echo "        all found DIR/*/loci/*/res.json.gz will be taken"
+    2>&1 echo "    THREADS = 8 unless specified"
     exit 0
 fi
 
 input_dir="$1"
 output_csv="$(realpath "$2")"
+if [ $# -ge 3 ]
+    threads="$3"
+else
+    threads=8
+fi
 
 cd "$input_dir"
 (echo -e "sample\tlocus\tgenotype";
 find -name res.json.gz | \
-    parallel --progress -P8 \
+    parallel --progress -P"$threads" \
         --rpl '{firstdirname} s:^\./::; s:/.*::' \
         --rpl '{lastdirname} $Global::use{"File::Basename"} ||=
             eval "use File::Basename; 1;"; $_ = basename(dirname($_));' \

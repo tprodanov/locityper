@@ -3,7 +3,6 @@
 import numpy as np
 import argparse
 import sys
-import pysam
 import os
 from collections import defaultdict
 import multiprocessing
@@ -74,6 +73,7 @@ def load_database(path, subset_loci):
 
 
 def create_vcf_header(chrom_lengths, samples):
+    import pysam
     header = pysam.VariantHeader()
     for chrom, length in chrom_lengths:
         header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
@@ -111,6 +111,7 @@ def copy_genotype(pred_gt, var, genome_name):
 
 
 def process_locus(locus, coords, samples, preds, genome_name, output):
+    import pysam
     chrom, start, end = coords
     out_filename = os.path.join(output, f'{locus}.vcf.gz')
 
@@ -140,6 +141,7 @@ def process_locus(locus, coords, samples, preds, genome_name, output):
 
 
 def create_thread(vcf_filename):
+    import pysam
     global in_vcf
     in_vcf = pysam.VariantFile(vcf_filename)
 
@@ -159,6 +161,7 @@ def merge_vars(rec1, rec2, n_samples):
 
 
 def merge_vcfs(in_vcf, samples, out_dir, loci):
+    import pysam
     chroms = set(chrom for chrom, _, _ in loci.values())
     chroms = { chrom: in_vcf.get_tid(chrom) for chrom in chroms }
     chrom_lengths = [(chrom, in_vcf.header.contigs[chrom].length)
@@ -190,6 +193,7 @@ def merge_vcfs(in_vcf, samples, out_dir, loci):
 
 
 def main():
+    import pysam
     parser = argparse.ArgumentParser(description='Convert Locityper predictions into VCF file.',
         formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('-i', '--input', metavar='FILE', required=True,
