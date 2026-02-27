@@ -97,7 +97,7 @@ def main():
     haplotypes = load_haplotypes(args.database, args.subset_loci)
     sys.stderr.write('Loading genotype predictions\n')
     with common.open(args.input) as f:
-        preds, samples = into_vcf.load_predictions(f, '1')
+        preds, samples = into_vcf.load_predictions(f)
     sys.stderr.write(f'Loaded {len(samples)} samples\n')
     loci_inters = set(haplotypes.keys()) & set(preds.keys())
     if len(loci_inters) < len(haplotypes):
