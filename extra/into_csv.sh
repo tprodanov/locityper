@@ -15,7 +15,7 @@ output_csv="$(realpath "$2")"
 cd "$input_dir"
 (echo -e "sample\tlocus\tgenotype";
 find -name res.json.gz | \
-    parallel -t -P8 \
+    parallel --progress -P8 \
         --rpl '{firstdirname} s:^\./::; s:/.*::' \
         --rpl '{lastdirname} $Global::use{"File::Basename"} ||=
             eval "use File::Basename; 1;"; $_ = basename(dirname($_));' \
