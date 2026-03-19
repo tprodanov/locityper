@@ -130,7 +130,6 @@ class Distances:
             hap_dists.append(curr_dists.items())
 
         pred_dists = {}
-        # for dist_combin in itertools.product(*hap_dists):
         for (hap1, (edit1, size1)), (hap2, (edit2, size2)) in itertools.product(*hap_dists):
             edit = edit1 + edit2
             size = size1 + size2
@@ -177,11 +176,11 @@ class Distances:
         loo: bool - this is leave-one-out experiment, do not include haplotypes from the same sample.
         excl_haps: set of excluded haplotype names.
         """
-        loo_gt = []
+        closest_gt = []
         distances = []
         for hap in gt:
             if hap is None:
-                loo_gt.append(None)
+                closest_gt.append(None)
                 distances.append((None, None))
                 continue
 
@@ -195,9 +194,9 @@ class Distances:
                     best_div = edit / size
                     best_edit = (edit, size)
                     best_hap = hap2
-            loo_gt.append(best_hap)
+            closest_gt.append(best_hap)
             distances.append(best_edit)
-        return loo_gt, GtDist(distances)
+        return closest_gt, GtDist(distances)
 
     def average_divergence(self):
         edits = []
@@ -224,11 +223,12 @@ class GtDist:
         sum_edit = 0
         sum_size = 0
         all_present = True
-        for edit, size in self.distances:
-            if edit is None:
+        for tup in self.distances:
+            if tup is None or tup[0] is None:
                 all_present = False
                 yield 'NA\tNA\tNA\tNA'
             else:
+                edit, size = tup
                 sum_edit += edit
                 sum_size += size
                 yield edit_to_str(edit, size)
@@ -250,15 +250,15 @@ def get_genotype(s, split, sep):
     return gt_str, tup
 
 
-def load_target_genotypes(args):
+def parse_genotypes(genotype_strings, genotypes_file, sep):
     genotypes = []
-    if args.genotype:
-        for val in args.genotype:
-            genotypes.append(get_genotype(val, ',', args.sep))
-    if args.gt_file:
-        with common.open(args.gt_file) as f:
+    if genotype_strings:
+        for val in genotype_strings:
+            genotypes.append(get_genotype(val, ',', sep))
+    if genotypes_file:
+        with common.open(genotypes_file) as f:
             for line in f:
-                genotypes.append(get_genotype(line, None, args.sep))
+                genotypes.append(get_genotype(line, None, sep))
     return genotypes
 
 
@@ -295,11 +295,11 @@ def main():
         help='Output CSV file.')
     parser.add_argument('-s', '--sep', metavar='STR', default='.',
         help='Separator between sample and haplotype [default: %(default)s].')
-    parser.add_argument('-n', '--max-entries', metavar='INT',
+    parser.add_argument('-n', '--max-entries', metavar='INT', type=int,
         help='Output at most INT entries per target genotype [default: all].')
     args = parser.parse_args()
 
-    genotypes = load_target_genotypes(args)
+    genotypes = parse_genotypes(args.genotype, args.gt_file, args.sep)
     distances = Distances(args.discarded, args.input)
 
     max_entries = args.max_entries or sys.maxsize
