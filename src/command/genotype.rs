@@ -146,6 +146,13 @@ impl Args {
         validate_param!(!self.databases.is_empty(), "Database directory is not provided (see -d/--database)");
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
+        validate_param!(!self.recr_bed.starts_with("~~"),
+            "--recr-bed ~~STR.bed was replaced with --recr-bed @@STR (extension needs to be included as well)");
+        if self.alt_contig_len > 0 && !self.recr_bed.is_empty() && !self.recr_bed.starts_with("@@") {
+            log::debug!("Recruitment BED file (--recr-bed) provided \
+                with non-zero alternative contig len (--recr-alt-len)");
+        }
+
         validate_param!(self.ploidy > 0, "Ploidy must be positive");
         self.samtools = ext::sys::find_exe(self.samtools)?;
         self.assgn_params.validate()?;
@@ -236,10 +243,12 @@ fn print_help(extended: bool) {
             "-c, --chunk-len".green(), "INT".yellow(),
             super::fmt_def(PrettyU64(defaults.chunk_length)));
         println!("    {:KEY$} {:VAL$}  Take user-defined BED file for recruitment from BAM/CRAM files.\n\
-            {EMPTY}  BED file should contain target loci coordinates, their copies,\n\
-            {EMPTY}  and any relevant alternative contigs. If path starts with {},\n\
-            {EMPTY}  strip tildes and use relative paths TARGET_DB/loci/*/{}.bed.",
-            "    --recr-bed".green(), "FILE".yellow(), "~~".yellow(), "STR".yellow());
+            {EMPTY}  Please use {} if you included alternative contigs.\n\
+            {EMPTY}  Use {}{} to indicate relative path DB/{},\n\
+            {EMPTY}  and {}{} to indicate relative paths DB/loci/*/{}.",
+            "    --recr-bed".green(), "FILE".yellow(), "--recr-alt-len 0".green(),
+            "@".yellow(), "FILE".yellow(), "FILE".yellow(),
+            "@@".yellow(), "FILE".yellow(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Recruit reads from all contigs shorter than this length [{}].\n\
             {EMPTY}  Unmapped reads are always examined irrespective of this argument.",
             "    --recr-alt-len".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.alt_contig_len)));
@@ -777,6 +786,7 @@ fn load_recr_targets<'a>(
 /// Prepare fetch regions for a list of regions.
 /// Additionally, add all short contigs.
 fn create_fetch_targets<'a>(
+    databases: &[PathBuf],
     contigs: &Arc<ContigNames>,
     bg_distr: &BgDistr,
     filt_loci: impl Iterator<Item = &'a LocusData>,
@@ -789,8 +799,12 @@ fn create_fetch_targets<'a>(
 
     if recr_bed.is_empty() {
         load_recr_targets(contigs, filt_loci, paths::LOCUS_BED, &mut intervals)?;
-    } else if let Some(suffix) = recr_bed.strip_prefix("~~") {
-        load_recr_targets(contigs, filt_loci, &format!("{}.bed", suffix), &mut intervals)?;
+    } else if let Some(fname) = recr_bed.strip_prefix("@@") {
+        load_recr_targets(contigs, filt_loci, fname, &mut intervals)?;
+    } else if let Some(fname) = recr_bed.strip_prefix("@") {
+        for db_dir in databases {
+            interv::load_bed(&db_dir.join(fname), contigs, &mut intervals)?;
+        }
     } else {
         interv::load_bed(&Path::new(recr_bed), contigs, &mut intervals)?;
     }
@@ -898,7 +912,7 @@ fn recruit_reads(
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let chunk_size = calculate_chunk_size(args.chunk_length, mean_read_len, is_paired_end);
     recruit_to_targets(&targets, &args.in_files, writers, Some(is_paired_end), args.threads, chunk_size, None,
-        |contigs| create_fetch_targets(contigs, bg_distr, filt_loci.iter().map(|t| &t.0),
+        |contigs| create_fetch_targets(&args.databases, contigs, bg_distr, filt_loci.iter().map(|t| &t.0),
             &args.recr_bed, args.alt_contig_len))?;
 
     for (_, filenames) in filt_loci.iter() {
