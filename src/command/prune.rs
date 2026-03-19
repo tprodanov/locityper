@@ -103,9 +103,9 @@ fn print_help() {
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  PAF field with divergence values [{}].",
-        "    --field".green(), "STR".yellow(), super::fmt_def(&defaults.field));
+        "-f, --field".green(), "STR".yellow(), super::fmt_def(&defaults.field));
     println!("    {:KEY$} {:VAL$}  Divergence threshold for pruning [{}].",
-        "    --threshold".green(), "NUM".yellow(), super::fmt_def_f64(defaults.threshold));
+        "-t, --threshold".green(), "NUM".yellow(), super::fmt_def_f64(defaults.threshold));
     println!("    {:KEY$} {:VAL$}  Use dynamic threshold to get approximately {} clusters.",
         "    --n-clusters".green(), "INT".yellow(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Select cluster representative with the smallest\n\
@@ -144,8 +144,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
             Long("skip-tree") => args.skip_tree = true,
-            Long("field") => args.field = parser.value()?.parse()?,
-            Long("thresh") | Long("threshold") => args.threshold = parser.value()?.parse()?,
+            Short('f') | Long("field") => args.field = parser.value()?.parse()?,
+            Short('t') | Long("thresh") | Long("threshold") => args.threshold = parser.value()?.parse()?,
             Long("n-clusters") => args.n_clusters = Some(parser.value()?.parse()?),
             Long("power") => args.power = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
