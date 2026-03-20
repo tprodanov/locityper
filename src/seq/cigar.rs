@@ -6,7 +6,10 @@ use std::{
     ops::Index,
 };
 use htslib::bam::record;
-use crate::ext::vec::VecOrNone;
+use crate::{
+    err::error,
+    ext::vec::VecOrNone,
+};
 
 /// Subset of CIGAR operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,20 @@ impl Operation {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff => true,
             Operation::Soft | Operation::Hard | Operation::Ins | Operation::Del => false,
+        }
+    }
+
+    pub fn from_char(c: u8) -> crate::Result<Self> {
+        match c {
+            b'M' => Ok(Self::Match),
+            b'=' => Ok(Self::Equal),
+            b'X' => Ok(Self::Diff),
+            b'I' => Ok(Self::Ins),
+            b'D' => Ok(Self::Del),
+            b'S' => Ok(Self::Soft),
+            b'H' => Ok(Self::Hard),
+            b'N' | b'P' => Err(error!(RuntimeError, "CIGAR operations N and P are not supported")),
+            _ => Err(error!(InvalidData, "Unexpected CIGAR operation {}", c as char)),
         }
     }
 
@@ -209,6 +226,22 @@ impl Cigar {
             rlen: len,
             qlen: len,
         }
+    }
+
+    /// Parses string representation of CIGAR.
+    pub fn from_str(s: &[u8]) -> crate::Result<Self> {
+        let mut cigar = Self::new();
+        let mut len = 0;
+        for &c in s {
+            match c {
+                b'0' ..= b'9' => len = 10 * len + u32::from(c - b'0'),
+                _ => {
+                    cigar.push_unchecked(Operation::from_char(c)?, len);
+                    len = 0;
+                }
+            }
+        }
+        Ok(cigar)
     }
 
     /// Converts raw CIGAR to this struct.

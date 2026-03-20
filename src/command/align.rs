@@ -29,6 +29,7 @@ struct Args {
     all_pairs: bool,
     pairs: Vec<String>,
     pairs_file: Option<PathBuf>,
+    against: Option<String>,
     threads: u16,
 
     params: dist::Params,
@@ -44,6 +45,7 @@ impl Default for Args {
             all_pairs: false,
             pairs: Vec::new(),
             pairs_file: None,
+            against: None,
             threads: 8,
 
             params: Default::default(),
@@ -56,10 +58,9 @@ impl Args {
         validate_param!(self.input.is_some(), "Input FASTA file is not provided (see -i/--input)");
         validate_param!(self.output.is_some(), "Output PAF path is not provided (see -o/--output)");
 
-        validate_param!(u8::from(self.all_pairs)
-            + u8::from(!self.pairs.is_empty())
-            + u8::from(self.pairs_file.is_some())
-            == 1, "Exactly one argument -p/-P/-A is required");
+        validate_param!(u8::from(self.all_pairs) + u8::from(!self.pairs.is_empty())
+            + u8::from(self.pairs_file.is_some()) + u8::from(self.against.is_some()) == 1,
+            "Exactly one argument -p/-P/-A/--against is required");
 
         self.params.validate()?;
         Ok(self)
@@ -93,6 +94,8 @@ fn print_help() {
         "-P, --pairs-file".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Find alignments for all pairs.",
         "-A, --all".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Align all sequence against {}.",
+        "    --against".green(), "STR".yellow(), "STR".yellow());
 
     println!("\n{}", "Alignment arguments:".bold());
     println!("    {} {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
@@ -150,6 +153,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             }
             Short('P') | Long("pairs-file") => args.pairs_file = Some(parser.value()?.parse()?),
             Short('A') | Long("all") | Long("all-pairs") => args.all_pairs = true,
+            Long("against") => args.against = Some(parser.value()?.parse()?),
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
             {
@@ -214,6 +218,7 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
             return Err(error!(InvalidInput, "Duplicate sequence {} in the input FASTA file", entry.name()));
         }
     }
+
     let mut pairs = Vec::new();
     for pair in args.pairs.iter() {
         let split: SmallVec<[&str; 2]> = pair.split(',').collect();
@@ -230,6 +235,12 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
             let split: SmallVec<[&str; 2]> = line.split_whitespace().collect();
             pairs.push(parse_pair(&split, &name2id)?);
         }
+    }
+
+    if let Some(against) = &args.against {
+        let i = *name2id.get(against as &str)
+            .ok_or_else(|| error!(InvalidInput, "Cannot find sequence `{}`", against))?;
+        pairs.extend((0..seqs.len() as u32).filter(|&j| i != j).map(|j| (i, j)));
     }
     Ok(pairs)
 }

@@ -20,8 +20,11 @@ use super::{ContigId, ContigNames};
 /// However, here we provide a bit more limiting pattern for contig names.
 const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=@^-]*";
 
+/// Interval: `contig:start`.
+pub(crate) const CHROM_POS_PATTERN: &'static str = formatcp!("^({}):([0-9][0-9_,]*)$", CONTIG_PATTERN);
+
 /// Interval: `contig:start-end`.
-const INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9][0-9_,]*)-([0-9][0-9_,]*)$", CONTIG_PATTERN);
+pub(crate) const INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9][0-9_,]*)-([0-9][0-9_,]*)$", CONTIG_PATTERN);
 
 /// Name of the interval (almost the same as `CONTIG_PATTERN`, but includes `:`).
 const NAME_PATTERN: &'static str = r"^[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*$";

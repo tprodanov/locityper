@@ -6,6 +6,7 @@ mod genotype;
 mod align;
 mod recruit;
 mod prune;
+mod paf_vcf;
 
 use std::{
     fs,
@@ -33,6 +34,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
         "g" | "genotype" => genotype::run(&argv[2..])?,
         "r" | "recruit" => recruit::run(&argv[2..])?,
 
+        "prune" => prune::run(&argv[2..])?,
         "aln" | "align" =>
         {
             #[cfg(feature = "align")] {
@@ -43,7 +45,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
                 std::process::exit(1);
             }
         }
-        "prune" => prune::run(&argv[2..])?,
+        "paf-vcf" | "paf-to-vcf" => paf_vcf::run(&argv[2..])?,
 
         "h" | "help" | "--help" | "-h" => print_help(),
         "V" | "version" | "--version" | "-V" => print_version(),
@@ -107,10 +109,12 @@ fn print_help() {
         "g, genotype".red());
 
     println!("\n{}", "[ Other utilities ]".bold());
-    println!("    {:WIDTH$} Align medium-size sequences to each other.",
-        "   align".red());
     println!("    {:WIDTH$} Recruit reads to one/multiple loci.",
         "r, recruit".red());
+    println!("    {:WIDTH$} Align medium-size sequences to each other.",
+        "   align".red());
+    println!("    {:WIDTH$} Translate alignments into multiple VCF files.",
+        "   paf-vcf".red());
 
     println!("\n{}", "[ General help ]".bold());
     println!("    {:WIDTH$} Show this help message.",
