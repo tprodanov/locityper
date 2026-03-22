@@ -315,7 +315,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let timer = Instant::now();
 
     let mut fasta_reader = fastx::Reader::from_path(args.input.as_ref().unwrap())?;
-    let entries = fasta_reader.read_all()?;
+    let entries = fasta_reader.read_named_seqs()?;
     let pairs = load_pairs(&args, &entries)?;
     if pairs.is_empty() {
         return Err(error!(InvalidInput, "No alignments to compute"));

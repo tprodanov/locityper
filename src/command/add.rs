@@ -763,7 +763,7 @@ fn add_locus(
             args.unknown_frac, args.ignore_overlaps)?
     } else if let Some(fasta_filename) = alleles_fasta {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
-        let alleles = fasta_reader.read_all()?;
+        let alleles = fasta_reader.read_named_seqs()?;
         log::info!("FASTA file contains {} alleles", alleles.len());
         discard_leave_out_alleles(alleles, &args.leave_out)
     } else {

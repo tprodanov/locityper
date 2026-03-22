@@ -2,6 +2,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
     io::{Write, BufRead},
+    ffi::OsStr,
 };
 use colored::Colorize;
 use regex::Regex;
@@ -21,7 +22,8 @@ use crate::{
 struct Args {
     paf: Option<PathBuf>,
     fasta: Option<PathBuf>,
-    out_fmt: Option<String>,
+    out_merged: Option<PathBuf>,
+    out_separate: Option<String>,
     ref_hap: Option<String>,
     region: Option<String>,
     haplotypes: Option<PathBuf>,
@@ -32,7 +34,8 @@ impl Default for Args {
         Self {
             paf: None,
             fasta: None,
-            out_fmt: None,
+            out_merged: None,
+            out_separate: None,
             ref_hap: None,
             region: None,
             haplotypes: None,
@@ -44,9 +47,10 @@ impl Args {
     fn validate(self) -> crate::Result<Self> {
         validate_param!(self.paf.is_some(), "Input PAF file is not provided (see -p/--paf)");
         validate_param!(self.fasta.is_some(), "Input FASTA file is not provided (see -f/--fasta)");
-        validate_param!(self.out_fmt.is_some(), "Output VCF path is not provided (see -o/--output)");
-        validate_param!(self.out_fmt.as_ref().map(|s| s.contains("{}")).unwrap_or(false),
-            "Output (-o/--output) must contain {{}}, where haplotype name is inserted");
+        validate_param!(self.out_merged.is_some() || self.out_separate.is_some(),
+            "Either -o or -O (or both) should be provided");
+        validate_param!(self.out_separate.as_ref().map(|s| s.contains("{}")).unwrap_or(true),
+            "Separate output (-O/--output) must contain {{}}, where haplotype name is inserted");
         validate_param!(self.ref_hap.is_some(), "Reference haplotype must be provided");
         Ok(self)
     }
@@ -58,7 +62,7 @@ fn print_help() {
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
     // let defaults = Args::default();
-    println!("{}", "Convert PAF file to haplotype-level VCF files.".yellow());
+    println!("{}", "Convert PAF file to VCF file(s).".yellow());
 
     print!("\n{}", "Usage:".bold());
     println!(" {} -p input.paf -f input.fa -o out.{{}}.vcf.gz -r ref_hap [args]", super::PROGRAM);
@@ -68,10 +72,15 @@ fn print_help() {
         "-p, --paf".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input FASTA[.gz] file with haplotypes.",
         "-f, --fasta".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Format string for output VCF.gz files,\n\
+    println!("    {:KEY$} {:VAL$}  Single VCF[.gz] file with variants,\n\
+        {EMPTY}  merged across all haplotypes.",
+        "-o, --out-merged", "FILE".yellow());
+    println!("    {:KEY$} {:VAL$} Format string for separate haplotype-level output VCF[.gz] files,\n\
         {EMPTY}  where haplotype name will be inserted in {{}}.\n\
         {EMPTY}  Tries to create parent directory only if it does not contain {{}}.",
-        "-o, --output".green(), "STR".yellow());
+        "-O, --out-separate".green(), "STR".yellow());
+    println!("{EMPTY}  Either {} or {} (or both) should be supplied.",
+        "-o".green(), "-O".green());
     println!("    {:KEY$} {:VAL$}  Reference haplotypes name.",
         "-r, --ref-hap".green(), "STR".yellow());
 
@@ -100,7 +109,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
         match arg {
             Short('p') | Long("paf") => args.paf = Some(parser.value()?.parse()?),
             Short('f') | Long("fasta") => args.fasta = Some(parser.value()?.parse()?),
-            Short('o') | Long("output") => args.out_fmt = Some(parser.value()?.parse()?),
+            Short('o') | Long("out-merged") => args.out_merged = Some(parser.value()?.parse()?),
+            Short('O') | Long("out-separate") | Long("out-sep") => args.out_separate = Some(parser.value()?.parse()?),
             Short('r') | Long("ref-hap") => args.ref_hap = Some(parser.value()?.parse()?),
 
             Short('R') | Long("region") => args.region = Some(parser.value()?.parse()?),
@@ -222,6 +232,19 @@ fn process_haplotype(
     Ok(())
 }
 
+/// Creates either bgzip or plain output file.
+fn create_vcf_writer(filename: impl AsRef<Path>) -> crate::Result<Box<dyn Write>> {
+    let filename = filename.as_ref();
+    if filename.extension().and_then(OsStr::to_str) == Some("gz") {
+        htslib::bgzf::Writer::from_path(&filename)
+            .map_err(|_| error!(RuntimeError, "Cannot create file {}", filename.display()))
+            .map(|w| Box::new(w) as Box<dyn Write>)
+    } else {
+        ext::sys::create_file(filename)
+            .map(|w| Box::new(w) as Box<dyn Write>)
+    }
+}
+
 #[inline]
 fn write_header(
     sample: &str,
@@ -276,9 +299,7 @@ fn process_paf(
             continue
         };
         let out_filename = out_fmt.replace("{}", hap);
-        // Cannot cast to crate IO error as we get htslib::Error
-        let mut out_file = htslib::bgzf::Writer::from_path(&out_filename)
-            .map_err(|_| error!(RuntimeError, "Cannot create file {}", out_filename))?;
+        let mut out_file = create_vcf_writer(&out_filename)?;
         write_header(hap, &mut out_file).map_err(add_path!(out_filename))?;
 
         let hap_column = 5 * usize::from(invert);
@@ -344,7 +365,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         .unwrap_or((ref_hap.clone(), 0));
     let only_haplotypes = args.haplotypes.as_ref().map(|filename| load_haplotypes(filename)).transpose()?;
 
-    let out_fmt = args.out_fmt.as_ref().expect("Output path must be provided");
+    let out_fmt = args.out_separate.as_ref().expect("Output path must be provided");
     if let Some(dirname) = Path::new(out_fmt).parent() {
         if !dirname.exists() && !dirname.to_string_lossy().contains("{}") {
             std::fs::create_dir(dirname).map_err(add_path!(dirname))?;

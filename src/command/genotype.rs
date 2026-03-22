@@ -21,7 +21,7 @@ use crate::{
         interv, recruit, fastx, div, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
-        counts::KmerCount,
+        counts::{KmerCount, KmerCounts},
     },
     bg::{
         TECHNOLOGIES, BgDistr, Technology, SequencingInfo,
@@ -589,6 +589,7 @@ pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathB
 
 pub(super) struct LocusData {
     set: ContigSet,
+    kmer_counts: KmerCounts,
     /// Input directory DB/loci/LOCUS
     db_dir: PathBuf,
     /// Output directory OUT/loci/LOCUS.
@@ -596,11 +597,11 @@ pub(super) struct LocusData {
 }
 
 impl LocusData {
-    pub fn new(set: ContigSet, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
+    pub fn new(set: ContigSet, kmer_counts: KmerCounts, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
         let out_dir = out_loci_dir.join(set.tag());
         Self {
             db_dir: db_locus_dir.to_owned(),
-            set, out_dir,
+            set, kmer_counts, out_dir,
         }
     }
 
@@ -712,9 +713,11 @@ pub(super) fn load_loci(
                     log::error!("Duplicate locus {} in the database, ignoring second instance", name);
                     continue;
                 }
-                match ContigSet::load(name, &path.join(paths::LOCUS_FASTA), &path.join(paths::KMERS)) {
-                    Ok(set) => {
-                        let locus_data = LocusData::new(set, &path, &out_loci_dir);
+                let fasta_fname = path.join(paths::LOCUS_FASTA);
+                let kmers_fname = path.join(paths::KMERS);
+                match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
+                    Ok((set, kmer_counts)) => {
+                        let locus_data = LocusData::new(set, kmer_counts, &path, &out_loci_dir);
                         if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
                             loci.push(locus_data);
                         }
@@ -901,7 +904,7 @@ fn recruit_reads(
     let mean_read_len = bg_distr.seq_info().mean_read_len();
 
     for (locus, filenames) in filt_loci.iter() {
-        target_builder.add(&locus.set, mean_read_len);
+        target_builder.add(&locus.set, &locus.kmer_counts, mean_read_len);
         // Output files with a large buffer (4 Mb).
         const BUFFER: usize = 4_194_304;
         writers.push(fs::File::create(&filenames.tmp_reads_filename)
@@ -1065,8 +1068,8 @@ fn analyze_locus(
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         Some(ext::sys::create_gzip(&windows_filename)?)
     } else { None };
-    let contig_infos = ContigInfos::new(&locus.set, explicit_weights, bg_distr.depth(), &args.assgn_params,
-        windows_writer)?;
+    let contig_infos = ContigInfos::new(&locus.set, &locus.kmer_counts, explicit_weights,
+        bg_distr.depth(), &args.assgn_params, windows_writer)?;
 
     let all_alns = if args.debug >= DebugLvl::Full {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
@@ -1074,10 +1077,10 @@ fn analyze_locus(
         let aln_recalc_writer = if contig_infos.has_explicit_weights() {
             Some(ext::sys::create_gzip(&locus.out_dir.join("weighted_reads.csv.gz"))?)
         } else { None };
-        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache, &contig_infos,
+        AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
             &args.assgn_params, reads_writer, read_kmer_writer, aln_recalc_writer)?
     } else {
-        AllAlignments::load(bam_reader, &locus.set, bg_distr, edit_dist_cache, &contig_infos,
+        AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
             &args.assgn_params, io::sink(), io::sink(), None)?
     };
 

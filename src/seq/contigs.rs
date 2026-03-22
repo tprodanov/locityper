@@ -12,7 +12,6 @@ use crate::{
     ext,
     seq::{
         fastx,
-        NamedSeq,
         counts::KmerCounts,
     },
     algo::HashMap,
@@ -274,36 +273,46 @@ impl fmt::Display for GenomeVersion {
 pub struct ContigSet {
     contigs: Arc<ContigNames>,
     seqs: Vec<Vec<u8>>,
-    kmer_counts: KmerCounts,
 }
 
 impl ContigSet {
+    pub fn new(contigs: Arc<ContigNames>, seqs: Vec<Vec<u8>>) -> Self {
+        Self { contigs, seqs }
+    }
+
     /// Loads contigs, their sequences and k-mer counts from two files.
     /// `descriptions` can either be `&mut Vec<String>`, or `()`.
     pub fn load(
         tag: impl Into<String>,
         fasta_filename: &Path,
-        kmers_filename: &Path,
     ) -> crate::Result<Self>
     {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
-        let mut named_seqs = fasta_reader.read_all()?;
-        let contigs = ContigNames::new(tag,
-            named_seqs.iter_mut().map(|entry| Ok((std::mem::replace(entry.name_mut(), String::new()), entry.len()))))?;
-        let seqs: Vec<_> = named_seqs.into_iter().map(NamedSeq::take_seq).collect();
+        let mut names_lens = Vec::new();
+        let mut seqs = Vec::new();
+        fasta_reader.read_all(|name, seq| {
+            names_lens.push((name.to_owned(), seq.len() as u32));
+            seqs.push(seq.to_owned());
+        })?;
+
+        Ok(Self {
+            contigs: ContigNames::new(tag, names_lens.into_iter().map(Ok)).map(Arc::new)?,
+            seqs,
+        })
+    }
+
+    pub fn load_with_kmer_counts(
+        tag: impl Into<String>,
+        fasta_filename: &Path,
+        kmers_filename: &Path,
+    ) -> crate::Result<(Self, KmerCounts)> {
+        let set = Self::load(tag, fasta_filename)?;
         // k-mer counts file contains both off-target and regular k-mer counts.
         // For now, we only need off-target counts, so we only read k-mer counts once.
         let mut kmers_file = ext::sys::open(kmers_filename)?;
         let kmer_counts = KmerCounts::load(&mut kmers_file).map_err(add_path!(kmers_filename))?;
-        kmer_counts.validate(&contigs)?;
-        Ok(Self {
-            contigs: Arc::new(contigs),
-            seqs, kmer_counts,
-        })
-    }
-
-    pub fn new(contigs: Arc<ContigNames>, seqs: Vec<Vec<u8>>, kmer_counts: KmerCounts) -> Self {
-        Self { contigs, seqs, kmer_counts }
+        kmer_counts.validate(&set.contigs)?;
+        Ok((set, kmer_counts))
     }
 
     /// Returns the number of contigs in the set.
@@ -334,11 +343,6 @@ impl ContigSet {
     /// Returns the sequence of the corresponding contig.
     pub fn get_seq(&self, contig_id: ContigId) -> &[u8] {
         &self.seqs[contig_id.ix()]
-    }
-
-    /// Returns k-mer counts.
-    pub fn kmer_counts(&self) -> &KmerCounts {
-        &self.kmer_counts
     }
 }
 

@@ -672,9 +672,8 @@ fn recruit_reads(
         super::recruit::DEFAULT_KMER_THRESH)?;
 
     let mut target_builder = recruit::TargetBuilder::new(recr_params);
-    let contig_set = ContigSet::new(Arc::new(ContigNames::empty()),
-        vec![bg_region.padded_sequence.clone()], bg_region.padded_kmer_counts.clone());
-    target_builder.add(&contig_set, seq_info.mean_read_len());
+    let contig_set = ContigSet::new(Arc::new(ContigNames::empty()), vec![bg_region.padded_sequence.clone()]);
+    target_builder.add(&contig_set, &bg_region.padded_kmer_counts, seq_info.mean_read_len());
     let mut targets = target_builder.finalize();
     targets.hide_recruited_reads();
 

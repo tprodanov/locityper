@@ -13,6 +13,7 @@ use crate::{
         kmers::{self, CANONICAL},
         aln::{Alignment, ReadEnd, Strand},
         cigar::Cigar,
+        counts::KmerCounts,
     },
     bg::{
         BgDistr,
@@ -697,10 +698,10 @@ impl UniqueKmers {
     /// Stores all k-mers, unique to the current locus.
     fn new(
         contig_set: &ContigSet,
+        kmer_counts: &KmerCounts,
         hard_threshold: u16,
         soft_threshold: u16,
     ) -> Self {
-        let kmer_counts = contig_set.kmer_counts();
         let k = u8::try_from(kmer_counts.k()).unwrap();
         assert!(k > 1);
         let mut kmers_buf = Vec::new();
@@ -819,6 +820,7 @@ impl AllAlignments {
     pub fn load(
         reader: impl bam::Read,
         contig_set: &ContigSet,
+        kmer_counts: &KmerCounts,
         bg_distr: &BgDistr,
         edit_dist_cache: &EditDistCache,
         contig_infos: &ContigInfos,
@@ -832,7 +834,8 @@ impl AllAlignments {
         let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over twice boundary size = {})", contigs.tag(), 2 * boundary);
-        let mut unique_kmers = UniqueKmers::new(contig_set, params.kmer_hard_thresh, params.kmer_soft_thresh);
+        let mut unique_kmers = UniqueKmers::new(contig_set, kmer_counts,
+            params.kmer_hard_thresh, params.kmer_soft_thresh);
 
         log::info!("    Loading read alignments");
         writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tlik\tneighb_complexity\tread_name")

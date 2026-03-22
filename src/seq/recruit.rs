@@ -15,7 +15,7 @@ use crate::{
     seq::{
         ContigSet,
         kmers::{self, Kmer},
-        counts::KmerCount,
+        counts::{KmerCount, KmerCounts},
         fastx::{self, FastxRead},
     },
     math::{RoundDiv, Fraction},
@@ -684,10 +684,9 @@ impl TargetBuilder {
     }
 
     /// Add set of locus alleles.
-    pub fn add(&mut self, contig_set: &ContigSet, mean_read_len: f64) {
+    pub fn add(&mut self, contig_set: &ContigSet, kmer_counts: &KmerCounts, mean_read_len: f64) {
         let locus_ix = LocusIx::try_from(self.locus_minimizers.len())
             .expect(const_format::formatcp!("Too many contig sets (allowed at most {})", LocusIx::MAX));
-        let kmer_counts = contig_set.kmer_counts();
         let base_k = kmer_counts.k();
         let shift = if u32::from(self.params.minimizer_k) <= base_k {
             (base_k as usize - usize::from(self.params.minimizer_k)) / 2

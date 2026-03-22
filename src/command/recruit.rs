@@ -540,8 +540,8 @@ fn build_targets(
             Some(kmer_getter) => kmer_getter.fetch(locus_seqs.clone())?,
             None => KmerCounts::new_zeroed(u32::from(minimizer_k), locus_seqs.iter().map(Vec::len)),
         };
-        let contig_set = ContigSet::new(Arc::new(ContigNames::empty()), locus_seqs, kmer_counts);
-        target_builder.add(&contig_set, 0.0);
+        let contig_set = ContigSet::new(Arc::new(ContigNames::empty()), locus_seqs);
+        target_builder.add(&contig_set, &kmer_counts, 0.0);
     }
     Ok(target_builder.finalize())
 }

@@ -375,15 +375,24 @@ impl<R: BufRead + Send> Reader<R> {
 
     /// Reads all sequences into memory.
     /// Each sequence is standardized and checked for invalid nucleotides.
-    pub fn read_all(&mut self) -> crate::Result<Vec<NamedSeq>> {
+    pub fn read_all(
+        &mut self,
+        mut callback: impl FnMut(String, Vec<u8>),
+    ) -> crate::Result<()>
+    {
         let mut record = FastxRecord::default();
-        let mut records = Vec::new();
         while self.read_next_standardized(&mut record)? {
-            let name = String::from_utf8(record.name().to_vec())
+            let name = std::str::from_utf8(record.name())
                 .map_err(|_| Error::Utf8("read name", record.name().to_vec()))?;
-            records.push(NamedSeq::new(name, record.seq().to_owned()));
+            callback(name.to_owned(), record.seq().to_vec());
         }
-        Ok(records)
+        Ok(())
+    }
+
+    pub fn read_named_seqs(&mut self) -> crate::Result<Vec<NamedSeq>> {
+        let mut res = Vec::new();
+        self.read_all(|name, seq| res.push(NamedSeq::new(name, seq)))?;
+        Ok(res)
     }
 }
 

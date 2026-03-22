@@ -583,6 +583,7 @@ impl ContigInfos {
     /// Creates a set of contig windows for each contig.
     pub fn new(
         set: &ContigSet,
+        kmer_counts: &KmerCounts,
         weights_filename: Option<&Path>,
         depth: &ReadDepth,
         params: &super::Params,
@@ -600,7 +601,7 @@ impl ContigInfos {
         let mut infos = Vec::with_capacity(seqs.len());
         for (id, seq, curr_weights) in itertools::izip!(contigs.ids(), seqs, explicit_weights) {
             infos.push(
-                ContigInfo::new(id, contigs, seq, set.kmer_counts(), depth, curr_weights, params).map(Arc::new)?);
+                ContigInfo::new(id, contigs, seq, kmer_counts, depth, curr_weights, params).map(Arc::new)?);
         }
         if let Some(mut writer) = dbg_writer {
             writeln!(writer,

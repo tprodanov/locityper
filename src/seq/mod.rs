@@ -91,9 +91,9 @@ impl NamedSeq {
         &self.name
     }
 
-    pub fn name_mut(&mut self) -> &mut String {
-        &mut self.name
-    }
+    // pub fn name_mut(&mut self) -> &mut String {
+    //     &mut self.name
+    // }
 
     /// Returns reference to the sequence.
     pub fn seq(&self) -> &[u8] {
@@ -110,10 +110,10 @@ impl NamedSeq {
         self.name
     }
 
-    /// Consumes this object and returns sequence.
-    pub fn take_seq(self) -> Vec<u8> {
-        self.seq
-    }
+    // /// Consumes this object and returns sequence.
+    // pub fn take_seq(self) -> Vec<u8> {
+    //     self.seq
+    // }
 
     /// Sequence length.
     pub fn len(&self) -> u32 {
