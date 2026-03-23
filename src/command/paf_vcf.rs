@@ -31,7 +31,7 @@ struct Args {
     out_merged: Option<PathBuf>,
     out_separate: Option<PathBuf>,
     ref_hap: Option<String>,
-    region: Option<String>,
+    region: String,
 }
 
 impl Default for Args {
@@ -43,7 +43,7 @@ impl Default for Args {
             out_merged: None,
             out_separate: None,
             ref_hap: None,
-            region: None,
+            region: String::from("auto"),
         }
     }
 }
@@ -60,7 +60,7 @@ impl Args {
 
 fn print_help() {
     const KEY: usize = 16;
-    const VAL: usize = 5;
+    const VAL: usize = 4;
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
     // let defaults = Args::default();
@@ -86,9 +86,10 @@ fn print_help() {
         "-o, --output".green(), "FILE [FILE]".yellow());
 
     println!("\n{}", "Optional arguments:".bold());
-    println!("    {:KEY$} {:VAL$}  Adjust variant positions relative to this region.\n\
-        {EMPTY}  Either `chrom:start`, `chrom:start-end` or a BED file with one entry.",
-        "-R, --region".green(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Adjust variant positions relative to this region [{}].\n\
+        {EMPTY}  Should be either {} (take from ref.bed), {},\n\
+        {EMPTY}  `chrom:start`, `chrom:start-end` or a BED file with one entry.",
+        "-R, --region".green(), "STR".yellow(), super::fmt_def("auto"), "auto".yellow(), "none".yellow());
 
     println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -117,7 +118,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Short('r') | Long("ref-hap") => args.ref_hap = Some(parser.value()?.parse()?),
-            Short('R') | Long("region") => args.region = Some(parser.value()?.parse()?),
+            Short('R') | Long("region") => args.region = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -135,26 +136,43 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
 /// Returns chromosome name and 0-based start position.
-fn load_region(s: &str) -> crate::Result<(String, u32)> {
-    let pos_re = Regex::new(interv::CHROM_POS_PATTERN).unwrap();
-    let interval_re = Regex::new(interv::INTERVAL_PATTERN).unwrap();
-    if let Some(captures) = pos_re.captures(s).or_else(|| interval_re.captures(s)) {
-        let chrom = captures[1].to_string();
-        let pos: PrettyU32 = captures[2].parse()
-            .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?;
-        return Ok((chrom, pos.get().strict_sub(1)));
+fn load_region(s: &str, fasta_filename: &Path) -> crate::Result<Option<(String, u32)>> {
+    if s == "none" { return Ok(None) };
+
+    let filename = if s == "auto" {
+        Path::new(fasta_filename).parent()
+            .ok_or_else(|| error!(RuntimeError, "Cannot get parent directory for {}", s))?
+            .join(super::paths::LOCUS_BED)
+    } else {
+        let pos_re = Regex::new(interv::CHROM_POS_PATTERN).unwrap();
+        let interval_re = Regex::new(interv::INTERVAL_PATTERN).unwrap();
+        if let Some(captures) = pos_re.captures(s).or_else(|| interval_re.captures(s)) {
+            let chrom = captures[1].to_string();
+            let pos: PrettyU32 = captures[2].parse()
+                .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?;
+            return Ok(Some((chrom, pos.get().strict_sub(1))));
+        }
+        PathBuf::from(s)
+    };
+
+    if !filename.exists() {
+        log::error!("Cannot find BED file {}, using relative locus coordinates", filename.display());
+        return Ok(None);
     }
 
-    let mut lines = ext::sys::open(s)?.lines();
-    let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", s))?
-        .map_err(add_path!(s))?;
+    let mut lines = ext::sys::open(&filename)?.lines();
+    let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+        .map_err(add_path!(filename))?;
     let trimmed_line = line.trim();
     let mut split = trimmed_line.split('\t');
-    let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", s))?.to_string();
+    let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+        .to_string();
     let pos: u32 = split.next()
-        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", s, trimmed_line))?
-        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed_line, s))?;
-    Ok((chrom, pos))
+        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})",
+            filename.display(), trimmed_line))?
+        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}",
+            trimmed_line, filename.display()))?;
+    Ok(Some((chrom, pos)))
 }
 
 #[derive(Clone, Debug)]
@@ -534,8 +552,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     }
     let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
 
-    let (chrom, shift) = args.region.as_ref().map(|s| load_region(s)).transpose()?
-        .unwrap_or((ref_hap.clone(), 0));
+    let (chrom, shift) = load_region(&args.region, fasta_filename)?.unwrap_or((ref_hap.clone(), 0));
     let vars = process_paf(args.paf.as_ref().expect("PAF filename must be provided"),
         contig_set.contigs(), ref_id)?;
     combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps,
