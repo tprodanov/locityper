@@ -1,7 +1,7 @@
 use std::{
     io,
 };
-use rand::Rng;
+use rand::{Rng, RngExt};
 use crate::{
     math::Ln,
     seq::contigs::Genotype,

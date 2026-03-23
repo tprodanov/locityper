@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
     ops::Index,
 };
-use rand::Rng;
+use rand::{Rng, RngExt};
 use crate::{
     seq::{
         self,

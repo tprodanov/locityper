@@ -3,7 +3,7 @@ use std::{
     cmp::{min, max},
 };
 use rand::{
-    Rng,
+    RngExt,
     seq::IndexedRandom,
 };
 use crate::{
@@ -99,7 +99,7 @@ impl Solver for Greedy {
         for _ in 0..max_iter {
             let mut best_target = None;
             let mut best_improv = min_diff;
-            for &rp in non_trivial_reads.choose_multiple(rng, sample_size) {
+            for &rp in non_trivial_reads.sample(rng, sample_size) {
                 let (target, improv) = assignments.best_read_improvement(rp);
                 if improv > best_improv {
                     best_target = Some(target);

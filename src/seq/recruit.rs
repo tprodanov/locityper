@@ -9,7 +9,7 @@ use std::{
     ops::{Add, AddAssign, Sub, Mul},
 };
 use smallvec::SmallVec;
-use rand::Rng;
+use rand::RngExt;
 use crate::{
     err::{validate_param, add_path},
     seq::{
