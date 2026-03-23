@@ -76,7 +76,7 @@ fn filter_windows(
             have_ns += 1;
             false
         } else {
-            let end_ix2 = (end_ix + 1).checked_sub(k as usize).unwrap();
+            let end_ix2 = (end_ix + 1).strict_sub(k as usize);
             assert!(end_ix2 > start_ix);
             // Inverse quantile (1) - what percentage of k-mer counts is <= 1.
             // This calculation is actually faster than quantile, as it does not require sorting.

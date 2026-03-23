@@ -32,9 +32,9 @@ impl<T> TriangleMatrix<T> {
     #[allow(unused)]
     pub fn from_linear_index(&self, k: usize) -> (usize, usize) {
         assert!(k < self.data.len());
-        let under_root = (8 * self.data.len()).checked_sub(8 * k + 7).unwrap();
-        let i = self.side.checked_sub(2 + (0.5 * (under_root as f64).sqrt() - 0.5).floor() as usize).unwrap();
-        let j = (k + i * (i + 3) / 2 + 1).checked_sub(self.side * i).unwrap();
+        let under_root = (8 * self.data.len()).strict_sub(8 * k + 7);
+        let i = self.side.strict_sub(2 + (0.5 * (under_root as f64).sqrt() - 0.5).floor() as usize);
+        let j = (k + i * (i + 3) / 2 + 1).strict_sub(self.side * i);
         (i, j)
     }
 

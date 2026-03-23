@@ -206,14 +206,14 @@ impl ExplicitWeights {
     // fn push(&mut self, val: f64) {
     //     let i = (val * Self::SCALE) as u64;
     //     self.weights.push((val, self.sum));
-    //     self.sum = self.sum.checked_add(i).unwrap();
+    //     self.sum = self.sum.strict_add(i);
     // }
 
     fn extend_by(&mut self, n: usize, val: f64) {
         let i = (val * Self::SCALE) as u64;
         for _ in 0..n {
             self.weights.push((val, self.sum));
-            self.sum = self.sum.checked_add(i).unwrap();
+            self.sum = self.sum.strict_add(i);
         }
     }
 
@@ -479,9 +479,9 @@ impl ContigInfo {
         (0..self.n_windows()).map(move |i| {
             let (start, end) = self.window_getter.ith_window(i);
             let left_tweak = tweak.min(start) as i32;
-            let right_tweak = tweak.min(self.contig_len.checked_sub(end).unwrap()) as i32;
+            let right_tweak = tweak.min(self.contig_len.strict_sub(end)) as i32;
             let r = rng.random_range(-left_tweak..=right_tweak);
-            (start.checked_add_signed(r).unwrap(), end.checked_add_signed(r).unwrap())
+            (start.strict_add_signed(r), end.strict_add_signed(r))
         })
     }
 

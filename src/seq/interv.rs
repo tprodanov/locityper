@@ -18,7 +18,7 @@ use super::{ContigId, ContigNames};
 /// many possible contig names: `[0-9A-Za-z!#$%&+./:;?@^_|~-][0-9A-Za-z!#$%&*+./:;=?@^_|~-]*`.
 ///
 /// However, here we provide a bit more limiting pattern for contig names.
-const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=@^-]*";
+pub(crate) const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=@^-]*";
 
 /// Interval: `contig:start`.
 pub(crate) const CHROM_POS_PATTERN: &'static str = formatcp!("^({}):([0-9][0-9_,]*)$", CONTIG_PATTERN);
@@ -235,7 +235,7 @@ impl Interval {
             if let Some(last) = merged.last_mut() {
                 assert!(last as &Interval <= curr, "Cannot merge unsorted intervals");
                 if last.contig_id == curr.contig_id && last.end + distance >= curr.start {
-                    last.end = curr.end;
+                    last.end = last.end.max(curr.end);
                 } else {
                     merged.push(curr.clone());
                 }

@@ -344,6 +344,11 @@ impl ContigSet {
     pub fn get_seq(&self, contig_id: ContigId) -> &[u8] {
         &self.seqs[contig_id.ix()]
     }
+
+    /// Returns sequence by contig name, if found.
+    pub fn get_seq_by_name(&self, name: &str) -> Option<&[u8]> {
+        self.contigs.try_get_id(name).map(|id| self.get_seq(id))
+    }
 }
 
 type GtStorage = SmallVec<[ContigId; 4]>;

@@ -407,7 +407,7 @@ fn expand_locus(
     let mut left_seq = seq::fetch_seq(fasta_reader, contig_name, left_start.into(), left_end.into())?;
 
     // Same with the right boundary, we extend right start further left so that we have enough moving windows.
-    let right_start = inner_end.checked_sub(args.moving_window).unwrap();
+    let right_start = inner_end.strict_sub(args.moving_window);
     let mut right_end = min(inner_end + allowed_expansion, contig_len);
     let mut right_seq = seq::fetch_seq(fasta_reader, contig_name, right_start.into(), right_end.into())?;
 

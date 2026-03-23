@@ -8,7 +8,7 @@ use std::{
 use colored::Colorize;
 use crate::{
     ext::{self, TriangleMatrix},
-    algo::HashSet,
+    algo::{HashSet, HashMap, IntMap},
     seq::{
         fastx, div, ContigId, ContigNames,
         counts::KmerCounts,
@@ -237,41 +237,55 @@ fn load_divergences(
     Ok(divergences)
 }
 
-/// Loads `discarded_haplotypes.txt` file, with lines
-/// haplotype = haplotype2, haplotype3, ...
-fn load_discarded_haplotypes(
+/// Loads `discarded_haplotypes.txt` file, with lines `haplotype (= or ~) haplotype2, haplotype3, ...`.
+/// Returns map (retained contig id) -> Vec of (discarded name, is_identical).
+pub(crate) fn load_discarded_haplotypes(
     f: impl BufRead,
     contigs: &ContigNames,
-) -> io::Result<Vec<(ContigId, Vec<String>)>>
+) -> crate::Result<IntMap<ContigId, Vec<(String, bool)>>>
 {
-    let mut corresp = Vec::new();
-    let mut eq_warned = false;
+    // Map { retained -> (discarded, identical) }, where retained is not found in `contigs`.
+    let mut corresp_unknown: HashMap<String, Vec<(String, bool)>> = HashMap::default();
+    // Same, but retained haplotype if found, and replaced with its id.
+    let mut corresp = IntMap::default();
+
     for line in f.lines() {
-        let line = line?;
+        let line = line.map_err(add_path!(!))?;
         let split: Vec<_> = line.split_whitespace().collect();
-        let Some(id) = contigs.try_get_id(split[0]) else {
-            log::warn!("[{}] Unknown haplotype `{}` among discarded haplotypes",
-                contigs.tag(), split[0]);
-            continue;
-        };
-        if split[1] != "=" && !eq_warned {
-            eq_warned = true;
-            log::warn!("[{}] Input haplotypes were previously pruned. Output newick tree will be incomplete",
-                contigs.tag());
+        if split.len() < 3 {
+            return Err(error!(InvalidInput, "Each line in discarded haplotypes must have at least 3 columns"));
         }
-        let mut curr_haps = Vec::with_capacity(split.len() - 2);
+        let identical = split[1] == "=";
+
+        let mut rhs = Vec::with_capacity(split.len() - 2);
         for contig in &split[2..] {
             let contig = contig.strip_suffix(',').unwrap_or(contig);
             if contigs.contains(contig) {
-                log::warn!("[{}] Haplotype {} is marked as discarded, but present in the haplotypes fasta",
-                    contigs.tag(), contig);
+                log::warn!("{}Haplotype {} is marked as discarded, but present in the haplotypes fasta",
+                    if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
                 continue;
             }
-            curr_haps.push(contig.to_string());
+            rhs.push((contig.to_string(), identical));
+            if let Some(v) = corresp_unknown.remove(contig) {
+                rhs.extend(v.into_iter().map(|(contig2, identical2)| (contig2, identical && identical2)));
+            }
         }
-        corresp.push((id, curr_haps));
+
+        match contigs.try_get_id(split[0]) {
+            Some(id) => corresp.insert(id, rhs),
+            None => corresp_unknown.insert(split[0].to_string(), rhs),
+        };
+    }
+
+    if let Some(contig) = corresp_unknown.keys().next() {
+        log::warn!("{}Haplotype {} is on the left side of the discarded haplotypes, but missing from the fasta",
+            if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
     }
     Ok(corresp)
+}
+
+pub(crate) fn all_identical(disc_haplotypes: &IntMap<ContigId, Vec<(String, bool)>>) -> bool {
+    disc_haplotypes.values().flat_map(|v| v.iter()).all(|(_, identical)| *identical)
 }
 
 struct Cluster {
@@ -293,13 +307,13 @@ impl Cluster {
         }
     }
 
-    fn add_identical(&mut self, names: &[String]) {
+    fn add_identical<'a>(&mut self, names: impl Iterator<Item = &'a str>) {
         debug_assert!(self.haps.len() == 1);
-        self.haps[0].1 += names.len() as u32;
         self.newick.insert(0, '(');
         write!(self.newick, ":0").unwrap();
         for hap in names {
             write!(self.newick, ",{}:0", hap).unwrap();
+            self.haps[0].1 += 1;
         }
         self.newick.push(')');
     }
@@ -398,7 +412,7 @@ fn cluster_haplotypes(
     mut thresh: f64,
     n_clusters: Option<usize>,
     power: PowerMean,
-    disc_haps: &[(ContigId, Vec<String>)],
+    disc_haps: &IntMap<ContigId, Vec<(String, bool)>>,
     mut nwk_writer: impl Write,
     mut disc_haps_writer: impl Write,
 ) -> crate::Result<Vec<ContigId>>
@@ -422,8 +436,8 @@ fn cluster_haplotypes(
     }
 
     let mut clusters: Vec<_> = contigs.ids().map(|id| Cluster::new(id, contigs)).collect();
-    for (id, haps) in disc_haps {
-        clusters[id.ix()].add_identical(&haps);
+    for (id, haps) in disc_haps.iter() {
+        clusters[id.ix()].add_identical(haps.iter().map(|(name, _)| name as &str));
     }
 
     let steps = dendrogram.steps();
@@ -569,8 +583,12 @@ fn process_locus(
         Default::default()
     } else {
         ext::sys::open(&disc_filename)?.read_to_end(&mut disc_haps_data).map_err(add_path!(disc_filename))?;
-        load_discarded_haplotypes(&disc_haps_data as &[u8], contigs).map_err(add_path!(!))?
+        load_discarded_haplotypes(&disc_haps_data as &[u8], contigs)?
     };
+    if !all_identical(&disc_haplotypes) {
+        log::warn!("[{}] Haplotypes were previously pruned (~ in discarded haplotypes). Tree will be inaccurate",
+            contigs.tag());
+    }
 
     let nwk_writer: Box<dyn Write> = if args.skip_tree {
         Box::new(io::sink())

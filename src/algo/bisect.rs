@@ -81,9 +81,12 @@ pub fn right_by_at<T, F: FnMut(&T) -> Ordering>(a: &[T], mut f: F, mut lo: usize
 /// Returns `hi` if all `f(a[i])` for all `i`.
 ///
 /// This function takes $O(hi - lo)$, but can still be faster than binary search if expected $i - lo$ is small.
-pub fn right_boundary<T, F>(a: &[T], mut f: F, lo: usize, hi: usize) -> usize
-where F: FnMut(&T) -> bool,
-{
+pub fn right_boundary<T>(
+    a: &[T],
+    mut f: impl FnMut(&T) -> bool,
+    lo: usize,
+    hi: usize,
+) -> usize {
     assert!(hi <= a.len(), "Cannot perform linear search on indices {}, {} (len: {})", lo, hi, a.len());
     for i in lo..hi {
         if !f(unsafe { a.get_unchecked(i) }) {

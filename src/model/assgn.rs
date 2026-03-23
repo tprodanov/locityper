@@ -248,7 +248,7 @@ impl<'a> ReadAssignment<'a> {
         } else {
             let distr = &self.parent.depth_distrs[w];
             let old_depth = self.depth[w];
-            let new_depth = old_depth.checked_add_signed(depth_change).expect("Read depth became negative");
+            let new_depth = old_depth.strict_add_signed(depth_change);
             distr.ln_prob(new_depth) - distr.ln_prob(old_depth)
         }
     }

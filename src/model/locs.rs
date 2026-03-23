@@ -831,7 +831,7 @@ impl AllAlignments {
     ) -> crate::Result<Self>
     {
         let contigs = contig_set.contigs();
-        let boundary = params.boundary_size.checked_sub(params.tweak.unwrap()).unwrap();
+        let boundary = params.boundary_size.strict_sub(params.tweak.unwrap());
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
             "[{}] Some contigs are too short (must be over twice boundary size = {})", contigs.tag(), 2 * boundary);
         let mut unique_kmers = UniqueKmers::new(contig_set, kmer_counts,
