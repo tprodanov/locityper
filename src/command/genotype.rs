@@ -610,7 +610,6 @@ impl LocusData {
         &self.set
     }
 
-    #[allow(unused)]
     #[inline(always)]
     pub fn db_dir(&self) -> &Path {
         &self.db_dir
@@ -682,7 +681,6 @@ pub(super) fn load_loci(
 {
     log::info!("Loading database");
     let out_loci_dir = out_path.join(paths::LOCI_DIR);
-    ext::sys::mkdir(&out_loci_dir)?;
     let mut loci = Vec::new();
     let mut total_entries = 0;
     let mut n_warnings = 0;
@@ -704,27 +702,26 @@ pub(super) fn load_loci(
 
             total_entries += 1;
             let path = entry.path();
-            if let Some(name) = locus_name_matches(&path, subset_loci) {
-                if !path.join(paths::SUCCESS).exists() {
-                    log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
-                    continue;
-                }
-                if !loci_names.insert(name.to_owned()) {
-                    log::error!("Duplicate locus {} in the database, ignoring second instance", name);
-                    continue;
-                }
-                let fasta_fname = path.join(paths::LOCUS_FASTA);
-                let kmers_fname = path.join(paths::KMERS);
-                match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
-                    Ok((set, kmer_counts)) => {
-                        let locus_data = LocusData::new(set, kmer_counts, &path, &out_loci_dir);
-                        if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
-                            loci.push(locus_data);
-                        }
-                    },
-                    Err(e) => log::error!("Could not load locus information from {}: {}",
-                        ext::fmt::path(&path), e.display()),
-                }
+            let Some(name) = locus_name_matches(&path, subset_loci) else { continue };
+            if !path.join(paths::SUCCESS).exists() {
+                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
+                continue;
+            }
+            if !loci_names.insert(name.to_owned()) {
+                log::error!("Duplicate locus {} in the database, ignoring second instance", name);
+                continue;
+            }
+            let fasta_fname = path.join(paths::LOCUS_FASTA);
+            let kmers_fname = path.join(paths::KMERS);
+            match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
+                Ok((set, kmer_counts)) => {
+                    let locus_data = LocusData::new(set, kmer_counts, &path, &out_loci_dir);
+                    if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
+                        loci.push(locus_data);
+                    }
+                },
+                Err(e) => log::error!("Could not load locus information from {}: {}",
+                    ext::fmt::path(&path), e.display()),
             }
         }
     }
@@ -1146,6 +1143,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let mut rng = ext::rand::init_rng(args.seed, true);
     let out_dir = args.output.as_ref().unwrap();
     ext::sys::mkdir(out_dir)?;
+    ext::sys::mkdir(&out_dir.join(paths::LOCI_DIR))?;
 
     let preproc_path = args.preproc.as_ref().unwrap();
     let bg_distr = if let Some("gz") = preproc_path.extension().and_then(std::ffi::OsStr::to_str) {
