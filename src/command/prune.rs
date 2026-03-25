@@ -17,7 +17,7 @@ use crate::{
     math::PowerMean,
 };
 use super::{
-    paths,
+    paths, Rerun,
     genotype::LocusData,
 };
 
@@ -27,6 +27,7 @@ struct Args {
     alignments: String,
     subset_loci: HashSet<String>,
 
+    only_tree: bool,
     skip_tree: bool,
     field: String,
     threshold: f64,
@@ -43,6 +44,7 @@ impl Default for Args {
             alignments: "haplotypes.paf.gz".to_string(),
             subset_loci: HashSet::default(),
 
+            only_tree: false,
             skip_tree: false,
             field: "dv".to_string(),
             threshold: 0.0002,
@@ -56,7 +58,9 @@ impl Default for Args {
 impl Args {
     fn validate(mut self) -> crate::Result<Self> {
         validate_param!(self.input.is_some(), "Input database is not provided (see -i/--input)");
-        validate_param!(self.output.is_some(), "Output database is not provided (see -o/--output)");
+        validate_param!(self.only_tree || self.output.is_some(), "Output database is not provided (see -o/--output)");
+        validate_param!(!self.only_tree || !self.skip_tree, "--skip-tree and --only-tree cannot be used together");
+
         validate_param!(!self.field.contains(':'), "PAF divergence field ({}) must not contain :",
             self.field);
         validate_param!(self.threshold >= 0.0, "Divergence threshold ({}) should be non-negative",
@@ -88,6 +92,7 @@ fn print_help() {
 
     print!("\n{}", "Usage:".bold());
     println!(" {} -i db -o pruned_db [args]", super::PROGRAM);
+    println!(" {} -i db --only-tree [args]", super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory.",
@@ -102,6 +107,10 @@ fn print_help() {
         "INPUT".yellow(), "PATH".yellow(), const_format::concatcp!(super::PROGRAM, " align").underline());
 
     println!("\n{}", "Optional arguments:".bold());
+    println!("    {:KEY$} {:VAL$}  Write tree in the input directory and stop.",
+        "    --only-tree".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Do not write trees in the output directory.",
+        "    --skip-tree".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  PAF field with divergence values [{}].",
         "-f, --field".green(), "STR".yellow(), super::fmt_def(&defaults.field));
     println!("    {:KEY$} {:VAL$}  Divergence threshold for pruning [{}].",
@@ -113,8 +122,6 @@ fn print_help() {
         "    --power".green(), "NUM".yellow(), super::fmt_def(&defaults.power));
     println!("    {:KEY$} {:VAL$}  Limit the pruning to loci from this list.",
         "    --subset-loci".green(), "STR+".yellow());
-    println!("    {:KEY$} {:VAL$}  Do not write trees in the output directory.",
-        "    --skip-tree".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
 
@@ -143,6 +150,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                     args.subset_loci.insert(val.parse()?);
                 }
             }
+            Long("only-tree") => args.only_tree = true,
             Long("skip-tree") => args.skip_tree = true,
             Short('f') | Long("field") => args.field = parser.value()?.parse()?,
             Short('t') | Long("thresh") | Long("threshold") => args.threshold = parser.value()?.parse()?,
@@ -514,7 +522,7 @@ fn copy_bed_files(locus_data: &LocusData) -> crate::Result<bool> {
 
 /// Thins out files from the input locus directory.
 /// Returns true if all necessary input files are present.
-fn thin_out_output_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<bool> {
+fn prune_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<bool> {
     let mut all_files_present = copy_bed_files(locus_data)?;
     let contig_set = locus_data.contig_set();
     let contigs = contig_set.contigs();
@@ -593,10 +601,14 @@ fn process_locus(
     let nwk_writer: Box<dyn Write> = if args.skip_tree {
         Box::new(io::sink())
     } else {
-        Box::new(ext::sys::create_gzip(&locus_data.out_dir().join("all_haplotypes.nwk.gz"))?)
+        let filename = (if args.only_tree { locus_data.db_dir() } else { locus_data.out_dir() })
+            .join("all_haplotypes.nwk.gz");
+        Box::new(ext::sys::create_gzip(&filename)?)
     };
     let keep_ids = cluster_haplotypes(contigs, divergences, args.threshold, args.n_clusters, args.power,
         &disc_haplotypes, nwk_writer, &mut disc_haps_data)?;
+    if args.only_tree { return Ok(true) }
+
     if !disc_haps_data.is_empty() {
         let out_disc_haps_filename = locus_data.out_dir().join(paths::DISCARDED_HAPS);
         ext::sys::create(&out_disc_haps_filename)?
@@ -609,7 +621,7 @@ fn process_locus(
         log::info!("[{}] Retained all {} haplotypes", contigs.tag(), contigs.len());
     }
 
-    if thin_out_output_files(locus_data, &keep_ids)? {
+    if prune_files(locus_data, &keep_ids)? {
         super::write_success_file(locus_data.out_dir().join(paths::SUCCESS))?;
         Ok(true)
     } else {
@@ -623,13 +635,19 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let timer = Instant::now();
 
     let input = args.input.as_ref().expect("Input path must be defined");
-    let output = args.output.as_ref().expect("Output path must be defined");
-    ext::sys::mkdir(&output)?;
-    let loci_dir = output.join(paths::LOCI_DIR);
-    ext::sys::mkdir(&loci_dir)?;
+    let output: &Path;
+    let rerun;
+    if args.only_tree {
+        output = Path::new("/dev/null");
+        rerun = Rerun::DoNothing;
+    } else {
+        output = args.output.as_ref().expect("Output path must be defined");
+        rerun = Rerun::from_force(args.force);
+        ext::sys::mkdir(&output)?;
+        ext::sys::mkdir(&output.join(paths::LOCI_DIR))?;
+    }
 
-    let loci = super::genotype::load_loci(&[input], &output, &args.subset_loci,
-        super::Rerun::from_force(args.force))?;
+    let loci = super::genotype::load_loci(&[input], output, &args.subset_loci, rerun)?;
     if loci.is_empty() {
         return Ok(());
     }
@@ -648,16 +666,19 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         }
     }
 
+    let descr = if args.only_tree { "create trees for" } else { "prune" };
+    let descr_past = if args.only_tree { "created trees for" } else { "pruned" };
+
     let succeed = total - failed;
     if succeed == 0 {
-        log::error!("Failed to prune all {} loci", failed);
+        log::error!("Failed to {} all {} loci", descr, failed);
     } else if failed > 0 {
-        log::warn!("Successfully pruned {} loci, failed to prune {} loci", succeed, failed);
+        log::warn!("Successfully {} {} loci, failed to {} {} loci", descr_past, succeed, descr, failed);
     } else {
-        log::info!("Successfully pruned {} loci", succeed);
+        log::info!("Successfully {} {} loci", descr_past, succeed);
     }
     if incomplete > 0 {
-        log::warn!("Of the pruned loci, {} output directories were not completely filled", incomplete);
+        log::warn!("{} output directories were not completely filled", incomplete);
     }
     log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())

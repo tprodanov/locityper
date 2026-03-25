@@ -148,6 +148,8 @@ enum Rerun {
     Part,
     /// Skip successfully complete analyses.
     None,
+    /// Skip any checks, mkdir,
+    DoNothing,
 }
 
 impl Rerun {
@@ -156,6 +158,7 @@ impl Rerun {
             Self::All => "all",
             Self::Part => "part",
             Self::None => "none",
+            Self::DoNothing => "do-nothing"
         }
     }
 
@@ -177,6 +180,8 @@ impl Rerun {
     fn prepare_and_clean_dir<F>(self, dir: &Path, clean: F) -> crate::Result<bool>
     where F: FnOnce(&Path) -> crate::Result<()>,
     {
+        if self == Self::DoNothing { return Ok(true) }
+
         if !dir.exists() {
             ext::sys::mkdir(dir)?;
             return Ok(true);
