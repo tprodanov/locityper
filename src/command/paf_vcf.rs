@@ -357,8 +357,8 @@ fn get_hap_ranges(ref_ranges: &[(u32, u32)], hap_vars: &[VarRange]) -> Vec<Optio
             let last_var = hap_vars[n - 1].clone();
             assert!(ref_start >= last_var.ref_end);
             // Insert variant after the last haplotype variant.
-            let shift = ref_start - last_var.ref_start;
-            hap_ranges.push(Some((last_var.hap_start + shift, last_var.hap_start + shift + ref_diff)));
+            let shift = ref_start - last_var.ref_end;
+            hap_ranges.push(Some((last_var.hap_end + shift, last_var.hap_end + shift + ref_diff)));
             continue;
         }
 
