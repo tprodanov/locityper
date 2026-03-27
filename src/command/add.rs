@@ -134,14 +134,14 @@ fn print_help() {
     println!("\n{} (may be repeated multiple times)", "Target loci:".bold());
     println!("    {:KEY$} {}\n\
         {EMPTY}  Locus name and coordinates. If VCF ({}) was not provided,\n\
-        {EMPTY}  FASTA with locus alleles is required as a third argument.",
+        {EMPTY}  FASTA with locus haplotypes is required as a third argument.",
         "-l, --locus".green(), "NAME REGION [FILE]".yellow(), "-v".green());
     println!("    {:KEY$} {:VAL$}  BED file with loci coordinates. Fourth column: locus name.\n\
         {EMPTY}  If VCF ({}) was not provided, fifth column is required\n\
-        {EMPTY}  with the path to locus alleles.",
+        {EMPTY}  with the path to locus haplotypes.",
         "-L, --loci".green(), "FILE".yellow(), "-v".green());
 
-    println!("\n{}", "Allele extraction parameters:".bold());
+    println!("\n{}", "Haplotype extraction parameters:".bold());
     println!("    {:KEY$} {:VAL$}  Name of the reference haplotype [default: tries to guess].",
         "-g, --genome".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  If needed, expand locus coordinates by <= {} bp [{}].\n\
@@ -154,8 +154,8 @@ fn print_help() {
         {EMPTY}  moving windows of size {} bp [{}].",
         "-w, --window".green(), "INT".yellow(), "INT".yellow(),
         super::fmt_def(PrettyU32(defaults.moving_window)));
-    println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per allele [{}]\n\
-        {EMPTY}  (relative to the allele length). Variants that have no known\n\
+    println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
+        {EMPTY}  relative to the haplotype length. Variants that have no known\n\
         {EMPTY}  variation in the input VCF pangenome are ignored.",
         "-u, --unknown".green(), "NUM".yellow(), super::fmt_def_f64(defaults.unknown_frac));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
@@ -293,7 +293,7 @@ fn load_loci(
         if let Some(filename) = opt_fasta {
             if !require_seqs {
                 return Err(error!(InvalidInput,
-                    "FASTA file with locus alleles cannot be provided if variants (-v) were specified (see locus {})",
+                    "FASTA file with locus haplotypes cannot be provided if variants (-v) were specified (see locus {})",
                     locus.name()));
             }
             if !filename.exists() || filename.is_dir() {
@@ -480,66 +480,13 @@ fn check_divergencies(tag: &str, entries: &[NamedSeq], divergences: &TriangleMat
         }
     }
     if count > 0 {
-        log::warn!("    [{}] {} allele pairs with high divergence, highest {:.5} ({} and {})", tag, count,
+        log::warn!("    [{}] {} haplotype pairs with high divergence, highest {:.5} ({} and {})", tag, count,
             highest, entries[highest_i].name(), entries[highest_j].name());
         if highest > 0.5 && !from_vcf {
-            log::warn!("    Extremely high sequence divergence, please check if allele sequences are accurate");
+            log::warn!("    Extremely high sequence divergence, please check if haplotype sequences are accurate");
         }
     }
 }
-
-// /// Cluster alleles using `kodama` crate
-// /// (which, in turn, is based on this paper https://arxiv.org/pdf/1109.2378.pdf).
-// ///
-// /// Clusters with divergence not exceeding the threshold are joined.
-// /// Returns boolean vector: does the sequence remain after mergin?
-// fn cluster_alleles(
-//     mut nwk_writer: impl Write,
-//     entries: &[NamedSeq],
-//     divergences: TriangleMatrix<f64>,
-//     thresh: f64,
-// ) -> io::Result<Vec<bool>> {
-//     let n = entries.len();
-//     let total_clusters = 2 * n - 1;
-//     // Use Complete method, meaning that we track maximal distance between two points between two clusters.
-//     // This is done to cut as little as needed.
-//     let dendrogram = kodama::linkage(&mut divergences.take_linear(), n, kodama::Method::Complete);
-//     let mut clusters_nwk = Vec::with_capacity(total_clusters);
-//     // Cluster representatives.
-//     let mut cluster_repr = Vec::with_capacity(total_clusters);
-//     clusters_nwk.extend(entries.iter().map(|entry| entry.name().to_owned()));
-//     cluster_repr.extend(0..n);
-
-//     let steps = dendrogram.steps();
-//     for step in steps.iter() {
-//         let i = step.cluster1;
-//         let j = step.cluster2;
-//         clusters_nwk.push(format!("({}:{dist},{}:{dist})", &clusters_nwk[i], &clusters_nwk[j],
-//             dist = crate::math::fmt_signif(0.5 * step.dissimilarity, 5)));
-//         let size1 = if i < n { 1 } else { steps[i - n].size };
-//         let size2 = if j < n { 1 } else { steps[j - n].size };
-//         cluster_repr.push(cluster_repr[if size1 >= size2 { i } else { j }]);
-//     }
-//     assert_eq!(clusters_nwk.len(), total_clusters);
-//     writeln!(nwk_writer, "{};", clusters_nwk.last().unwrap())?;
-
-//     let mut queue = vec![total_clusters - 1];
-//     let mut keep_seqs = vec![false; n];
-//     while let Some(i) = queue.pop() {
-//         if i < n {
-//             keep_seqs[i] = true;
-//         } else {
-//             let step = &steps[i - n];
-//             if step.dissimilarity == 0.0 || step.dissimilarity <= thresh {
-//                 keep_seqs[cluster_repr[i]] = true;
-//             } else {
-//                 queue.push(step.cluster1);
-//                 queue.push(step.cluster2);
-//             }
-//         }
-//     }
-//     Ok(keep_seqs)
-// }
 
 /// Discards identical haplotypes, and, if any, writes their names into a text files.
 fn discard_identical(entries: Vec<NamedSeq>, locus_dir: &Path) -> crate::Result<Vec<NamedSeq>> {
@@ -602,7 +549,7 @@ fn process_alleles(
     }
     std::mem::drop(fasta_filename);
 
-    log::info!("    Calculating sequence divergence for {} alleles", n_entries);
+    log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
     let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
     let divergences = div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
     let divergences = TriangleMatrix::from_linear_data(n_entries, divergences);
@@ -645,14 +592,14 @@ fn process_alleles(
 /// Checks sequences for Ns, minimal size and for equal boundaries.
 fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u8]>) -> crate::Result<()> {
     if seqs.len() < 2 {
-        return Err(error!(InvalidData, "Less than two alleles available for locus {}", locus.name()));
+        return Err(error!(InvalidData, "Less than two haplotypes available for locus {}", locus.name()));
     }
     let min_size = seqs.iter().map(|s| s.len()).min().unwrap();
     if min_size < 1000 {
-        log::error!("    [{}] Locus alleles extremely short (shortest: {} bp). Continuing for now",
+        log::error!("    [{}] Locus haplotypes extremely short (shortest: {} bp). Continuing for now",
             locus.name(), min_size);
     } else if min_size < 10000 {
-        log::warn!("    [{}] Locus alleles may be too short (shortest: {} bp)", locus.name(), min_size);
+        log::warn!("    [{}] Locus haplotypes may be too short (shortest: {} bp)", locus.name(), min_size);
     }
 
     const AFFIX_SIZE: usize = 5;
@@ -669,18 +616,18 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
         if d > 0 {
             log::log!(
                 if d == n { log::Level::Error } else { log::Level::Warn },
-                "[{}] {} of the alleles ({}/{}) do not match the reference at the boundary", locus.name(),
+                "[{}] {} of the haplotypes ({}/{}) do not match the reference at the boundary", locus.name(),
                 if d == n { "All" } else if d >= n / 2 { "Most" } else { "Some" }, d, n);
         }
     } else if seqs[1..].iter().map(NamedSeq::seq)
         .any(|s| &s[..AFFIX_SIZE] != prefix || &s[s.len() - AFFIX_SIZE..] != suffix)
     {
-        log::warn!("[{}] Allele sequences differ at the boundary", locus.name());
+        log::warn!("[{}] Haplotype sequences differ at the boundary", locus.name());
     }
     Ok(())
 }
 
-/// Discard alleles, whose names are in `leave_out`.
+/// Discard haplotypes, whose names are in `leave_out`.
 /// Additionally, discard sequences `name[._-][0-9]` where `name` is in `leave_out`.
 fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>) -> Vec<NamedSeq> {
     if leave_out.is_empty() {
@@ -707,9 +654,9 @@ fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>
             left_out.truncate(5);
             left_out.push("...".to_owned());
         }
-        log::warn!("    Leave out {} alleles ({})", discarded, left_out.join(", "));
+        log::warn!("    Leave out {} haplotypes ({})", discarded, left_out.join(", "));
     } else {
-        log::warn!("Zero matches between leave-out and FASTA alleles");
+        log::warn!("Zero matches between leave-out and FASTA haplotypes");
     }
     filt_alleles
 }
@@ -764,16 +711,16 @@ fn add_locus(
     } else if let Some(fasta_filename) = alleles_fasta {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let alleles = fasta_reader.read_named_seqs()?;
-        log::info!("FASTA file contains {} alleles", alleles.len());
+        log::info!("FASTA file contains {} haplotypes", alleles.len());
         discard_leave_out_alleles(alleles, &args.leave_out)
     } else {
-        unreachable!("Either VCF file or alleles FASTA must be specified")
+        unreachable!("Either VCF file or haplotypes FASTA must be specified")
     };
     let obtained_count = allele_seqs.len();
     let allele_seqs: Vec<_> = allele_seqs.into_iter().filter(|entry| !seq::has_n(entry.seq())).collect();
     let without_ns = allele_seqs.len();
     if without_ns < obtained_count {
-        log::warn!("    Removed {}/{} alleles with Ns", obtained_count - without_ns, obtained_count);
+        log::warn!("    Removed {}/{} haplotypes with Ns", obtained_count - without_ns, obtained_count);
     }
     check_sequences(&allele_seqs, &locus, if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
     process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)
