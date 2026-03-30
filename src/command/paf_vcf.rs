@@ -255,7 +255,7 @@ fn process_haplotype(
     cigar: &Cigar,
 ) -> crate::Result<Vec<VarRange>>
 {
-    let mut vars = Vec::new();
+    let mut vars = Vec::<VarRange>::new();
     let mut rpos = 0;
     let mut qpos = 0;
     for item in cigar.iter() {
@@ -272,19 +272,35 @@ fn process_haplotype(
         let rdiff = u32::from(op.consumes_ref()) * item.len();
         let qdiff = u32::from(op.consumes_query()) * item.len();
 
-        let var = if rdiff == qdiff {
-            VarRange::new(rpos,      rpos + rdiff,      qpos,      qpos + qdiff)
-        } else if rpos == 0 || qpos == 0 {
-            VarRange::new(rpos,      rpos + rdiff + 1,  qpos,      qpos + qdiff + 1)
-        } else {
-            VarRange::new(rpos - 1,  rpos + rdiff,      qpos - 1,  qpos + qdiff)
-        };
+        let mut need_new = true;
+        if let Some(last_var) = vars.last_mut() {
+            if last_var.ref_end == rpos && last_var.hap_end == qpos {
+                // Current indel is preceded by a mismatch.
+                last_var.ref_end = rpos + rdiff;
+                last_var.hap_end = qpos + qdiff;
+                need_new = false;
+            } else {
+                assert!(last_var.ref_end < rpos && last_var.hap_end < qpos);
+            }
+        }
+
+        if need_new {
+            let var = if rdiff == qdiff {
+                VarRange::new(rpos,      rpos + rdiff,      qpos,      qpos + qdiff)
+            } else if rpos == 0 || qpos == 0 {
+                VarRange::new(rpos,      rpos + rdiff + 1,  qpos,      qpos + qdiff + 1)
+            } else {
+                VarRange::new(rpos - 1,  rpos + rdiff,      qpos - 1,  qpos + qdiff)
+            };
+            vars.push(var);
+        }
+        rpos += rdiff;
+        qpos += qdiff;
+    }
+    if let Some(var) = vars.last() {
         if var.ref_end > ref_seq.len() as u32 || var.hap_end > hap_seq.len() as u32 {
             return Err(error!(RuntimeError, "CIGAR operation out of range of the sequence"));
         }
-        vars.push(var);
-        rpos += rdiff;
-        qpos += qdiff;
     }
     move_all_left(&mut vars, ref_seq, hap_seq);
     Ok(vars)
@@ -472,7 +488,10 @@ fn write_vcf(
                     }
                 }
         })).collect();
-        assert!(alleles.len() > 1);
+        if alleles.len() == 1 {
+            // Can happen in separate.vcf.gz as some alleles become unknown.
+            continue;
+        }
 
         write!(writer, "{}\t{}\t.", chrom, ref_start + shift + 1).map_err(add_path!(vcf_filename))?;
         for (i, allele) in alleles.iter().enumerate() {
