@@ -188,14 +188,70 @@ impl VarRange {
     fn new(ref_start: u32, ref_end: u32, hap_start: u32, hap_end: u32) -> Self {
         Self { ref_start, ref_end, hap_start, hap_end }
     }
+
+    #[inline]
+    fn ref_len(&self) -> u32 {
+        self.ref_end - self.ref_start
+    }
+
+    #[inline]
+    fn alt_len(&self) -> u32 {
+        self.hap_end - self.hap_start
+    }
+}
+
+/// Canonize gap by moving its position at max to the left.
+/// Resulting gap start will be >= min_start.
+/// Gap can appear both on reference or alternate haplotypes (does not matter), gap start is reference-based.
+/// Between min_start and gap_start sequence must be non-variable.
+fn gap_move_left(full_ref_seq: &[u8], mut gap_start: u32, gap_seq: &[u8], min_start: u32) -> u32 {
+    let last_ix = gap_seq.len() - 1;
+    let mut k = last_ix;
+    while gap_start > min_start && gap_seq[k] == full_ref_seq[gap_start as usize - 1] {
+        gap_start -= 1;
+        k = k.checked_sub(1).unwrap_or(last_ix);
+    }
+    gap_start
+}
+
+/// Move variants to canonical representation.
+fn move_all_left(vars: &mut Vec<VarRange>, ref_seq: &[u8], hap_seq: &[u8]) {
+    let mut last_end = 0;
+    for var in vars {
+        // Update here so that we can safely use continue.
+        let min_start = last_end;
+        last_end = var.ref_end;
+
+        if var.ref_len() == var.alt_len() { continue; }
+        let var_ref_seq = &ref_seq[var.ref_start as usize..var.ref_end as usize];
+        let var_alt_seq = &hap_seq[var.hap_start as usize..var.hap_end as usize];
+        // Prefixes do not match.
+        if var_ref_seq.iter().zip(var_alt_seq).any(|(c1, c2)| c1 != c2) { continue; }
+
+        let prefix_size = usize::min(var_ref_seq.len(), var_alt_seq.len());
+        let gap_seq = if prefix_size == var_ref_seq.len() {
+            &var_alt_seq[prefix_size..]
+        } else {
+            &var_ref_seq[prefix_size..]
+        };
+        let gap_start = var.ref_start + prefix_size as u32;
+        let new_start = gap_move_left(ref_seq, gap_start, gap_seq, min_start + prefix_size as u32);
+        let shift = gap_start - new_start;
+        assert!(var.hap_start >= shift);
+        assert!(var.ref_start - shift >= min_start);
+        var.ref_start -= shift;
+        var.ref_end -= shift;
+        var.hap_start -= shift;
+        var.hap_end -= shift;
+    }
 }
 
 /// Convert one haplotype into VCF.
 /// `start` represent shift of the variants relative to the reference haplotype.
 /// Returns a vector of variant ranges.
 fn process_haplotype(
-    ref_len: u32,
-    hap_len: u32,
+    ref_seq: &[u8],
+    hap_seq: &[u8],
     cigar: &Cigar,
 ) -> crate::Result<Vec<VarRange>>
 {
@@ -223,13 +279,14 @@ fn process_haplotype(
         } else {
             VarRange::new(rpos - 1,  rpos + rdiff,      qpos - 1,  qpos + qdiff)
         };
-        if var.ref_end > ref_len || var.hap_end > hap_len {
+        if var.ref_end > ref_seq.len() as u32 || var.hap_end > hap_seq.len() as u32 {
             return Err(error!(RuntimeError, "CIGAR operation out of range of the sequence"));
         }
         vars.push(var);
         rpos += rdiff;
         qpos += qdiff;
     }
+    move_all_left(&mut vars, ref_seq, hap_seq);
     Ok(vars)
 }
 
@@ -263,12 +320,13 @@ fn create_vcf_writer<'a>(
 /// Reads PAF file and returns a vector of variants for each haplotype found in the contig set and in the PAF file.
 fn process_paf(
     paf_filename: &Path,
-    contigs: &ContigNames,
+    contig_set: &ContigSet,
     ref_id: ContigId,
 ) -> crate::Result<Vec<Option<Vec<VarRange>>>>
 {
+    let contigs = contig_set.contigs();
     let ref_hap = contigs.get_name(ref_id);
-    let ref_len = contigs.get_len(ref_id);
+    let ref_seq = contig_set.get_seq(ref_id);
     let mut var_ranges = vec![None; contigs.len()];
     var_ranges[ref_id.ix()] = Some(Vec::new());
 
@@ -295,8 +353,7 @@ fn process_paf(
             log::warn!("Cannot find sequence for haplotype {}", hap);
             continue
         };
-
-        let hap_len = contigs.get_len(hap_id);
+        let hap_seq = contig_set.get_seq(hap_id);
 
         let hap_column = 5 * usize::from(invert);
         let ref_column = 5 * usize::from(!invert);
@@ -309,7 +366,7 @@ fn process_paf(
         let ref_end: u32 = split[ref_column + 3].parse()
             .map_err(|_| error!(ParsingError, "Cannot parse PAF line {}", trimmed))?;
 
-        if ref_start != 0 || ref_end != ref_len || hap_start != 0 || hap_end != hap_len {
+        if ref_start != 0 || ref_end != ref_seq.len() as u32 || hap_start != 0 || hap_end != hap_seq.len() as u32 {
             log::warn!("Alignment between {} and {} does not cover the full sequence", ref_hap, hap);
             continue;
         }
@@ -333,7 +390,7 @@ fn process_paf(
                 cigar.query_len(), cigar.ref_len(), hap_end, ref_end);
             continue;
         }
-        var_ranges[hap_id.ix()] = Some(process_haplotype(ref_len, hap_len, &cigar)?);
+        var_ranges[hap_id.ix()] = Some(process_haplotype(ref_seq, hap_seq, &cigar)?);
     }
     Ok(var_ranges)
 }
@@ -553,8 +610,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
 
     let (chrom, shift) = load_region(&args.region, fasta_filename)?.unwrap_or((ref_hap.clone(), 0));
-    let vars = process_paf(args.paf.as_ref().expect("PAF filename must be provided"),
-        contig_set.contigs(), ref_id)?;
+    let vars = process_paf(args.paf.as_ref().expect("PAF filename must be provided"), &contig_set, ref_id)?;
     combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps,
         args.out_merged.as_ref().expect("Merged output VCF must be present"),
         args.out_separate.as_ref().map(|fname| fname as &Path))?;
