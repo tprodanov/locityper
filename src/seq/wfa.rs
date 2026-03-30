@@ -153,6 +153,12 @@ impl Aligner {
     /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
     /// If the alignment is dropped, returns VERY approximate alignment.
     pub fn align(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> crate::Result<i32> {
+        // // Has .I.D or .D.I
+        // let mut has_gap_conflict = false;
+        // // Initial value does not matter.
+        // let mut last_op = Operation::Match;
+        // let start_len = cigar.len();
+
         let status = unsafe { cwfa::wavefront_align(
             self.inner,
             seq1.as_ptr() as *const c_char,
@@ -176,6 +182,8 @@ impl Aligner {
                 let op = op_from_char(ch).map_err(|_| error!(RuntimeError,
                     "Could not align two sequences: violating CIGAR character `{}` ({}) in {:?}. Sequences: {} and {}",
                     char::from(ch), ch, cigar_slice, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2)))?;
+                // has_gap_conflict = has_gap_conflict || last_op.gap_conflict(op);
+                // last_op = op;
                 cigar.push_checked(op, 1);
             }
         }
@@ -184,6 +192,10 @@ impl Aligner {
             log::warn!("WFA produced very small score ({}). Sequences: {} and {}",
                 score, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2));
         }
+
+        // if has_gap_conflict {
+        //     score += cigar.optimize(start_len, &self.penalties);
+        // }
         Ok(score)
     }
 }

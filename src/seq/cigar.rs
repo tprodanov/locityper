@@ -9,6 +9,7 @@ use htslib::bam::record;
 use crate::{
     err::error,
     ext::vec::VecOrNone,
+    seq::wfa::Penalties,
 };
 
 /// Subset of CIGAR operations.
@@ -121,6 +122,14 @@ impl Operation {
             Operation::Diff => Operation::Diff,
 
             Operation::Hard => panic!("Cigar::invert not supported with Hard clipping"),
+        }
+    }
+
+    /// Returns true if insertion and deletion go right after another.
+    pub const fn gap_conflict(self, next: Operation) -> bool {
+        match (self, next) {
+            (Operation::Ins, Operation::Del) | (Operation::Del, Operation::Ins) => true,
+            _ => false
         }
     }
 }
@@ -489,6 +498,40 @@ impl Cigar {
             nmatches += if item.op == Operation::Equal { item.len } else { 0 };
         }
         (nmatches, total_size)
+    }
+
+    /// Removes conflicting gaps and returns change in the score.
+    /// Sequences are for the tail of the CIGAR, starting at the `start` index.
+    pub fn optimize(&mut self, start: usize, penalties: &Penalties) -> i32 {
+        let mut score_diff = 0;
+        for i in (start + 1..self.len()).rev() {
+            let prev = unsafe { *self.tuples.get_unchecked(i - 1) };
+            let curr = unsafe { *self.tuples.get_unchecked(i) };
+            if !prev.operation().gap_conflict(curr.operation()) {
+                continue;
+            }
+            let l1 = prev.len();
+            let l2 = curr.len();
+            let mismatch_len = u32::min(l1, l2);
+            let tail_len = u32::max(l1, l2) - mismatch_len;
+
+            // Theoretically, mismatch could contain equalities, but too expensive to check.
+            let diff = mismatch_len as i32 * (2 * penalties.gap_extend - penalties.mismatch)
+                + (if tail_len == 0 { 2 } else { 1 }) * penalties.gap_open;
+            if diff <= 0 {
+                continue;
+            }
+            score_diff += diff;
+
+            self.tuples[i] = CigarItem::new(Operation::Diff, mismatch_len);
+            if tail_len == 0 {
+                self.tuples.remove(i - 1);
+            } else {
+                self.tuples[i - 1] = CigarItem::new(
+                    if l1 > l2 { prev.operation() } else { curr.operation() }, tail_len);
+            }
+        }
+        score_diff
     }
 }
 

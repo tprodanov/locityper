@@ -372,8 +372,7 @@ fn align_all_singlethread(
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;
     for (ix, &(i, j)) in pairs.iter().enumerate() {
-        process_pair(entries, i as usize, j as usize, minimizers, kmers, params, &aligner,
-            &mut buf1, &mut buf2, out)?;
+        process_pair(entries, i as usize, j as usize, minimizers, kmers, params, &aligner, &mut buf1, &mut buf2, out)?;
         if verbose && (ix & LOG_FREQ) == LOG_FREQ {
             log::debug!("    Aligned ≈{:5.1}% pairs", mult * ix as f64);
         }
