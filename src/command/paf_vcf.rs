@@ -576,9 +576,13 @@ fn group_haplotypes(
     let mut add = |i: usize, name: &str| -> crate::Result<()> {
         let c = re.captures(name).ok_or_else(|| error!(ParsingError, "Cannot parse contig name `{}`", name))?;
         let sample = &c[1];
-        let hap = c.get(2).map(|hap| hap.as_str().as_bytes()[1] - b'1').unwrap_or(0) as usize;
+        let opt_hap = c.get(2);
+        let hap = opt_hap.map(|hap| hap.as_str().as_bytes()[1] - b'1').unwrap_or(0) as usize;
         let vec = map.entry(sample.to_string()).or_default();
-        vec.resize(vec.len().max(hap + 1), None);
+        // If haplotype has .1 suffix, make vector length at least 2,
+        // so that we have indication that the sample is diploid.
+        let new_len = vec.len().max(hap + 1).max(if opt_hap.is_none() { 1 } else { 2 });
+        vec.resize(new_len, None);
         vec[hap] = Some(i);
         Ok(())
     };
