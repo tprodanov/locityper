@@ -262,11 +262,16 @@ fn load_loci(
     for (name, locus, opt_fasta) in loci.iter() {
         if !names.insert(name.clone()) {
             return Err(error!(InvalidInput, "Locus name '{}' appears at least twice", name));
+        } else if !require_seqs && opt_fasta.is_some() {
+            return Err(error!(InvalidInput,
+                "FASTA file with locus haplotypes cannot be provided if variants (-v) were specified (see locus {})",
+                name));
         }
         let interval = Interval::parse(locus, contigs)?;
         intervals.push((NamedInterval::new(name.clone(), interval)?, opt_fasta.clone()));
     }
 
+    let mut extra_col_warning = false;
     for filename in bed_files.iter() {
         let dirname = ext::sys::parent_unless_tty(filename);
         for line in ext::sys::open(filename)?.lines() {
@@ -276,7 +281,7 @@ fn load_loci(
             if !names.insert(interval.name().to_string()) {
                 return Err(error!(InvalidInput, "Locus name '{}' appears at least twice", interval.name()));
             }
-            let opt_fasta = match split.next() {
+            let mut opt_fasta = match split.next() {
                 None => None,
                 Some(s) => {
                     let path = &Path::new(s);
@@ -284,6 +289,13 @@ fn load_loci(
                     Some(dirname.map(|d| d.join(path)).unwrap_or_else(|| path.to_path_buf()))
                 },
             };
+            if !require_seqs {
+                if !extra_col_warning {
+                    log::warn!("VCF file was provided (-v), ignoring column 5");
+                    extra_col_warning = true;
+                }
+                opt_fasta = None;
+            }
             intervals.push((interval, opt_fasta));
         }
     }
@@ -291,11 +303,6 @@ fn load_loci(
     // Test FASTA filenames.
     for (locus, opt_fasta) in intervals.iter() {
         if let Some(filename) = opt_fasta {
-            if !require_seqs {
-                return Err(error!(InvalidInput,
-                    "FASTA file with locus haplotypes cannot be provided if variants (-v) were specified (see locus {})",
-                    locus.name()));
-            }
             if !filename.exists() || filename.is_dir() {
                 return Err(error!(InvalidInput, "FASTA file {} does not exist for locus {}",
                     ext::fmt::path(filename), locus.name()));
