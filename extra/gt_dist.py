@@ -57,7 +57,7 @@ class Distances:
                         continue
                     assert '~' not in line, 'Discarded haplotypes contain non-exact matches (~)'
                     hap, haps2 = map(str.strip, line.strip().split('='))
-                    haps2 = list(map(str.strip, hasp2.split(',')))
+                    haps2 = list(map(str.strip, haps2.split(',')))
                     for hap2 in list(haps2):
                         if hap2 in self.discarded:
                             haps2 += self.discarded[hap2]
