@@ -55,8 +55,14 @@ class Distances:
                 for line in f:
                     if line.startswith('#'):
                         continue
-                    hap, haps2 = line.strip().split('=')
-                    self.discarded[hap.strip()] = tuple(map(str.strip, haps2.split(',')))
+                    assert '~' not in line, 'Discarded haplotypes contain non-exact matches (~)'
+                    hap, haps2 = map(str.strip, line.strip().split('='))
+                    haps2 = list(map(str.strip, hasp2.split(',')))
+                    for hap2 in list(haps2):
+                        if hap2 in self.discarded:
+                            haps2 += self.discarded[hap2]
+                            del self.discarded[hap2]
+                    self.discarded[hap] = tuple(haps2)
 
         self.lengths = {}
         self.distances = defaultdict(dict)
