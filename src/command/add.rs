@@ -53,6 +53,7 @@ struct Args {
     threads: u16,
     force: bool,
     jellyfish: PathBuf,
+    only_seqs: bool,
 }
 
 impl Default for Args {
@@ -78,6 +79,7 @@ impl Default for Args {
             threads: 8,
             force: false,
             jellyfish: PathBuf::from("jellyfish"),
+            only_seqs: false,
         }
     }
 }
@@ -172,6 +174,8 @@ fn print_help() {
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Only extract sequences, do not extra work.",
+        "    --only-seqs".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
 
@@ -232,6 +236,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
+            Long("only-seqs") => args.only_seqs = true,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -555,6 +560,11 @@ fn process_alleles(
         seqs.push(entry.seq().to_vec());
     }
     std::mem::drop(fasta_filename);
+
+    if args.only_seqs {
+        super::write_success_file(locus_dir.join(paths::SUCCESS))?;
+        return Ok(());
+    }
 
     log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
     let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
