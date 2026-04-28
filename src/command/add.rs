@@ -236,7 +236,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
-            Long("only-seqs") => args.only_seqs = true,
+            Long("only-seqs") | Long("seqs-only") => args.only_seqs = true,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -294,7 +294,7 @@ fn load_loci(
                     Some(dirname.map(|d| d.join(path)).unwrap_or_else(|| path.to_path_buf()))
                 },
             };
-            if !require_seqs {
+            if !require_seqs && opt_fasta.is_some() {
                 if !extra_col_warning {
                     log::warn!("VCF file was provided (-v), ignoring column 5");
                     extra_col_warning = true;

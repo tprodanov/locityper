@@ -31,6 +31,7 @@ struct Args {
     pairs_file: Option<PathBuf>,
     against: Option<String>,
     threads: u16,
+    ignore_missing: bool,
 
     params: dist::Params,
 }
@@ -47,6 +48,7 @@ impl Default for Args {
             pairs_file: None,
             against: None,
             threads: 8,
+            ignore_missing: false,
 
             params: Default::default(),
         }
@@ -125,6 +127,8 @@ fn print_help() {
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
+    println!("    {:KEY$} {:VAL$}  Do not print error messages on missing haplotypes from {}/{}.",
+        "--ignore-missing".green(), super::flag(), "-p".green(), "-P".green());
 
     println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -178,6 +182,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 args.params.penalties.gap_extend = parser.value()?.parse()?,
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
+            Long("ignore-missing") => args.ignore_missing = true,
             Short('V') | Long("version") => {
                 super::print_version();
                 std::process::exit(0);
@@ -192,19 +197,37 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
     Ok(args)
 }
 
-fn parse_pair(split_pair: &[&str], name2id: &HashMap<&str, u32>) -> crate::Result<(u32, u32)> {
+fn parse_pair(
+    split_pair: &[&str],
+    name2id: &HashMap<&str, u32>,
+    pairs: &mut Vec<(u32, u32)>,
+    warn: bool,
+) -> crate::Result<()>
+{
     if split_pair.len() != 2 {
-        return Err(error!(InvalidInput, "Cannot parse pair `{:?}`: exactly two names required",
-            split_pair));
+        return Err(error!(InvalidInput, "Cannot parse pair `{:?}`: exactly two names required", split_pair));
     }
-    let id1 = *name2id.get(split_pair[0])
-        .ok_or_else(|| error!(InvalidInput, "Cannot find sequence `{}`", split_pair[0]))?;
-    let id2 = *name2id.get(split_pair[1])
-        .ok_or_else(|| error!(InvalidInput, "Cannot find sequence `{}`", split_pair[1]))?;
+    let name1 = split_pair[0];
+    let name2 = split_pair[1];
+
+    let Some(&id1) = name2id.get(name1) else {
+        if warn {
+            log::warn!("Cannot find sequence `{}`", name1);
+        }
+        return Ok(())
+    };
+    let Some(&id2) = name2id.get(name2) else {
+        if warn {
+            log::warn!("Cannot find sequence `{}`", name2);
+        }
+        return Ok(())
+    };
     if id1 == id2 {
-        return Err(error!(InvalidInput, "Cannot align sequence to itself ({})", split_pair[0]));
+        log::error!("Cannot align sequence to itself ({})", name1);
+    } else {
+        pairs.push((id2, id1));
     }
-    Ok((id2, id1))
+    Ok(())
 }
 
 fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> {
@@ -222,7 +245,7 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
     let mut pairs = Vec::new();
     for pair in args.pairs.iter() {
         let split: SmallVec<[&str; 2]> = pair.split(',').collect();
-        pairs.push(parse_pair(&split, &name2id)?);
+        parse_pair(&split, &name2id, &mut pairs, !args.ignore_missing)?;
     }
 
     if let Some(path) = &args.pairs_file {
@@ -233,7 +256,7 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
                 continue;
             }
             let split: SmallVec<[&str; 2]> = line.split_whitespace().collect();
-            pairs.push(parse_pair(&split, &name2id)?);
+            parse_pair(&split, &name2id, &mut pairs, !args.ignore_missing)?;
         }
     }
 
