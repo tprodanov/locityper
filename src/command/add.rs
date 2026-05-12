@@ -53,6 +53,7 @@ struct Args {
     threads: u16,
     force: bool,
     jellyfish: PathBuf,
+    only_seqs: bool,
 }
 
 impl Default for Args {
@@ -78,6 +79,7 @@ impl Default for Args {
             threads: 8,
             force: false,
             jellyfish: PathBuf::from("jellyfish"),
+            only_seqs: false,
         }
     }
 }
@@ -172,6 +174,8 @@ fn print_help() {
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
     println!("    {:KEY$} {:VAL$}  Force rewrite output directory.",
         "-F, --force".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Only extract sequences, do not extra work.",
+        "    --only-seqs".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Jellyfish executable [{}].",
         "    --jellyfish".green(), "EXE".yellow(), super::fmt_def(defaults.jellyfish.display()));
 
@@ -232,6 +236,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
+            Long("only-seqs") | Long("seqs-only") => args.only_seqs = true,
             Long("jellyfish") => args.jellyfish = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -262,11 +267,16 @@ fn load_loci(
     for (name, locus, opt_fasta) in loci.iter() {
         if !names.insert(name.clone()) {
             return Err(error!(InvalidInput, "Locus name '{}' appears at least twice", name));
+        } else if !require_seqs && opt_fasta.is_some() {
+            return Err(error!(InvalidInput,
+                "FASTA file with locus haplotypes cannot be provided if variants (-v) were specified (see locus {})",
+                name));
         }
         let interval = Interval::parse(locus, contigs)?;
         intervals.push((NamedInterval::new(name.clone(), interval)?, opt_fasta.clone()));
     }
 
+    let mut extra_col_warning = false;
     for filename in bed_files.iter() {
         let dirname = ext::sys::parent_unless_tty(filename);
         for line in ext::sys::open(filename)?.lines() {
@@ -276,7 +286,7 @@ fn load_loci(
             if !names.insert(interval.name().to_string()) {
                 return Err(error!(InvalidInput, "Locus name '{}' appears at least twice", interval.name()));
             }
-            let opt_fasta = match split.next() {
+            let mut opt_fasta = match split.next() {
                 None => None,
                 Some(s) => {
                     let path = &Path::new(s);
@@ -284,6 +294,13 @@ fn load_loci(
                     Some(dirname.map(|d| d.join(path)).unwrap_or_else(|| path.to_path_buf()))
                 },
             };
+            if !require_seqs && opt_fasta.is_some() {
+                if !extra_col_warning {
+                    log::warn!("VCF file was provided (-v), ignoring column 5");
+                    extra_col_warning = true;
+                }
+                opt_fasta = None;
+            }
             intervals.push((interval, opt_fasta));
         }
     }
@@ -291,11 +308,6 @@ fn load_loci(
     // Test FASTA filenames.
     for (locus, opt_fasta) in intervals.iter() {
         if let Some(filename) = opt_fasta {
-            if !require_seqs {
-                return Err(error!(InvalidInput,
-                    "FASTA file with locus haplotypes cannot be provided if variants (-v) were specified (see locus {})",
-                    locus.name()));
-            }
             if !filename.exists() || filename.is_dir() {
                 return Err(error!(InvalidInput, "FASTA file {} does not exist for locus {}",
                     ext::fmt::path(filename), locus.name()));
@@ -548,6 +560,11 @@ fn process_alleles(
         seqs.push(entry.seq().to_vec());
     }
     std::mem::drop(fasta_filename);
+
+    if args.only_seqs {
+        super::write_success_file(locus_dir.join(paths::SUCCESS))?;
+        return Ok(());
+    }
 
     log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
     let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();

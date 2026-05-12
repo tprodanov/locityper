@@ -478,13 +478,14 @@ fn write_vcf(
     for (i, &(ref_start, ref_end)) in ref_ranges.iter().enumerate() {
         let mut alleles = vec![&ref_seq[ref_start as usize..ref_end as usize]];
         let hap_allele_ixs: Vec<Option<usize>> = contig_set.seqs().iter().zip(&hap_ranges)
-            .map(|(seq, hap)| hap[i].map(|(start, end)| {
+            .map(|(seq, hap)| hap[i].and_then(|(start, end)| {
                 let allele = &seq[start as usize..end as usize];
+                if allele.contains(&b'N') { return None; }
                 match alleles.iter().position(|&existing_allele| existing_allele == allele) {
-                    Some(allele_ix) => allele_ix,
+                    Some(allele_ix) => Some(allele_ix),
                     None => {
                         alleles.push(allele);
-                        alleles.len() - 1
+                        Some(alleles.len() - 1)
                     }
                 }
         })).collect();
