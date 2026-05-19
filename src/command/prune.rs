@@ -647,7 +647,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         ext::sys::mkdir(&output.join(paths::LOCI_DIR))?;
     }
 
-    let loci = super::genotype::load_loci(&[input], output, &args.subset_loci, rerun)?;
+    let loci = super::genotype::load_loci(&[input], output, &args.subset_loci, rerun, &Default::default())?;
     if loci.is_empty() {
         return Ok(());
     }

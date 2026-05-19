@@ -7,6 +7,7 @@ use std::{
 use smallvec::SmallVec;
 use htslib::bam;
 use bio::io::fasta;
+use itertools::izip;
 use crate::{
     err::{Error, error, add_path},
     ext,
@@ -14,7 +15,8 @@ use crate::{
         fastx,
         counts::KmerCounts,
     },
-    algo::HashMap,
+    algo::{HashMap, HashSet},
+    command::prune,
 };
 
 /// Contig identificator - newtype over u16.
@@ -348,6 +350,56 @@ impl ContigSet {
     /// Returns sequence by contig name, if found.
     pub fn get_seq_by_name(&self, name: &str) -> Option<&[u8]> {
         self.contigs.try_get_id(name).map(|id| self.get_seq(id))
+    }
+
+    /// Extract a subset of this contig set counts removing leave-out haplotype names.
+    /// Returns subset indices and a new contig set.
+    /// Subset indices will follow be sorted, so in the same order as this contigs set.
+    pub fn extract_subset(
+        &self,
+        leave_out: &HashSet<String>,
+        disc_filename: &Path,
+    ) -> crate::Result<(Vec<usize>, Self)> {
+        let disc_haps = if disc_filename.exists() {
+            prune::load_discarded_haplotypes(ext::sys::open(&disc_filename)?, &self.contigs)?
+        } else {
+            Default::default()
+        };
+        if !prune::all_identical(&disc_haps) {
+            log::warn!("[{}] Haplotypes were previously pruned (~ in discarded haplotypes). \
+                Leave-out genotyping may lose relevant previously discarded haplotypes",
+                self.contigs.tag());
+        }
+
+        let mut ixs = Vec::new();
+        let mut names_lengths = Vec::new();
+        let mut discarded = 0;
+        let mut replaced = 0;
+        for (i, (name, length)) in izip!(self.contigs.names(), self.contigs.lengths()).enumerate() {
+            let mut name = name.to_string();
+            if leave_out.contains(&name) {
+                if let Some(discarded) = disc_haps.get(&ContigId::new(i)) {
+                    for (oth_name, is_identical) in discarded {
+                        if *is_identical {
+                            name = oth_name.to_string();
+                            replaced += 1;
+                            break;
+                        }
+                    }
+                }
+                discarded += 1;
+                // Could not find any identical haplotype.
+                continue;
+            }
+            ixs.push(i);
+            names_lengths.push((name, *length));
+        }
+
+        log::debug!("    [{}] Leave-out: discarded {} haplotypes, replaced {} with identical haplotypes",
+            self.contigs.tag(), discarded, replaced);
+        let contigs = ContigNames::new(self.contigs.tag(), names_lengths.into_iter().map(Ok)).map(Arc::new)?;
+        let seqs = ixs.iter().map(|&i| self.seqs[i].clone()).collect();
+        Ok((ixs, ContigSet::new(contigs, seqs)))
     }
 }
 

@@ -75,6 +75,7 @@ struct Args {
     subset_loci: HashSet<String>,
     ploidy: u8,
     priors: Option<PathBuf>,
+    leave_out: HashSet<String>,
     reg_weights: Option<PathBuf>,
 
     threads: u16,
@@ -110,6 +111,7 @@ impl Default for Args {
             subset_loci: HashSet::default(),
             ploidy: 2,
             priors: None,
+            leave_out: HashSet::default(),
             reg_weights: None,
 
             threads: 8,
@@ -223,6 +225,8 @@ fn print_help(extended: bool) {
             {EMPTY}  <locus>  <haplotypes through comma>  <log10 prior>.\n\
             {EMPTY}  Only specified genotypes are evaluated.",
             "    --priors".green(), "FILE".yellow());
+        println!("    {:KEY$} {:VAL$}  Leave out haplotypes with specified names.",
+            "    --leave-out".green(), "STR+".yellow());
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -402,6 +406,11 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
+            Long("leave-out") => {
+                for val in parser.values()? {
+                    args.leave_out.insert(val.parse()?);
+                }
+            }
             Long("reg-weights") | Long("region-weights") => args.reg_weights = Some(parser.value()?.parse()?),
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
@@ -677,6 +686,7 @@ pub(super) fn load_loci(
     out_path: &Path,
     subset_loci: &HashSet<String>,
     rerun: super::Rerun,
+    leave_out: &HashSet<String>,
 ) -> crate::Result<Vec<LocusData>>
 {
     log::info!("Loading database");
@@ -713,15 +723,23 @@ pub(super) fn load_loci(
             }
             let fasta_fname = path.join(paths::LOCUS_FASTA);
             let kmers_fname = path.join(paths::KMERS);
-            match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
-                Ok((set, kmer_counts)) => {
-                    let locus_data = LocusData::new(set, kmer_counts, &path, &out_loci_dir);
-                    if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
-                        loci.push(locus_data);
-                    }
-                },
-                Err(e) => log::error!("Could not load locus information from {}: {}",
-                    ext::fmt::path(&path), e.display()),
+            let (mut set, mut kmer_counts) = match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
+                Ok(tup) => tup,
+                Err(e) => {
+                    log::error!("Could not load locus information from {}: {}", ext::fmt::path(&path), e.display());
+                    continue;
+                }
+            };
+            if !leave_out.is_empty() {
+                let (ixs, new_set) = set.extract_subset(leave_out, &path.join(paths::DISCARDED_HAPS))?;
+                if ixs.len() != set.len() {
+                    kmer_counts = kmer_counts.thin_out(ixs.into_iter());
+                }
+                set = new_set;
+            }
+            let locus_data = LocusData::new(set, kmer_counts, &path, &out_loci_dir);
+            if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
+                loci.push(locus_data);
             }
         }
     }
@@ -1184,7 +1202,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
     let explicit_weights = args.reg_weights.as_ref().map(|path| load_explicit_weights(path)).transpose()?;
-    let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun)?;
+    let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun, &args.leave_out)?;
     if loci.is_empty() {
         return Ok(());
     }
