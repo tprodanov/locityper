@@ -377,19 +377,22 @@ impl ContigSet {
         let mut replaced = 0;
         for (i, (name, length)) in izip!(self.contigs.names(), self.contigs.lengths()).enumerate() {
             let mut name = name.to_string();
+            let mut found = false;
             if leave_out.contains(&name) {
                 if let Some(discarded) = disc_haps.get(&ContigId::new(i)) {
                     for (oth_name, is_identical) in discarded {
                         if *is_identical {
                             name = oth_name.to_string();
                             replaced += 1;
+                            found = true;
                             break;
                         }
                     }
                 }
-                discarded += 1;
-                // Could not find any identical haplotype.
-                continue;
+                if !found {
+                    discarded += 1;
+                    continue;
+                }
             }
             ixs.push(i);
             names_lengths.push((name, *length));

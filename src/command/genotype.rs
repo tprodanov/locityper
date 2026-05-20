@@ -605,14 +605,20 @@ pub(super) struct LocusData {
     db_dir: PathBuf,
     /// Output directory OUT/loci/LOCUS.
     out_dir: PathBuf,
+    /// How many contigs were there before subsetting.
+    init_nhaps: usize,
+    /// In case of leave-out haplotypes, keep these indices.
+    keep_ixs: Option<Vec<usize>>,
 }
 
 impl LocusData {
-    pub fn new(set: ContigSet, kmer_counts: KmerCounts, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
-        let out_dir = out_loci_dir.join(set.tag());
+    pub fn new(set: ContigSet, kmer_counts: KmerCounts, db_locus_dir: &Path, out_locus_dir: &Path) -> Self {
         Self {
             db_dir: db_locus_dir.to_owned(),
-            set, kmer_counts, out_dir,
+            out_dir: out_locus_dir.to_owned(),
+            init_nhaps: set.len(),
+            set, kmer_counts,
+            keep_ixs: None,
         }
     }
 
@@ -713,36 +719,41 @@ pub(super) fn load_loci(
             }
 
             total_entries += 1;
-            let path = entry.path();
-            let Some(name) = locus_name_matches(&path, subset_loci) else { continue };
-            if !path.join(paths::SUCCESS).exists() {
-                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
+            let db_locus_dir = entry.path();
+            let Some(name) = locus_name_matches(&db_locus_dir, subset_loci) else { continue };
+            if !db_locus_dir.join(paths::SUCCESS).exists() {
+                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
                 continue;
             }
             if !loci_names.insert(name.to_owned()) {
                 log::error!("Duplicate locus {} in the database, ignoring second instance", name);
                 continue;
             }
-            let fasta_fname = path.join(paths::LOCUS_FASTA);
-            let kmers_fname = path.join(paths::KMERS);
-            let (mut set, mut kmer_counts) = match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
-                Ok(tup) => tup,
+            let out_locus_dir = out_loci_dir.join(name);
+            if !rerun.prepare_and_clean_dir(&out_locus_dir, |path| clean_dir(path, &mut n_warnings))? {
+                continue;
+            }
+
+            let fasta_fname = db_locus_dir.join(paths::LOCUS_FASTA);
+            let kmers_fname = db_locus_dir.join(paths::KMERS);
+            let mut locus_data = match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
+                Ok((set, kmer_counts)) => LocusData::new(set, kmer_counts, &db_locus_dir, &out_locus_dir),
                 Err(e) => {
-                    log::error!("Could not load locus information from {}: {}", ext::fmt::path(&path), e.display());
+                    log::error!("Could not load locus information from {}: {}",
+                        ext::fmt::path(&db_locus_dir), e.display());
                     continue;
                 }
             };
             if !leave_out.is_empty() {
-                let (ixs, new_set) = set.extract_subset(leave_out, &path.join(paths::DISCARDED_HAPS))?;
-                if ixs.len() != set.len() {
-                    kmer_counts = kmer_counts.thin_out(ixs.into_iter());
+                let (ixs, new_set) = locus_data.set.extract_subset(leave_out,
+                    &db_locus_dir.join(paths::DISCARDED_HAPS))?;
+                locus_data.set = new_set;
+                if ixs.len() != locus_data.init_nhaps {
+                    locus_data.kmer_counts = locus_data.kmer_counts.thin_out(ixs.iter().copied());
                 }
-                set = new_set;
+                locus_data.keep_ixs = Some(ixs);
             }
-            let locus_data = LocusData::new(set, kmer_counts, &path, &out_loci_dir);
-            if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
-                loci.push(locus_data);
-            }
+            loci.push(locus_data);
         }
     }
     let n = loci.len();
@@ -1140,8 +1151,11 @@ fn analyze_locus(
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
         let contig_distances = if dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
-            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;
-            Some(dists)
+            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, locus.init_nhaps)?;
+            match &locus.keep_ixs {
+                Some(ixs) if ixs.len() != dists.side() => Some(dists.thin_out(ixs)),
+                _ => Some(dists),
+            }
         } else {
             None
         };
