@@ -398,7 +398,7 @@ impl ContigSet {
             names_lengths.push((name, *length));
         }
 
-        log::debug!("    [{}] Leave-out: discarded {} haplotypes ({}), replaced {} haplotypes ({}) with identical ones",
+        log::debug!("    [{}] Leave-out: discarded {} haplotype(s) [{}], replaced {} haplotype(s) [{}] with identical",
             self.contigs.tag(),
             discarded.len(), ext::vec::join_up_to(&discarded, 5),
             replaced.len(), ext::vec::join_up_to(&replaced, 5));
