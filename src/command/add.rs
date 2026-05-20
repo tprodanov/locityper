@@ -25,7 +25,7 @@ use crate::{
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
         panvcf, fastx, div,
-        contigs::GenomeVersion,
+        contigs::{self, GenomeVersion},
         kmers::{self, Kmer},
         counts::{JfKmerGetter, KmerCount},
     },
@@ -644,17 +644,6 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
     Ok(())
 }
 
-/// Returns true if `name` is in `set`, or, if `name` ends with `.N` / `_N` / `-N` (N is a single digit)
-/// and corresponding prefix is in the set.
-pub(crate) fn sample_or_haplotype_in_set(name: &str, set: &HashSet<String>) -> bool {
-    let bytes = name.as_bytes();
-    let n = bytes.len();
-    set.contains(name) ||
-        (n > 2 && set.contains(&std::str::from_utf8(&bytes[..n - 2]).unwrap() as &str)
-        && b'0' <= bytes[n - 1] && bytes[n - 1] <= b'9'
-        && (bytes[n - 2] == b'.' || bytes[n - 2] == b'_' || bytes[n - 2] == b'-'))
-}
-
 /// Discard haplotypes, whose names are in `leave_out`.
 /// Additionally, discard sequences `name[._-][0-9]` where `name` is in `leave_out`.
 fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>) -> Vec<NamedSeq> {
@@ -664,19 +653,14 @@ fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>
     let mut filt_alleles = Vec::with_capacity(alleles.len());
     let mut left_out = Vec::new();
     for allele in alleles.into_iter() {
-        if sample_or_haplotype_in_set(allele.name(), leave_out) {
+        if contigs::sample_or_haplotype_in_set(allele.name(), leave_out) {
             left_out.push(allele.take_name());
             continue;
         }
         filt_alleles.push(allele);
     }
-    let discarded = left_out.len();
-    if discarded > 0 {
-        if left_out.len() > 5 {
-            left_out.truncate(5);
-            left_out.push("...".to_owned());
-        }
-        log::warn!("    Leave out {} haplotypes ({})", discarded, left_out.join(", "));
+    if !left_out.is_empty() {
+        log::warn!("    Leave out {} haplotypes ({})", left_out.len(), ext::vec::join_up_to(&left_out, 5));
     } else {
         log::warn!("Zero matches between leave-out and FASTA haplotypes");
     }

@@ -124,11 +124,7 @@ impl HaplotypeNames {
         }
         log::info!("VCF file contains {} haplotypes", total);
         if discarded > 0 {
-            if left_out.len() > 5 {
-                left_out.truncate(5);
-                left_out.push("...".to_owned());
-            }
-            log::warn!("    Leave out {} haplotypes ({})", discarded, left_out.join(", "));
+            log::warn!("    Leave out {} haplotypes ({})", left_out.len(), crate::ext::vec::join_up_to(&left_out, 5));
         } else if !leave_out.is_empty() {
             log::warn!("Zero matches between leave-out and VCF samples");
         }

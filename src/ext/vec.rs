@@ -369,3 +369,21 @@ where T: Copy,
         }
     }
 }
+
+/// Joins strings with ", " up to max entries and then writes ", ..." if needed.
+/// `join_up_to(&["a", "b", "c", "d"], 2)` -> `"a, b, ..."`
+/// `join_up_to(&["a", "b", "c", "d"], 5)` -> `"a, b, c, d"`
+pub fn join_up_to(strings: &[impl AsRef<str>], max: usize) -> String {
+    let mut res = String::new();
+    for (i, s) in strings.iter().enumerate() {
+        if i > 1 {
+            res.push_str(", ");
+        }
+        if i == max {
+            res.push_str("...");
+            break;
+        }
+        res.push_str(s.as_ref());
+    }
+    res
+}

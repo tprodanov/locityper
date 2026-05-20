@@ -15,13 +15,12 @@ use crate::{
     seq::{
         interv,
         cigar::{Cigar, Operation},
-        contigs::{ContigId, ContigNames, ContigSet},
+        contigs::{self, ContigId, ContigNames, ContigSet},
     },
     algo::{
         bisect,
         HashMap, IntMap,
     },
-    command::prune,
 };
 
 struct Args {
@@ -621,14 +620,14 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     };
     let disc_haps = match disc_filename {
         Some(fname) if fname.exists() =>
-            prune::load_discarded_haplotypes(ext::sys::open(fname)?, contig_set.contigs())?,
+            contigs::load_discarded_haplotypes(ext::sys::open(fname)?, contig_set.contigs())?,
         Some(fname) => {
             log::debug!("Skip discarded haplotypes, file {} does not exist", fname.display());
             Default::default()
         }
         None => Default::default()
     };
-    if !prune::all_identical(&disc_haps) {
+    if !contigs::discarded_all_identical(&disc_haps) {
         log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
     }
     let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;

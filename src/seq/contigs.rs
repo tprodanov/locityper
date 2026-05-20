@@ -1,5 +1,6 @@
 use std::{
-    fmt, io,
+    fmt,
+    io::{self, BufRead},
     fs::File,
     sync::Arc,
     path::Path,
@@ -15,8 +16,7 @@ use crate::{
         fastx,
         counts::KmerCounts,
     },
-    algo::{HashMap, HashSet},
-    command::prune,
+    algo::{HashMap, HashSet, IntMap},
 };
 
 /// Contig identificator - newtype over u16.
@@ -361,11 +361,11 @@ impl ContigSet {
         disc_filename: &Path,
     ) -> crate::Result<(Vec<usize>, Self)> {
         let disc_haps = if disc_filename.exists() {
-            prune::load_discarded_haplotypes(ext::sys::open(&disc_filename)?, &self.contigs)?
+            load_discarded_haplotypes(ext::sys::open(&disc_filename)?, &self.contigs)?
         } else {
             Default::default()
         };
-        if !prune::all_identical(&disc_haps) {
+        if !discarded_all_identical(&disc_haps) {
             log::warn!("[{}] Haplotypes were previously pruned (~ in discarded haplotypes). \
                 Leave-out genotyping may lose relevant previously discarded haplotypes",
                 self.contigs.tag());
@@ -373,24 +373,24 @@ impl ContigSet {
 
         let mut ixs = Vec::new();
         let mut names_lengths = Vec::new();
-        let mut discarded = 0;
-        let mut replaced = 0;
+        let mut discarded = Vec::new();
+        let mut replaced = Vec::new();
         for (i, (name, length)) in izip!(self.contigs.names(), self.contigs.lengths()).enumerate() {
             let mut name = name.to_string();
             let mut found = false;
-            if leave_out.contains(&name) {
+            if sample_or_haplotype_in_set(&name, &leave_out) {
                 if let Some(discarded) = disc_haps.get(&ContigId::new(i)) {
                     for (oth_name, is_identical) in discarded {
                         if *is_identical {
+                            replaced.push(name.to_string());
                             name = oth_name.to_string();
-                            replaced += 1;
                             found = true;
                             break;
                         }
                     }
                 }
                 if !found {
-                    discarded += 1;
+                    discarded.push(name.to_string());
                     continue;
                 }
             }
@@ -398,8 +398,10 @@ impl ContigSet {
             names_lengths.push((name, *length));
         }
 
-        log::debug!("    [{}] Leave-out: discarded {} haplotypes, replaced {} with identical haplotypes",
-            self.contigs.tag(), discarded, replaced);
+        log::debug!("    [{}] Leave-out: discarded {} haplotypes ({}), replaced {} haplotypes ({}) with identical ones",
+            self.contigs.tag(),
+            discarded.len(), ext::vec::join_up_to(&discarded, 5),
+            replaced.len(), ext::vec::join_up_to(&replaced, 5));
         let contigs = ContigNames::new(self.contigs.tag(), names_lengths.into_iter().map(Ok)).map(Arc::new)?;
         let seqs = ixs.iter().map(|&i| self.seqs[i].clone()).collect();
         Ok((ixs, ContigSet::new(contigs, seqs)))
@@ -461,4 +463,70 @@ impl fmt::Display for Genotype {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&self.name)
     }
+}
+
+pub type DiscardedHaplotypes = IntMap<ContigId, Vec<(String, bool)>>;
+
+/// Loads `discarded_haplotypes.txt` file, with lines `haplotype (= or ~) haplotype2, haplotype3, ...`.
+/// Returns map (retained contig id) -> Vec of (discarded name, is_identical).
+pub fn load_discarded_haplotypes(
+    f: impl BufRead,
+    contigs: &ContigNames,
+) -> crate::Result<DiscardedHaplotypes>
+{
+    // Map { retained -> (discarded, identical) }, where retained is not found in `contigs`.
+    let mut corresp_unknown: HashMap<String, Vec<(String, bool)>> = HashMap::default();
+    // Same, but retained haplotype if found, and replaced with its id.
+    let mut corresp = IntMap::default();
+
+    for line in f.lines() {
+        let line = line.map_err(add_path!(!))?;
+        let split: Vec<_> = line.split_whitespace().collect();
+        if split.len() < 3 {
+            return Err(error!(InvalidInput, "Each line in discarded haplotypes must have at least 3 columns"));
+        }
+        let identical = split[1] == "=";
+
+        let mut rhs = Vec::with_capacity(split.len() - 2);
+        for contig in &split[2..] {
+            let contig = contig.strip_suffix(',').unwrap_or(contig);
+            if contigs.contains(contig) {
+                log::warn!("{}Haplotype {} is marked as discarded, but present in the haplotypes fasta",
+                    if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
+                continue;
+            }
+            rhs.push((contig.to_string(), identical));
+            if let Some(v) = corresp_unknown.remove(contig) {
+                rhs.extend(v.into_iter().map(|(contig2, identical2)| (contig2, identical && identical2)));
+            }
+        }
+
+        match contigs.try_get_id(split[0]) {
+            Some(id) => corresp.insert(id, rhs),
+            None => corresp_unknown.insert(split[0].to_string(), rhs),
+        };
+    }
+
+    if let Some(contig) = corresp_unknown.keys().next() {
+        log::warn!("{}Haplotype {} is on the left side of the discarded haplotypes, but missing from the fasta",
+            if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
+    }
+    Ok(corresp)
+}
+
+/// Returns true if all discarded haplotypes are identical to one of the retained haplotypes.
+/// Will be false if `locityper prune` was used.
+pub fn discarded_all_identical(disc_haplotypes: &DiscardedHaplotypes) -> bool {
+    disc_haplotypes.values().flat_map(|v| v.iter()).all(|(_, identical)| *identical)
+}
+
+/// Returns true if `name` is in `set`, or, if `name` ends with `.N` / `_N` / `-N` (N is a single digit)
+/// and corresponding prefix is in the set.
+pub fn sample_or_haplotype_in_set(name: &str, set: &HashSet<String>) -> bool {
+    let bytes = name.as_bytes();
+    let n = bytes.len();
+    set.contains(name) ||
+        (n > 2 && set.contains(&std::str::from_utf8(&bytes[..n - 2]).unwrap() as &str)
+        && b'0' <= bytes[n - 1] && bytes[n - 1] <= b'9'
+        && (bytes[n - 2] == b'.' || bytes[n - 2] == b'_' || bytes[n - 2] == b'-'))
 }
