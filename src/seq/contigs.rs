@@ -382,7 +382,7 @@ impl ContigSet {
                 if let Some(discarded) = disc_haps.get(&ContigId::new(i)) {
                     for (oth_name, is_identical) in discarded {
                         if *is_identical {
-                            replaced.push(name.to_string());
+                            replaced.push(format!("{}->{}", name, oth_name));
                             name = oth_name.to_string();
                             found = true;
                             break;
@@ -398,7 +398,7 @@ impl ContigSet {
             names_lengths.push((name, *length));
         }
 
-        log::debug!("    [{}] Leave-out: discarded {} haplotype(s) [{}], replaced {} haplotype(s) [{}] with identical",
+        log::debug!("    [{}] Leave-out: discarded {} haplotype(s) [{}], replaced {} haplotype(s) with identical [{}]",
             self.contigs.tag(),
             discarded.len(), ext::vec::join_up_to(&discarded, 5),
             replaced.len(), ext::vec::join_up_to(&replaced, 5));
