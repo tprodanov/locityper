@@ -299,18 +299,18 @@ fn clip_msg(bytes: &[u8]) -> Cow<'_, str> {
 
 fn format_output(s: &mut String, out: &Output) {
     match out.status.code() {
-        Some(code) => writeln!(s, "    {}: {}", "Exit code".bold(), code).unwrap(),
-        None => writeln!(s, "    {}: {}", "Exit code".bold(), "unknown").unwrap(),
+        Some(code) => writeln!(s, "{}: {}", "Exit code".bold(), code).unwrap(),
+        None => writeln!(s, "{}: {}", "Exit code".bold(), "unknown").unwrap(),
     };
     let stdout = clip_msg(&out.stdout);
     let stdout = stdout.trim();
     if !stdout.is_empty() {
-        writeln!(s, "    {}: {}", "Stdout".bold(), stdout).unwrap();
+        writeln!(s, "{} >>>\n{}\n<<<", "Stdout".bold(), stdout).unwrap();
     }
     let stderr = clip_msg(&out.stderr);
     let stderr = stderr.trim();
     if !stderr.is_empty() {
-        writeln!(s, "    {}: {}", "Stderr".bold(), stderr).unwrap();
+        writeln!(s, "{} >>>\n{}\n<<<", "Stderr".bold(), stderr).unwrap();
     }
 }
 

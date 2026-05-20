@@ -225,7 +225,8 @@ fn print_help(extended: bool) {
             {EMPTY}  <locus>  <haplotypes through comma>  <log10 prior>.\n\
             {EMPTY}  Only specified genotypes are evaluated.",
             "    --priors".green(), "FILE".yellow());
-        println!("    {:KEY$} {:VAL$}  Leave out haplotypes with specified names.",
+        println!("    {:KEY$} {:VAL$}  Discard these haplotypes from the reference panels.\n
+            {EMPTY}  Identical haplotypes with different names can still be used.",
             "    --leave-out".green(), "STR+".yellow());
 
         println!("\n{}", "Read recruitment:".bold());
