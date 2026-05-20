@@ -11,6 +11,7 @@ use std::{
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use htslib::bam::{self, Read as BamRead};
+use itertools::izip;
 use crate::{
     err::{Error, error, validate_param, add_path},
     math::{
@@ -18,7 +19,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        interv, recruit, fastx, div, Interval,
+        self, interv, recruit, fastx, div, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
@@ -990,7 +991,19 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
         return Ok(());
     }
 
-    let in_fasta = locus.db_dir.join(paths::LOCUS_FASTA);
+    let in_fasta: PathBuf = if args.leave_out.is_empty() {
+        locus.db_dir.join(paths::LOCUS_FASTA)
+    } else {
+        let fasta_filename = locus.out_dir.join("haplotypes.fa");
+        log::info!("    Copying left-out haplotypes to {}", ext::fmt::path(&fasta_filename));
+        let mut fasta_writer = ext::sys::create_file(&fasta_filename)?;
+        for (name, seq) in izip!(locus.set.contigs().names(), locus.set.seqs()) {
+            seq::write_multiline_fasta(&mut fasta_writer, name.as_bytes(), seq)
+                .map_err(add_path!(fasta_filename))?;
+        }
+        fasta_filename
+    };
+
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &filenames.reads_filename, bg_distr.seq_info(),
@@ -1019,6 +1032,9 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     fs::rename(&filenames.tmp_aln_filename, &filenames.aln_filename)
         .map_err(add_path!(filenames.tmp_aln_filename, filenames.aln_filename))?;
+    if !args.leave_out.is_empty() {
+        fs::remove_file(&in_fasta).map_err(add_path!(in_fasta))?;
+    }
     Ok(())
 }
 

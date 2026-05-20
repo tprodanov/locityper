@@ -559,7 +559,7 @@ fn process_alleles(
             .map_err(add_path!(fasta_filename))?;
         seqs.push(entry.seq().to_vec());
     }
-    std::mem::drop(fasta_filename);
+    std::mem::drop(fasta_writer);
 
     if args.only_seqs {
         super::write_success_file(locus_dir.join(paths::SUCCESS))?;
