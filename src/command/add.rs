@@ -211,7 +211,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Short('L') | Long("loci") | Long("loci-bed") => args.bed_files.push(parser.value()?.parse()?),
 
             Short('g') | Long("genome") => args.ref_name = Some(parser.value()?.parse()?),
-            Long("leave-out") | Long("leaveout") => {
+            Long("leave-out") => {
                 for val in parser.values()? {
                     args.leave_out.insert(val.parse()?);
                 }
@@ -559,7 +559,7 @@ fn process_alleles(
             .map_err(add_path!(fasta_filename))?;
         seqs.push(entry.seq().to_vec());
     }
-    std::mem::drop(fasta_filename);
+    std::mem::drop(fasta_writer);
 
     if args.only_seqs {
         super::write_success_file(locus_dir.join(paths::SUCCESS))?;
@@ -644,6 +644,17 @@ fn check_sequences(seqs: &[NamedSeq], locus: &NamedInterval, ref_seq: Option<&[u
     Ok(())
 }
 
+/// Returns true if `name` is in `set`, or, if `name` ends with `.N` / `_N` / `-N` (N is a single digit)
+/// and corresponding prefix is in the set.
+pub(crate) fn sample_or_haplotype_in_set(name: &str, set: &HashSet<String>) -> bool {
+    let bytes = name.as_bytes();
+    let n = bytes.len();
+    set.contains(name) ||
+        (n > 2 && set.contains(&std::str::from_utf8(&bytes[..n - 2]).unwrap() as &str)
+        && b'0' <= bytes[n - 1] && bytes[n - 1] <= b'9'
+        && (bytes[n - 2] == b'.' || bytes[n - 2] == b'_' || bytes[n - 2] == b'-'))
+}
+
 /// Discard haplotypes, whose names are in `leave_out`.
 /// Additionally, discard sequences `name[._-][0-9]` where `name` is in `leave_out`.
 fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>) -> Vec<NamedSeq> {
@@ -653,13 +664,7 @@ fn discard_leave_out_alleles(alleles: Vec<NamedSeq>, leave_out: &HashSet<String>
     let mut filt_alleles = Vec::with_capacity(alleles.len());
     let mut left_out = Vec::new();
     for allele in alleles.into_iter() {
-        let name = allele.name();
-        let bytes = name.as_bytes();
-        let n = bytes.len();
-        if leave_out.contains(name) ||
-                (n > 2 && leave_out.contains(&std::str::from_utf8(&bytes[..n - 2]).unwrap() as &str)
-                && b'0' <= bytes[n - 1] && bytes[n - 1] <= b'9'
-                && (bytes[n - 2] == b'.' || bytes[n - 2] == b'_' || bytes[n - 2] == b'-')) {
+        if sample_or_haplotype_in_set(allele.name(), leave_out) {
             left_out.push(allele.take_name());
             continue;
         }

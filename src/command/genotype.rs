@@ -11,6 +11,7 @@ use std::{
 use colored::Colorize;
 use const_format::{str_repeat, concatcp};
 use htslib::bam::{self, Read as BamRead};
+use itertools::izip;
 use crate::{
     err::{Error, error, validate_param, add_path},
     math::{
@@ -18,7 +19,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        interv, recruit, fastx, div, Interval,
+        self, interv, recruit, fastx, div, Interval,
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
@@ -75,6 +76,7 @@ struct Args {
     subset_loci: HashSet<String>,
     ploidy: u8,
     priors: Option<PathBuf>,
+    leave_out: HashSet<String>,
     reg_weights: Option<PathBuf>,
 
     threads: u16,
@@ -110,6 +112,7 @@ impl Default for Args {
             subset_loci: HashSet::default(),
             ploidy: 2,
             priors: None,
+            leave_out: HashSet::default(),
             reg_weights: None,
 
             threads: 8,
@@ -223,6 +226,9 @@ fn print_help(extended: bool) {
             {EMPTY}  <locus>  <haplotypes through comma>  <log10 prior>.\n\
             {EMPTY}  Only specified genotypes are evaluated.",
             "    --priors".green(), "FILE".yellow());
+        println!("    {:KEY$} {:VAL$}  Discard these haplotypes from the reference panels.\n
+            {EMPTY}  Identical haplotypes with different names can still be used.",
+            "    --leave-out".green(), "STR+".yellow());
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -402,6 +408,11 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
+            Long("leave-out") => {
+                for val in parser.values()? {
+                    args.leave_out.insert(val.parse()?);
+                }
+            }
             Long("reg-weights") | Long("region-weights") => args.reg_weights = Some(parser.value()?.parse()?),
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
@@ -594,14 +605,20 @@ pub(super) struct LocusData {
     db_dir: PathBuf,
     /// Output directory OUT/loci/LOCUS.
     out_dir: PathBuf,
+    /// How many contigs were there before subsetting.
+    init_nhaps: usize,
+    /// In case of leave-out haplotypes, keep these indices.
+    keep_ixs: Option<Vec<usize>>,
 }
 
 impl LocusData {
-    pub fn new(set: ContigSet, kmer_counts: KmerCounts, db_locus_dir: &Path, out_loci_dir: &Path) -> Self {
-        let out_dir = out_loci_dir.join(set.tag());
+    pub fn new(set: ContigSet, kmer_counts: KmerCounts, db_locus_dir: &Path, out_locus_dir: &Path) -> Self {
         Self {
             db_dir: db_locus_dir.to_owned(),
-            set, kmer_counts, out_dir,
+            out_dir: out_locus_dir.to_owned(),
+            init_nhaps: set.len(),
+            set, kmer_counts,
+            keep_ixs: None,
         }
     }
 
@@ -677,6 +694,7 @@ pub(super) fn load_loci(
     out_path: &Path,
     subset_loci: &HashSet<String>,
     rerun: super::Rerun,
+    leave_out: &HashSet<String>,
 ) -> crate::Result<Vec<LocusData>>
 {
     log::info!("Loading database");
@@ -701,28 +719,41 @@ pub(super) fn load_loci(
             }
 
             total_entries += 1;
-            let path = entry.path();
-            let Some(name) = locus_name_matches(&path, subset_loci) else { continue };
-            if !path.join(paths::SUCCESS).exists() {
-                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&path));
+            let db_locus_dir = entry.path();
+            let Some(name) = locus_name_matches(&db_locus_dir, subset_loci) else { continue };
+            if !db_locus_dir.join(paths::SUCCESS).exists() {
+                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
                 continue;
             }
             if !loci_names.insert(name.to_owned()) {
                 log::error!("Duplicate locus {} in the database, ignoring second instance", name);
                 continue;
             }
-            let fasta_fname = path.join(paths::LOCUS_FASTA);
-            let kmers_fname = path.join(paths::KMERS);
-            match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
-                Ok((set, kmer_counts)) => {
-                    let locus_data = LocusData::new(set, kmer_counts, &path, &out_loci_dir);
-                    if rerun.prepare_and_clean_dir(&locus_data.out_dir, |path| clean_dir(path, &mut n_warnings))? {
-                        loci.push(locus_data);
-                    }
-                },
-                Err(e) => log::error!("Could not load locus information from {}: {}",
-                    ext::fmt::path(&path), e.display()),
+            let out_locus_dir = out_loci_dir.join(name);
+            if !rerun.prepare_and_clean_dir(&out_locus_dir, |path| clean_dir(path, &mut n_warnings))? {
+                continue;
             }
+
+            let fasta_fname = db_locus_dir.join(paths::LOCUS_FASTA);
+            let kmers_fname = db_locus_dir.join(paths::KMERS);
+            let mut locus_data = match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
+                Ok((set, kmer_counts)) => LocusData::new(set, kmer_counts, &db_locus_dir, &out_locus_dir),
+                Err(e) => {
+                    log::error!("Could not load locus information from {}: {}",
+                        ext::fmt::path(&db_locus_dir), e.display());
+                    continue;
+                }
+            };
+            if !leave_out.is_empty() {
+                let (ixs, new_set) = locus_data.set.extract_subset(leave_out,
+                    &db_locus_dir.join(paths::DISCARDED_HAPS))?;
+                locus_data.set = new_set;
+                if ixs.len() != locus_data.init_nhaps {
+                    locus_data.kmer_counts = locus_data.kmer_counts.thin_out(ixs.iter().copied());
+                }
+                locus_data.keep_ixs = Some(ixs);
+            }
+            loci.push(locus_data);
         }
     }
     let n = loci.len();
@@ -971,7 +1002,19 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
         return Ok(());
     }
 
-    let in_fasta = locus.db_dir.join(paths::LOCUS_FASTA);
+    let in_fasta: PathBuf = if args.leave_out.is_empty() {
+        locus.db_dir.join(paths::LOCUS_FASTA)
+    } else {
+        let fasta_filename = locus.out_dir.join("haplotypes.fa");
+        log::info!("    Copying left-out haplotypes to {}", ext::fmt::path(&fasta_filename));
+        let mut fasta_writer = ext::sys::create_file(&fasta_filename)?;
+        for (name, seq) in izip!(locus.set.contigs().names(), locus.set.seqs()) {
+            seq::write_multiline_fasta(&mut fasta_writer, name.as_bytes(), seq)
+                .map_err(add_path!(fasta_filename))?;
+        }
+        fasta_filename
+    };
+
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &filenames.reads_filename, bg_distr.seq_info(),
@@ -1000,6 +1043,9 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     fs::rename(&filenames.tmp_aln_filename, &filenames.aln_filename)
         .map_err(add_path!(filenames.tmp_aln_filename, filenames.aln_filename))?;
+    if !args.leave_out.is_empty() {
+        fs::remove_file(&in_fasta).map_err(add_path!(in_fasta))?;
+    }
     Ok(())
 }
 
@@ -1105,8 +1151,11 @@ fn analyze_locus(
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
         let contig_distances = if dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
-            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;
-            Some(dists)
+            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, locus.init_nhaps)?;
+            match &locus.keep_ixs {
+                Some(ixs) if ixs.len() != dists.side() => Some(dists.thin_out(ixs)),
+                _ => Some(dists),
+            }
         } else {
             None
         };
@@ -1184,7 +1233,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
     let explicit_weights = args.reg_weights.as_ref().map(|path| load_explicit_weights(path)).transpose()?;
-    let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun)?;
+    let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun, &args.leave_out)?;
     if loci.is_empty() {
         return Ok(());
     }

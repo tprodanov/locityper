@@ -5,7 +5,7 @@ mod genotype;
 #[cfg(feature = "align")]
 mod align;
 mod recruit;
-mod prune;
+pub(crate) mod prune;
 mod paf_vcf;
 
 use std::{
