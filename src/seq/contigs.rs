@@ -381,7 +381,7 @@ impl ContigSet {
             if sample_or_haplotype_in_set(&name, &leave_out) {
                 if let Some(discarded) = disc_haps.get(&ContigId::new(i)) {
                     for (oth_name, is_identical) in discarded {
-                        if *is_identical {
+                        if *is_identical && !sample_or_haplotype_in_set(oth_name, &leave_out) {
                             replaced.push(format!("{}->{}", name, oth_name));
                             name = oth_name.to_string();
                             found = true;
