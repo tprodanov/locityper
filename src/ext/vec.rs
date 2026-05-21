@@ -376,7 +376,7 @@ where T: Copy,
 pub fn join_up_to(strings: &[impl AsRef<str>], max: usize) -> String {
     let mut res = String::new();
     for (i, s) in strings.iter().enumerate() {
-        if i > 1 {
+        if i > 0 {
             res.push_str(", ");
         }
         if i == max {
