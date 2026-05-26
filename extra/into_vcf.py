@@ -77,9 +77,12 @@ def create_vcf_header(chrom_lengths, samples):
     import pysam
     header = pysam.VariantHeader()
     for chrom, length in chrom_lengths:
-        header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
+        if length is None:
+            header.add_line('##contig=<ID={}>'.format(chrom))
+        else:
+            header.add_line('##contig=<ID={},length={}>'.format(chrom, length))
     header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
-    header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="Converted genotype quality">')
+    header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Converted genotype quality">')
     header.add_line('##FORMAT=<ID=qual,Number=1,Type=Float,Description="Raw genotype quality">')
     header.add_line('##FORMAT=<ID=reads,Number=1,Type=Integer,'
         'Description="Total number of reads used to predict locus genotype">')
@@ -153,8 +156,8 @@ def merge_vars(rec1, rec2, n_samples):
         fmt1 = rec1.samples[sample_ix]
         fmt2 = rec2.samples[sample_ix]
         if fmt1['GT'] != fmt2['GT']:
-            gq1 = (fmt1['GQ'], fmt1['qual'])
-            gq2 = (fmt1['GQ'], fmt2['qual'])
+            gq1 = (fmt1['GQ'], int(fmt1['qual']))
+            gq2 = (fmt1['GQ'], int(fmt2['qual']))
             if gq1 < gq2:
                 fmt1.clear()
                 for key, val in fmt2.items():
