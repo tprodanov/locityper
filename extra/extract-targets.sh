@@ -154,26 +154,24 @@ function process_genome {
         # * Take PAF for given target and convert to BED file
         #       columns: chrom, start, end, strand (±1 * length), target length
         # * Sort and merge, sum fourth column
-        # * Convert columns: chrom, start, end, strand (+/-), target name.
+        # * Convert columns: chrom, start, end, strand (+/-), target name, length / target_length.
         zcat "${paf_filename}" | \
             awk -F$'\t' -v target="$target" \
                 'BEGIN{OFS=FS} $1 == target { print $6, $8, $9, ($5 == "+" ? 1 : -1) * ($4 - $3), $2 }' | \
             sort -k1,1V -k2,2n | \
             bedtools merge -d "$distance" -c 4,5 -o sum,distinct 2> /dev/null | \
-            awk -F$'\t' -v target="$target" -v min_frac="$min_frac" \
-                'BEGIN{OFS=FS}
-                $3 - $2 >= $5 * min_frac { print $1, $2, $3, ($4 >= 0 ? "+" : "-"), target }' \
-            > "${prefix}/${target}.bed"
+            awk -F$'\t' -v target="$target" \
+                'BEGIN{OFS=FS} { print $1, $2, $3, ($4 >= 0 ? "+" : "-"), target, ($3-$2) / $5 }' |
+                sort -k6,6gr > "${prefix}/${target}.bed"
 
-        # For each line, print region, strand, length; then sort by length; take $count lines; and fetch from assembly.
-        awk -F$'\t' 'BEGIN{OFS=FS} $6 >= min_frac { print ($1 ":" ($2+1) "-" $3), $4, $3 - $2 }' \
-                "${prefix}/${target}.bed" | \
-            sort -k3,3nr | head -n "$count" | cat -n | \
-            while read index region strand _length; do
-                local strand_arg suffix
-                # Either -i (reverse completement) or empty string (forward)
-                [[ "$strand" = "+" ]] && strand_arg="" || strand_arg="-i"
-                [[ "$index" -eq 1 ]] && suffix="" || suffix="-${index}"
+        # Take $count first entries,
+        #     convert into: region, strand faidx argument ("-i" or ""), suffix ("" or "-<INDEX>").
+        # Then, fetch regions from the current assembly.
+        awk -F$'\t' -v count="$count" -v min_frac="$min_frac" \
+            'BEGIN{OFS=";"} NR <= count && $6 >= min_frac {
+                print ($1 ":" ($2+1) "-" $3), $4, $3 - $2
+            }' "${prefix}/${target}.bed" | \
+            while IFS=";" read region strand_arg suffix; do
                 samtools faidx "$genome_fasta" "$region" $strand_arg | \
                     sed "1c>${short_name}${suffix} ${region}"
             done | gzip > "${prefix}/${target}.fa.gz"
@@ -181,7 +179,7 @@ function process_genome {
 
     [[ $have_agc = n ]] || rm "${genome_fasta}"{,.fai}
 
-    cat "${prefix}"/*.bed | sort -k1,1V -k2,2n | gzip > "${prefix}.bed.gz"
+    cat "${prefix}"/*.bed | gzip > "${prefix}.bed.gz"
     rm "${prefix}"/*.bed
     # ===== END ======
 
