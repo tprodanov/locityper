@@ -92,6 +92,7 @@ function parse_params {
     fi
 
     [[ ! -z "${targets_file-}" ]] || panic "Missing required parameter -t/--targets"
+    [[ -f "${targets_file}" ]] || panic "Targets file ${targets_file} not found"
     [[ ! -z "${output-}" ]]   || panic "Missing required parameter -o/--output"
 
     [[ -z "${agc_file-}" ]] && have_agc=n || have_agc=y
