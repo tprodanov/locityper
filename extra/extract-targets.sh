@@ -169,7 +169,10 @@ function process_genome {
         # Then, fetch regions from the current assembly.
         awk -F$'\t' -v count="$count" -v min_frac="$min_frac" \
             'BEGIN{OFS=";"} NR <= count && $6 >= min_frac {
-                print ($1 ":" ($2+1) "-" $3), $4, $3 - $2
+                region = $1 ":" ($2+1) "-" $3;
+                strand_arg = $4 >= 0 ? "" : "-i";
+                suffix = NR > 1 ? "" : ("-" NR);
+                print region, strand_arg, suffix
             }' "${prefix}/${target}.bed" | \
             while IFS=";" read region strand_arg suffix; do
                 samtools faidx "$genome_fasta" "$region" $strand_arg | \
