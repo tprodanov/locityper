@@ -171,7 +171,7 @@ function process_genome {
             'BEGIN{OFS=";"} NR <= count && $6 >= min_frac {
                 region = $1 ":" ($2+1) "-" $3;
                 strand_arg = $4 >= 0 ? "" : "-i";
-                suffix = NR > 1 ? "" : ("-" NR);
+                suffix = NR == 1 ? "" : ("-" NR);
                 print region, strand_arg, suffix
             }' "${prefix}/${target}.bed" | \
             while IFS=";" read region strand_arg suffix; do
