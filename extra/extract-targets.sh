@@ -9,9 +9,9 @@ function help_message {
   cat <<HELP
 Usage: $SCRIPT_NAME (-a FILE | -g DIR) -t FILE -o DIR [-d INT] [args] [-- minimap-args]
 
-Maps target sequences to assembly genomes and extracts corresponding subregions.
-Multiple instances of this script can be run in parallel on the same output directory,
-as it creates "*.lock" files for haplotypes in progress and ".ok" files for the finished haplotypes.
+│ Maps target sequences to assembly genomes and extracts corresponding subregions.
+│ Multiple instances of this script can be run in parallel on the same output directory,
+│ as it creates "*.lock" files for haplotypes in progress and ".ok" files for the finished haplotypes.
 
 Available options:
     -a, --agc      FILE  Input AGC file.
@@ -27,7 +27,7 @@ Available options:
     -h, --help           Print this help and exit.
 
 Provide minimap2 arguments after --
-    Default arguments are "-cx asm20 -t 3 -N 10 -p 0.5"
+    Default arguments are "-cx asm20 -t 3 -N 100 -p 0.5"
 HELP
 }
 
@@ -88,7 +88,7 @@ function parse_params {
     if [[ ${#@} -ne 0 ]]; then
         minimap2_args=( "$@" )
     else
-        minimap2_args=( -cx asm20 -t 3 -N 10 -p 0.5 )
+        minimap2_args=( -cx asm20 -t 3 -N 100 -p 0.5 )
     fi
 
     [[ ! -z "${targets_file-}" ]] || panic "Missing required parameter -t/--targets"
