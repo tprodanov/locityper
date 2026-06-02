@@ -121,11 +121,11 @@ fn print_help() {
     println!("{}", "Adds target locus/loci to the database.".yellow());
 
     print!("\n{}", "Usage:".bold());
-    println!(" {} target -d db -r ref.fa -j counts.jf [-v vars.vcf.gz] -l/-L loci [args]", super::PROGRAM);
+    println!(" {} target -o db -r ref.fa -j counts.jf [-v vars.vcf.gz] -l/-L loci [args]", super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
-    println!("    {:KEY$} {:VAL$}  Output database directory.",
-        "-d, --database".green(), "DIR".yellow());
+    println!("    {:KEY$} {:VAL$}  Output database directory (synonym: {}).",
+        "-o, --output".green(), "DIR".yellow(), "-d/--database".green());
     println!("    {:KEY$} {:VAL$}  Reference FASTA file.",
         "-r, --reference".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Jellyfish k-mer counts (see documentation).",
@@ -194,7 +194,8 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Short('o') | Long("output") | Short('d') | Long("db") | Long("database")
+                => args.database = Some(parser.value()?.parse()?),
             Short('j') | Long("jf-counts") => args.jf_counts = Some(parser.value()?.parse()?),
             Short('r') | Long("reference") => args.reference = Some(parser.value()?.parse()?),
             Short('v') | Long("vcf") | Long("variants") => args.variants = Some(parser.value()?.parse()?),
