@@ -99,6 +99,9 @@ struct Args {
     edit_thresh: Option<EditThresh>,
     assgn_params: AssgnParams,
     solvers: Vec<String>,
+
+    transfer_alns: bool,
+    n_hap_hap_alns: usize,
 }
 
 impl Default for Args {
@@ -135,6 +138,9 @@ impl Default for Args {
             edit_thresh: None,
             assgn_params: Default::default(),
             solvers: Vec::new(),
+
+            transfer_alns: true,
+            n_hap_hap_alns: 100,
         }
     }
 }
@@ -159,6 +165,10 @@ impl Args {
         validate_param!(self.ploidy > 0, "Ploidy must be positive");
         self.samtools = ext::sys::find_exe(self.samtools)?;
         self.assgn_params.validate()?;
+
+        if self.transfer_alns {
+            self.n_hap_hap_alns = max(self.n_hap_hap_alns, 1);
+        }
         Ok(self)
     }
 }
@@ -228,7 +238,14 @@ fn print_help(extended: bool) {
             "    --priors".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Discard these samples/haplotypes from the reference panels.\n\
             {EMPTY}  Identical haplotypes with different names can still be used.",
-            "    --leave-out".green(), "STR+".yellow());
+            "--lo, --leave-out".green(), "STR+".yellow());
+
+        println!("\n{}", "Transferring alignments:".bold());
+        println!("    {:KEY$} {:VAL$}  Do not transfer read alignments to other haplotypes.\n\
+            {EMPTY}  In any case, alignment transfer requires files DB/loci/*/{}",
+            "    --no-transfer".green(), super::flag(), paths::LOCUS_PAF);
+        println!("    {:KEY$} {:VAL$}  Store top {} alignments from each haplotype to other haplotypes [{}].",
+            "    --n-hh-alns".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.n_hap_hap_alns));
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -497,6 +514,9 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
+
+            Long("no-transfer") => args.transfer_alns = false,
+            Long("n-hh-alns") => args.n_hap_hap_alns = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();

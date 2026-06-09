@@ -1,5 +1,6 @@
 use std::{
-    thread, io,
+    thread,
+    io::{self, BufRead},
     sync::Arc,
     cmp::Ordering,
     fmt::Write as FmtWrite,
@@ -13,6 +14,7 @@ use crate::{
         kmers::{self, Kmer},
         wfa::{Aligner, Penalties},
         cigar::{Cigar, Operation},
+        aln::Strand,
     },
     err::{error, validate_param, add_path},
     math::RoundDiv,
@@ -420,4 +422,136 @@ fn align_all_parallel(
     }
     assert_eq!(start, n_pairs);
     handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect()
+}
+
+/// Wrapper over a PAF file.
+pub struct PafFile<R> {
+    file: R,
+    line: String,
+}
+
+impl<R: BufRead> PafFile<R> {
+    pub fn new(file: R) -> Self {
+        Self {
+            file,
+            line: String::new(),
+        }
+    }
+
+    /// Use this function instead of following `std::Iterator` trait to avoid data reallocation.
+    pub fn next<'a>(&'a mut self) -> Option<crate::Result<PafLine<'a>>> {
+        loop {
+            self.line.clear();
+            return match self.file.read_line(&mut self.line) {
+                Ok(0) => None,
+                Ok(_n) => {
+                    if self.line.is_empty() || self.line.starts_with('#') {
+                        continue
+                    }
+                    if self.line.ends_with('\n') {
+                        self.line.pop();
+                        if self.line.ends_with('\r') {
+                            self.line.pop();
+                        }
+                    }
+                    Some(PafLine::new(&self.line))
+                }
+                Err(e) => Some(Err(crate::Error::Io(e, Vec::new()))),
+            }
+        }
+    }
+}
+
+pub struct PafLine<'a> {
+    line: &'a str,
+    split: SmallVec<[&'a str; 32]>,
+}
+
+impl<'a> PafLine<'a> {
+    pub fn new(line: &'a str) -> crate::Result<Self> {
+        let split: SmallVec<_> = line.split('\t').collect();
+        if split.len() < 12 {
+            Err(error!(InvalidInput, "PAF line ({}) has too few columns", line))
+        } else {
+            Ok(Self { line, split })
+        }
+    }
+
+    #[inline(always)]
+    fn parse_error(&self) -> crate::err::Error {
+        error!(ParsingError, "Could not parse PAF line `{}`", self.line)
+    }
+
+    #[allow(unused)]
+    pub fn query_name(&self) -> &str {
+        &self.split[0]
+    }
+
+    #[allow(unused)]
+    pub fn query_len(&self) -> crate::Result<u32> {
+        self.split[1].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn query_start(&self) -> crate::Result<u32> {
+        self.split[2].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn query_end(&self) -> crate::Result<u32> {
+        self.split[3].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn strand(&self) -> crate::Result<Strand> {
+        Strand::from_str(self.split[4])
+    }
+
+    #[allow(unused)]
+    pub fn target_name(&self) -> &str {
+        &self.split[5]
+    }
+
+    #[allow(unused)]
+    pub fn target_len(&self) -> crate::Result<u32> {
+        self.split[6].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn target_start(&self) -> crate::Result<u32> {
+        self.split[7].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn target_end(&self) -> crate::Result<u32> {
+        self.split[8].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn n_matches(&self) -> crate::Result<u32> {
+        self.split[9].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn aln_len(&self) -> crate::Result<u32> {
+        self.split[10].parse().map_err(|_| self.parse_error())
+    }
+
+    /// Returns CIGAR if present.
+    #[allow(unused)]
+    pub fn cigar(&self) -> Option<crate::Result<Cigar>> {
+        for col in &self.split[12..] {
+            if col.starts_with("cg:Z:") {
+                return Some(Cigar::from_str(&col.as_bytes()[5..]));
+            }
+        }
+        None
+    }
+
+    /// Checks if the alignment fully covers both sequences and is on the forward strand.
+    pub fn full_positive_alignment(&self) -> crate::Result<bool> {
+        Ok(self.strand()?.is_forward()
+            && self.query_start()? == 0 && self.query_end()? == self.query_len()?
+            && self.target_start()? == 0 && self.target_end()? == self.target_len()?)
+    }
 }

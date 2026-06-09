@@ -14,6 +14,7 @@ use crate::{
     },
     seq::{
         interv,
+        dist::PafFile,
         cigar::{Cigar, Operation},
         contigs::{self, ContigId, ContigNames, ContigSet},
     },
@@ -345,18 +346,11 @@ fn process_paf(
     let mut var_ranges = vec![None; contigs.len()];
     var_ranges[ref_id.ix()] = Some(Vec::new());
 
-    let file = ext::sys::open(paf_filename)?;
-    for line in file.lines() {
-        let line = line.map_err(add_path!(paf_filename))?;
-        if line.starts_with('#') { continue };
-        let trimmed = line.trim();
-        let split: Vec<_> = trimmed.split('\t').collect();
-        if split.len() < 12 {
-            return Err(error!(InvalidInput, "PAF line ({}) has too few columns", trimmed));
-        }
-
-        let hap1: &str = &split[0];
-        let hap2: &str = &split[5];
+    let mut file = ext::sys::open(paf_filename).map(PafFile::new)?;
+    while let Some(entry) = file.next() {
+        let entry = entry?;
+        let hap1: &str = entry.query_name();
+        let hap2: &str = entry.target_name();
         let (hap, invert) = if ref_hap == hap1 {
             (hap2, true)
         } else if ref_hap == hap2 {
@@ -368,41 +362,23 @@ fn process_paf(
             log::warn!("Cannot find sequence for haplotype {}", hap);
             continue
         };
-        let hap_seq = contig_set.get_seq(hap_id);
-
-        let hap_column = 5 * usize::from(invert);
-        let ref_column = 5 * usize::from(!invert);
-        let hap_start: u32 = split[hap_column + 2].parse()
-            .map_err(|_| error!(ParsingError, "Cannot parse PAF line {}", trimmed))?;
-        let hap_end: u32 = split[hap_column + 3].parse()
-            .map_err(|_| error!(ParsingError, "Cannot parse PAF line {}", trimmed))?;
-        let ref_start: u32 = split[ref_column + 2].parse()
-            .map_err(|_| error!(ParsingError, "Cannot parse PAF line {}", trimmed))?;
-        let ref_end: u32 = split[ref_column + 3].parse()
-            .map_err(|_| error!(ParsingError, "Cannot parse PAF line {}", trimmed))?;
-
-        if ref_start != 0 || ref_end != ref_seq.len() as u32 || hap_start != 0 || hap_end != hap_seq.len() as u32 {
-            log::warn!("Alignment between {} and {} does not cover the full sequence", ref_hap, hap);
-            continue;
+        if !entry.full_positive_alignment()? {
+            log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
+                hap1, hap2);
+            continue
         }
-        let mut cigar = None;
-        for col in &split[12..] {
-            if col.starts_with("cg:Z:") {
-                cigar = Some(Cigar::from_str(&col.as_bytes()[5..])?);
-                break;
-            }
-        }
-        let Some(mut cigar) = cigar else {
+
+        let Some(mut cigar) = entry.cigar().transpose()? else {
             log::warn!("CIGAR missing for {} and {}", ref_hap, hap);
             continue
         };
-
         if invert {
             cigar = cigar.invert();
         }
-        if cigar.query_len() != hap_end || cigar.ref_len() != ref_end {
+        let hap_seq = contig_set.get_seq(hap_id);
+        if cigar.query_len() != hap_seq.len() as u32 || cigar.ref_len() != ref_seq.len() as u32 {
             log::error!("Incorrect CIGAR for {} and {} (expected lengths {},{}, got {},{})", ref_hap, hap,
-                cigar.query_len(), cigar.ref_len(), hap_end, ref_end);
+                cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
             continue;
         }
         var_ranges[hap_id.ix()] = Some(process_haplotype(ref_seq, hap_seq, &cigar)?);

@@ -13,6 +13,7 @@ pub mod wfa;
 #[cfg(feature = "align")]
 pub mod dist;
 pub mod div;
+pub mod transfer;
 
 pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames, ContigSet};

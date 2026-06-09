@@ -15,6 +15,7 @@ use crate::{
         Interval, ContigId, ContigNames,
         cigar::{Cigar, Operation},
     },
+    err::error,
 };
 
 /// Newtype over strand: false = negative, true = positive.
@@ -26,6 +27,14 @@ pub enum Strand {
 }
 
 impl Strand {
+    pub fn from_str(s: &str) -> crate::Result<Self> {
+        match s {
+            "+" => Ok(Self::Forward),
+            "-" => Ok(Self::Reverse),
+            _ => Err(error!(ParsingError, "Cannot parse strand from `{}`", s))
+        }
+    }
+
     #[inline]
     pub fn from_record(record: &Record) -> Self {
         if record.is_reverse() { Self::Reverse } else { Self::Forward }
@@ -34,6 +43,11 @@ impl Strand {
     #[inline(always)]
     pub fn is_forward(self) -> bool {
         self == Strand::Forward
+    }
+
+    #[inline(always)]
+    pub fn is_reverse(self) -> bool {
+        self == Strand::Reverse
     }
 }
 
