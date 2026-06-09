@@ -348,7 +348,7 @@ pub fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMat
 
 /// Prediction for a single genotype.
 #[derive(Clone)]
-struct Prediction {
+pub struct Prediction {
     lik_mean: f64,
     lik_var: f64,
     attempts: u16,
@@ -371,6 +371,16 @@ impl Prediction {
             attempts: self.attempts,
             assgn_counts: None,
         }
+    }
+
+    /// Number of assignment attempts.
+    pub fn attempts(&self) -> u16 {
+        self.attempts
+    }
+
+    /// How many times each read assignment was observed.
+    pub fn assgn_counts(&self) -> &[u16] {
+        self.assgn_counts.as_ref().expect("Assignment counts undefined")
     }
 }
 
@@ -740,6 +750,16 @@ impl Genotyping {
         }
         res
     }
+
+    /// Top predicted genotypes (from best to worst).
+    pub fn genotypes(&self) -> &[Genotype] {
+        &self.genotypes
+    }
+
+    /// More detailed predictions for top genotypes (same order as .genotypes).
+    pub fn predictions(&self) -> &[Prediction] {
+        &self.predictions
+    }
 }
 
 /// Returns: vector of likelihood means and variances (same order ).
@@ -881,7 +901,7 @@ impl DebugFiles {
 }
 
 pub fn solve(
-    mut data: Data,
+    data: &Arc<Data>,
     bg_distr: &BgDistr,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
@@ -889,7 +909,6 @@ pub fn solve(
 {
     let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
-    data.threads = min(data.threads, n_gts);
     log::info!("    Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);
 
     let mut sol_writer = ext::sys::create_gzip(&locus_dir.join("sol.csv.gz"))?;
@@ -903,11 +922,10 @@ pub fn solve(
     }
 
     let mut files = DebugFiles::new(locus_dir, data.threads, data.debug)?;
-    let data = Arc::new(data);
     if data.threads == 1 {
         solve_single_thread(&data, rng, &mut predictions, &mut sol_writer, files.into_threads().next().unwrap())?;
     } else {
-        let main_worker = MainWorker::new(Arc::clone(&data), rng, files.into_threads());
+        let main_worker = MainWorker::new(Arc::clone(data), rng, files.into_threads());
         main_worker.run(&mut sol_writer, rng, &mut predictions)?;
         files.merge()?;
     }

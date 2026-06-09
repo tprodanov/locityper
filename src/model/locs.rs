@@ -82,6 +82,15 @@ impl MateData {
         }
     }
 
+    /// Returns sequence for the corresponding strand.
+    pub fn get_seq(&self, strand: Strand) -> &[u8] {
+        if strand == self.strand {
+            &self.sequence
+        } else {
+            self.opp_sequence.get_or_init(|| seq::reverse_complement(&self.sequence))
+        }
+    }
+
     /// Returns sequence and quality for the corresponding strand.
     pub fn get_seq_and_qual(&self, strand: Strand) -> (&[u8], &[u8]) {
         if strand == self.strand {

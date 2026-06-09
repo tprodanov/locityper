@@ -35,7 +35,7 @@ fn create_bam_header(
     contig_to_tid.resize(contigs.len(), None);
     let mut header = bam::header::Header::new();
     let mut tid = 0;
-    for &id in gt.ids().iter() {
+    for &id in gt.ids() {
         if contig_to_tid[id.ix()].is_some() {
             // This contig was already included in the genotype.
             continue;
@@ -156,6 +156,7 @@ fn count_alignments<const PAIRED: bool>(
     let mut best_ij = TwoU32(UNMAPPED, UNMAPPED);
     let mut best_val = (0, f64::NEG_INFINITY);
     for aln in read_alns {
+        let count = assgn_counts.next().expect("Not enough assignment counts");
         let ij = match aln.parent() {
             None => TwoU32(UNMAPPED, UNMAPPED),
             Some((_, aln_pair)) => TwoU32(
@@ -163,7 +164,6 @@ fn count_alignments<const PAIRED: bool>(
                 if PAIRED { aln_pair.ix2().unwrap_or(UNMAPPED) } else { UNMAPPED },
             ),
         };
-        let count = assgn_counts.next().expect("Not enough assignment counts");
         let ln_prob = aln.ln_prob();
         if count > 0 {
             let val = buffer.entry(ij)
