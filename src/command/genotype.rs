@@ -408,7 +408,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("priors") => args.priors = Some(parser.value()?.parse()?),
-            Long("leave-out") => {
+            Long("leave-out") | Long("lo") => {
                 for val in parser.values()? {
                     args.leave_out.insert(val.parse()?);
                 }
@@ -1160,18 +1160,18 @@ fn analyze_locus(
             None
         };
 
-        let data = solve::Data {
+        let data = Arc::new(solve::Data {
             scheme: Arc::clone(scheme),
             contigs: Arc::clone(contigs),
             contig_distances,
             distr_cache: Arc::clone(distr_cache),
             assgn_params: args.assgn_params.clone(),
             debug: args.debug,
-            threads: usize::from(args.threads),
+            threads: usize::from(args.threads).min(genotypes.len()),
             is_paired_end: bg_distr.insert_distr().is_paired_end(),
             all_alns, genotypes, priors, contig_infos,
-        };
-        solve::solve(data, bg_distr, &locus.out_dir, &mut rng)?
+        });
+        solve::solve(&data, bg_distr, &locus.out_dir, &mut rng)?
     };
 
     let res_filename = locus.out_dir.join(paths::RES_JSON);
