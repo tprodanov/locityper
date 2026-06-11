@@ -79,70 +79,52 @@ pub struct ContigNames {
 }
 
 impl ContigNames {
-    /// Create new, empty, contig names.
-    pub fn empty() -> Self {
-        ContigNames {
-            tag: "UNINIT".to_string(),
+    /// Creates new contig names.
+    pub fn new(tag: impl Into<String>) -> Self {
+        Self {
+            tag: tag.into(),
             names: Vec::new(),
             lengths: Vec::new(),
             name_to_id: HashMap::default(),
         }
     }
 
-    /// Create contig names from an iterator over pairs (name, length).
-    /// Names must not repeat.
-    /// First argument: overall name of the contig set.
-    pub fn new<T: TryInto<u32> + std::fmt::Display + Copy>(
-        tag: impl Into<String>,
-        mut it: impl Iterator<Item = crate::Result<(String, T)>>
-    ) -> crate::Result<Self>
-    {
-        let mut names = Vec::new();
-        let mut lengths = Vec::new();
-        let mut name_to_id = HashMap::default();
-
-        while let Some((name, length)) = it.next().transpose()? {
-            let length: u32 = length.try_into()
-                .map_err(|_| error!(InvalidData, "Contig {} is too long ({} bp)", name, length))?;
-            let contig_id = ContigId::new(names.len());
-            if let Some(prev_id) = name_to_id.insert(name.clone(), contig_id) {
-                panic!("Contig {} appears twice in the contig list ({} and {})!", name, prev_id, contig_id);
-            }
-            names.push(name);
-            lengths.push(length);
+    pub fn add<T: TryInto<u32> + std::fmt::Display + Copy>(&mut self, name: String, length: T) -> crate::Result<()> {
+        let contig_id = TryInto::<u16>::try_into(self.names.len())
+            .map_err(|_| error!(InvalidData, "[{}] Too many contigs (at most {} supported)", self.tag, u16::MAX))
+            .map(ContigId::new)?;
+        let length: u32 = length.try_into()
+            .map_err(|_| error!(InvalidData, "[{}] Contig {} is too long ({} bp do not fit into 32 bits)",
+                self.tag, name, length))?;
+        if let Some(old_id) = self.name_to_id.insert(name.clone(), contig_id) {
+            *self.name_to_id.get_mut(&name).unwrap() = old_id;
+            panic!("[{}] Contig {} appears twice in the contig list", self.tag, name);
         }
-
-        const MAX_CONTIGS: usize = (std::u16::MAX as usize - 1) / 2;
-        if names.is_empty() {
-            return Err(error!(InvalidData, "Contig set is empty"));
-        } else if names.len() >= MAX_CONTIGS {
-            return Err(error!(InvalidData, "Too many contigs ({}), can support at most {}",
-                names.len(), MAX_CONTIGS));
-        }
-
-        names.shrink_to_fit();
-        lengths.shrink_to_fit();
-        name_to_id.shrink_to_fit();
-        Ok(Self {
-            tag: tag.into(),
-            names, lengths, name_to_id,
-        })
+        self.names.push(name);
+        self.lengths.push(length);
+        Ok(())
     }
 
     /// Creates contig names from FASTA index.
     /// First argument: overall name of the contig name set.
     pub fn from_index(tag: impl Into<String>, index: &fasta::Index) -> crate::Result<Self> {
-        Self::new(tag, index.sequences().into_iter().map(|seq| Ok((seq.name, seq.len))))
+        let mut contigs = Self::new(tag);
+        for seq in index.sequences().into_iter() {
+            contigs.add(seq.name, seq.len)?;
+        }
+        Ok(contigs)
     }
 
     /// Creates contig names from BAM header.
     pub fn from_bam_header(tag: impl Into<String>, header: &bam::HeaderView) -> crate::Result<Self> {
-        Self::new(tag, (0..header.target_count()).map(|i| {
+        let mut contigs = Self::new(tag);
+        for i in 0..header.target_count() {
             let byte_name = header.tid2name(i);
             let name = String::from_utf8(byte_name.to_vec())
                 .map_err(|_| Error::Utf8("contig name", byte_name.to_vec()))?;
-            Ok((name, header.target_len(i).unwrap()))
-        }))
+            contigs.add(name, header.target_len(i).expect("Contig length undefined in BAM"))?;
+        }
+        Ok(contigs)
     }
 
     /// Loads indexed fasta and stored contig names and lengths.
@@ -225,6 +207,12 @@ impl ContigNames {
     pub fn genome_size(&self) -> u64 {
         self.lengths.iter().copied().map(u64::from).sum()
     }
+
+    /// Adds a different name that points to an existing contig. Only relevant for `get_id`/`try_get_id`.
+    pub fn add_synonym(&mut self, name: String, id: ContigId) {
+        let old_val = self.name_to_id.insert(name, id);
+        assert!(old_val.is_none(), "Cannot add synonym (duplicated name)");
+    }
 }
 
 impl fmt::Debug for ContigNames {
@@ -290,17 +278,15 @@ impl ContigSet {
     ) -> crate::Result<Self>
     {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
-        let mut names_lens = Vec::new();
+        let mut contigs = ContigNames::new(tag);
         let mut seqs = Vec::new();
         fasta_reader.read_all(|name, seq| {
-            names_lens.push((name.to_owned(), seq.len() as u32));
+            contigs.add(name, seq.len())?;
             seqs.push(seq.to_owned());
+            Ok(())
         })?;
 
-        Ok(Self {
-            contigs: ContigNames::new(tag, names_lens.into_iter().map(Ok)).map(Arc::new)?,
-            seqs,
-        })
+        Ok(Self::new(Arc::new(contigs), seqs))
     }
 
     pub fn load_with_kmer_counts(
@@ -372,7 +358,7 @@ impl ContigSet {
         }
 
         let mut ixs = Vec::new();
-        let mut names_lengths = Vec::new();
+        let mut contigs = ContigNames::new(self.contigs.tag());
         let mut discarded = Vec::new();
         let mut replaced = Vec::new();
         for (i, (name, length)) in izip!(self.contigs.names(), self.contigs.lengths()).enumerate() {
@@ -395,16 +381,15 @@ impl ContigSet {
                 }
             }
             ixs.push(i);
-            names_lengths.push((name, *length));
+            contigs.add(name, *length)?;
         }
 
         log::debug!("    [{}] Leave-out: discarded {} haplotype(s) [{}], replaced {} haplotype(s) with identical [{}]",
             self.contigs.tag(),
             discarded.len(), ext::vec::join_up_to(&discarded, 5),
             replaced.len(), ext::vec::join_up_to(&replaced, 5));
-        let contigs = ContigNames::new(self.contigs.tag(), names_lengths.into_iter().map(Ok)).map(Arc::new)?;
         let seqs = ixs.iter().map(|&i| self.seqs[i].clone()).collect();
-        Ok((ixs, ContigSet::new(contigs, seqs)))
+        Ok((ixs, ContigSet::new(Arc::new(contigs), seqs)))
     }
 }
 
