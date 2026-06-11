@@ -17,7 +17,7 @@ mod cwfa {
 /// Maximum accuracy level (need to change `add` help message, if changed this).
 pub const MAX_ACCURACY: u8 = 9;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Penalties {
     // NOTE: Adding match may lead to problems in other places (such as `panvcf` divergence calculation).
     // Similarly, adding separate parameters for insert/deletion penalties may lead to problems elsewhere.
@@ -105,6 +105,12 @@ fn alignment_steps(accuracy: u8) -> i32 {
 pub struct Aligner {
     inner: *mut cwfa::wavefront_aligner_t,
     penalties: Penalties,
+    /// At what size nX could not theoretically be replaced with 1I(n-1)=1D.
+    /// For example, with default penalties (4,6,1)
+    /// ACGT                          ACGT
+    /// |||| will have score -16, but  |||  will have score -14, so safe_mismatch_size < 4.
+    /// CGTA                           CGTA
+    safe_mismatch_size: u32,
 }
 
 #[cfg(feature = "align")]
@@ -140,9 +146,11 @@ impl Aligner {
         attributes.affine_penalties.gap_opening = penalties.gap_open;
         attributes.affine_penalties.gap_extension = penalties.gap_extend;
 
+        // At this value it could not be beneficial to replace nX with 1I(n-1)=1D.
+        let safe_mismatch_size = ((2 * penalties.gap_open + 2 * penalties.gap_extend) / penalties.mismatch) as u32;
         Self {
             inner: unsafe { cwfa::wavefront_aligner_new(&mut attributes) },
-            penalties,
+            safe_mismatch_size, penalties,
         }
     }
 
@@ -197,6 +205,55 @@ impl Aligner {
         //     score += cigar.optimize(start_len, &self.penalties);
         // }
         Ok(score)
+    }
+
+    /// If `i1 == i2` or `j1 == j2` inserts simple INS/DEL,
+    /// If gap is bigger than `max_gap` inserts INS/DEL followed by (mis)matches,
+    /// If gap can be quickly replaced with mismatches, do that.
+    /// Otherwise performs proper alignment of the two subsequences.
+    #[inline(always)]
+    pub fn smart_align<const CHECK_MAX_GAP: bool>(
+        &self,
+        seq1: &[u8], // ref sequence
+        seq2: &[u8], // query sequence
+        i1: u32,
+        i2: u32,
+        j1: u32,
+        j2: u32,
+        max_gap: u32,
+        cigar: &mut Cigar,
+    ) -> crate::Result<i32>
+    {
+        debug_assert!(i1 <= i2 && j1 <= j2);
+        let jump1 = i2 - i1;
+        let jump2 = j2 - j1;
+        match (jump1 > 0, jump2 > 0) {
+            (true, true) => {
+                let subseq1 = &seq1[i1 as usize..i2 as usize];
+                let subseq2 = &seq2[j1 as usize..j2 as usize];
+                if CHECK_MAX_GAP && jump1 > max_gap || jump2 > max_gap {
+                    Ok(self.penalties.align_simple(subseq1, subseq2, cigar))
+                } else if jump1 == jump2 && jump1 <= self.safe_mismatch_size {
+                    let mut ndiff = 0;
+                    for (&c1, &c2) in itertools::izip!(subseq1, subseq2) {
+                        cigar.push_checked(if c1 == c2 { Operation::Equal } else { Operation::Diff }, 1);
+                        ndiff -= i32::from(c1 != c2);
+                    }
+                    Ok(ndiff * self.penalties.mismatch)
+                } else {
+                    self.align(subseq1, subseq2, cigar)
+                }
+            }
+            (true, false) => {
+                cigar.push_unchecked(Operation::Del, jump1);
+                Ok(-self.penalties.gap_open - jump1 as i32 * self.penalties.gap_extend)
+            }
+            (false, true) => {
+                cigar.push_unchecked(Operation::Ins, jump2);
+                Ok(-self.penalties.gap_open - jump2 as i32 * self.penalties.gap_extend)
+            }
+            (false, false) => Ok(0),
+        }
     }
 }
 

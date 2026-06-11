@@ -192,42 +192,6 @@ fn get_kmer_matches(kmers1: &SeqKmers, kmers2: &SeqKmers, buf: &mut Vec<(u32, u3
     buf.sort_unstable();
 }
 
-#[inline(always)]
-fn align_gap(
-    seq1: &[u8],
-    seq2: &[u8],
-    i1: u32,
-    i2: u32,
-    j1: u32,
-    j2: u32,
-    aligner: &Aligner,
-    max_gap: u32,
-    cigar: &mut Cigar,
-) -> crate::Result<i32>
-{
-    let penalties = aligner.penalties();
-    debug_assert!(i1 <= i2 && j1 <= j2);
-    let jump1 = i2 - i1;
-    let jump2 = j2 - j1;
-    if jump1 > 0 && jump2 > 0 {
-        let subseq1 = &seq1[i1 as usize..i2 as usize];
-        let subseq2 = &seq2[j1 as usize..j2 as usize];
-        if jump1 > max_gap || jump2 > max_gap {
-            Ok(penalties.align_simple(subseq1, subseq2, cigar))
-        } else {
-            aligner.align(subseq1, subseq2, cigar)
-        }
-    } else if jump1 > 0 {
-        cigar.push_unchecked(Operation::Del, jump1);
-        Ok(-penalties.gap_open - jump1 as i32 * penalties.gap_extend)
-    } else if jump2 > 0 {
-        cigar.push_unchecked(Operation::Ins, jump2);
-        Ok(-penalties.gap_open - jump2 as i32 * penalties.gap_extend)
-    } else {
-        Ok(0)
-    }
-}
-
 fn align(
     aligner: &Aligner,
     entry1: &NamedSeq,
@@ -259,7 +223,7 @@ fn align(
             cigar.push_unchecked(Operation::Equal, curr_match);
             curr_match = 0;
         }
-        score += align_gap(seq1, seq2, i1, i2, j1, j2, aligner, max_gap, &mut cigar)?;
+        score += aligner.smart_align::<true>(seq1, seq2, i1, i2, j1, j2, max_gap, &mut cigar)?;
         curr_match += backbone_k;
         i1 = i2 + backbone_k;
         j1 = j2 + backbone_k;
@@ -270,7 +234,7 @@ fn align(
     }
     let n1 = seq1.len() as u32;
     let n2 = seq2.len() as u32;
-    score += align_gap(seq1, seq2, i1, n1, j1, n2, aligner, max_gap, &mut cigar)?;
+    score += aligner.smart_align::<true>(seq1, seq2, i1, n1, j1, n2, max_gap, &mut cigar)?;
     assert_eq!(cigar.ref_len(), seq1.len() as u32,
         "Alignment {} - {} produced incorrect CIGAR {}", entry1.name(), entry2.name(), cigar);
     assert_eq!(cigar.query_len(), seq2.len() as u32,

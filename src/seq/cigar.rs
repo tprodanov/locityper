@@ -9,7 +9,8 @@ use htslib::bam::record;
 use crate::{
     err::error,
     ext::vec::VecOrNone,
-    seq::wfa::Penalties,
+    seq::wfa::{Penalties, Aligner},
+    algo::bisect,
 };
 
 /// Subset of CIGAR operations.
@@ -753,41 +754,135 @@ pub fn clipping_rate(record: &record::Record) -> f64 {
 #[derive(Clone, Copy)]
 pub struct AlignmentCursor {
     cigar_ix: u32,
+    qpos: u32,
+    rpos: u32,
+}
+
+/// Extended CIGAR item, which comparing to `CigarItem`
+/// contains query and reference positions and the start of the operation.
+#[derive(Clone, Copy)]
+pub struct ExtCigarItem {
+    op: Operation,
+    len: u32,
+    qpos: u32,
     rpos: u32,
 }
 
 /// Extension over CIGAR that answers queries "convert range start..end to another sequence" in log(n) time,
 /// where n is the number of operations in this CIGAR.
 pub struct SearchableCigar {
-    cigar: Cigar,
-    /// Vector of positions (qpos, rpos). Starts with 0,0, ends with qlen, rlen.
-    positions: Vec<(u32, u32)>,
+    items: Vec<ExtCigarItem>,
 }
 
 impl SearchableCigar {
-    pub fn new(cigar: Cigar) -> Self {
-        let mut positions = Vec::with_capacity(cigar.len() + 1);
-        positions.push((0, 0));
+    pub fn new(cigar: &Cigar) -> Self {
+        let mut items = Vec::with_capacity(cigar.len());
         let mut qpos = 0;
         let mut rpos = 0;
         for item in cigar.iter() {
+            items.push(ExtCigarItem {
+                qpos, rpos,
+                len: item.len,
+                op: item.op,
+            });
             qpos += u32::from(item.op.consumes_query()) * item.len;
             rpos += u32::from(item.op.consumes_ref()) * item.len;
-            positions.push((qpos, rpos));
         }
-        Self { cigar, positions }
+        Self { items }
     }
 
     /// Swap query and reference.
     pub fn invert(&self) -> Self {
         Self {
-            cigar: self.cigar.invert(),
-            positions: self.positions.iter().map(|&(x, y)| (y, x)).collect()
+            items: self.items.iter().map(|item| ExtCigarItem {
+                qpos: item.rpos,
+                rpos: item.qpos,
+                len: item.len,
+                op: item.op.invert(),
+            }).collect()
         }
     }
 
     /// Based on query position, find reference position.
-    fn find_position(&self, qpos: u32) -> AlignmentCursor {
-        todo!()
+    pub fn find_position(&self, qpos: u32) -> AlignmentCursor {
+        let cigar_ix = bisect::right_by(&self.items, |item| item.qpos.cmp(&qpos)).strict_sub(1);
+        let item = self.items[cigar_ix];
+        assert!(item.op.consumes_query()); // [TODO] Later, convert to debug assert.
+        AlignmentCursor {
+            cigar_ix: cigar_ix as u32,
+            qpos,
+            rpos: item.rpos + u32::from(item.op.consumes_ref()) * (qpos - item.qpos),
+        }
+    }
+
+    /// Suppose a read was aligned to a "query" side of this searchable cigar, and corresponding cursor was obtained
+    /// using `find_position`. Then, this function transfers read alignment from "query" to "target" haplotype.
+    pub fn transfer_alignment(
+        &self,
+        cursor: AlignmentCursor,
+        read_cigar: &Cigar,
+        read_seq: &[u8],
+        ref_seq: &[u8],
+        aligner: &Aligner,
+    ) -> crate::Result<Cigar>
+    {
+        let mut read_cigar_iter = read_cigar.iter();
+        let mut read_cigar_item = read_cigar_iter.next().expect("Read CIGAR is empty");
+        let mut read_item_rem = read_cigar_item.len;
+
+        let mut hap_cigar_iter = self.items.iter();
+        let mut hap_cigar_item = hap_cigar_iter.next().expect("Alignment cursor is invalid");
+        let mut hap_item_rem = hap_cigar_item.len - (cursor.qpos - hap_cigar_item.qpos);
+
+        // For both read and haplotypes, `_pos` is the current position in both cigars.
+        // `_last` is the end of the sequence added to the new cigar.
+        // So, gap `_last.._pos` is not yet aligned.
+        let mut read_last = 0;
+        let mut read_pos = 0;
+        let mut hap_last = cursor.rpos;
+        let mut hap_pos = cursor.rpos;
+
+        let mut new_cigar = Cigar::new();
+        loop {
+            let shift = min(read_item_rem, hap_item_rem);
+            if read_cigar_item.op == Operation::Equal && hap_cigar_item.op == Operation::Equal {
+                // [TODO] Check if adding 1X / 2X is faster than a WFA call
+                aligner.smart_align::<false>(
+                    ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, u32::MAX, &mut new_cigar)?;
+                new_cigar.push_checked(Operation::Equal, shift);
+                // [TODO] Remove assert
+                assert!(itertools::izip!(
+                    &ref_seq[hap_pos as usize..(hap_pos + shift) as usize],
+                    &read_seq[read_pos as usize..(read_pos + shift) as usize]).all(|(a, b)| a == b));
+                read_pos += shift;
+                read_last = read_pos;
+                hap_pos += shift;
+                hap_last = hap_pos;
+            } else {
+                read_pos += u32::from(read_cigar_item.op.consumes_query()) * shift;
+                hap_pos += u32::from(hap_cigar_item.op.consumes_ref()) * shift;
+            }
+            read_item_rem -= shift;
+            if read_item_rem == 0 {
+                let Some(tmp) = read_cigar_iter.next() else { break };
+                read_cigar_item = tmp;
+                read_item_rem = tmp.len;
+            }
+            hap_item_rem -= shift;
+            if hap_item_rem == 0 {
+                let Some(tmp) = hap_cigar_iter.next() else { break };
+                hap_cigar_item = tmp;
+                hap_item_rem = tmp.len;
+            }
+        }
+        // [TODO] Check semi-global alignment.
+        if read_last != read_pos {
+            new_cigar.push_checked(Operation::Soft, read_pos - read_last);
+        }
+        match new_cigar.tuples.first_mut() {
+            Some(first) if first.op == Operation::Ins => first.op = Operation::Soft,
+            _ => {}
+        }
+        Ok(new_cigar)
     }
 }

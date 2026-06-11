@@ -225,7 +225,7 @@ pub trait RoundDiv {
     #[allow(unused)]
     fn correct_ceil_div(self, rhs: Self) -> Self;
 
-    /// Fast ceiling division. Can give incorrect results due to overflowing.
+    /// Fast ceiling division. Can give incorrect results for very large values due to overflowing.
     fn fast_ceil_div(self, rhs: Self) -> Self;
 
     /// Fast rounding division. Can give incorrect results due to overflowing.
