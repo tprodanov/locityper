@@ -991,16 +991,17 @@ fn create_mapping_command(
         // This is because Strobealign starts to connect read pairs in multiple ways,
         // which produces too large output, and takes a lot of time.
         cmd.args(&[
-            "--no-progress",
             "-M", &n_locs,   // Try as many secondary locations as possible.
             "-N", &n_locs,   // Output as many secondary alignments as possible.
             "-S", "0.5",     // Try candidate sites with minimizer hits >= FLOAT * best hits.
             "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.
             "--eqx",         // Output X/= instead of M operations.
-            "--no-PG",
             "-r", &format!("{:.0}", seq_info.mean_read_len()),
-            "-t", &args.threads.to_string()]);
+            "-t", &args.threads.to_string(),
+            "--no-progress",
+            "--no-PG",
+        ]);
     } else {
         cmd = Command::new(&args.minimap);
         cmd.args(&[
@@ -1009,7 +1010,8 @@ fn create_mapping_command(
             "-N", &n_locs,   // Output as many secondary alignments as possible.
             "-f", "0.05",   // Filter out 5% minimizers. Should be still enough minimizers for long reads.
             "--eqx",        // Output X/= instead of M operations.
-            "-t", &args.threads.to_string()]);
+            "-t", &args.threads.to_string(),
+        ]);
     }
     cmd.arg(&ref_path).arg(&reads_path)
         .stdout(Stdio::piped())

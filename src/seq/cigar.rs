@@ -770,6 +770,7 @@ pub struct ExtCigarItem {
 
 /// Extension over CIGAR that answers queries "convert range start..end to another sequence" in log(n) time,
 /// where n is the number of operations in this CIGAR.
+#[derive(Clone)]
 pub struct SearchableCigar {
     items: Vec<ExtCigarItem>,
 }
