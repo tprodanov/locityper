@@ -2,10 +2,9 @@ pub mod paths;
 mod add;
 mod preproc;
 mod genotype;
-#[cfg(feature = "align")]
 mod align;
 mod recruit;
-pub(crate) mod prune;
+pub mod prune;
 mod paf_vcf;
 
 use std::{
@@ -35,16 +34,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
         "r" | "recruit" => recruit::run(&argv[2..])?,
 
         "prune" => prune::run(&argv[2..])?,
-        "aln" | "align" =>
-        {
-            #[cfg(feature = "align")] {
-                align::run(&argv[2..])?;
-            }
-            #[cfg(not(feature = "align"))] {
-                log::error!("{} command unavailable, please enable `align` feature during compilation", "align".bold());
-                std::process::exit(1);
-            }
-        }
+        "aln" | "align" => align::run(&argv[2..])?,
         "paf-vcf" | "paf-to-vcf" => paf_vcf::run(&argv[2..])?,
 
         "h" | "help" | "--help" | "-h" => print_help(),

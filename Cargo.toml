@@ -45,13 +45,12 @@ itertools = { version = "0.14", default-features = false, features = ["use_std"]
 kodama = { version = "0.3" }
 
 [build-dependencies]
-bindgen = { version = "0.72", default-features = false, features = ["runtime"], optional = true }
+bindgen = { version = "0.72", default-features = false, features = ["runtime"] }
 
 # [profile.release]
 # debug = 1  # Needed for profiling.
 
 [features]
-default = ["align"]
+default = []
 gurobi = ["dep:grb"]
 highs = ["dep:highs", "dep:highs-sys"]
-align = ["dep:bindgen"]

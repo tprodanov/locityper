@@ -1,4 +1,4 @@
-#[cfg(feature = "align")]
+
 mod build_wfa {
     use std::{
         env,
@@ -61,6 +61,5 @@ mod build_wfa {
 }
 
 fn main() {
-    #[cfg(feature = "align")]
-    { build_wfa::build(); }
+    build_wfa::build();
 }

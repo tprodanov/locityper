@@ -1,11 +1,9 @@
-#[cfg(feature = "align")]
 use std::ffi::c_char;
 use crate::{
     seq::cigar::{Cigar, Operation},
     err::{error, validate_param},
 };
 
-#[cfg(feature = "align")]
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
@@ -84,7 +82,6 @@ impl Penalties {
 }
 
 /// Number of alignment steps based on the accuracy level (0-9).
-#[cfg(feature = "align")]
 fn alignment_steps(accuracy: u8) -> i32 {
     match accuracy {
         0 =>       1,
@@ -101,7 +98,6 @@ fn alignment_steps(accuracy: u8) -> i32 {
     }
 }
 
-#[cfg(feature = "align")]
 pub struct Aligner {
     inner: *mut cwfa::wavefront_aligner_t,
     penalties: Penalties,
@@ -113,14 +109,12 @@ pub struct Aligner {
     safe_mismatch_size: u32,
 }
 
-#[cfg(feature = "align")]
 impl Drop for Aligner {
     fn drop(&mut self) {
         unsafe { cwfa::wavefront_aligner_delete(self.inner) }
     }
 }
 
-#[cfg(feature = "align")]
 impl Aligner {
     /// Accuracy level must be in [1, 9], 0 - very fast and inaccurate, 9 - very slow and accurate.
     pub fn new(penalties: Penalties, accuracy: u8) -> Self {
@@ -259,7 +253,6 @@ impl Aligner {
 
 /// Convert char into operation, replacing M with X.
 #[inline]
-#[cfg(feature = "align")]
 fn op_from_char(ch: u8) -> Result<Operation, ()> {
     match ch {
         b'M' | b'=' => Ok(Operation::Equal),
