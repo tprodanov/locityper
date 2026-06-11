@@ -723,6 +723,7 @@ fn create_mapping_command(args: &Args, seq_info: &SequencingInfo, ref_filename: 
             "-U",          // Do not output unmapped reads,
             "-f", "0.001", // Discard more minimizers to speed up alignment,
             "--eqx",       // Output X/= instead of M operations,
+            "--no-PG",
             "-t", &threads.to_string(), // Specify the number of threads,
             "-r", &format!("{:.0}", seq_info.mean_read_len()), // Provide mean read length.
             "--no-progress",
@@ -961,6 +962,7 @@ fn run_mapping(
             // Ignore reads where any of the mates is unmapped,
             // + ignore secondary & supplementary alignments + ignore failed checks.
             "-F", "3852",
+            "--no-PG",
             "-q", &args.min_mapq.to_string(),
             ]);
     if let Some(filename) = &tmp_bed {

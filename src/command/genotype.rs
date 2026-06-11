@@ -998,6 +998,7 @@ fn create_mapping_command(
             "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.
             "--eqx",         // Output X/= instead of M operations.
+            "--no-PG",
             "-r", &format!("{:.0}", seq_info.mean_read_len()),
             "-t", &args.threads.to_string()]);
     } else {
@@ -1045,7 +1046,7 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
     let mut pipe_guard = ext::sys::PipeGuard::new(mapping_exe, mapping_child);
 
     let mut samtools_cmd = Command::new(&args.samtools);
-    samtools_cmd.args(&["view", "-b"]); // Output BAM.
+    samtools_cmd.args(&["view", "-b", "--no-PG"]); // Output BAM.
     if bg_distr.seq_info().technology().are_short_reads() {
         samtools_cmd.args(&["-e", "[AS] >= 50 || flag & 2304 == 0"]); // Discard secondary alignments with low score.
     }
