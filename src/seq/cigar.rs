@@ -748,3 +748,46 @@ pub fn clipping_rate(record: &record::Record) -> f64 {
         f64::from(clipping) / record.seq_len() as f64
     }
 }
+
+/// Directs to a position in an aligment.
+#[derive(Clone, Copy)]
+pub struct AlignmentCursor {
+    cigar_ix: u32,
+    rpos: u32,
+}
+
+/// Extension over CIGAR that answers queries "convert range start..end to another sequence" in log(n) time,
+/// where n is the number of operations in this CIGAR.
+pub struct SearchableCigar {
+    cigar: Cigar,
+    /// Vector of positions (qpos, rpos). Starts with 0,0, ends with qlen, rlen.
+    positions: Vec<(u32, u32)>,
+}
+
+impl SearchableCigar {
+    pub fn new(cigar: Cigar) -> Self {
+        let mut positions = Vec::with_capacity(cigar.len() + 1);
+        positions.push((0, 0));
+        let mut qpos = 0;
+        let mut rpos = 0;
+        for item in cigar.iter() {
+            qpos += u32::from(item.op.consumes_query()) * item.len;
+            rpos += u32::from(item.op.consumes_ref()) * item.len;
+            positions.push((qpos, rpos));
+        }
+        Self { cigar, positions }
+    }
+
+    /// Swap query and reference.
+    pub fn invert(&self) -> Self {
+        Self {
+            cigar: self.cigar.invert(),
+            positions: self.positions.iter().map(|&(x, y)| (y, x)).collect()
+        }
+    }
+
+    /// Based on query position, find reference position.
+    fn find_position(&self, qpos: u32) -> AlignmentCursor {
+        todo!()
+    }
+}

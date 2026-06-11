@@ -127,7 +127,7 @@ impl InsertDistr {
 
         let est_limit = INS_QUANTILE_MULT * F64Ext::interpol_quantile(&mut insert_sizes, INS_QUANTILE);
         // Find index after the limiting value.
-        let m = bisect::right(&insert_sizes, &est_limit);
+        let m = bisect::f64::right(&insert_sizes, est_limit);
         let lim_insert_sizes = &insert_sizes[..m];
         let (mean, var) = F64Ext::mean_variance(lim_insert_sizes);
         let distr = NBinom::estimate_corrected(mean, var);

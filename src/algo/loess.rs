@@ -93,8 +93,8 @@ fn loess(x: &[f64], y: &[f64], w: Option<&[f64]>, xout: &[f64], frac: f64, deg: 
 
     let mut y_out = Vec::with_capacity(xout.len());
     for &xval in xout.iter() {
-        let mut a = bisect::left(&x, &xval);
-        let mut b = bisect::right_at(&x, &xval, a, n);
+        let mut a = bisect::f64::left(&x, xval);
+        let mut b = bisect::f64::right_at(&x, xval, a, n);
         let curr_n = b - a;
         if curr_n >= n_frac {
             y_out.push(y[a..b].iter().sum::<f64>() / curr_n as f64);

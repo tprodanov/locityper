@@ -50,7 +50,7 @@ fn find_gc_bins(gc_contents: &[f64]) -> Vec<(usize, usize)> {
     let mut i = 0;
     for gc in 0..GC_BINS {
         let gc = gc as f64;
-        let j = bisect::right_at(gc_contents, &(gc + 0.5), i, n);
+        let j = bisect::f64::right_at(gc_contents, gc + 0.5, i, n);
         res.push((i, j));
         debug_assert!(i == j || (gc - 0.5 <= gc_contents[i] && gc_contents[j - 1] < gc + 0.5));
         i = j;

@@ -3,35 +3,39 @@
 use std::cmp::Ordering;
 
 /// Performs binary search and finds index `i` such that `a[i-1] < target <= a[i].
-#[inline]
-pub fn left<T: PartialOrd>(a: &[T], target: &T) -> usize {
-    left_by(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"))
+#[inline(always)]
+#[allow(unused)]
+pub fn left<T: Ord>(a: &[T], target: &T) -> usize {
+    left_by(a, |v| v.cmp(target))
 }
 
 /// Performs binary search between indices `lo` and `hi`
 /// and finds index `i` such that `a[i-1] < target <= a[i].
-#[inline]
+#[inline(always)]
 #[allow(unused)]
-pub fn left_at<T: PartialOrd>(a: &[T], target: &T, lo: usize, hi: usize) -> usize {
-    left_by_at(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"), lo, hi)
+pub fn left_at<T: Ord>(a: &[T], target: &T, lo: usize, hi: usize) -> usize {
+    left_by_at(a, |v| v.cmp(target), lo, hi)
 }
 
 /// Performs binary search and finds index `i` such that `a[i-1] <= target < a[i].
-#[inline]
-pub fn right<T: PartialOrd>(a: &[T], target: &T) -> usize {
-    right_by(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"))
+#[inline(always)]
+#[allow(unused)]
+pub fn right<T: Ord>(a: &[T], target: &T) -> usize {
+    right_by(a, |v| v.cmp(target))
 }
 
 /// Performs binary search between indices `lo` and `hi`
 /// and finds index `i` such that `a[i-1] <= target < a[i].
-#[inline]
-pub fn right_at<T: PartialOrd>(a: &[T], target: &T, lo: usize, hi: usize) -> usize {
-    right_by_at(a, |v| v.partial_cmp(target).expect("Bisect failed: elements are not comparable"), lo, hi)
+#[inline(always)]
+#[allow(unused)]
+pub fn right_at<T: Ord>(a: &[T], target: &T, lo: usize, hi: usize) -> usize {
+    right_by_at(a, |v| v.cmp(target), lo, hi)
 }
 
 /// Performs binary search
 /// and finds the index `i` such that `f(a[i-1]) -> Less` and `f(a[i]) -> Equal | Greater`.
-#[inline]
+#[inline(always)]
+#[allow(unused)]
 pub fn left_by<T, F: FnMut(&T) -> Ordering>(a: &[T], f: F) -> usize {
     left_by_at(a, f, 0, a.len())
 }
@@ -57,7 +61,8 @@ pub fn left_by_at<T, F: FnMut(&T) -> Ordering>(a: &[T], mut f: F, mut lo: usize,
 
 /// Performs binary search
 /// and finds the index `i` such that `f(a[i-1]) -> Less | Equal` and `f(a[i]) -> Greater`.
-#[inline]
+#[inline(always)]
+#[allow(unused)]
 pub fn right_by<T, F: FnMut(&T) -> Ordering>(a: &[T], f: F) -> usize {
     right_by_at(a, f, 0, a.len())
 }
@@ -94,4 +99,36 @@ pub fn right_boundary<T>(
         }
     }
     hi
+}
+
+pub mod f64 {
+    /// Performs binary search and finds index `i` such that `a[i-1] < target <= a[i].
+    #[inline(always)]
+    #[allow(unused)]
+    pub fn left(a: &[f64], target: f64) -> usize {
+        super::left_by(a, |v| v.total_cmp(&target))
+    }
+
+    /// Performs binary search between indices `lo` and `hi`
+    /// and finds index `i` such that `a[i-1] < target <= a[i].
+    #[inline(always)]
+    #[allow(unused)]
+    pub fn left_at(a: &[f64], target: f64, lo: usize, hi: usize) -> usize {
+        super::left_by_at(a, |v| v.total_cmp(&target), lo, hi)
+    }
+
+    /// Performs binary search and finds index `i` such that `a[i-1] <= target < a[i].
+    #[inline(always)]
+    #[allow(unused)]
+    pub fn right(a: &[f64], target: f64) -> usize {
+        super::right_by(a, |v| v.total_cmp(&target))
+    }
+
+    /// Performs binary search between indices `lo` and `hi`
+    /// and finds index `i` such that `a[i-1] <= target < a[i].
+    #[inline(always)]
+    #[allow(unused)]
+    pub fn right_at(a: &[f64], target: f64, lo: usize, hi: usize) -> usize {
+        super::right_by_at(a, |v| v.total_cmp(&target), lo, hi)
+    }
 }
