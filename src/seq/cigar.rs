@@ -257,6 +257,12 @@ impl Cigar {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.tuples.clear();
+        self.rlen = 0;
+        self.qlen = 0;
+    }
+
     /// Parses string representation of CIGAR.
     pub fn from_str(s: &[u8]) -> crate::Result<Self> {
         let mut cigar = Self::new();
@@ -321,12 +327,8 @@ impl Cigar {
     }
 
     pub fn push_item_unchecked(&mut self, item: CigarItem) {
-        if item.op.consumes_ref() {
-            self.rlen += item.len;
-        }
-        if item.op.consumes_query() {
-            self.qlen += item.len;
-        }
+        self.rlen += u32::from(item.op.consumes_ref()) * item.len;
+        self.qlen += u32::from(item.op.consumes_query()) * item.len;
         self.tuples.push(item);
     }
 
@@ -338,16 +340,25 @@ impl Cigar {
 
     /// Push a new entry, merges with the latest entry, if relevant.
     pub fn push_checked(&mut self, op: Operation, len: u32) {
-        if op.consumes_ref() {
-            self.rlen += len;
-        }
-        if op.consumes_query() {
-            self.qlen += len;
-        }
+        self.rlen += u32::from(op.consumes_ref()) * len;
+        self.qlen += u32::from(op.consumes_query()) * len;
         match self.tuples.last_mut() {
             Some(item) if item.op == op => item.len += len,
             _ => self.tuples.push(CigarItem::new(op, len)),
         }
+    }
+
+    /// Removes last entry in this CIGAR.
+    pub fn pop(&mut self) -> Option<CigarItem> {
+        let item = self.tuples.pop()?;
+        self.rlen -= u32::from(item.op.consumes_ref()) * item.len;
+        self.qlen -= u32::from(item.op.consumes_query()) * item.len;
+        Some(item)
+    }
+
+    #[inline(always)]
+    pub fn last(&self) -> Option<&CigarItem> {
+        self.tuples.last()
     }
 
     pub fn extend(&mut self, other: &Cigar) {
@@ -837,6 +848,7 @@ impl SearchableCigar {
 
     /// Suppose a read was aligned to a "query" side of this searchable cigar, and corresponding cursor was obtained
     /// using `find_position`. Then, this function transfers read alignment from "query" to "target" haplotype.
+    /// Returns start and end coordinates and a new CIGAR.
     pub fn transfer_alignment(
         &self,
         cursor: AlignmentCursor,
@@ -844,14 +856,15 @@ impl SearchableCigar {
         read_seq: &[u8],
         ref_seq: &[u8],
         aligner: &Aligner,
-    ) -> crate::Result<Cigar>
+    ) -> crate::Result<(u32, u32, Cigar)>
     {
+        let mut rstart = cursor.rpos;
         let mut hap_cigar_iter = self.items[cursor.cigar_ix as usize..].iter();
         let hap_cigar_item = hap_cigar_iter.next().expect("Alignment cursor is invalid");
         let mut op2 = hap_cigar_item.op;
         let mut rem2 = hap_cigar_item.len - (cursor.qpos - hap_cigar_item.qpos);
         if op2 == Operation::Equal && rem2 >= read_cigar.rlen {
-            return Ok(read_cigar.clone());
+            return Ok((rstart, rstart + read_cigar.rlen, read_cigar.clone()));
         }
 
         let mut read_cigar_iter = read_cigar.iter();
@@ -861,8 +874,11 @@ impl SearchableCigar {
         // So, gap `_last.._pos` is not yet aligned.
         let mut read_last = 0;
         let mut read_pos = 0;
-        let mut hap_last = cursor.rpos;
-        let mut hap_pos = cursor.rpos;
+        let mut hap_last = rstart;
+        let mut hap_pos = rstart;
+
+        /// When checking read padding, add reference sequence of length = read tail + 3.
+        const CLIP_PADDING: u32 = 3;
 
         let mut new_cigar = Cigar::new();
         loop {
@@ -874,7 +890,14 @@ impl SearchableCigar {
                 _ => None,
             };
             if add_operation.is_some() {
-                aligner.smart_align(ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, (), &mut new_cigar)?;
+                if read_last == 0 && read_pos > 0 {
+                    aligner.align_clipping::<true>(ref_seq, read_seq,
+                        hap_last.saturating_sub(read_pos + CLIP_PADDING), hap_pos, read_last, read_pos,
+                        &mut new_cigar);
+                    rstart = rstart + hap_pos - hap_last - new_cigar.rlen;
+                } else {
+                    aligner.smart_align(ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, (), &mut new_cigar);
+                }
             }
             let shift = double_cigar_move_and_shift(op1, op2, &mut read_pos, &mut rem1, &mut hap_pos, &mut rem2);
             if let Some(op) = add_operation {
@@ -896,15 +919,19 @@ impl SearchableCigar {
                 ExtCigarItem { op: op2, len: rem2, .. } = *tmp;
             }
         }
-        // [TODO] Check semi-global alignment.
         if read_last != read_cigar.qlen {
-            new_cigar.push_checked(Operation::Soft, read_cigar.qlen - read_last);
+            // [TODO] Could use ref_len if we had it.
+            aligner.align_clipping::<false>(ref_seq, read_seq,
+                hap_last, min(ref_seq.len() as u32, hap_last + read_cigar.qlen - read_last + CLIP_PADDING),
+                read_last, read_cigar.qlen,
+                &mut new_cigar);
         }
         match new_cigar.tuples.first_mut() {
             Some(first) if first.op == Operation::Ins => first.op = Operation::Soft,
             _ => {}
         }
-        Ok(new_cigar)
+        assert_eq!(read_cigar.qlen, new_cigar.qlen);
+        Ok((rstart, rstart + new_cigar.rlen, new_cigar))
     }
 }
 

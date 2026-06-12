@@ -94,7 +94,7 @@ impl HapAlns {
         for (oth_contig_id, _, cigar) in &self.alns[first_aln.contig_id().ix()] {
             let cursor = cigar.find_position(first_aln.interval().start());
             log::debug!("        to {}: cursor {:?}", contig_set.contigs().get_name(*oth_contig_id), cursor);
-            let new_cigar = cigar.transfer_alignment(cursor, first_aln.cigar(), first_seq,
+            let (rstart, rend, new_cigar) = cigar.transfer_alignment(cursor, first_aln.cigar(), first_seq,
                 contig_set.get_seq(*oth_contig_id), aligner)?;
             log::debug!("        -> {:?}", new_cigar);
         }

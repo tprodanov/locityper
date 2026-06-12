@@ -223,7 +223,7 @@ fn align(
             cigar.push_unchecked(Operation::Equal, curr_match);
             curr_match = 0;
         }
-        score += aligner.smart_align(seq1, seq2, i1, i2, j1, j2, max_gap, &mut cigar)?;
+        score += aligner.smart_align(seq1, seq2, i1, i2, j1, j2, max_gap, &mut cigar);
         curr_match += backbone_k;
         i1 = i2 + backbone_k;
         j1 = j2 + backbone_k;
@@ -234,7 +234,7 @@ fn align(
     }
     let n1 = seq1.len() as u32;
     let n2 = seq2.len() as u32;
-    score += aligner.smart_align(seq1, seq2, i1, n1, j1, n2, max_gap, &mut cigar)?;
+    score += aligner.smart_align(seq1, seq2, i1, n1, j1, n2, max_gap, &mut cigar);
     assert_eq!(cigar.ref_len(), seq1.len() as u32,
         "Alignment {} - {} produced incorrect CIGAR {}", entry1.name(), entry2.name(), cigar);
     assert_eq!(cigar.query_len(), seq2.len() as u32,
@@ -333,7 +333,7 @@ fn align_all_singlethread(
 {
     let mut buf1 = Default::default();
     let mut buf2 = Default::default();
-    let aligner = Aligner::new(params.penalties.clone(), params.accuracy);
+    let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
     let mult = 100.0 / pairs.len() as f64;
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;

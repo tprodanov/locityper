@@ -1,7 +1,10 @@
-use std::ffi::c_char;
+use std::{
+    ffi::c_char,
+    cmp::max,
+};
 use crate::{
     seq::cigar::{Cigar, Operation},
-    err::{error, validate_param},
+    err::validate_param,
 };
 
 #[allow(non_upper_case_globals)]
@@ -116,7 +119,11 @@ impl Threshold for () {
 }
 
 pub struct Aligner {
-    inner: *mut cwfa::wavefront_aligner_t,
+    /// WFA aligner for global alignments.
+    global_aligner: *mut cwfa::wavefront_aligner_t,
+    /// WFA aligner for left clipping (sequence right side should be aligned, left side can be unaligned)
+    /// and right clipping.
+    semiglobal_aligner: Option<*mut cwfa::wavefront_aligner_t>,
     penalties: Penalties,
     /// At what size nX could not theoretically be replaced with 1I(n-1)=1D.
     /// For example, with default penalties (4,6,1)
@@ -128,13 +135,21 @@ pub struct Aligner {
 
 impl Drop for Aligner {
     fn drop(&mut self) {
-        unsafe { cwfa::wavefront_aligner_delete(self.inner) }
+        unsafe { cwfa::wavefront_aligner_delete(self.global_aligner) };
+        if let Some(ptr) = self.semiglobal_aligner {
+            unsafe { cwfa::wavefront_aligner_delete(ptr) };
+        }
     }
 }
 
 impl Aligner {
     /// Accuracy level must be in [1, 9], 0 - very fast and inaccurate, 9 - very slow and accurate.
-    pub fn new(penalties: Penalties, accuracy: u8) -> Self {
+    pub fn new(
+        penalties: Penalties,
+        accuracy: u8,
+        bound: Option<i32>,
+        enable_semiglobal: bool,
+    ) -> Self {
         assert!(1 <= accuracy && accuracy <= MAX_ACCURACY, "Cannot construct WFA aligner for accuracy {}", accuracy);
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
         // Limit the number of alignment steps.
@@ -148,8 +163,13 @@ impl Aligner {
         };
         // Compute score and CIGAR as well.
         attributes.alignment_scope = cwfa::alignment_scope_t_compute_alignment;
-        // Compute global alignment.
-        attributes.alignment_form.span = cwfa::alignment_span_t_alignment_end2end;
+
+        if let Some(k) = bound {
+            attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_banded_adaptive;
+            attributes.heuristic.min_k = -k;
+            attributes.heuristic.max_k = k;
+            attributes.heuristic.steps_between_cutoffs = 3;
+        }
 
         // Set the cost model and parameters.
         attributes.distance_metric = cwfa::distance_metric_t_gap_affine;
@@ -157,12 +177,20 @@ impl Aligner {
         attributes.affine_penalties.gap_opening = penalties.gap_open;
         attributes.affine_penalties.gap_extension = penalties.gap_extend;
 
+        let semiglobal_aligner = if enable_semiglobal {
+            // Need positive match score for alignment to work.
+            attributes.affine_penalties.match_ = -max(1, attributes.affine_penalties.mismatch / 2);
+            attributes.alignment_form.span = cwfa::alignment_span_t_alignment_endsfree;
+            Some(unsafe { cwfa::wavefront_aligner_new(&mut attributes.clone()) })
+        } else { None };
+
+        attributes.affine_penalties.match_ = 0;
+        attributes.alignment_form.span = cwfa::alignment_span_t_alignment_end2end;
+        let global_aligner = unsafe { cwfa::wavefront_aligner_new(&mut attributes) };
+
         // At this value it could not be beneficial to replace nX with 1I(n-1)=1D.
         let safe_mismatch_size = ((2 * penalties.gap_open + 2 * penalties.gap_extend) / penalties.mismatch) as u32;
-        Self {
-            inner: unsafe { cwfa::wavefront_aligner_new(&mut attributes) },
-            safe_mismatch_size, penalties,
-        }
+        Self { global_aligner, semiglobal_aligner, safe_mismatch_size, penalties }
     }
 
     pub fn penalties(&self) -> &Penalties {
@@ -171,39 +199,51 @@ impl Aligner {
 
     /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
     /// If the alignment is dropped, returns VERY approximate alignment.
-    pub fn align(&self, seq1: &[u8], seq2: &[u8], cigar: &mut Cigar) -> crate::Result<i32> {
-        // // Has .I.D or .D.I
-        // let mut has_gap_conflict = false;
-        // // Initial value does not matter.
-        // let mut last_op = Operation::Match;
-        // let start_len = cigar.len();
-
-        let status = unsafe { cwfa::wavefront_align(
-            self.inner,
-            seq1.as_ptr() as *const c_char,
-            seq1.len() as i32,
-            seq2.as_ptr() as *const c_char,
-            seq2.len() as i32,
+    ///
+    /// If `LEFT_CLIPPING`, replace starting operations until "=" with soft clipping.
+    /// !!! Resulting score will be incorrect.
+    fn align<const LEFT_CLIPPING: bool>(
+        &self,
+        aligner: *mut cwfa::wavefront_aligner_t,
+        seq1: &[u8],
+        seq2: &[u8],
+        cigar: &mut Cigar,
+    ) -> i32 {
+        let status = unsafe { cwfa::wavefront_align(aligner,
+            seq1.as_ptr() as *const c_char, seq1.len() as i32,
+            seq2.as_ptr() as *const c_char, seq2.len() as i32,
         ) };
         if status != 0 {
             // Alignment was dropped, create approximate alignment.
-            return Ok(self.penalties.align_simple(seq1, seq2, cigar));
+            return self.penalties.align_simple(seq1, seq2, cigar);
         }
 
-        let c_cigar = unsafe { (*self.inner).cigar };
+        let c_cigar = unsafe { (*aligner).cigar };
         let begin_offset = usize::try_from(unsafe { (*c_cigar).begin_offset }).unwrap();
         let end_offset = usize::try_from(unsafe { (*c_cigar).end_offset }).unwrap();
+        let mut no_matches_yet = true;
         if begin_offset < end_offset {
             let cigar_slice: &[u8] = unsafe {
                 std::slice::from_raw_parts((*c_cigar).operations as *const u8, end_offset - begin_offset)
             };
             for &ch in cigar_slice {
-                let op = op_from_char(ch).map_err(|_| error!(RuntimeError,
-                    "Could not align two sequences: violating CIGAR character `{}` ({}) in {:?}. Sequences: {} and {}",
-                    char::from(ch), ch, cigar_slice, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2)))?;
-                // has_gap_conflict = has_gap_conflict || last_op.gap_conflict(op);
-                // last_op = op;
+                let op = op_from_char(ch);
+                if LEFT_CLIPPING && no_matches_yet && op == Operation::Equal {
+                    no_matches_yet = false;
+                    let soft_clipping = cigar.query_len();
+                    cigar.clear();
+                    if soft_clipping > 0 {
+                        cigar.push_unchecked(Operation::Soft, soft_clipping);
+                    }
+                }
                 cigar.push_checked(op, 1);
+            }
+        }
+        if LEFT_CLIPPING && no_matches_yet {
+            let soft_clipping = cigar.query_len();
+            cigar.clear();
+            if soft_clipping > 0 {
+                cigar.push_unchecked(Operation::Soft, soft_clipping);
             }
         }
         let score = unsafe { (*c_cigar).score };
@@ -211,11 +251,7 @@ impl Aligner {
             log::warn!("WFA produced very small score ({}). Sequences: {} and {}",
                 score, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2));
         }
-
-        // if has_gap_conflict {
-        //     score += cigar.optimize(start_len, &self.penalties);
-        // }
-        Ok(score)
+        score
     }
 
     /// If `i1 == i2` or `j1 == j2` inserts simple INS/DEL,
@@ -233,7 +269,7 @@ impl Aligner {
         j2: u32,
         max_gap: impl Threshold,
         cigar: &mut Cigar,
-    ) -> crate::Result<i32>
+    ) -> i32
     {
         debug_assert!(i1 <= i2 && j1 <= j2);
         let jump1 = i2 - i1;
@@ -243,40 +279,89 @@ impl Aligner {
                 let subseq1 = &seq1[i1 as usize..i2 as usize];
                 let subseq2 = &seq2[j1 as usize..j2 as usize];
                 if max_gap.under(jump1) || max_gap.under(jump2) {
-                    Ok(self.penalties.align_simple(subseq1, subseq2, cigar))
+                    self.penalties.align_simple(subseq1, subseq2, cigar)
                 } else if jump1 == jump2 && jump1 <= self.safe_mismatch_size {
                     let mut ndiff = 0;
                     for (&c1, &c2) in itertools::izip!(subseq1, subseq2) {
                         cigar.push_checked(if c1 == c2 { Operation::Equal } else { Operation::Diff }, 1);
                         ndiff -= i32::from(c1 != c2);
                     }
-                    Ok(ndiff * self.penalties.mismatch)
+                    ndiff * self.penalties.mismatch
                 } else {
-                    self.align(subseq1, subseq2, cigar)
+                    self.align::<false>(self.global_aligner, subseq1, subseq2, cigar)
                 }
             }
             (true, false) => {
                 cigar.push_unchecked(Operation::Del, jump1);
-                Ok(-self.penalties.gap_open - jump1 as i32 * self.penalties.gap_extend)
+                -self.penalties.gap_open - jump1 as i32 * self.penalties.gap_extend
             }
             (false, true) => {
                 cigar.push_unchecked(Operation::Ins, jump2);
-                Ok(-self.penalties.gap_open - jump2 as i32 * self.penalties.gap_extend)
+                -self.penalties.gap_open - jump2 as i32 * self.penalties.gap_extend
             }
-            (false, false) => Ok(0),
+            (false, false) => 0,
         }
+    }
+
+    pub fn align_clipping<const LEFT: bool>(
+        &self,
+        seq1: &[u8], // ref sequence
+        seq2: &[u8], // query sequence
+        i1: u32,
+        i2: u32,
+        j1: u32,
+        j2: u32,
+        cigar: &mut Cigar,
+    ) {
+        assert!(j1 != j2);
+        if i1 == i2 {
+            cigar.push_unchecked(Operation::Soft, j2 - j1);
+            return
+        }
+        let subseq1 = &seq1[i1 as usize..i2 as usize];
+        let subseq2 = &seq2[j1 as usize..j2 as usize];
+
+        let aligner = self.semiglobal_aligner.expect("Semi-global aligner undefined");
+        if LEFT {
+            unsafe { cwfa::wavefront_aligner_set_alignment_free_ends(
+                aligner, subseq1.len() as i32, 0, subseq2.len() as i32, 0) };
+        } else {
+            unsafe { cwfa::wavefront_aligner_set_alignment_free_ends(
+                aligner, 0, subseq1.len() as i32, 0, subseq2.len() as i32) };
+        }
+
+        let subseq1 = &seq1[i1 as usize..i2 as usize];
+        let subseq2 = &seq2[j1 as usize..j2 as usize];
+        log::debug!("Align clipping (left? {}) between {} and {}. Current CIGAR = {:?}",
+            LEFT, std::str::from_utf8(subseq1).unwrap(), std::str::from_utf8(subseq2).unwrap(), cigar);
+        self.align::<LEFT>(aligner, subseq1, subseq2, cigar);
+        if !LEFT {
+            let mut soft_clipping = 0;
+            loop {
+                match cigar.last() {
+                    Some(item) if item.operation() != Operation::Equal
+                        => soft_clipping += u32::from(item.operation().consumes_query()) * item.len(),
+                    _ => break,
+                }
+                cigar.pop();
+            }
+            if soft_clipping > 0 {
+                cigar.push_unchecked(Operation::Soft, soft_clipping);
+            }
+        }
+        log::debug!("    -> {:?}", cigar);
     }
 }
 
 /// Convert char into operation, replacing M with X.
-#[inline]
-fn op_from_char(ch: u8) -> Result<Operation, ()> {
+#[inline(always)]
+fn op_from_char(ch: u8) -> Operation {
     match ch {
-        b'M' | b'=' => Ok(Operation::Equal),
-        b'X' => Ok(Operation::Diff),
-        b'I' => Ok(Operation::Ins),
-        b'D' => Ok(Operation::Del),
-        b'S' => Ok(Operation::Soft),
-        _ => Err(()),
+        b'M' | b'=' => Operation::Equal,
+        b'X' => Operation::Diff,
+        b'I' => Operation::Ins,
+        b'D' => Operation::Del,
+        b'S' => Operation::Soft,
+        _ => panic!("Unexpected CIGAR operation {}", ch as char),
     }
 }
