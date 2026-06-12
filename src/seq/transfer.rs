@@ -3,13 +3,17 @@
 use std::{
     path::Path,
     cmp::{min, max},
+    ops::Range,
 };
 use crate::{
     seq::{
-        ContigId, ContigNames,
+        contigs::{ContigId, ContigNames, ContigSet},
         cigar::SearchableCigar,
         dist::PafFile,
+        aln::Alignment,
+        wfa::Aligner,
     },
+    model::locs::MateData,
     ext::{
         self,
     },
@@ -17,14 +21,18 @@ use crate::{
 };
 
 /// Haplotype-haplotype alignments.
-pub struct HapHapAlns {
-    /// Alignments from each contig. Tuples contain (second contig, total number of matches, cigar).
+pub struct HapAlns {
+    /// Alignments from each contig.
+    /// Tuples with:
+    /// - second contig,
+    /// - total number of matches,
+    /// - cigar where ref = second contig, query = outer contig.
     alns: Vec<Vec<(ContigId, u32, SearchableCigar)>>,
 }
 
-impl HapHapAlns {
+impl HapAlns {
     /// Loads alignments from a PAF file, keep <= `n_alns` best alignments per haplotype.
-    pub fn from_file(
+    pub fn load(
         filename: &Path,
         contigs: &ContigNames,
         max_div: f64,
@@ -55,8 +63,8 @@ impl HapHapAlns {
             if simil < min_simil { continue };
             let Some(cigar) = entry.cigar().transpose()? else { continue };
             let cigar = SearchableCigar::new(&cigar);
-            alns[id1.ix()].push((id2, n_matches, cigar.invert()));
-            alns[id2.ix()].push((id1, n_matches, cigar));
+            alns[id2.ix()].push((id1, n_matches, cigar.invert()));
+            alns[id1.ix()].push((id2, n_matches, cigar));
         }
 
         for hap_alns in &mut alns {
@@ -64,4 +72,39 @@ impl HapHapAlns {
         }
         Ok(Self { alns })
     }
+
+    pub fn transfer_alignments(
+        &self,
+        alns: &mut Vec<Alignment>,
+        start_ix: usize,
+        mate_data: &MateData,
+        contig_set: &ContigSet,
+        aligner: &Aligner,
+    ) -> crate::Result<()>
+    {
+        let mut intervals = iset::IntervalSet::new();
+        // log::debug!("    Initial alignments");
+        for aln in &alns[start_ix..] {
+            // log::debug!("        * {:15} {:?} {}", aln.interval(), aln.cigar(), aln.strand());
+            intervals.insert(aln_interval(aln));
+        }
+        let first_aln = &alns[start_ix];
+        log::debug!("    First alignment: {} {:?} {}", first_aln.interval(), first_aln.cigar(), first_aln.strand());
+        let first_seq = mate_data.get_seq(first_aln.strand());
+        for (oth_contig_id, _, cigar) in &self.alns[first_aln.contig_id().ix()] {
+            let cursor = cigar.find_position(first_aln.interval().start());
+            log::debug!("        to {}: cursor {:?}", contig_set.contigs().get_name(*oth_contig_id), cursor);
+            let new_cigar = cigar.transfer_alignment(cursor, first_aln.cigar(), first_seq,
+                contig_set.get_seq(*oth_contig_id), aligner)?;
+            log::debug!("        -> {:?}", new_cigar);
+        }
+        Ok(())
+    }
+}
+
+/// Convert alignment intervals into ranges of u64, useful for interval set.
+#[inline(always)]
+fn aln_interval(aln: &Alignment) -> Range<u64> {
+    let prefix = u64::from(aln.contig_id().get()) << 32;
+    (prefix | u64::from(aln.interval().start()))..(prefix | u64::from(aln.interval().end()))
 }

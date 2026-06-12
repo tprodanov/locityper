@@ -26,6 +26,14 @@ pub enum Operation {
     Del,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Consumes {
+    Read,
+    Ref,
+    Both,
+}
+
 impl Operation {
     /// Does the Cigar operation consume reference sequence?
     #[inline]
@@ -51,6 +59,17 @@ impl Operation {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff => true,
             Operation::Soft | Operation::Hard | Operation::Ins | Operation::Del => false,
+        }
+    }
+
+    /// Returns whether this operation consumes read, reference or both. Panics on hard clipping.
+    #[inline]
+    pub const fn consumes(self) -> Consumes {
+        match self {
+            Operation::Match | Operation::Equal | Operation::Diff => Consumes::Both,
+            Operation::Soft | Operation::Ins => Consumes::Read,
+            Operation::Del => Consumes::Ref,
+            Operation::Hard => panic!("Unexpected hard clipping"),
         }
     }
 
@@ -751,7 +770,7 @@ pub fn clipping_rate(record: &record::Record) -> f64 {
 }
 
 /// Directs to a position in an aligment.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct AlignmentCursor {
     cigar_ix: u32,
     qpos: u32,
@@ -760,7 +779,7 @@ pub struct AlignmentCursor {
 
 /// Extended CIGAR item, which comparing to `CigarItem`
 /// contains query and reference positions and the start of the operation.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExtCigarItem {
     op: Operation,
     len: u32,
@@ -829,11 +848,11 @@ impl SearchableCigar {
     {
         let mut read_cigar_iter = read_cigar.iter();
         let mut read_cigar_item = read_cigar_iter.next().expect("Read CIGAR is empty");
-        let mut read_item_rem = read_cigar_item.len;
+        let mut read_op_rem = read_cigar_item.len;
 
-        let mut hap_cigar_iter = self.items.iter();
+        let mut hap_cigar_iter = self.items[cursor.cigar_ix as usize..].iter();
         let mut hap_cigar_item = hap_cigar_iter.next().expect("Alignment cursor is invalid");
-        let mut hap_item_rem = hap_cigar_item.len - (cursor.qpos - hap_cigar_item.qpos);
+        let mut hap_op_rem = hap_cigar_item.len - (cursor.qpos - hap_cigar_item.qpos);
 
         // For both read and haplotypes, `_pos` is the current position in both cigars.
         // `_last` is the end of the sequence added to the new cigar.
@@ -845,40 +864,47 @@ impl SearchableCigar {
 
         let mut new_cigar = Cigar::new();
         loop {
-            let shift = min(read_item_rem, hap_item_rem);
+            // log::debug!("    :   read {} rem {},  hap {:?} rem {}.    read window {}..{},  hap window {}..{}",
+            //     read_cigar_item, read_op_rem, hap_cigar_item, hap_op_rem, read_last, read_pos, hap_last, hap_pos);
+
+            // [TODO] If two haplotypes are equal, just align currently open read window
+            // and copy overlapping read operations.
             if read_cigar_item.op == Operation::Equal && hap_cigar_item.op == Operation::Equal {
-                // [TODO] Check if adding 1X / 2X is faster than a WFA call
+                let shift = min(read_op_rem, hap_op_rem);
                 aligner.smart_align::<false>(
                     ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, u32::MAX, &mut new_cigar)?;
                 new_cigar.push_checked(Operation::Equal, shift);
+                // log::debug!("    :   insert {}=", shift);
+                // log::debug!("        {}", std::str::from_utf8(&ref_seq[hap_pos as usize..(hap_pos + shift) as usize]).unwrap());
+                // log::debug!("        {}", std::str::from_utf8(&read_seq[read_pos as usize..(read_pos + shift) as usize]).unwrap());
                 // [TODO] Remove assert
                 assert!(itertools::izip!(
                     &ref_seq[hap_pos as usize..(hap_pos + shift) as usize],
                     &read_seq[read_pos as usize..(read_pos + shift) as usize]).all(|(a, b)| a == b));
                 read_pos += shift;
                 read_last = read_pos;
+                read_op_rem -= shift;
                 hap_pos += shift;
                 hap_last = hap_pos;
+                hap_op_rem -= shift
             } else {
-                read_pos += u32::from(read_cigar_item.op.consumes_query()) * shift;
-                hap_pos += u32::from(hap_cigar_item.op.consumes_ref()) * shift;
+                double_cigar_move_and_shift(read_cigar_item.op, hap_cigar_item.op,
+                    &mut read_pos, &mut read_op_rem, &mut hap_pos, &mut hap_op_rem);
             }
-            read_item_rem -= shift;
-            if read_item_rem == 0 {
+            if read_op_rem == 0 {
                 let Some(tmp) = read_cigar_iter.next() else { break };
                 read_cigar_item = tmp;
-                read_item_rem = tmp.len;
+                read_op_rem = tmp.len;
             }
-            hap_item_rem -= shift;
-            if hap_item_rem == 0 {
+            if hap_op_rem == 0 {
                 let Some(tmp) = hap_cigar_iter.next() else { break };
                 hap_cigar_item = tmp;
-                hap_item_rem = tmp.len;
+                hap_op_rem = tmp.len;
             }
         }
         // [TODO] Check semi-global alignment.
-        if read_last != read_pos {
-            new_cigar.push_checked(Operation::Soft, read_pos - read_last);
+        if read_last != read_cigar.qlen {
+            new_cigar.push_checked(Operation::Soft, read_cigar.qlen - read_last);
         }
         match new_cigar.tuples.first_mut() {
             Some(first) if first.op == Operation::Ins => first.op = Operation::Soft,
@@ -886,4 +912,59 @@ impl SearchableCigar {
         }
         Ok(new_cigar)
     }
+}
+
+/// Depending on the two parallel CIGAR operations (read v. hapQ) and (hapQ v. hapT)
+/// depermine whether read position and hapT position should change,
+/// and whether read and hapT CIGAR iterator should move.
+#[inline(always)]
+fn double_cigar_move_and_shift(
+    operation1: Operation,
+    operation2: Operation,
+    read_pos: &mut u32,
+    read_op_rem: &mut u32,
+    hap_pos: &mut u32,
+    hap_op_rem: &mut u32,
+) {
+    // 1. Read CIGAR shifts, unless *both*
+    //    a. deletion in hapQ relative to hapQ,
+    //    b. no insertion in the read rel to hapQ.
+    // 2. Read moves, whenever
+    //    a. read CIGAR shifts,
+    //    b. there is no deletion in the read rel to hapQ.
+    // Analogous ideas for the hapT shift and move.
+    let (read_moves, read_cigar_shifts, hap_moves, hap_cigar_shifts)
+        = match (operation1.consumes(), operation2.consumes())
+    {
+        (Consumes::Both, Consumes::Both) => (true,  true,  true,  true),
+        // Insertion in read.
+        (Consumes::Read, Consumes::Both) => (true,  true,  false, false),
+        // Deletion in read.
+        (Consumes::Ref,  Consumes::Both) => (false, true,  true,  true),
+
+        // Insertion in hapQ rel to hapT.
+        (Consumes::Both, Consumes::Read) => (true,  true,  false, true),
+        // Insertion in read & insertion in hapQ, which is now ignored.
+        (Consumes::Read, Consumes::Read) => (true,  true,  false, false),
+        // Deletion in the read and insertion in hapQ. Shift both CIGARs.
+        (Consumes::Ref,  Consumes::Read) => (false, true,  false, true),
+
+        // Deletion in hapQ, shift and move hapT.
+        (Consumes::Both, Consumes::Ref)  => (false, false, true,  true),
+        // Twice deletion in hapQ, move everything.
+        (Consumes::Read, Consumes::Ref)  => (true,  true,  true,  true),
+        // Deletion in read, deletion in hapQ. Shift and move hapT.
+        (Consumes::Ref,  Consumes::Ref)  => (false, false, true,  true),
+    };
+
+    // If both CIGAR shifts, take minimal of rems, otherwise, take one of the rems directly.
+    let shift = if read_cigar_shifts && (!hap_cigar_shifts || *read_op_rem <= *hap_op_rem) {
+        *read_op_rem
+    } else {
+        *hap_op_rem
+    };
+    *read_pos += u32::from(read_moves) * shift;
+    *read_op_rem -= u32::from(read_cigar_shifts) * shift;
+    *hap_pos += u32::from(hap_moves) * shift;
+    *hap_op_rem -= u32::from(hap_cigar_shifts) * shift;
 }

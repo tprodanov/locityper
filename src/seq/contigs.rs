@@ -89,7 +89,9 @@ impl ContigNames {
         }
     }
 
-    pub fn add<T: TryInto<u32> + std::fmt::Display + Copy>(&mut self, name: String, length: T) -> crate::Result<()> {
+    pub fn add<T>(&mut self, name: String, length: T) -> crate::Result<ContigId>
+    where T: TryInto<u32> + std::fmt::Display + Copy,
+    {
         let contig_id = TryInto::<u16>::try_into(self.names.len())
             .map_err(|_| error!(InvalidData, "[{}] Too many contigs (at most {} supported)", self.tag, u16::MAX))
             .map(ContigId::new)?;
@@ -102,7 +104,7 @@ impl ContigNames {
         }
         self.names.push(name);
         self.lengths.push(length);
-        Ok(())
+        Ok(contig_id)
     }
 
     /// Creates contig names from FASTA index.
@@ -362,14 +364,16 @@ impl ContigSet {
         let mut discarded = Vec::new();
         let mut replaced = Vec::new();
         for (i, (name, length)) in izip!(self.contigs.names(), self.contigs.lengths()).enumerate() {
-            let mut name = name.to_string();
+            let mut save_name = name.to_string();
             let mut found = false;
+            let mut replaced_now = false;
             if sample_or_haplotype_in_set(&name, &leave_out) {
                 if let Some(discarded) = disc_haps.get(&ContigId::new(i)) {
                     for (oth_name, is_identical) in discarded {
                         if *is_identical && !sample_or_haplotype_in_set(oth_name, &leave_out) {
+                            replaced_now = true;
                             replaced.push(format!("{}->{}", name, oth_name));
-                            name = oth_name.to_string();
+                            save_name = oth_name.to_string();
                             found = true;
                             break;
                         }
@@ -381,7 +385,10 @@ impl ContigSet {
                 }
             }
             ixs.push(i);
-            contigs.add(name, *length)?;
+            let contig_id = contigs.add(save_name, *length)?;
+            if replaced_now {
+                contigs.add_synonym(name.to_string(), contig_id);
+            }
         }
 
         log::debug!("    [{}] Leave-out: discarded {} haplotype(s) [{}], replaced {} haplotype(s) with identical [{}]",

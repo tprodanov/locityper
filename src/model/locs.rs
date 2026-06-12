@@ -14,6 +14,8 @@ use crate::{
         aln::{Alignment, ReadEnd, Strand},
         cigar::Cigar,
         counts::KmerCounts,
+        transfer::HapAlns,
+        wfa::Aligner,
     },
     bg::{
         BgDistr,
@@ -214,6 +216,9 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
         alns: &mut Vec<Alignment>,
         read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
+        hap_alns: Option<&HapAlns>,
+        contig_set: &ContigSet,
+        aligner: &Aligner,
     ) -> crate::Result<bool>
     {
         assert!(self.has_more, "Cannot read any more records from a BAM file");
@@ -328,6 +333,14 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             alns.truncate(start_len);
             return Ok(false);
         }
+
+        // if read_data.name == "A00297:175:HVVVJDSXX:3:2525:19922:32080" {
+            if let Some(hap_alns) = hap_alns {
+                log::debug!("    Transferring alignments for {}", read_data.name);
+                hap_alns.transfer_alignments(alns, start_len, read_data.mates[read_end.ix()].as_ref().unwrap(),
+                    contig_set, aligner)?;
+            }
+        // }
 
         VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() <= passable_dist);
         alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
@@ -837,8 +850,10 @@ impl AllAlignments {
         mut dbg_writer1: impl Write,
         mut dbg_writer2: impl Write,
         mut dbg_writer3: Option<GzFile>,
+        hap_alns: Option<&HapAlns>,
     ) -> crate::Result<Self>
     {
+        let aligner = Aligner::new(Default::default(), 6);
         let contigs = contig_set.contigs();
         let boundary = params.boundary_size.strict_sub(params.tweak.unwrap());
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
@@ -870,13 +885,15 @@ impl AllAlignments {
             let mut read_data = ReadData::default();
             counts.total += 1;
             tmp_alns.clear();
-            let has_first = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+            let has_first = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1,
+                hap_alns, contig_set, &aligner)?;
             if !hashes.insert(read_data.name_hash) {
                 log::debug!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
             let has_second = is_paired_end
-                && reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1)?;
+                && reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1,
+                    hap_alns, contig_set, &aligner)?;
 
             if !has_first && !has_second {
                 counts.both_unmapped += 1;

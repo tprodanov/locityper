@@ -23,6 +23,7 @@ use crate::{
         contigs::{ContigId, ContigNames, ContigSet, Genotype},
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
+        transfer::HapAlns,
     },
     bg::{
         TECHNOLOGIES, BgDistr, Technology, SequencingInfo,
@@ -1137,6 +1138,12 @@ fn analyze_locus(
     let contig_infos = ContigInfos::new(&locus.set, &locus.kmer_counts, explicit_weights,
         bg_distr.depth(), &args.assgn_params, windows_writer)?;
 
+    let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
+    let hap_alns = if paf_filename.exists() {
+        // [TODO] Divergence from parameter?
+        Some(HapAlns::load(&paf_filename, &locus.set.contigs(), 0.01)?)
+    } else { None };
+
     let all_alns = if args.debug >= DebugLvl::Full {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         let read_kmer_writer = ext::sys::create_gzip(&locus.out_dir.join("read_kmers.csv.gz"))?;
@@ -1144,10 +1151,10 @@ fn analyze_locus(
             Some(ext::sys::create_gzip(&locus.out_dir.join("weighted_reads.csv.gz"))?)
         } else { None };
         AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, reads_writer, read_kmer_writer, aln_recalc_writer)?
+            &args.assgn_params, reads_writer, read_kmer_writer, aln_recalc_writer, hap_alns.as_ref())?
     } else {
         AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, io::sink(), io::sink(), None)?
+            &args.assgn_params, io::sink(), io::sink(), None, hap_alns.as_ref())?
     };
 
     if filenames.reads_filename.exists() {
@@ -1171,6 +1178,7 @@ fn analyze_locus(
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
 
+        // [TODO] Do not use distances since they are not that useful.
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
         let contig_distances = if dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
