@@ -90,21 +90,21 @@ impl<T> TriangleMatrix<T> {
         self.data.iter_mut()
     }
 
-    /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`, and `None` when `i == j`.
-    pub fn get_symmetric(&self, i: usize, j: usize) -> Option<&T> {
+    /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`. Panics for i == j.
+    pub fn get_symmetric(&self, i: usize, j: usize) -> &T {
         match i.cmp(&j) {
-            Ordering::Less => Some(self.index((i, j))),
-            Ordering::Equal => None,
-            Ordering::Greater => Some(self.index((j, i))),
+            Ordering::Less => self.index((i, j)),
+            Ordering::Greater => self.index((j, i)),
+            Ordering::Equal => panic!("Triangle matrix is undefined for the diagonal (i == j)"),
         }
     }
 
-    /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`, and `None` when `i == j`.
-    pub fn get_mut_symmetric(&mut self, i: usize, j: usize) -> Option<&mut T> {
+    /// Returns `self[(i, j)]` if `i < j`, `self[(j, i)] if `j < i`. Panics for i == j.
+    pub fn get_symmetric_mut(&mut self, i: usize, j: usize) -> &mut T {
         match i.cmp(&j) {
-            Ordering::Less => Some(self.index_mut((i, j))),
-            Ordering::Equal => None,
-            Ordering::Greater => Some(self.index_mut((j, i))),
+            Ordering::Less => self.index_mut((i, j)),
+            Ordering::Greater => self.index_mut((j, i)),
+            Ordering::Equal => panic!("Triangle matrix is undefined for the diagonal (i == j)"),
         }
     }
 }
@@ -128,7 +128,7 @@ impl<T: Clone> TriangleMatrix<T> {
                 .map(|(i, j)| {
                     let k = ixs[i].try_into().expect("Matrix index out of usize range");
                     let l = ixs[j].try_into().expect("Matrix index out of usize range");
-                    self.get_symmetric(k, l).unwrap().clone()
+                    self.get_symmetric(k, l).clone()
                 }).collect(),
         }
     }

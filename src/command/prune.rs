@@ -212,7 +212,7 @@ fn load_divergences(
             continue;
         }
 
-        let d: &mut f64 = &mut divergences.get_mut_symmetric(id1.ix(), id2.ix()).expect("id1 != id2");
+        let d: &mut f64 = &mut divergences.get_symmetric_mut(id1.ix(), id2.ix());
         if !d.is_nan() && *d != val {
             if n_warnings < 10 {
                 n_warnings += 1;
@@ -306,7 +306,7 @@ impl Cluster {
             }
             for (j, &(id2, mult2)) in self.haps[i + 1..].iter().enumerate() {
                 let j = i + j + 1;
-                let div = epsilon + *divergences.get_symmetric(id1.ix(), id2.ix()).unwrap();
+                let div = epsilon + *divergences.get_symmetric(id1.ix(), id2.ix());
                 buf[i] = power.update_mult(buf[i], div, f64::from(mult2));
                 buf[j] = power.update_mult(buf[j], div, f64::from(mult1));
             }

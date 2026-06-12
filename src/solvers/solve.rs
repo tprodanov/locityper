@@ -339,7 +339,7 @@ pub fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMat
     let mut min_dist = u32::MAX;
     ext::vec::gen_permutations(gt1.ids(), |perm_ids1| {
         let dist: u32 = perm_ids1.iter().zip(gt2.ids())
-            .map(|(i, j)| distances.get_symmetric(i.ix(), j.ix()).copied().unwrap_or(0))
+            .map(|(i, j)| if i == j { 0 } else { *distances.get_symmetric(i.ix(), j.ix()) })
             .sum();
         min_dist = min(min_dist, dist);
     });

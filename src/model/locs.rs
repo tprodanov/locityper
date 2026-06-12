@@ -334,7 +334,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             return Ok(false);
         }
 
-        // if read_data.name == "A00297:175:HVVVJDSXX:3:2525:19922:32080" {
+        // if read_data.name == "A00297:175:HVVVJDSXX:2:1528:29035:11788" && read_end.ix() == 1 {
             if let Some(hap_alns) = hap_alns {
                 log::debug!("    Transferring alignments for {}", read_data.name);
                 hap_alns.transfer_alignments(alns, start_len, read_data.mates[read_end.ix()].as_ref().unwrap(),
@@ -853,7 +853,7 @@ impl AllAlignments {
         hap_alns: Option<&HapAlns>,
     ) -> crate::Result<Self>
     {
-        let aligner = Aligner::new(Default::default(), 6);
+        let aligner = Aligner::new(Default::default(), 6, Some(10), true);
         let contigs = contig_set.contigs();
         let boundary = params.boundary_size.strict_sub(params.tweak.unwrap());
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
