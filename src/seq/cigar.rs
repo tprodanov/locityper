@@ -29,7 +29,7 @@ pub enum Operation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Consumes {
-    Read,
+    Query,
     Ref,
     Both,
 }
@@ -62,12 +62,12 @@ impl Operation {
         }
     }
 
-    /// Returns whether this operation consumes read, reference or both. Panics on hard clipping.
+    /// Returns whether this operation consumes query, reference or both. Panics on hard clipping.
     #[inline]
     pub const fn consumes(self) -> Consumes {
         match self {
             Operation::Match | Operation::Equal | Operation::Diff => Consumes::Both,
-            Operation::Soft | Operation::Ins => Consumes::Read,
+            Operation::Soft | Operation::Ins => Consumes::Query,
             Operation::Del => Consumes::Ref,
             Operation::Hard => panic!("Unexpected hard clipping"),
         }
@@ -846,14 +846,16 @@ impl SearchableCigar {
         aligner: &Aligner,
     ) -> crate::Result<Cigar>
     {
-        let mut read_cigar_iter = read_cigar.iter();
-        let mut read_cigar_item = read_cigar_iter.next().expect("Read CIGAR is empty");
-        let mut read_op_rem = read_cigar_item.len;
-
         let mut hap_cigar_iter = self.items[cursor.cigar_ix as usize..].iter();
-        let mut hap_cigar_item = hap_cigar_iter.next().expect("Alignment cursor is invalid");
-        let mut hap_op_rem = hap_cigar_item.len - (cursor.qpos - hap_cigar_item.qpos);
+        let hap_cigar_item = hap_cigar_iter.next().expect("Alignment cursor is invalid");
+        let mut op2 = hap_cigar_item.op;
+        let mut rem2 = hap_cigar_item.len - (cursor.qpos - hap_cigar_item.qpos);
+        if op2 == Operation::Equal && rem2 >= read_cigar.rlen {
+            return Ok(read_cigar.clone());
+        }
 
+        let mut read_cigar_iter = read_cigar.iter();
+        let CigarItem { op: mut op1, len: mut rem1 } = read_cigar_iter.next().expect("Read CIGAR is empty");
         // For both read and haplotypes, `_pos` is the current position in both cigars.
         // `_last` is the end of the sequence added to the new cigar.
         // So, gap `_last.._pos` is not yet aligned.
@@ -864,42 +866,34 @@ impl SearchableCigar {
 
         let mut new_cigar = Cigar::new();
         loop {
-            // log::debug!("    :   read {} rem {},  hap {:?} rem {}.    read window {}..{},  hap window {}..{}",
-            //     read_cigar_item, read_op_rem, hap_cigar_item, hap_op_rem, read_last, read_pos, hap_last, hap_pos);
-
-            // [TODO] If two haplotypes are equal, just align currently open read window
-            // and copy overlapping read operations.
-            if read_cigar_item.op == Operation::Equal && hap_cigar_item.op == Operation::Equal {
-                let shift = min(read_op_rem, hap_op_rem);
-                aligner.smart_align::<false>(
-                    ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, u32::MAX, &mut new_cigar)?;
-                new_cigar.push_checked(Operation::Equal, shift);
-                // log::debug!("    :   insert {}=", shift);
-                // log::debug!("        {}", std::str::from_utf8(&ref_seq[hap_pos as usize..(hap_pos + shift) as usize]).unwrap());
-                // log::debug!("        {}", std::str::from_utf8(&read_seq[read_pos as usize..(read_pos + shift) as usize]).unwrap());
-                // [TODO] Remove assert
-                assert!(itertools::izip!(
-                    &ref_seq[hap_pos as usize..(hap_pos + shift) as usize],
-                    &read_seq[read_pos as usize..(read_pos + shift) as usize]).all(|(a, b)| a == b));
-                read_pos += shift;
+            const MIN_SIZE: u32 = 5;
+            let add_operation = match (op1 == Operation::Equal, op2 == Operation::Equal) {
+                (true, true) => Some(Operation::Equal),
+                (true, false) if rem1 >= MIN_SIZE => Some(op2),
+                (false, true) if rem2 >= MIN_SIZE => Some(op1),
+                _ => None,
+            };
+            if add_operation.is_some() {
+                aligner.smart_align(ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, (), &mut new_cigar)?;
+            }
+            let shift = double_cigar_move_and_shift(op1, op2, &mut read_pos, &mut rem1, &mut hap_pos, &mut rem2);
+            if let Some(op) = add_operation {
+                new_cigar.push_checked(op, shift);
+                assert!(op != Operation::Equal || itertools::izip!(
+                    &read_seq[(read_pos - shift) as usize..read_pos as usize],
+                    &ref_seq[(hap_pos - shift) as usize..hap_pos as usize],
+                ).all(|(&c1, &c2)| c1 == c2));
                 read_last = read_pos;
-                read_op_rem -= shift;
-                hap_pos += shift;
                 hap_last = hap_pos;
-                hap_op_rem -= shift
-            } else {
-                double_cigar_move_and_shift(read_cigar_item.op, hap_cigar_item.op,
-                    &mut read_pos, &mut read_op_rem, &mut hap_pos, &mut hap_op_rem);
             }
-            if read_op_rem == 0 {
+
+            if rem1 == 0 {
                 let Some(tmp) = read_cigar_iter.next() else { break };
-                read_cigar_item = tmp;
-                read_op_rem = tmp.len;
+                CigarItem { op: op1, len: rem1 } = *tmp;
             }
-            if hap_op_rem == 0 {
+            if rem2 == 0 {
                 let Some(tmp) = hap_cigar_iter.next() else { break };
-                hap_cigar_item = tmp;
-                hap_op_rem = tmp.len;
+                ExtCigarItem { op: op2, len: rem2, .. } = *tmp;
             }
         }
         // [TODO] Check semi-global alignment.
@@ -917,15 +911,16 @@ impl SearchableCigar {
 /// Depending on the two parallel CIGAR operations (read v. hapQ) and (hapQ v. hapT)
 /// depermine whether read position and hapT position should change,
 /// and whether read and hapT CIGAR iterator should move.
+/// Returns shift size.
 #[inline(always)]
 fn double_cigar_move_and_shift(
-    operation1: Operation,
-    operation2: Operation,
-    read_pos: &mut u32,
-    read_op_rem: &mut u32,
-    hap_pos: &mut u32,
-    hap_op_rem: &mut u32,
-) {
+    op1: Operation,
+    op2: Operation,
+    pos1: &mut u32,
+    rem1: &mut u32,
+    pos2: &mut u32,
+    rem2: &mut u32,
+) -> u32 {
     // 1. Read CIGAR shifts, unless *both*
     //    a. deletion in hapQ relative to hapQ,
     //    b. no insertion in the read rel to hapQ.
@@ -933,38 +928,33 @@ fn double_cigar_move_and_shift(
     //    a. read CIGAR shifts,
     //    b. there is no deletion in the read rel to hapQ.
     // Analogous ideas for the hapT shift and move.
-    let (read_moves, read_cigar_shifts, hap_moves, hap_cigar_shifts)
-        = match (operation1.consumes(), operation2.consumes())
-    {
-        (Consumes::Both, Consumes::Both) => (true,  true,  true,  true),
+    let (read_moves, read_cigar_shifts, hap_moves, hap_cigar_shifts) = match (op1.consumes(), op2.consumes()) {
+        (Consumes::Both,  Consumes::Both) => (true,  true,  true,  true),
         // Insertion in read.
-        (Consumes::Read, Consumes::Both) => (true,  true,  false, false),
+        (Consumes::Query, Consumes::Both) => (true,  true,  false, false),
         // Deletion in read.
-        (Consumes::Ref,  Consumes::Both) => (false, true,  true,  true),
+        (Consumes::Ref,   Consumes::Both) => (false, true,  true,  true),
 
         // Insertion in hapQ rel to hapT.
-        (Consumes::Both, Consumes::Read) => (true,  true,  false, true),
+        (Consumes::Both,  Consumes::Query) => (true,  true,  false, true),
         // Insertion in read & insertion in hapQ, which is now ignored.
-        (Consumes::Read, Consumes::Read) => (true,  true,  false, false),
+        (Consumes::Query, Consumes::Query) => (true,  true,  false, false),
         // Deletion in the read and insertion in hapQ. Shift both CIGARs.
-        (Consumes::Ref,  Consumes::Read) => (false, true,  false, true),
+        (Consumes::Ref,   Consumes::Query) => (false, true,  false, true),
 
         // Deletion in hapQ, shift and move hapT.
-        (Consumes::Both, Consumes::Ref)  => (false, false, true,  true),
+        (Consumes::Both,  Consumes::Ref) => (false, false, true,  true),
         // Twice deletion in hapQ, move everything.
-        (Consumes::Read, Consumes::Ref)  => (true,  true,  true,  true),
+        (Consumes::Query, Consumes::Ref) => (true,  true,  true,  true),
         // Deletion in read, deletion in hapQ. Shift and move hapT.
-        (Consumes::Ref,  Consumes::Ref)  => (false, false, true,  true),
+        (Consumes::Ref,   Consumes::Ref) => (false, false, true,  true),
     };
 
     // If both CIGAR shifts, take minimal of rems, otherwise, take one of the rems directly.
-    let shift = if read_cigar_shifts && (!hap_cigar_shifts || *read_op_rem <= *hap_op_rem) {
-        *read_op_rem
-    } else {
-        *hap_op_rem
-    };
-    *read_pos += u32::from(read_moves) * shift;
-    *read_op_rem -= u32::from(read_cigar_shifts) * shift;
-    *hap_pos += u32::from(hap_moves) * shift;
-    *hap_op_rem -= u32::from(hap_cigar_shifts) * shift;
+    let shift = if read_cigar_shifts && (!hap_cigar_shifts || *rem1 <= *rem2) { *rem1 } else { *rem2 };
+    *pos1 += u32::from(read_moves) * shift;
+    *rem1 -= u32::from(read_cigar_shifts) * shift;
+    *pos2 += u32::from(hap_moves) * shift;
+    *rem2 -= u32::from(hap_cigar_shifts) * shift;
+    shift
 }

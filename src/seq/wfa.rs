@@ -98,6 +98,23 @@ fn alignment_steps(accuracy: u8) -> i32 {
     }
 }
 
+/// Used for check for max jump. This way we can turn on/off max jump check during compile time.
+pub trait Threshold : Copy {
+    /// Returns true if `threshold < val`.
+    fn under(self, val: u32) -> bool;
+}
+
+impl Threshold for u32 {
+    #[inline(always)]
+    fn under(self, val: u32) -> bool { self < val }
+}
+
+/// Larger than any value, always return false
+impl Threshold for () {
+    #[inline(always)]
+    fn under(self, _val: u32) -> bool { false }
+}
+
 pub struct Aligner {
     inner: *mut cwfa::wavefront_aligner_t,
     penalties: Penalties,
@@ -206,7 +223,7 @@ impl Aligner {
     /// If gap can be quickly replaced with mismatches, do that.
     /// Otherwise performs proper alignment of the two subsequences.
     #[inline(always)]
-    pub fn smart_align<const CHECK_MAX_GAP: bool>(
+    pub fn smart_align(
         &self,
         seq1: &[u8], // ref sequence
         seq2: &[u8], // query sequence
@@ -214,7 +231,7 @@ impl Aligner {
         i2: u32,
         j1: u32,
         j2: u32,
-        max_gap: u32,
+        max_gap: impl Threshold,
         cigar: &mut Cigar,
     ) -> crate::Result<i32>
     {
@@ -225,7 +242,7 @@ impl Aligner {
             (true, true) => {
                 let subseq1 = &seq1[i1 as usize..i2 as usize];
                 let subseq2 = &seq2[j1 as usize..j2 as usize];
-                if CHECK_MAX_GAP && jump1 > max_gap || jump2 > max_gap {
+                if max_gap.under(jump1) || max_gap.under(jump2) {
                     Ok(self.penalties.align_simple(subseq1, subseq2, cigar))
                 } else if jump1 == jump2 && jump1 <= self.safe_mismatch_size {
                     let mut ndiff = 0;
