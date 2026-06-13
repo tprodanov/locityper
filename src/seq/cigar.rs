@@ -800,14 +800,6 @@ macro_rules! pos_ix {
     ($to_ref:expr) => { const { if $to_ref { 0 } else { 1 } } }
 }
 
-/// Directs to a position in an aligment.
-#[derive(Clone, Copy, Debug)]
-pub struct AlignmentCursor {
-    cigar_ix: u32,
-    qpos: u32,
-    rpos: u32,
-}
-
 /// Extended CIGAR item, which comparing to `CigarItem`
 /// contains query and reference positions and the start of the operation.
 #[derive(Clone, Copy, Debug)]
@@ -821,20 +813,21 @@ pub struct ExtCigarItem {
 /// To speed up binary search, store cigar index for each position = i * STEP.
 pub const SPARSE_STEP_PWR: u32 = 8;
 pub const SPARSE_STEP: u32 = 1 << SPARSE_STEP_PWR;
+const SPARSE_MASK: u32 = SPARSE_STEP - 1;
 
 #[inline(always)]
-fn update_sparse_indices(
-    sparse_indices: &mut Vec<(u32, u32)>,
+fn update_sparse_index(
+    sparse_index: &mut Vec<(u32, u32)>,
     cigar_ix: u32,
     len: u32,
     pos1: u32,
     pos2: u32,
     consumes_other: bool,
 ) {
-    for i in sparse_indices.len() as u32..=((pos1 + len - 1) >> SPARSE_STEP_PWR) {
+    for i in sparse_index.len() as u32..=((pos1 + len - 1) >> SPARSE_STEP_PWR) {
         let sparse_pos1 = i << SPARSE_STEP_PWR;
         let sparse_pos2 = pos2 + u32::from(consumes_other) * (sparse_pos1 - pos1);
-        sparse_indices.push((cigar_ix, sparse_pos2));
+        sparse_index.push((cigar_ix, sparse_pos2));
     }
 }
 
@@ -845,7 +838,8 @@ pub struct SearchableCigar {
     items: Vec<ExtCigarItem>,
     /// Outer index: 0 = query -> ref, 1 = ref -> query.
     /// Inner vector: for each position = i * STEP store cigar index and corresponding position in the other sequence.
-    sparse_indices: [Vec<(u32, u32)>; 2],
+    /// As the final value, each vector contains cigar length and length of the other sequence.
+    sparse_index: [Vec<(u32, u32)>; 2],
 }
 
 impl SearchableCigar {
@@ -853,8 +847,8 @@ impl SearchableCigar {
         let mut items = Vec::with_capacity(cigar.len());
         let mut qpos = 0;
         let mut rpos = 0;
-        let mut sparse_indices_qr = Vec::with_capacity(1 + ((cigar.qlen - 1) >> SPARSE_STEP_PWR) as usize);
-        let mut sparse_indices_rq = Vec::with_capacity(1 + ((cigar.rlen - 1) >> SPARSE_STEP_PWR) as usize);
+        let mut sparse_index_qr = Vec::with_capacity(1 + ((cigar.qlen - 1) >> SPARSE_STEP_PWR) as usize);
+        let mut sparse_index_rq = Vec::with_capacity(1 + ((cigar.rlen - 1) >> SPARSE_STEP_PWR) as usize);
         for (cigar_ix, &item) in cigar.iter().enumerate() {
             let cigar_ix = cigar_ix as u32;
             let op = if invert { item.op.invert() } else { item.op };
@@ -864,42 +858,39 @@ impl SearchableCigar {
                 pos: [qpos, rpos],
             });
             let (cons_query, cons_ref) = op.consumes_query_ref();
+            let old_qpos = qpos;
             if cons_query {
-                update_sparse_indices(&mut sparse_indices_qr, cigar_ix, item.len, qpos, rpos, cons_ref);
+                update_sparse_index(&mut sparse_index_qr, cigar_ix, item.len, qpos, rpos, cons_ref);
                 qpos += item.len;
             }
             if cons_ref {
-                update_sparse_indices(&mut sparse_indices_rq, cigar_ix, item.len, rpos, qpos, cons_query);
+                update_sparse_index(&mut sparse_index_rq, cigar_ix, item.len, rpos, old_qpos, cons_query);
                 rpos += item.len
             }
         }
+        sparse_index_qr.push((cigar.len() as u32, cigar.rlen));
+        sparse_index_rq.push((cigar.len() as u32, cigar.qlen));
         Self {
             items,
-            sparse_indices: [sparse_indices_qr, sparse_indices_rq],
+            sparse_index: [sparse_index_qr, sparse_index_rq],
         }
     }
 
-    /// Based on query position, find reference position.
-    pub fn find_position<const TO_REF: bool>(&self, qpos: u32) -> AlignmentCursor {
-        let cigar_ix = bisect::right_by(&self.items, |item| item.pos[pos_ix!(TO_REF)].cmp(&qpos)).strict_sub(1);
-        let item = self.items[cigar_ix];
-        let op = if TO_REF { item.op } else { item.op.invert() };
-        // [TODO] Later, convert to debug assert.
-        assert!(op.consumes_query());
-        AlignmentCursor {
-            cigar_ix: cigar_ix as u32,
-            qpos,
-            rpos: item.pos[pos_ix!(!TO_REF)] + u32::from(op.consumes_ref()) * (qpos - item.pos[pos_ix!(TO_REF)]),
-        }
-    }
+    /// Based on query position, returns approximate reference position.
+    /// Returns (cigar_lbound, cigar_rbound, approximate_ref_position).
+    #[inline]
+    pub fn find_approx_position<const TO_REF: bool>(&self, qpos: u32) -> (u32, u32, u32) {
+        let sparse_index = &self.sparse_index[pos_ix!(TO_REF)];
+        let i = qpos >> SPARSE_STEP_PWR;
+        let (cigar_rbound, rpos2) = sparse_index[(i + 1) as usize];
+        // Safety: i is non-negative & i + 1 is in bounds.
+        let (cigar_lbound, rpos1) = unsafe { *sparse_index.get_unchecked(i as usize) };
 
-    #[inline(always)]
-    pub fn find_position_dynamic(&self, qpos: u32, query_to_ref: bool) -> AlignmentCursor {
-        if query_to_ref {
-            self.find_position::<true>(qpos)
-        } else {
-            self.find_position::<false>(qpos)
-        }
+        // Same as rpos1 + (qpos - qpos1) * (rpos2 - rpos1) / (qpos2 - qpos1), because:
+        //     qpos & SPARSE_MASK = qpos - qpos1
+        //     X >> SPARSE_STEP_PWR = X / (qpos2 - qpos1)
+        let approx_rpos = rpos1 + (((qpos & SPARSE_MASK) * (rpos2 - rpos1)) >> SPARSE_STEP_PWR);
+        (cigar_lbound, cigar_rbound, approx_rpos)
     }
 
     /// Suppose a read was aligned to a "query" side of this searchable cigar, and corresponding cursor was obtained
@@ -907,19 +898,32 @@ impl SearchableCigar {
     /// Returns start and end coordinates and a new CIGAR.
     pub fn transfer_alignment<const TO_REF: bool>(
         &self,
-        cursor: AlignmentCursor,
+        qpos: u32,
+        cigar_lbound: u32,
+        cigar_rbound: u32,
         read_cigar: &Cigar,
         read_seq: &[u8],
         ref_seq: &[u8],
         aligner: &Aligner,
     ) -> (u32, u32, Cigar) {
-        let hap_len = ref_seq.len() as u32;
-        let mut hap_start = cursor.rpos;
-        let mut hap_cigar_iter = self.items[cursor.cigar_ix as usize..].iter();
-        let hap_cigar_item = hap_cigar_iter.next().expect("Alignment cursor is invalid");
+        // First, find CIGAR index
+        let cigar_ix = if cigar_lbound == cigar_rbound {
+            cigar_lbound as usize
+        } else {
+            bisect::right_by_at(&self.items, |item| item.pos[pos_ix!(TO_REF)].cmp(&qpos),
+                cigar_lbound as usize, cigar_rbound as usize).strict_sub(1)
+        };
+
+        // Extract relevant entries from the haplotype-haplotype cigar.
+        let mut hap_cigar_iter = self.items[cigar_ix as usize..].iter();
+        let hap_cigar_item = hap_cigar_iter.next().unwrap();
         let mut op2 = if TO_REF { hap_cigar_item.op } else { hap_cigar_item.op.invert() };
-        let shift = cursor.qpos - hap_cigar_item.pos[pos_ix!(TO_REF)];
+        let shift = qpos - hap_cigar_item.pos[pos_ix!(TO_REF)];
         let mut rem2 = hap_cigar_item.len -  shift;
+
+        // Alignment starting position in the new haplotype. Could change when soft clipping is examined.
+        let mut aln_start = hap_cigar_item.pos[pos_ix!(!TO_REF)] + u32::from(op2.consumes_ref()) * shift;
+        let hap_len = ref_seq.len() as u32;
 
         // When checking read padding, add reference sequence of length = read tail + 3.
         const CLIP_PADDING: u32 = 3;
@@ -928,12 +932,12 @@ impl SearchableCigar {
         // basepairs if the read had soft clipping.
         let soft_clip_left = read_cigar[0].op == Operation::Soft;
         let soft_clip_right = read_cigar.tuples.last().unwrap().op == Operation::Soft;
-        let perfect_hap_end = hap_start + read_cigar.rlen;
+        let perfect_hap_end = aln_start + read_cigar.rlen;
         if op2 == Operation::Equal
-            && shift >= u32::from(soft_clip_left) * min(hap_start, CLIP_PADDING)
+            && shift >= u32::from(soft_clip_left) * min(aln_start, CLIP_PADDING)
             && rem2 >= read_cigar.rlen + u32::from(soft_clip_right) * min(hap_len - perfect_hap_end, CLIP_PADDING)
         {
-            return (hap_start, perfect_hap_end, read_cigar.clone());
+            return (aln_start, perfect_hap_end, read_cigar.clone());
         }
 
         let mut read_cigar_iter = read_cigar.iter();
@@ -943,8 +947,8 @@ impl SearchableCigar {
         // So, gap `_last.._pos` is not yet aligned.
         let mut read_last = 0;
         let mut read_pos = 0;
-        let mut hap_last = hap_start;
-        let mut hap_pos = hap_start;
+        let mut hap_last = aln_start;
+        let mut hap_pos = aln_start;
 
         let mut new_cigar = Cigar::new();
         loop {
@@ -960,7 +964,7 @@ impl SearchableCigar {
                 if read_last == 0 && read_pos > 0 {
                     aligner.align_clipping::<true>(ref_seq, read_seq,
                         hap_last.saturating_sub(read_pos + CLIP_PADDING), hap_pos, read_last, read_pos, &mut new_cigar);
-                    hap_start = hap_start + hap_pos - hap_last - new_cigar.rlen;
+                    aln_start = aln_start + hap_pos - hap_last - new_cigar.rlen;
                 } else {
                     aligner.smart_align(ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, (), &mut new_cigar);
                 }
@@ -971,9 +975,9 @@ impl SearchableCigar {
                 new_cigar.push_checked(op, shift);
                 // [NOTE] Will be removed later.
                 assert!(op != Operation::Equal || itertools::izip!(
-                    &read_seq[(read_pos - shift) as usize..read_pos as usize],
-                    &ref_seq[(hap_pos - shift) as usize..hap_pos as usize],
-                ).all(|(&c1, &c2)| c1 == c2));
+                        &read_seq[(read_pos - shift) as usize..read_pos as usize],
+                        &ref_seq[(hap_pos - shift) as usize..hap_pos as usize],
+                    ).all(|(&c1, &c2)| c1 == c2));
                 read_last = read_pos;
                 hap_last = hap_pos;
             }
@@ -998,24 +1002,7 @@ impl SearchableCigar {
             _ => {}
         }
         assert_eq!(read_cigar.qlen, new_cigar.qlen);
-        (hap_start, hap_start + new_cigar.rlen, new_cigar)
-    }
-
-    #[inline(always)]
-    pub fn transfer_alignment_dynamic(
-        &self,
-        cursor: AlignmentCursor,
-        read_cigar: &Cigar,
-        read_seq: &[u8],
-        ref_seq: &[u8],
-        aligner: &Aligner,
-        query_to_ref: bool,
-    ) -> (u32, u32, Cigar) {
-        if query_to_ref {
-            self.transfer_alignment::<true>(cursor, read_cigar, read_seq, ref_seq, aligner)
-        } else {
-            self.transfer_alignment::<false>(cursor, read_cigar, read_seq, ref_seq, aligner)
-        }
+        (aln_start, aln_start + new_cigar.rlen, new_cigar)
     }
 }
 

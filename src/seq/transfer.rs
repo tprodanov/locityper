@@ -3,9 +3,11 @@
 use std::{
     path::Path,
     ops::Range,
+    sync::Arc,
 };
 use crate::{
     seq::{
+        Interval,
         contigs::{ContigId, ContigNames, ContigSet},
         cigar::SearchableCigar,
         dist::PafFile,
@@ -71,6 +73,28 @@ impl HapAlns {
         Ok(Self { aln_matrix, best_ixs })
     }
 
+    fn transfer_alignment<const TO_REF: bool>(
+        &self,
+        source_id: ContigId,
+        target_id: ContigId,
+        read_source_aln: &Alignment,
+        read_seq: &[u8],
+        contig_set: &ContigSet,
+        aligner: &Aligner,
+    ) {
+        let target_seq = contig_set.get_seq(target_id);
+        let haps_cigar = self.aln_matrix.get_symmetric(source_id.ix(), target_id.ix())
+            .as_ref().expect("Alignment between haplotypes must exist");
+        let source_aln_start = read_source_aln.interval().start();
+        let (cigar_lbound, cigar_rbound, approx_pos) = haps_cigar.find_approx_position::<TO_REF>(source_aln_start);
+        log::debug!("        : Approx. start = {},  cigar bounds: {}..{}", approx_pos, cigar_lbound, cigar_rbound);
+        let (start, end, new_cigar) = haps_cigar.transfer_alignment::<TO_REF>(
+            source_aln_start, cigar_lbound, cigar_rbound, read_source_aln.cigar(), read_seq, target_seq, aligner);
+        log::debug!("        : {:?}", new_cigar);
+        let new_interval = Interval::new(Arc::clone(contig_set.contigs()), target_id, start, end);
+        log::debug!("        : {}", new_interval);
+    }
+
     pub fn transfer_alignments(
         &self,
         alns: &mut Vec<Alignment>,
@@ -78,8 +102,7 @@ impl HapAlns {
         mate_data: &MateData,
         contig_set: &ContigSet,
         aligner: &Aligner,
-    ) -> crate::Result<()>
-    {
+    ) {
         let mut intervals = iset::IntervalSet::new();
         // log::debug!("    Initial alignments");
         for aln in &alns[start_ix..] {
@@ -88,19 +111,16 @@ impl HapAlns {
         }
         let first_aln = &alns[start_ix];
         log::debug!("    First alignment: {} {:?} {}", first_aln.interval(), first_aln.cigar(), first_aln.strand());
-        let first_seq = mate_data.get_seq(first_aln.strand());
-        let first_id = first_aln.contig_id();
-        for &(oth_contig_id, _) in &self.best_ixs[first_id.ix()] {
-            let cigar = self.aln_matrix.get_symmetric(first_id.ix(), oth_contig_id.ix())
-                .as_ref().expect("Alignment between haplotypes must exist");
-            let query_to_ref = first_id < oth_contig_id;
-            let cursor = cigar.find_position_dynamic(first_aln.interval().start(), query_to_ref);
-            log::debug!("        to {}: cursor {:?}", contig_set.contigs().get_name(oth_contig_id), cursor);
-            let (_rstart, _rend, new_cigar) = cigar.transfer_alignment_dynamic(cursor, first_aln.cigar(), first_seq,
-                contig_set.get_seq(oth_contig_id), aligner, query_to_ref);
-            log::debug!("        -> {:?}", new_cigar);
+        let read_seq = mate_data.get_seq(first_aln.strand());
+        let source_id = first_aln.contig_id();
+        for &(target_id, _) in &self.best_ixs[source_id.ix()] {
+            log::debug!("        Transferring to [{}] {}", target_id.get(), contig_set.contigs().get_name(target_id));
+            if source_id < target_id {
+                self.transfer_alignment::<true>(source_id, target_id, first_aln, read_seq, contig_set, aligner);
+            } else {
+                self.transfer_alignment::<false>(source_id, target_id, first_aln, read_seq, contig_set, aligner);
+            }
         }
-        Ok(())
     }
 }
 

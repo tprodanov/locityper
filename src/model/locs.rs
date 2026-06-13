@@ -338,7 +338,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             if let Some(hap_alns) = hap_alns {
                 log::debug!("    Transferring alignments for {}", read_data.name);
                 hap_alns.transfer_alignments(alns, start_len, read_data.mates[read_end.ix()].as_ref().unwrap(),
-                    contig_set, aligner)?;
+                    contig_set, aligner);
             }
         // }
 
