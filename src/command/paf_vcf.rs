@@ -269,8 +269,9 @@ fn process_haplotype(
         if op == Operation::Match || op == Operation::Hard {
             return Err(error!(RuntimeError, "Unexpected operation (M/H) in CIGAR {}", cigar));
         }
-        let rdiff = u32::from(op.consumes_ref()) * item.len();
-        let qdiff = u32::from(op.consumes_query()) * item.len();
+        let (cons_query, cons_ref) = op.consumes_query_ref();
+        let qdiff = u32::from(cons_query) * item.len();
+        let rdiff = u32::from(cons_ref) * item.len();
 
         let mut need_new = true;
         if let Some(last_var) = vars.last_mut() {

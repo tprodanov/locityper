@@ -62,6 +62,17 @@ impl Operation {
         }
     }
 
+    /// Returns tuple `(consumes_query(), consumes_ref())` in one go.
+    #[inline]
+    pub const fn consumes_query_ref(self) -> (bool, bool) {
+        match self {
+            Operation::Match | Operation::Equal | Operation::Diff => (true, true),
+            Operation::Soft | Operation::Ins => (true, false),
+            Operation::Del => (false, true),
+            Operation::Hard => (false, false),
+        }
+    }
+
     /// Returns whether this operation consumes query, reference or both. Panics on hard clipping.
     #[inline]
     pub const fn consumes(self) -> Consumes {
@@ -327,8 +338,9 @@ impl Cigar {
     }
 
     pub fn push_item_unchecked(&mut self, item: CigarItem) {
-        self.rlen += u32::from(item.op.consumes_ref()) * item.len;
-        self.qlen += u32::from(item.op.consumes_query()) * item.len;
+        let (cons_query, cons_ref) = item.op.consumes_query_ref();
+        self.qlen += u32::from(cons_query) * item.len;
+        self.rlen += u32::from(cons_ref) * item.len;
         self.tuples.push(item);
     }
 
@@ -340,8 +352,9 @@ impl Cigar {
 
     /// Push a new entry, merges with the latest entry, if relevant.
     pub fn push_checked(&mut self, op: Operation, len: u32) {
-        self.rlen += u32::from(op.consumes_ref()) * len;
-        self.qlen += u32::from(op.consumes_query()) * len;
+        let (cons_query, cons_ref) = op.consumes_query_ref();
+        self.qlen += u32::from(cons_query) * len;
+        self.rlen += u32::from(cons_ref) * len;
         match self.tuples.last_mut() {
             Some(item) if item.op == op => item.len += len,
             _ => self.tuples.push(CigarItem::new(op, len)),
@@ -351,8 +364,9 @@ impl Cigar {
     /// Removes last entry in this CIGAR.
     pub fn pop(&mut self) -> Option<CigarItem> {
         let item = self.tuples.pop()?;
-        self.rlen -= u32::from(item.op.consumes_ref()) * item.len;
-        self.qlen -= u32::from(item.op.consumes_query()) * item.len;
+        let (cons_query, cons_ref) = item.op.consumes_query_ref();
+        self.qlen -= u32::from(cons_query) * item.len;
+        self.rlen -= u32::from(cons_ref) * item.len;
         Some(item)
     }
 
@@ -804,11 +818,34 @@ pub struct ExtCigarItem {
     pos: [u32; 2],
 }
 
+/// To speed up binary search, store cigar index for each position = i * STEP.
+pub const SPARSE_STEP_PWR: u32 = 8;
+pub const SPARSE_STEP: u32 = 1 << SPARSE_STEP_PWR;
+
+#[inline(always)]
+fn update_sparse_indices(
+    sparse_indices: &mut Vec<(u32, u32)>,
+    cigar_ix: u32,
+    len: u32,
+    pos1: u32,
+    pos2: u32,
+    consumes_other: bool,
+) {
+    for i in sparse_indices.len() as u32..=((pos1 + len - 1) >> SPARSE_STEP_PWR) {
+        let sparse_pos1 = i << SPARSE_STEP_PWR;
+        let sparse_pos2 = pos2 + u32::from(consumes_other) * (sparse_pos1 - pos1);
+        sparse_indices.push((cigar_ix, sparse_pos2));
+    }
+}
+
 /// Extension over CIGAR that answers queries "convert range start..end to another sequence" in log(n) time,
 /// where n is the number of operations in this CIGAR.
 #[derive(Clone)]
 pub struct SearchableCigar {
     items: Vec<ExtCigarItem>,
+    /// Outer index: 0 = query -> ref, 1 = ref -> query.
+    /// Inner vector: for each position = i * STEP store cigar index and corresponding position in the other sequence.
+    sparse_indices: [Vec<(u32, u32)>; 2],
 }
 
 impl SearchableCigar {
@@ -816,17 +853,30 @@ impl SearchableCigar {
         let mut items = Vec::with_capacity(cigar.len());
         let mut qpos = 0;
         let mut rpos = 0;
-        for item in cigar.iter() {
+        let mut sparse_indices_qr = Vec::with_capacity(1 + ((cigar.qlen - 1) >> SPARSE_STEP_PWR) as usize);
+        let mut sparse_indices_rq = Vec::with_capacity(1 + ((cigar.rlen - 1) >> SPARSE_STEP_PWR) as usize);
+        for (cigar_ix, &item) in cigar.iter().enumerate() {
+            let cigar_ix = cigar_ix as u32;
             let op = if invert { item.op.invert() } else { item.op };
             items.push(ExtCigarItem {
                 len: item.len,
                 op,
                 pos: [qpos, rpos],
             });
-            qpos += u32::from(op.consumes_query()) * item.len;
-            rpos += u32::from(op.consumes_ref()) * item.len;
+            let (cons_query, cons_ref) = op.consumes_query_ref();
+            if cons_query {
+                update_sparse_indices(&mut sparse_indices_qr, cigar_ix, item.len, qpos, rpos, cons_ref);
+                qpos += item.len;
+            }
+            if cons_ref {
+                update_sparse_indices(&mut sparse_indices_rq, cigar_ix, item.len, rpos, qpos, cons_query);
+                rpos += item.len
+            }
         }
-        Self { items }
+        Self {
+            items,
+            sparse_indices: [sparse_indices_qr, sparse_indices_rq],
+        }
     }
 
     /// Based on query position, find reference position.
