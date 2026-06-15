@@ -334,7 +334,7 @@ impl<'a, R: bam::Read> FilteredReader<'a, R> {
             return Ok(false);
         }
 
-        // if read_data.name == "A00297:175:HVVVJDSXX:2:1528:29035:11788" && read_end.ix() == 1 {
+        // if read_data.name == "A00404:156:HV37TDSXX:1:2347:23909:19257" && read_end.ix() == 0 {
             if let Some(hap_alns) = hap_alns {
                 log::debug!("    Transferring alignments for {}", read_data.name);
                 hap_alns.transfer_alignments(alns, start_len, read_data.mates[read_end.ix()].as_ref().unwrap(),

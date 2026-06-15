@@ -233,7 +233,7 @@ impl Aligner {
                     let soft_clipping = cigar.query_len();
                     cigar.clear();
                     if soft_clipping > 0 {
-                        cigar.push_unchecked(Operation::Soft, soft_clipping);
+                        cigar.push_unchecked(Operation::Ins, soft_clipping);
                     }
                 }
                 cigar.push_checked(op, 1);
@@ -243,7 +243,7 @@ impl Aligner {
             let soft_clipping = cigar.query_len();
             cigar.clear();
             if soft_clipping > 0 {
-                cigar.push_unchecked(Operation::Soft, soft_clipping);
+                cigar.push_unchecked(Operation::Ins, soft_clipping);
             }
         }
         let score = unsafe { (*c_cigar).score };
@@ -315,7 +315,8 @@ impl Aligner {
     ) {
         assert!(j1 != j2);
         if i1 == i2 {
-            cigar.push_unchecked(Operation::Soft, j2 - j1);
+            // Will be replaced with Operation::Soft later in the analysis.
+            cigar.push_unchecked(Operation::Ins, j2 - j1);
             return
         }
         let subseq1 = &seq1[i1 as usize..i2 as usize];
@@ -346,7 +347,7 @@ impl Aligner {
                 cigar.pop();
             }
             if soft_clipping > 0 {
-                cigar.push_unchecked(Operation::Soft, soft_clipping);
+                cigar.push_unchecked(Operation::Ins, soft_clipping);
             }
         }
         log::debug!("    -> {:?}", cigar);

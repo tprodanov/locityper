@@ -52,6 +52,7 @@ impl HapAlns {
             let Some(id1) = contigs.try_get_id(hap1) else { continue };
             let Some(id2) = contigs.try_get_id(hap2) else { continue };
             if id1 == id2 { continue };
+            // if std::cmp::min(id1, id2).get() != 270 || std::cmp::max(id1, id2).get() != 356 { continue };
             let matrix_cell = aln_matrix.get_symmetric_mut(id1.ix(), id2.ix());
             if matrix_cell.is_some() { continue };
 
@@ -91,8 +92,15 @@ impl HapAlns {
         let (start, end, new_cigar) = haps_cigar.transfer_alignment::<TO_REF>(
             source_aln_start, cigar_lbound, cigar_rbound, read_source_aln.cigar(), read_seq, target_seq, aligner);
         log::debug!("        : {:?}", new_cigar);
-        let new_interval = Interval::new(Arc::clone(contig_set.contigs()), target_id, start, end);
-        log::debug!("        : {}", new_interval);
+        assert!(new_cigar.validate(read_seq, &target_seq[start as usize..end as usize]));
+
+        // [TODO] More specifically, check difference in rlen and qlen
+        if start < end {
+            let new_interval = Interval::new(Arc::clone(contig_set.contigs()), target_id, start, end);
+            log::debug!("        : {}", new_interval);
+        } else {
+            log::debug!("        : EMPTY");
+        }
     }
 
     pub fn transfer_alignments(
