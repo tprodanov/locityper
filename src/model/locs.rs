@@ -1073,6 +1073,9 @@ impl AllAlignments {
         let mut counts = ReadCounts::default();
         let mut reads = Vec::new();
         let mut unused_reads = Vec::new();
+
+        let mut total_alns = 0;
+        let mut n_recovered = 0;
         while reader.has_more() {
             let mut read_data = ReadData::default();
             counts.total += 1;
@@ -1104,9 +1107,10 @@ impl AllAlignments {
             let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
 
             if let Some(hap_alns) = opt_hap_alns {
-                log::debug!("Transferring alignments for {}", read_data.name);
-                hap_alns.transfer_alignments(&mut prelim_alignments, &read_data, contig_set, &aligner, &data.err_prof);
+                n_recovered += hap_alns.transfer_alignments(
+                    &mut prelim_alignments, &read_data, contig_set, &aligner, &data.err_prof);
             }
+            total_alns += prelim_alignments.len();
             prelim_alignments.finalize();
             let groupped_alns = if is_paired_end {
                 identify_paired_end_alignments(read_data, &mut prelim_alignments.alns,
@@ -1127,6 +1131,9 @@ impl AllAlignments {
         if collisions > 2 && collisions * 100 > counts.total {
             return Err(error!(RuntimeError, "Too many read name collisions ({}). \
                 Possibly, paired-end reads are processed as single-end reads.", collisions))
+        }
+        if n_recovered > 0 {
+            log::debug!("    Loaded {} alignments, recovered additional {}", total_alns - n_recovered, total_alns)
         }
         Ok(Self { reads, unused_reads })
     }

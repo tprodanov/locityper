@@ -72,7 +72,8 @@ impl HapAlns {
         Ok(Self { aln_matrix, best_ixs })
     }
 
-    /// Try to identify any new alignments for a given read.
+    /// Try to identify any new alignments for a given read/read pair.
+    /// Returns the number of new alignments.
     pub(crate) fn transfer_alignments(
         &self,
         prelim_alignments: &mut PrelimAlignments,
@@ -80,7 +81,7 @@ impl HapAlns {
         contig_set: &ContigSet,
         aligner: &Aligner,
         err_prof: &ErrorProfile,
-    ) {
+    ) -> usize {
         let n = prelim_alignments.len();
         let mut seen = vec![false; n];
 
@@ -94,13 +95,9 @@ impl HapAlns {
             let source_strand = source_aln.strand();
             let read_end = source_aln.read_end();
             let read_seq = read_data.mate_data(read_end).get_seq(source_strand);
-            log::debug!("    Source alignment: [{}] {} {:?} {} ({} read end)",
-                source_contig_id, source_aln.interval(), source_cigar, source_strand, read_end.ix() + 1);
             let passable_dist = prelim_alignments.passable_dist(read_end);
 
             for &(target_contig_id, _) in &self.best_ixs[source_contig_id.ix()] {
-                log::debug!("        Transferring to [{}] {}", target_contig_id.get(),
-                    contig_set.contigs().get_name(target_contig_id));
                 let target_seq = contig_set.get_seq(target_contig_id);
                 let haps_cigar = self.aln_matrix.get_symmetric(source_contig_id.ix(), target_contig_id.ix())
                     .as_ref().expect("Alignment between haplotypes must exist");
@@ -111,13 +108,11 @@ impl HapAlns {
                 } else {
                     haps_cigar.find_approx_position::<false>(source_aln_start)
                 };
-                log::debug!("        : Approx. start = {},  cigar bounds: {}..{}", approx_start, min_cigar_ix, max_cigar_ix);
                 if let Some(ix) = prelim_alignments.pos_collection().get(read_end, target_contig_id, approx_start) {
                     // Similar position is observed in alignment `ix`. Do not transfer it later.
                     if let Some(v) = seen.get_mut(ix as usize) {
                         *v = true;
                     }
-                    log::debug!("        : Previously observed");
                     continue;
                 }
 
@@ -128,7 +123,6 @@ impl HapAlns {
                     haps_cigar.transfer_alignment::<false>(
                         source_aln_start, min_cigar_ix, max_cigar_ix, &source_cigar, read_seq, target_seq, aligner)
                 };
-                assert!(new_start.abs_diff(approx_start) <= 256);
                 const MIN_ALN_SIZE: u32 = 50;
                 let cigar_ref_len = new_cigar.ref_len();
                 // Either too high edit distance or too short alignment.
@@ -138,10 +132,10 @@ impl HapAlns {
 
                 let interval = Interval::new(Arc::clone(contig_set.contigs()), target_contig_id,
                     new_start, new_start + cigar_ref_len);
-                log::debug!("        : Save new {} {}", interval, new_cigar);
                 let new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);
                 prelim_alignments.push(new_aln, contig_set.contigs(), err_prof);
             }
         }
+        prelim_alignments.len() - n
     }
 }
