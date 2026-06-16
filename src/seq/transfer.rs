@@ -2,7 +2,6 @@
 
 use std::{
     path::Path,
-    ops::Range,
     sync::Arc,
 };
 use crate::{
@@ -14,7 +13,8 @@ use crate::{
         aln::Alignment,
         wfa::Aligner,
     },
-    model::locs::MateData,
+    bg::ErrorProfile,
+    model::locs::{ReadData, PrelimAlignments},
     ext::{
         self,
         TriangleMatrix,
@@ -38,9 +38,7 @@ impl HapAlns {
         filename: &Path,
         contigs: &ContigNames,
         max_div: f64,
-    ) -> crate::Result<Self>
-    {
-        // [TODO] Replace leave-out haplotypes.
+    ) -> crate::Result<Self> {
         let mut aln_matrix = TriangleMatrix::new(contigs.len(), None);
         let mut best_ixs = vec![Vec::new(); contigs.len()];
         let min_simil = 1.0 - max_div;
@@ -74,67 +72,76 @@ impl HapAlns {
         Ok(Self { aln_matrix, best_ixs })
     }
 
-    fn transfer_alignment<const TO_REF: bool>(
+    /// Try to identify any new alignments for a given read.
+    pub(crate) fn transfer_alignments(
         &self,
-        source_id: ContigId,
-        target_id: ContigId,
-        read_source_aln: &Alignment,
-        read_seq: &[u8],
+        prelim_alignments: &mut PrelimAlignments,
+        read_data: &ReadData,
         contig_set: &ContigSet,
         aligner: &Aligner,
+        err_prof: &ErrorProfile,
     ) {
-        let target_seq = contig_set.get_seq(target_id);
-        let haps_cigar = self.aln_matrix.get_symmetric(source_id.ix(), target_id.ix())
-            .as_ref().expect("Alignment between haplotypes must exist");
-        let source_aln_start = read_source_aln.interval().start();
-        let (cigar_lbound, cigar_rbound, approx_pos) = haps_cigar.find_approx_position::<TO_REF>(source_aln_start);
-        log::debug!("        : Approx. start = {},  cigar bounds: {}..{}", approx_pos, cigar_lbound, cigar_rbound);
-        let (start, end, new_cigar) = haps_cigar.transfer_alignment::<TO_REF>(
-            source_aln_start, cigar_lbound, cigar_rbound, read_source_aln.cigar(), read_seq, target_seq, aligner);
-        log::debug!("        : {:?}", new_cigar);
-        assert!(new_cigar.validate(read_seq, &target_seq[start as usize..end as usize]));
+        let n = prelim_alignments.len();
+        let mut seen = vec![false; n];
 
-        // [TODO] More specifically, check difference in rlen and qlen
-        if start < end {
-            let new_interval = Interval::new(Arc::clone(contig_set.contigs()), target_id, start, end);
-            log::debug!("        : {}", new_interval);
-        } else {
-            log::debug!("        : EMPTY");
-        }
-    }
+        for i in 0..n {
+            if std::mem::replace(&mut seen[i], true) { continue }
+            let source_aln = &prelim_alignments[i];
+            // Copy various variables before `source_aln` is dropped to make `prelim_alignments` mutable.
+            let source_contig_id = source_aln.contig_id();
+            let source_aln_start = source_aln.interval().start();
+            let source_cigar = source_aln.cigar().clone();
+            let source_strand = source_aln.strand();
+            let read_end = source_aln.read_end();
+            let read_seq = read_data.mate_data(read_end).get_seq(source_strand);
+            log::debug!("    Source alignment: [{}] {} {:?} {} ({} read end)",
+                source_contig_id, source_aln.interval(), source_cigar, source_strand, read_end.ix() + 1);
+            let passable_dist = prelim_alignments.passable_dist(read_end);
 
-    pub fn transfer_alignments(
-        &self,
-        alns: &mut Vec<Alignment>,
-        start_ix: usize,
-        mate_data: &MateData,
-        contig_set: &ContigSet,
-        aligner: &Aligner,
-    ) {
-        let mut intervals = iset::IntervalSet::new();
-        // log::debug!("    Initial alignments");
-        for aln in &alns[start_ix..] {
-            // log::debug!("        * {:15} {:?} {}", aln.interval(), aln.cigar(), aln.strand());
-            intervals.insert(aln_interval(aln));
-        }
-        let first_aln = &alns[start_ix];
-        log::debug!("    First alignment: {} {:?} {}", first_aln.interval(), first_aln.cigar(), first_aln.strand());
-        let read_seq = mate_data.get_seq(first_aln.strand());
-        let source_id = first_aln.contig_id();
-        for &(target_id, _) in &self.best_ixs[source_id.ix()] {
-            log::debug!("        Transferring to [{}] {}", target_id.get(), contig_set.contigs().get_name(target_id));
-            if source_id < target_id {
-                self.transfer_alignment::<true>(source_id, target_id, first_aln, read_seq, contig_set, aligner);
-            } else {
-                self.transfer_alignment::<false>(source_id, target_id, first_aln, read_seq, contig_set, aligner);
+            for &(target_contig_id, _) in &self.best_ixs[source_contig_id.ix()] {
+                log::debug!("        Transferring to [{}] {}", target_contig_id.get(),
+                    contig_set.contigs().get_name(target_contig_id));
+                let target_seq = contig_set.get_seq(target_contig_id);
+                let haps_cigar = self.aln_matrix.get_symmetric(source_contig_id.ix(), target_contig_id.ix())
+                    .as_ref().expect("Alignment between haplotypes must exist");
+                let query_to_ref = source_contig_id < target_contig_id;
+
+                let (min_cigar_ix, max_cigar_ix, approx_start) = if query_to_ref {
+                    haps_cigar.find_approx_position::<true>(source_aln_start)
+                } else {
+                    haps_cigar.find_approx_position::<false>(source_aln_start)
+                };
+                log::debug!("        : Approx. start = {},  cigar bounds: {}..{}", approx_start, min_cigar_ix, max_cigar_ix);
+                if let Some(ix) = prelim_alignments.pos_collection().get(read_end, target_contig_id, approx_start) {
+                    // Similar position is observed in alignment `ix`. Do not transfer it later.
+                    if let Some(v) = seen.get_mut(ix as usize) {
+                        *v = true;
+                    }
+                    log::debug!("        : Previously observed");
+                    continue;
+                }
+
+                let (new_start, new_cigar) = if query_to_ref {
+                    haps_cigar.transfer_alignment::<true>(
+                        source_aln_start, min_cigar_ix, max_cigar_ix, &source_cigar, read_seq, target_seq, aligner)
+                } else {
+                    haps_cigar.transfer_alignment::<false>(
+                        source_aln_start, min_cigar_ix, max_cigar_ix, &source_cigar, read_seq, target_seq, aligner)
+                };
+                assert!(new_start.abs_diff(approx_start) <= 256);
+                const MIN_ALN_SIZE: u32 = 50;
+                let cigar_ref_len = new_cigar.ref_len();
+                // Either too high edit distance or too short alignment.
+                if cigar_ref_len.abs_diff(new_cigar.query_len()) > passable_dist || cigar_ref_len < MIN_ALN_SIZE {
+                    continue
+                }
+
+                let interval = Interval::new(Arc::clone(contig_set.contigs()), target_contig_id,
+                    new_start, new_start + cigar_ref_len);
+                log::debug!("        : Save new {} {}", interval, new_cigar);
+                let new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);
+                prelim_alignments.push(new_aln, contig_set.contigs(), err_prof);
             }
         }
     }
-}
-
-/// Convert alignment intervals into ranges of u64, useful for interval set.
-#[inline(always)]
-fn aln_interval(aln: &Alignment) -> Range<u64> {
-    let prefix = u64::from(aln.contig_id().get()) << 32;
-    (prefix | u64::from(aln.interval().start()))..(prefix | u64::from(aln.interval().end()))
 }

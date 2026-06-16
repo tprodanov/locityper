@@ -193,9 +193,9 @@ impl Aligner {
         Self { global_aligner, semiglobal_aligner, safe_mismatch_size, penalties }
     }
 
-    pub fn penalties(&self) -> &Penalties {
-        &self.penalties
-    }
+    // pub fn penalties(&self) -> &Penalties {
+    //     &self.penalties
+    // }
 
     /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
     /// If the alignment is dropped, returns VERY approximate alignment.
@@ -333,8 +333,6 @@ impl Aligner {
 
         let subseq1 = &seq1[i1 as usize..i2 as usize];
         let subseq2 = &seq2[j1 as usize..j2 as usize];
-        log::debug!("Align clipping (left? {}) between {} and {}. Current CIGAR = {:?}",
-            LEFT, std::str::from_utf8(subseq1).unwrap(), std::str::from_utf8(subseq2).unwrap(), cigar);
         self.align::<LEFT>(aligner, subseq1, subseq2, cigar);
         if !LEFT {
             let mut soft_clipping = 0;
@@ -350,7 +348,6 @@ impl Aligner {
                 cigar.push_unchecked(Operation::Ins, soft_clipping);
             }
         }
-        log::debug!("    -> {:?}", cigar);
     }
 }
 

@@ -1014,8 +1014,8 @@ fn load_alns(
     while let Some(()) = reader.read(&mut record).transpose()? {
         if record.flags() & 3844 == 0 && record.mapq() >= min_mapq && cigar::clipping_rate(&record) <= max_clipping {
             if let Some(cigar) = cigar_getter(&record) {
-                alns.push(NamedAlignment::new(&record, cigar, ReadEnd::from_record(&record),
-                    Arc::clone(contigs), f64::NAN));
+                alns.push(NamedAlignment::new(
+                    &record, cigar, ReadEnd::from_record(&record), Arc::clone(contigs)));
                 paired_counts[usize::from(record.is_paired())] += 1;
             } else {
                 wo_cigar += 1;

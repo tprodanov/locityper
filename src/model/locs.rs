@@ -1,6 +1,6 @@
 use std::{
     cmp::{min, max},
-    fmt::{self, Write as FmtWrite},
+    fmt,
     sync::{Arc, OnceLock},
     io::{self, Write},
 };
@@ -22,14 +22,13 @@ use crate::{
         err_prof::{ErrorProfile, EditDistCache},
         insertsz::InsertDistr,
     },
-    algo::{bisect, TwoU32, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
+    algo::{bisect, get_hash, HashSet, IntSet, IntMap, hash_map::Entry},
     math::Ln,
     model::{
         windows::ContigInfos,
     },
     ext::{
         sys::GzFile,
-        vec::VecExt,
     },
 };
 
@@ -138,6 +137,22 @@ impl Default for ReadData {
 }
 
 impl ReadData {
+    pub fn set_name(&mut self, record: &bam::Record, read_end: ReadEnd) -> crate::Result<()> {
+        let qname = record.qname();
+        if read_end == ReadEnd::Second {
+            return if qname != self.name.as_bytes() {
+                Err(error!(InvalidData, "Read {} does not have a second read end", self.name))
+            } else {
+                Ok(())
+            }
+        }
+        assert!(self.name.is_empty());
+        self.name = String::from_utf8(qname.to_vec())
+            .map_err(|_| Error::Utf8("read name", record.qname().to_vec()))?;
+        self.name_hash = NameHash::new(qname);
+        Ok(())
+    }
+
     #[inline(always)]
     pub fn name(&self) -> &String {
         &self.name
@@ -154,204 +169,389 @@ impl ReadData {
     }
 }
 
-// ------------------------- BAM file reader, that skips bad alignments -------------------------
+/// Store start positions divided by 128.
+const STEP_PWR: u32 = 7;
+/// During query, check the position div 128 and one of the neighboring positions (two queries in total).
+/// This way we will for certain find the position by checking queries within 64 bp.
+const DIST_PWR: u32 = STEP_PWR - 1;
+/// To check if the value is closer to zero or to 128, check (val & UP_DOWN_MASK).
+const UP_DOWN_MASK: u32 = 1 << DIST_PWR;
 
-/// BAM reader.
-/// Contains `next_alns` method, which consecutively reads all records with the same name
-/// until the next primary alignment.
-struct FilteredReader<'a, R: bam::Read> {
-    reader: R,
-    /// Next record is stored but not yet returned.
-    record: bam::Record,
-    has_more: bool,
-    contigs: Arc<ContigNames>,
-    contig_infos: &'a ContigInfos,
-    err_prof: &'a ErrorProfile,
-    are_short_reads: bool,
-    edit_dist_cache: &'a EditDistCache,
-    /// Buffer, used for discrard alignments with the same positions.
-    /// Key (contig id, alignment start), value: index of the previous position.
-    found_alns: IntMap<TwoU32, usize>,
-    params: &'a super::Params,
+#[inline(always)]
+fn encode(read_end: ReadEnd, contig: ContigId, pos: u32) -> u64 {
+    (read_end.as_int::<u64>() << 48) | (u64::from(contig.get()) << 32) | u64::from(pos >> STEP_PWR)
 }
 
-#[inline]
+#[derive(Clone, Copy)]
+pub(crate) struct PosCollectionValue {
+    index: u32,
+    pos: u32,
+}
+
+impl PosCollectionValue {
+    #[inline(always)]
+    pub(crate) fn new(index: u32, pos: u32) -> Self {
+        Self { index, pos }
+    }
+
+    #[inline(always)]
+    pub(crate) fn index(self) -> u32 {
+        self.index
+    }
+
+    // #[inline(always)]
+    // pub(crate) fn pos(self) -> u32 {
+    //     self.pos
+    // }
+}
+
+/// Use this value for indices of alignments that are not saved due to poor edit distance.
+const NOT_SAVED: u32 = u32::MAX;
+
+/// Store previously observed alignment starts.
+#[derive(Default)]
+pub(crate) struct PosCollection {
+    /// Key = encode(contig, pos); value = PosCollectionValue { index, pos }.
+    map: IntMap<u64, PosCollectionValue>,
+}
+
+impl PosCollection {
+    // /// Adds position to the collection. Returns false if the 128-bin is already in use.
+    // /// Returns `Some(index)` and does not update collection if a similar position (within 128 bp) is already stored.
+    // #[inline(always)]
+    // pub(crate) fn add(&mut self, read_end: ReadEnd, contig: ContigId, pos: u32, index: u32) -> bool {
+    //     match self.entry(read_end, contig, pos) {
+    //         Entry::Occupied(_) => false,
+    //         Entry::Vacant(entry) => {
+    //             entry.insert(PosCollectionValue::new(index, pos));
+    //             true
+    //         }
+    //     }
+    // }
+
+    /// Returns entry corresponding to a given contig and the 128 bp bin around the position.
+    /// When modifying the entry, be careful that start position is still inside the bin
+    /// (won't panic if not, but can screw up the distance check in `get`).
+    #[inline(always)]
+    pub(crate) fn entry<'a>(
+        &'a mut self,
+        read_end: ReadEnd,
+        contig: ContigId,
+        pos: u32,
+    ) -> Entry<'a, u64, PosCollectionValue> {
+        self.map.entry(encode(read_end, contig, pos))
+    }
+
+    /// Returns previously observed index if the position is similar (within 64 bp or inside the same 128 bp bin).
+    #[inline(always)]
+    pub(crate) fn get(&self, read_end: ReadEnd, contig: ContigId, pos: u32) -> Option<u32> {
+        let key = encode(read_end, contig, pos);
+        if let Some(&val) = self.map.get(&key) {
+            return Some(val.index());
+        }
+        // +1 if start is closer to 128, -1 if start is closer to 0.
+        let key_increment = 1 - (i64::from((pos & UP_DOWN_MASK) == 0) << 1);
+        // Don't care about wrapping since we won't get any matches in the map.
+        // Could also use `key.checked_add_signed()?`, but it may be slower.
+        let key2 = key.wrapping_add_signed(key_increment);
+        match self.map.get(&key2) {
+            Some(&val) if (val.pos.abs_diff(pos) >> DIST_PWR) != 0 => Some(val.index()),
+            _ => None,
+        }
+    }
+}
+
+/// Structure for storing initial alignments, before any subsequent pairing.
+pub(crate) struct PrelimAlignments {
+    alns: Vec<Alignment>,
+    pos_collection: PosCollection,
+    passable_dist: [u32; 2],
+    best_edit: [u32; 2],
+    best_lik: [f64; 2],
+}
+
+impl PrelimAlignments {
+    fn new() -> Self {
+        Self {
+            alns: Vec::new(),
+            pos_collection: Default::default(),
+            passable_dist: [u32::MAX; 2],
+            best_edit: [u32::MAX; 2],
+            best_lik: [f64::NEG_INFINITY; 2],
+        }
+    }
+
+    #[inline]
+    fn set_passable_dist(&mut self, read_end: ReadEnd, dist: u32) {
+        self.passable_dist[read_end.ix()] = dist;
+    }
+
+    /// Adds new alignment. Returns false if edit distance is under `passable_dist`.
+    pub(crate) fn push(
+        &mut self,
+        mut aln: Alignment,
+        contigs: &ContigNames,
+        err_prof: &ErrorProfile,
+    ) -> bool {
+        let read_end = aln.read_end();
+        let read_prof = aln.count_region_operations_fast(contigs.get_len(aln.contig_id()));
+        let dist = read_prof.edit_distance();
+        let aln_prob = err_prof.ln_prob(&read_prof);
+        aln.set_distance(dist);
+        aln.set_ln_prob(aln_prob);
+        self.best_edit[read_end.ix()] = self.best_edit[read_end.ix()].min(dist.edit());
+        self.best_lik[read_end.ix()] = self.best_lik[read_end.ix()].max(aln_prob);
+
+        let new_aln_ix = self.alns.len() as u32;
+        let save = dist.edit() <= self.passable_dist[read_end.ix()];
+        // Return false now before we update pos collection.
+        if new_aln_ix == 0 && !save {
+            return false;
+        }
+
+        let aln_start = aln.interval().start();
+        match (self.pos_collection.entry(read_end, aln.contig_id(), aln_start), save) {
+            (Entry::Occupied(mut entry), true) => {
+                let entry = entry.get_mut();
+                let aln_ix = entry.index();
+                if aln_ix == NOT_SAVED {
+                    entry.index = new_aln_ix;
+                    entry.pos = aln_start;
+                    self.alns.push(aln);
+                } else if aln_prob > self.alns[aln_ix as usize].ln_prob() {
+                    self.alns[aln_ix as usize] = aln;
+                    entry.pos = aln_start;
+                }
+            }
+            (Entry::Occupied(_entry), false) => {}
+            (Entry::Vacant(entry), true) => {
+                entry.insert(PosCollectionValue::new(new_aln_ix, aln_start));
+                self.alns.push(aln);
+            }
+            (Entry::Vacant(entry), false) => {
+                entry.insert(PosCollectionValue::new(NOT_SAVED, aln_start));
+            }
+        }
+        save
+    }
+
+    fn debug_write(&self, read_data: &ReadData, dbg_writer: &mut impl Write) -> crate::Result<()> {
+        for (i, aln) in self.alns.iter().enumerate() {
+            write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", read_data.name_hash, aln.read_end(), aln.interval(),
+                aln.distance().unwrap(), Ln::to_log10(aln.ln_prob())).map_err(add_path!(!))?;
+            if i == 0 {
+                write!(dbg_writer, "\t{}", read_data.name).map_err(add_path!(!))?;
+            }
+            writeln!(dbg_writer).map_err(add_path!(!))?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&mut self) {
+        self.alns.iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - self.best_lik[aln.read_end().ix()]));
+    }
+
+    /// Returns the number of stored alignments.
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.alns.len()
+    }
+
+    #[inline(always)]
+    pub fn pos_collection(&self) -> &PosCollection {
+        &self.pos_collection
+    }
+
+    #[inline(always)]
+    pub fn passable_dist(&self, read_end: ReadEnd) -> u32 {
+        self.passable_dist[read_end.ix()]
+    }
+}
+
+impl std::ops::Index<usize> for PrelimAlignments {
+    type Output = Alignment;
+
+    fn index(&self, i: usize) -> &Alignment {
+        self.alns.index(i)
+    }
+}
+
+// ------------------------- BAM file reader, that skips bad alignments -------------------------
+
+/// For each BAM contig, store its index across `ContigNames`.
+/// BAM contigs must be a subset (possibly equal) of the contig names since if there are new contigs,
+/// we cannot transfer alignments from them.
+fn construct_tid_to_contig_map(header: &bam::HeaderView, contigs: &ContigNames) -> crate::Result<Vec<ContigId>> {
+    let mut conversion = Vec::with_capacity(header.target_count() as usize);
+    for i in 0..header.target_count() {
+        let name_bytes = header.tid2name(i);
+        let name = std::str::from_utf8(name_bytes).map_err(|_| Error::Utf8("read name", name_bytes.to_vec()))?;
+        let id = contigs.try_get_id(name)
+            .ok_or_else(|| error!(InvalidData, "Intermediate BAM file contains unexpected contigs (e.g. {})", name))?;
+        conversion.push(id);
+    }
+    Ok(conversion)
+}
+
+#[inline(always)]
 fn is_primary(record: &bam::Record) -> bool {
     (record.flags() & 2304) == 0
 }
 
-impl<'a, R: bam::Read> FilteredReader<'a, R> {
-    fn new(
-        mut reader: R,
-        contigs: Arc<ContigNames>,
-        contig_infos: &'a ContigInfos,
-        bg_distr: &'a BgDistr,
-        edit_dist_cache: &'a EditDistCache,
-        params: &'a super::Params,
-    ) -> crate::Result<Self> {
+/// BAM reader that allows to peek the last BAM record.
+struct LaggedReader<R> {
+    reader: R,
+    record: bam::Record,
+    has_more: bool,
+}
+
+impl<R: bam::Read> LaggedReader<R> {
+    fn new(mut reader: R) -> crate::Result<Self> {
         let mut record = bam::Record::new();
         // Reader would return None if there are no more records.
         let has_more = reader.read(&mut record).transpose()?.is_some();
         assert!(is_primary(&record), "First record in the BAM file is secondary/supplementary");
-        Ok(FilteredReader {
-            found_alns: IntMap::default(),
-            are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
-            err_prof: bg_distr.error_profile(),
-            reader, record, contigs, contig_infos, edit_dist_cache, has_more, params,
-        })
+        Ok(Self { reader, record, has_more })
     }
 
-    /// Starting with `self.record` (already loaded), reads all alignments,
-    /// corresponding to this read and current read end.
-    /// Basically, the function continue to read until the next primary alignment is found,
-    /// which is saved to `self.record`.
-    ///
-    /// If read is unmapped, or best edit distance is too high, does not add any new alignments.
-    ///
-    /// Multiplies input weight by the weight of the best alignment.
-    /// Returns true if any of the alignments were good, otherwise the input vector did not change.
-    fn next_alns(
-        &mut self,
-        read_end: ReadEnd,
-        alns: &mut Vec<Alignment>,
-        read_data: &mut ReadData,
-        dbg_writer: &mut impl Write,
-        hap_alns: Option<&HapAlns>,
-        contig_set: &ContigSet,
-        aligner: &Aligner,
-    ) -> crate::Result<bool>
-    {
-        assert!(self.has_more, "Cannot read any more records from a BAM file");
-        let name = std::str::from_utf8(self.record.qname())
-            .map_err(|_| Error::Utf8("read name", self.record.qname().to_vec()))?;
-        let name_hash = NameHash::new(self.record.qname());
-
-        // Check if everything is correct.
-        if read_end == ReadEnd::First {
-            assert!(read_data.name.is_empty());
-            read_data.name.push_str(name);
-            read_data.name_hash = name_hash;
-        } else if name_hash != read_data.name_hash {
-            return Err(error!(InvalidData, "Read {} does not have a second read end", name));
-        }
-        if self.record.seq().is_empty() {
-            if self.record.qname().is_empty() {
-                return Err(error!(InvalidData,
-                    "Alignment file contains absolutely empty read (no read name or sequence)"));
-            }
-            return Err(error!(InvalidData, "Read {} does not have read sequence", read_data.name));
-        }
-        let old_option = read_data.mates[read_end.ix()].replace(MateData::new(&self.record));
-        assert!(old_option.is_none(), "Mate data defined twice");
-
-        if self.record.is_unmapped() {
-            writeln!(dbg_writer, "{}\t{}\t*\tNA\tNA\tNA\t{}", name_hash, read_end, name).map_err(add_path!(!))?;
-            // Read the next record, and save false to `has_more` if there are no more records left.
-            self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
-            return Ok(false);
-        }
-
-        let start_len = alns.len();
-        // Does any alignment have good edit distance?
-        let mut best_edit = u32::MAX;
-        let mut max_prob = f64::NEG_INFINITY;
-        self.found_alns.clear();
-        let mut primary = true;
-        let mut neighb_complexity = f64::NAN;
-
-        loop {
-            let mut cigar = Cigar::from_raw(self.record.raw_cigar());
-            if primary {
-                assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
-            } else {
-                cigar.hard_to_soft();
-            }
-
-            if self.record.is_unmapped() {
-                // Do nothing
-            } else if cigar.is_empty() {
-                log::warn!("    Read {} is mapped (flag {}) and has empty CIGAR; skipping this alignment",
-                    std::str::from_utf8(self.record.qname()).unwrap(), self.record.flags());
-            } else {
-                let mut aln = Alignment::new(&self.record, cigar, read_end, Arc::clone(&self.contigs), f64::NAN);
-                let contig_len = self.contigs.get_len(aln.contig_id());
-                let read_prof = aln.count_region_operations_fast(contig_len);
-                let dist = read_prof.edit_distance();
-                let aln_prob = self.err_prof.ln_prob(&read_prof);
-                aln.set_distance(dist);
-                aln.set_ln_prob(aln_prob);
-                best_edit = best_edit.min(dist.edit());
-                max_prob = max_prob.max(aln_prob);
-
-                write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", name_hash, read_end, aln.interval(),
-                    dist, Ln::to_log10(aln_prob)).map_err(add_path!(!))?;
-                if primary {
-                    neighb_complexity = if self.are_short_reads { self.contig_infos.neighb_complexity(&aln) }
-                                        else { 1.0 };
-                    write!(dbg_writer, "\t{:.5}\t{}", neighb_complexity, read_data.name).map_err(add_path!(!))?;
-                    primary = false;
-                }
-                writeln!(dbg_writer).map_err(add_path!(!))?;
-
-                match self.found_alns.entry(TwoU32(aln.contig_id().get().into(), aln.interval().start())) {
-                    Entry::Occupied(entry) => {
-                        let aln_ix = *entry.get();
-                        // Already seen this alignment.
-                        if aln_prob > alns[aln_ix].ln_prob() {
-                            alns[aln_ix] = aln;
-                        }
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(alns.len());
-                        alns.push(aln);
-                    }
-                }
-            }
-
-            if self.reader.read(&mut self.record).transpose()?.is_none() {
-                self.has_more = false;
-                break;
-            } else if is_primary(&self.record) {
-                // Next primary record or unmapped read. Either way, it will be a new read or new read end.
-                break;
-            }
-            assert_eq!(self.record.qname(), read_data.name.as_bytes(),
-                "Read {} first alignment is not primary", String::from_utf8_lossy(self.record.qname()));
-        }
-
-        let read_len = alns[start_len].distance().unwrap().read_len();
-        let (good_dist, mut passable_dist) = self.edit_dist_cache.get(read_len);
-        let mut threshold_dist = good_dist;
-
-        // neighb_complexity will be 1.0 for long reads.
-        if neighb_complexity <= self.params.poor_compl {
-            threshold_dist = max(threshold_dist, (self.params.poor_compl_edit * read_len as f64) as u32);
-            passable_dist += threshold_dist - good_dist;
-        }
-        writeln!(dbg_writer, "#dist {}, {}", threshold_dist, passable_dist).map_err(add_path!(!))?;
-        if best_edit > threshold_dist {
-            alns.truncate(start_len);
-            return Ok(false);
-        }
-
-        // if read_data.name == "A00404:156:HV37TDSXX:1:2347:23909:19257" && read_end.ix() == 0 {
-            if let Some(hap_alns) = hap_alns {
-                log::debug!("    Transferring alignments for {}", read_data.name);
-                hap_alns.transfer_alignments(alns, start_len, read_data.mates[read_end.ix()].as_ref().unwrap(),
-                    contig_set, aligner);
-            }
-        // }
-
-        VecExt::unstable_retain(alns, start_len, |aln| aln.distance().unwrap().edit() <= passable_dist);
-        alns[start_len..].iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - max_prob));
-        read_data.weight *= if best_edit <= good_dist
-            { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
-        Ok(true)
+    /// Reads next read into `self.record`, returns true if there are more reads left.
+    #[inline]
+    fn proceed(&mut self) -> crate::Result<bool> {
+        self.has_more = self.reader.read(&mut self.record).transpose()?.is_some();
+        Ok(self.has_more)
     }
 
+    /// Returns the next record unless it has primary alignment.
+    #[inline]
+    fn next_unless_primary<'a>(&'a mut self) -> crate::Result<Option<&'a bam::Record>> {
+        if !self.proceed()? || is_primary(&self.record) {
+            Ok(None)
+        } else {
+            Ok(Some(&self.record))
+        }
+    }
+
+    #[inline]
+    fn skip_until_primary(&mut self) -> crate::Result<()> {
+        while let Some(_) = self.next_unless_primary()? {}
+        Ok(())
+    }
+
+    #[inline]
+    fn current(&self) -> Option<&bam::Record> {
+        if self.has_more {
+            Some(&self.record)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     fn has_more(&self) -> bool {
         self.has_more
     }
+}
+
+/// BAM reader.
+/// Contains `next_alns` method, which consecutively reads all records with the same name
+/// until the next primary alignment.
+struct Data<'a> {
+    tid2contig: Vec<ContigId>,
+    contig_set: &'a ContigSet,
+    contig_infos: &'a ContigInfos,
+    err_prof: &'a ErrorProfile,
+    are_short_reads: bool,
+    edit_dist_cache: &'a EditDistCache,
+    params: &'a super::Params,
+}
+
+impl<'a> Data<'a> {
+    fn new(
+        contig_set: &'a ContigSet,
+        contig_infos: &'a ContigInfos,
+        tid2contig: Vec<ContigId>,
+        bg_distr: &'a BgDistr,
+        edit_dist_cache: &'a EditDistCache,
+        params: &'a super::Params,
+    ) -> crate::Result<Self> {
+        Ok(Self {
+            are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
+            err_prof: bg_distr.error_profile(),
+            contig_set, contig_infos, tid2contig, edit_dist_cache, params,
+        })
+    }
+}
+
+/// Starting with `self.record` (already loaded), reads all alignments,
+/// corresponding to this read and current read end.
+/// Basically, the function continue to read until the next primary alignment is found,
+/// which is saved to `self.record`.
+///
+/// Returns false if the read is unmapped, or best edit distance is too high.
+fn read_next_alns<'a>(
+    data: &Data<'a>,
+    reader: &mut LaggedReader<impl bam::Read>,
+    read_end: ReadEnd,
+    read_data: &mut ReadData,
+    prelim_alignments: &mut PrelimAlignments,
+) -> crate::Result<bool> {
+    let record = reader.current().expect("Cannot read any more records from a BAM file");
+    read_data.set_name(&record, read_end)?;
+    if record.seq().is_empty() {
+        if record.qname().is_empty() {
+            return Err(
+                error!(InvalidData, "Alignment file contains absolutely empty read (no read name or sequence)"));
+        }
+        return Err(error!(InvalidData, "Read {} does not have read sequence", read_data.name));
+    }
+    let old_option = read_data.mates[read_end.ix()].replace(MateData::new(&record));
+    assert!(old_option.is_none(), "Mate data defined twice");
+    if record.is_unmapped() {
+        reader.proceed()?;
+        return Ok(false);
+    }
+
+    let cigar = Cigar::from_raw(record.raw_cigar());
+    assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
+    let aln = Alignment::from_record_w_contig_id(record, data.tid2contig[record.tid() as usize],
+        cigar, read_end, Arc::clone(data.contig_set.contigs()));
+    let neighb_complexity = if data.are_short_reads { data.contig_infos.neighb_complexity(&aln) } else { 1.0 };
+    let read_len = record.seq().len() as u32;
+    let (good_dist, mut passable_dist) = data.edit_dist_cache.get(read_len);
+    let mut threshold_dist = good_dist;
+    if neighb_complexity <= data.params.poor_compl {
+        threshold_dist = max(good_dist, (data.params.poor_compl_edit * read_len as f64) as u32);
+        passable_dist += threshold_dist - good_dist;
+    }
+
+    prelim_alignments.set_passable_dist(read_end, passable_dist);
+    if !prelim_alignments.push(aln, data.contig_set.contigs(), data.err_prof) {
+        // Primary alignment is not good enough.
+        reader.skip_until_primary()?;
+        return Ok(false);
+    }
+
+    while let Some(record) = reader.next_unless_primary()? {
+        assert_eq!(record.qname(), read_data.name.as_bytes(),
+            "Read {} first alignment is not primary", String::from_utf8_lossy(record.qname()));
+        let mut cigar = Cigar::from_raw(record.raw_cigar());
+        cigar.hard_to_soft();
+        if cigar.is_empty() {
+            log::warn!("    Read {} is mapped (flag {}) and has empty CIGAR; skipping this alignment",
+                read_data.name, record.flags());
+            continue;
+        }
+        let aln = Alignment::from_record_w_contig_id(record, data.tid2contig[record.tid() as usize],
+            cigar, read_end, Arc::clone(data.contig_set.contigs()));
+        prelim_alignments.push(aln, data.contig_set.contigs(), data.err_prof);
+    }
+
+    let best_edit = prelim_alignments.best_edit[read_end.ix()];
+    if best_edit > threshold_dist {
+        return Ok(false);
+    }
+    read_data.weight *= if best_edit <= good_dist { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
+    Ok(true)
 }
 
 // ------------------------- Structures for storing all alignments for one read pair -------------------------
@@ -545,7 +745,6 @@ fn identify_contig_pair_alns(
     prob_diff: f64,
 ) {
     let start_len = aln_pairs.len();
-
     let k = alignments.len();
     assert!(i <= j && j <= k);
     buffer.clear();
@@ -805,23 +1004,16 @@ fn in_bounds(alns: &[Alignment], boundary: u32, contigs: &ContigNames) -> bool {
 #[derive(Default)]
 struct ReadCounts {
     total: u32,
+    poorly_mapped: u32,
     out_of_bounds: u32,
-    both_unmapped: u32,
-    pair_unmapped: u32,
     few_kmers: u32,
 }
 
 impl ReadCounts {
     fn to_string(&self, use_reads: usize, is_paired_end: bool) -> String {
-        let mut s = format!("Use {} read{}s. Discard ", use_reads, if is_paired_end { " pair" } else { "" });
-        if is_paired_end {
-            write!(s, "{} + {} one|two mates", self.pair_unmapped, self.both_unmapped).unwrap();
-        } else {
-            write!(s, "{}", self.both_unmapped).unwrap();
-        }
-        write!(s, " poorly mapped, {} out of bounds and {} with few unique k-mers",
-            self.out_of_bounds, self.few_kmers).unwrap();
-        s
+        format!("Use {} read{}s. Discard {} poorly mapped, {} out of bounds and {} with few unique k-mers",
+            use_reads, if is_paired_end { " pair" } else { "" },
+            self.poorly_mapped, self.out_of_bounds, self.few_kmers)
     }
 }
 
@@ -850,10 +1042,9 @@ impl AllAlignments {
         mut dbg_writer1: impl Write,
         mut dbg_writer2: impl Write,
         mut dbg_writer3: Option<GzFile>,
-        hap_alns: Option<&HapAlns>,
+        opt_hap_alns: Option<&HapAlns>,
     ) -> crate::Result<Self>
     {
-        let aligner = Aligner::new(Default::default(), 6, Some(10), true);
         let contigs = contig_set.contigs();
         let boundary = params.boundary_size.strict_sub(params.tweak.unwrap());
         assert!(contigs.lengths().iter().all(|&len| len > 2 * boundary),
@@ -862,19 +1053,20 @@ impl AllAlignments {
             params.kmer_hard_thresh, params.kmer_soft_thresh);
 
         log::info!("    Loading read alignments");
-        writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tlik\tneighb_complexity\tread_name")
+        writeln!(dbg_writer1, "read_hash\tread_end\tinterval\tedit_dist\tlik\tread_name")
             .map_err(add_path!(!))?;
         writeln!(dbg_writer2, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
         if let Some(w) = &mut dbg_writer3 {
             writeln!(w, "read_hash\tread_end\tinterval\told_lik\tnew_lik\toverall_weight\tweights")
                 .map_err(add_path!(!))?;
         }
-        let mut reader = FilteredReader::new(reader, Arc::clone(contigs), contig_infos,
-            bg_distr, edit_dist_cache, params)?;
-
+        // [TODO] Explain params.
+        let aligner = Aligner::new(Default::default(), 6, Some(10), true);
+        let tid2contig = construct_tid_to_contig_map(reader.header(), contig_set.contigs())?;
+        let mut reader = LaggedReader::new(reader)?;
+        let data = Data::new(contig_set, contig_infos, tid2contig, bg_distr, edit_dist_cache, params)?;
         let is_paired_end = bg_distr.insert_distr().is_paired_end();
         let mut hashes = IntSet::default();
-        let mut tmp_alns = Vec::new();
         let mut buffer = Vec::with_capacity(16);
         let mut collisions = 0;
 
@@ -884,35 +1076,43 @@ impl AllAlignments {
         while reader.has_more() {
             let mut read_data = ReadData::default();
             counts.total += 1;
-            tmp_alns.clear();
-            let has_first = reader.next_alns(ReadEnd::First, &mut tmp_alns, &mut read_data, &mut dbg_writer1,
-                hap_alns, contig_set, &aligner)?;
+            let mut prelim_alignments = PrelimAlignments::new();
+            let mut well_mapped = read_next_alns(&data, &mut reader, ReadEnd::First,
+                &mut read_data, &mut prelim_alignments)?;
             if !hashes.insert(read_data.name_hash) {
                 log::debug!("Read {} produced hash collision ({})", read_data.name, read_data.name_hash);
                 collisions += 1;
             }
-            let has_second = is_paired_end
-                && reader.next_alns(ReadEnd::Second, &mut tmp_alns, &mut read_data, &mut dbg_writer1,
-                    hap_alns, contig_set, &aligner)?;
-
-            if !has_first && !has_second {
-                counts.both_unmapped += 1;
+            if is_paired_end {
+                if well_mapped {
+                    well_mapped = read_next_alns(&data, &mut reader, ReadEnd::Second,
+                        &mut read_data, &mut prelim_alignments)?;
+                } else {
+                    reader.skip_until_primary()?;
+                }
+            }
+            if !well_mapped {
+                counts.poorly_mapped += 1;
                 continue;
-            } else if is_paired_end && !(has_first && has_second) {
-                counts.pair_unmapped += 1;
-                continue;
-            } else if !in_bounds(&tmp_alns, boundary, contigs) {
+            } else if !in_bounds(&prelim_alignments.alns, boundary, contigs) {
                 counts.out_of_bounds += 1;
                 continue;
             }
 
+            prelim_alignments.debug_write(&read_data, &mut dbg_writer1)?;
             read_data.weight *= unique_kmers.read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
             let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+
+            if let Some(hap_alns) = opt_hap_alns {
+                log::debug!("Transferring alignments for {}", read_data.name);
+                hap_alns.transfer_alignments(&mut prelim_alignments, &read_data, contig_set, &aligner, &data.err_prof);
+            }
+            prelim_alignments.finalize();
             let groupped_alns = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut tmp_alns,
+                identify_paired_end_alignments(read_data, &mut prelim_alignments.alns,
                     max_alns, &mut buffer, bg_distr.insert_distr(), contig_infos, params)
             } else {
-                identify_single_end_alignments(read_data, &mut tmp_alns,
+                identify_single_end_alignments(read_data, &mut prelim_alignments.alns,
                     max_alns, contig_infos, params)
             };
             // TODO: Rethink this, reads may be needed for read depth!

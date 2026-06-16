@@ -5,6 +5,7 @@ use std::{
     borrow::Cow,
     cmp::{min, max},
 };
+use num_traits::identities::{ConstZero, ConstOne};
 use htslib::bam::Record;
 use crate::{
     bg::{
@@ -86,10 +87,10 @@ impl ReadEnd {
     }
 
     /// Converts read-end into integer (First => 0, Second => 1).
-    pub const fn as_u16(self) -> u16 {
+    pub const fn as_int<T: ConstZero + ConstOne>(self) -> T {
         match self {
-            ReadEnd::First => 0,
-            ReadEnd::Second => 1,
+            ReadEnd::First => T::ZERO,
+            ReadEnd::Second => T::ONE,
         }
     }
 
@@ -133,25 +134,37 @@ pub struct Alignment {
 }
 
 impl Alignment {
+    #[inline]
+    pub fn new(interval: Interval, cigar: Cigar, strand: Strand, read_end: ReadEnd) -> Self {
+        Self {
+            interval, cigar, strand, read_end,
+            ln_prob: f64::NAN,
+            dist: None,
+        }
+    }
+
+    /// Creates a new alignment information from a bam record, but sets specified contig id.
+    pub fn from_record_w_contig_id(
+        record: &Record,
+        contig_id: ContigId,
+        cigar: Cigar,
+        read_end: ReadEnd,
+        contigs: Arc<ContigNames>,
+    ) -> Self {
+        let start = u32::try_from(record.pos()).unwrap();
+        let interval = Interval::new(contigs, contig_id, start, start + cigar.ref_len());
+        Self::new(interval, cigar, Strand::from_record(record), read_end)
+    }
+
     /// Creates a new alignment information from a bam record.
-    pub fn new(
+    #[inline]
+    pub fn from_record(
         record: &Record,
         cigar: Cigar,
         read_end: ReadEnd,
         contigs: Arc<ContigNames>,
-        ln_prob: f64,
-    ) -> Self
-    {
-        assert!(!record.is_unmapped(),
-            "Cannot get alignment interval for an unmapped record {}", String::from_utf8_lossy(record.qname()));
-        let contig_id = ContigId::new(record.tid());
-        let start = u32::try_from(record.pos()).unwrap();
-        let interval = Interval::new(contigs, contig_id, start, start + cigar.ref_len());
-        Self {
-            strand: Strand::from_record(record),
-            dist: None,
-            interval, cigar, ln_prob, read_end,
-        }
+    ) -> Self {
+        Alignment::from_record_w_contig_id(record, ContigId::new(record.tid()), cigar, read_end, contigs)
     }
 
     /// Get contig id of the alignment.
@@ -357,12 +370,10 @@ impl NamedAlignment {
         cigar: Cigar,
         read_end: ReadEnd,
         contigs: Arc<ContigNames>,
-        ln_prob: f64,
-    ) -> Self
-    {
+    ) -> Self {
         Self {
             name: record.qname().to_vec(),
-            aln: Alignment::new(record, cigar, read_end, contigs, ln_prob),
+            aln: Alignment::from_record(record, cigar, read_end, contigs),
         }
     }
 

@@ -1128,7 +1128,6 @@ fn analyze_locus(
         return Ok(());
     }
 
-    let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
     let contigs = locus.set.contigs();
 
     let windows_writer = if args.debug >= DebugLvl::Some {
@@ -1144,6 +1143,7 @@ fn analyze_locus(
         Some(HapAlns::load(&paf_filename, &locus.set.contigs(), 0.01)?)
     } else { None };
 
+    let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
     let all_alns = if args.debug >= DebugLvl::Full {
         let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
         let read_kmer_writer = ext::sys::create_gzip(&locus.out_dir.join("read_kmers.csv.gz"))?;

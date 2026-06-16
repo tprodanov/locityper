@@ -43,7 +43,6 @@ glob = { version = "0.3", default-features = false }
 ruint = { version = "1.17", default-features = false, features = ["alloc", "num-traits"] }
 itertools = { version = "0.14", default-features = false, features = ["use_std"] }
 kodama = { version = "0.3" }
-iset = { version = "0.3" }
 
 [build-dependencies]
 bindgen = { version = "0.72", default-features = false, features = ["runtime"] }

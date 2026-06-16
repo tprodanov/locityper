@@ -22,6 +22,8 @@ parser$add_argument('-b', '--breaks', nargs = 2, type = 'integer', metavar = 'IN
     help = 'Two integers, for distance (bp) between major and minor breaks.')
 parser$add_argument('-o', '--out', metavar = 'FILE', required = T,
     help = 'Output plot file (PNG, PDF, etc.). Literal {} is replaced with --names STR.')
+parser$add_argument('-O', '--out-csv', metavar = 'FILE', required = F,
+    help = 'Output CSV file with matching k-mers. Literal {} is replaced with --names STR.')
 args <- parser$parse_args()
 
 ###################
@@ -112,7 +114,14 @@ ggplot(kmer_pairs) +
     theme(
         legend.position = 'bottom',
         legend.key.height = unit(0.8, 'lines'),
+        panel.grid = element_blank(),
     )
 
 out_filename <- gsub('{}', args$names, args$out, fixed = T)
 ggsave(out_filename, width = 8, height = 8.7, dpi = 400)
+
+if (!is.null(args$out_csv)) {
+    out_csv_filename <- gsub('{}', args$names, args$out_csv, fixed = T)
+    select(kmer_pairs, pos1, pos2, freq) |>
+        write.table(out_csv_filename, sep = '\t', quote = F, row.names = F)
+}
