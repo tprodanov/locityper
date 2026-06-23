@@ -1,6 +1,6 @@
 use std::{
+    fmt, thread,
     cmp::{min, max},
-    fmt,
     sync::{Arc, OnceLock},
     io::{self, Write},
 };
@@ -209,7 +209,7 @@ impl PosCollectionValue {
 const NOT_SAVED: u32 = u32::MAX;
 
 /// Store previously observed alignment starts.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct PosCollection {
     /// Key = encode(contig, pos); value = PosCollectionValue { index, pos }.
     map: IntMap<u64, PosCollectionValue>,
@@ -262,6 +262,7 @@ impl PosCollection {
 }
 
 /// Structure for storing initial alignments, before any subsequent pairing.
+#[derive(Clone)]
 pub(crate) struct PrelimAlignments {
     alns: Vec<Alignment>,
     pos_collection: PosCollection,
@@ -953,12 +954,13 @@ impl UniqueKmers {
     }
 
     /// Counts the number of unique k-mers in both read mates and
-    // returns weight the read/read pair (can be zero).
-    fn read_weight(
+    /// returns weight the read/read pair (can be zero).
+    /// Updates read_data.weight and mate_data.unique_kmers.
+    fn calcuate_read_weight(
         &mut self,
         read_data: &mut ReadData,
         dbg_writer: &mut impl Write,
-    ) -> io::Result<f64>
+    ) -> io::Result<()>
     {
         let mut paired_count = 0_u16;
         write!(dbg_writer, "{}\t", read_data.name_hash)?;
@@ -986,7 +988,8 @@ impl UniqueKmers {
         }
         let weight = (self.weight_interc + f64::from(paired_count) * self.weight_mult).clamp(0.0, 1.0);
         writeln!(dbg_writer, "{:.2}", weight)?;
-        Ok(weight)
+        read_data.weight *= weight;
+        Ok(())
     }
 }
 
@@ -1018,6 +1021,7 @@ impl ReadCounts {
 }
 
 /// Paired-end/single-end read alignments, sorted by contig.
+#[derive(Default)]
 pub struct AllAlignments {
     /// Each element: one read pair.
     reads: Vec<GrouppedAlignments>,
@@ -1033,16 +1037,17 @@ impl AllAlignments {
     /// (ii) there is an alignment that overlaps an inner region of any contig (beyond the boundary region).
     pub fn load(
         reader: impl bam::Read,
-        contig_set: &ContigSet,
+        contig_set: &Arc<ContigSet>,
         kmer_counts: &KmerCounts,
-        bg_distr: &BgDistr,
+        bg_distr: &Arc<BgDistr>,
         edit_dist_cache: &EditDistCache,
-        contig_infos: &ContigInfos,
+        contig_infos: &Arc<ContigInfos>,
         params: &super::Params,
+        threads: usize,
         mut dbg_writer1: impl Write,
         mut dbg_writer2: impl Write,
         mut dbg_writer3: Option<GzFile>,
-        opt_hap_alns: Option<&HapAlns>,
+        opt_hap_alns: Option<Arc<HapAlns>>,
     ) -> crate::Result<Self>
     {
         let contigs = contig_set.contigs();
@@ -1060,25 +1065,22 @@ impl AllAlignments {
             writeln!(w, "read_hash\tread_end\tinterval\told_lik\tnew_lik\toverall_weight\tweights")
                 .map_err(add_path!(!))?;
         }
-        // [TODO] Explain params.
-        let aligner = Aligner::new(Default::default(), 6, Some(10), true);
         let tid2contig = construct_tid_to_contig_map(reader.header(), contig_set.contigs())?;
         let mut reader = LaggedReader::new(reader)?;
         let data = Data::new(contig_set, contig_infos, tid2contig, bg_distr, edit_dist_cache, params)?;
         let is_paired_end = bg_distr.insert_distr().is_paired_end();
         let mut hashes = IntSet::default();
-        let mut buffer = Vec::with_capacity(16);
         let mut collisions = 0;
 
         let mut counts = ReadCounts::default();
-        let mut reads = Vec::new();
-        let mut unused_reads = Vec::new();
+        let mut ungroupped_reads = vec![Vec::new(); usize::from(threads)];
+        let mut total_index = 0;
 
         let mut total_alns = 0;
         let mut n_recovered = 0;
         while reader.has_more() {
-            let mut read_data = ReadData::default();
             counts.total += 1;
+            let mut read_data = ReadData::default();
             let mut prelim_alignments = PrelimAlignments::new();
             let mut well_mapped = read_next_alns(&data, &mut reader, ReadEnd::First,
                 &mut read_data, &mut prelim_alignments)?;
@@ -1103,39 +1105,59 @@ impl AllAlignments {
             }
 
             prelim_alignments.debug_write(&read_data, &mut dbg_writer1)?;
-            read_data.weight *= unique_kmers.read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
-            let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+            unique_kmers.calcuate_read_weight(&mut read_data, &mut dbg_writer2).map_err(add_path!(!))?;
+            ungroupped_reads[total_index % threads].push((read_data, prelim_alignments));
+            total_index += 1;
 
-            if let Some(hap_alns) = opt_hap_alns {
-                n_recovered += hap_alns.transfer_alignments(
-                    &mut prelim_alignments, &read_data, contig_set, &aligner, &data.err_prof);
-            }
-            total_alns += prelim_alignments.len();
-            prelim_alignments.finalize();
-            let groupped_alns = if is_paired_end {
-                identify_paired_end_alignments(read_data, &mut prelim_alignments.alns,
-                    max_alns, &mut buffer, bg_distr.insert_distr(), contig_infos, params)
-            } else {
-                identify_single_end_alignments(read_data, &mut prelim_alignments.alns,
-                    max_alns, contig_infos, params)
-            };
-            // TODO: Rethink this, reads may be needed for read depth!
-            if groupped_alns.weight() >= params.min_weight {
-                reads.push(groupped_alns);
-            } else {
-                unused_reads.push(groupped_alns);
-                counts.few_kmers += 1;
-            }
+            // let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+            // if let Some(hap_alns) = opt_hap_alns {
+            //     n_recovered += hap_alns.transfer_alignments(
+            //         &mut prelim_alignments, &read_data, contig_set, &aligner, &data.err_prof);
+            // }
+            // total_alns += prelim_alignments.len();
+            // prelim_alignments.finalize();
+            // let groupped_alns = if is_paired_end {
+            //     identify_paired_end_alignments(read_data, &mut prelim_alignments.alns,
+            //         max_alns, &mut buffer, bg_distr.insert_distr(), contig_infos, params)
+            // } else {
+            //     identify_single_end_alignments(read_data, &mut prelim_alignments.alns,
+            //         max_alns, contig_infos, params)
+            // };
+            // // TODO: Rethink this, reads may be needed for read depth!
+            // if groupped_alns.weight() >= params.min_weight {
+            //     reads.push(groupped_alns);
+            // } else {
+            //     unused_reads.push(groupped_alns);
+            //     counts.few_kmers += 1;
+            // }
         }
-        log::debug!("    {}", counts.to_string(reads.len(), is_paired_end));
+
+        let first_thread_reads = ungroupped_reads.pop().unwrap();
+        // One less than the number of threads.
+        let mut handles = Vec::with_capacity(threads - 1);
+        for thread_reads in ungroupped_reads {
+            let bg_distr = Arc::clone(bg_distr);
+            let contig_set = Arc::clone(contig_set);
+            let contig_infos = Arc::clone(contig_infos);
+            let opt_hap_alns = opt_hap_alns.as_ref().map(Arc::clone);
+            let params = params.clone();
+            handles.push(thread::spawn(move || recover_and_group_alignments(thread_reads, &bg_distr, opt_hap_alns,
+                &contig_infos, &contig_set, &params)));
+        }
+        let all_alns = recover_and_group_alignments(first_thread_reads, bg_distr, opt_hap_alns,
+            &contig_infos, &contig_set, params);
+
+        log::debug!("    {}", counts.to_string(all_alns.reads.len(), is_paired_end));
         if collisions > 2 && collisions * 100 > counts.total {
             return Err(error!(RuntimeError, "Too many read name collisions ({}). \
                 Possibly, paired-end reads are processed as single-end reads.", collisions))
         }
         if n_recovered > 0 {
-            log::debug!("    Loaded {} alignments, recovered additional {}", total_alns - n_recovered, total_alns)
+            let before = total_alns - n_recovered;
+            log::debug!("    Loaded {}k alignments, recovered additional {}k (+{:.1}%)",
+                before / 1000, n_recovered / 1000, 100.0 * n_recovered as f64 / before as f64);
         }
-        Ok(Self { reads, unused_reads })
+        Ok(all_alns)
     }
 
     /// Reads that are used in the model.
@@ -1178,4 +1200,46 @@ impl AllAlignments {
         }
         Ok(())
     }
+}
+
+/// If possible, recover additional read alignments;
+/// then group read pairs together.
+fn recover_and_group_alignments(
+    prelim_alignments: Vec<(ReadData, PrelimAlignments)>,
+    bg_distr: &BgDistr,
+    opt_hap_alns: Option<Arc<HapAlns>>,
+    contig_infos: &ContigInfos,
+    contig_set: &ContigSet,
+    params: &super::Params,
+) -> AllAlignments {
+    // [TODO] Explain params.
+    let aligner = Aligner::new(Default::default(), 6, Some(10), true);
+    let is_paired_end = bg_distr.insert_distr().is_paired_end();
+    let mut buffer = Vec::with_capacity(16);
+
+    let mut all_alns = AllAlignments::default();
+    for (read_data, mut read_alignments) in prelim_alignments {
+        if let Some(hap_alns) = &opt_hap_alns {
+            hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
+                bg_distr.error_profile());
+        }
+        read_alignments.finalize();
+
+        let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
+        let groupped_alns = if is_paired_end {
+            identify_paired_end_alignments(read_data, &mut read_alignments.alns,
+                max_alns, &mut buffer, bg_distr.insert_distr(), contig_infos, params)
+        } else {
+            identify_single_end_alignments(read_data, &mut read_alignments.alns,
+                max_alns, contig_infos, params)
+        };
+        // TODO: Rethink this, reads may be needed for read depth!
+        if groupped_alns.weight() >= params.min_weight {
+            all_alns.reads.push(groupped_alns);
+        } else {
+            all_alns.unused_reads.push(groupped_alns);
+            // counts.few_kmers += 1;
+        }
+    }
+    all_alns
 }

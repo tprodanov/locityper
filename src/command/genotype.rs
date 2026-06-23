@@ -620,7 +620,7 @@ pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathB
 }
 
 pub(super) struct LocusData {
-    set: ContigSet,
+    set: Arc<ContigSet>,
     kmer_counts: KmerCounts,
     /// Input directory DB/loci/LOCUS
     db_dir: PathBuf,
@@ -638,13 +638,14 @@ impl LocusData {
             db_dir: db_locus_dir.to_owned(),
             out_dir: out_locus_dir.to_owned(),
             init_nhaps: set.len(),
-            set, kmer_counts,
+            set: Arc::new(set),
+            kmer_counts,
             keep_ixs: None,
         }
     }
 
     #[inline(always)]
-    pub fn contig_set(&self) -> &ContigSet {
+    pub fn contig_set(&self) -> &Arc<ContigSet> {
         &self.set
     }
 
@@ -768,7 +769,7 @@ pub(super) fn load_loci(
             if !leave_out.is_empty() {
                 let (ixs, new_set) = locus_data.set.extract_subset(leave_out,
                     &db_locus_dir.join(paths::DISCARDED_HAPS))?;
-                locus_data.set = new_set;
+                locus_data.set = Arc::new(new_set);
                 if ixs.len() != locus_data.init_nhaps {
                     locus_data.kmer_counts = locus_data.kmer_counts.thin_out(ixs.iter().copied());
                 }
@@ -1110,7 +1111,7 @@ fn generate_genotypes(
 fn analyze_locus(
     locus: &LocusData,
     filenames: &Filenames,
-    bg_distr: &BgDistr,
+    bg_distr: &Arc<BgDistr>,
     edit_dist_cache: &EditDistCache,
     scheme: &Arc<Scheme>,
     distr_cache: &Arc<DistrCache>,
@@ -1129,18 +1130,17 @@ fn analyze_locus(
     }
 
     let contigs = locus.set.contigs();
-
     let windows_writer = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         Some(ext::sys::create_gzip(&windows_filename)?)
     } else { None };
     let contig_infos = ContigInfos::new(&locus.set, &locus.kmer_counts, explicit_weights,
-        bg_distr.depth(), &args.assgn_params, windows_writer)?;
+        bg_distr.depth(), &args.assgn_params, windows_writer).map(Arc::new)?;
 
     let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
     let hap_alns = if paf_filename.exists() {
         // [TODO] Divergence from parameter?
-        Some(HapAlns::load(&paf_filename, &locus.set.contigs(), 0.01)?)
+        Some(HapAlns::load(&paf_filename, &locus.set.contigs(), 0.01).map(Arc::new)?)
     } else { None };
 
     let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
@@ -1151,10 +1151,11 @@ fn analyze_locus(
             Some(ext::sys::create_gzip(&locus.out_dir.join("weighted_reads.csv.gz"))?)
         } else { None };
         AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, reads_writer, read_kmer_writer, aln_recalc_writer, hap_alns.as_ref())?
+            &args.assgn_params, usize::from(args.threads),
+            reads_writer, read_kmer_writer, aln_recalc_writer, hap_alns)?
     } else {
         AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, io::sink(), io::sink(), None, hap_alns.as_ref())?
+            &args.assgn_params, usize::from(args.threads), io::sink(), io::sink(), None, hap_alns)?
     };
 
     if filenames.reads_filename.exists() {
@@ -1227,10 +1228,10 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let preproc_path = args.preproc.as_ref().unwrap();
     let bg_distr = if let Some("gz") = preproc_path.extension().and_then(std::ffi::OsStr::to_str) {
-        BgDistr::load_from(&preproc_path, None)?
+        BgDistr::load_from(&preproc_path, None)
     } else {
-        BgDistr::load_from(&preproc_path.join(paths::BG_DISTR), Some(&preproc_path.join(paths::SUCCESS)))?
-    };
+        BgDistr::load_from(&preproc_path.join(paths::BG_DISTR), Some(&preproc_path.join(paths::SUCCESS)))
+    }.map(Arc::new)?;
 
     if let Some(depth) = bg_distr.opt_depth() {
         args.assgn_params.set_tweak_size(depth.window_size())?;

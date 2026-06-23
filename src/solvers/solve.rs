@@ -258,7 +258,7 @@ pub struct Data {
     pub contig_distances: Option<TriangleMatrix<u32>>,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
-    pub contig_infos: ContigInfos,
+    pub contig_infos: Arc<ContigInfos>,
     pub distr_cache: Arc<DistrCache>,
 
     /// Genotypes and their priors.
