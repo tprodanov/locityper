@@ -37,7 +37,7 @@ use crate::{
     model::{
         self,
         Params as AssgnParams,
-        locs::AllAlignments,
+        locs::{self, AllAlignments},
         windows::{ContigInfos, WeightCalculator},
         distr_cache::DistrCache,
     },
@@ -101,8 +101,7 @@ struct Args {
     assgn_params: AssgnParams,
     solvers: Vec<String>,
 
-    transfer_alns: bool,
-    n_hap_hap_alns: usize,
+    hap_div: f64,
 }
 
 impl Default for Args {
@@ -140,8 +139,7 @@ impl Default for Args {
             assgn_params: Default::default(),
             solvers: Vec::new(),
 
-            transfer_alns: true,
-            n_hap_hap_alns: 100,
+            hap_div: 0.02,
         }
     }
 }
@@ -166,10 +164,6 @@ impl Args {
         validate_param!(self.ploidy > 0, "Ploidy must be positive");
         self.samtools = ext::sys::find_exe(self.samtools)?;
         self.assgn_params.validate()?;
-
-        if self.transfer_alns {
-            self.n_hap_hap_alns = max(self.n_hap_hap_alns, 1);
-        }
         Ok(self)
     }
 }
@@ -241,12 +235,11 @@ fn print_help(extended: bool) {
             {EMPTY}  Identical haplotypes with different names can still be used.",
             "--lo, --leave-out".green(), "STR+".yellow());
 
-        println!("\n{}", "Transferring alignments:".bold());
-        println!("    {:KEY$} {:VAL$}  Do not transfer read alignments to other haplotypes.\n\
-            {EMPTY}  In any case, alignment transfer requires files DB/loci/*/{}",
-            "    --no-transfer".green(), super::flag(), paths::LOCUS_PAF);
-        println!("    {:KEY$} {:VAL$}  Store top {} alignments from each haplotype to other haplotypes [{}].",
-            "    --n-hh-alns".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.n_hap_hap_alns));
+        println!("\n{}", "Alignment recovery:".bold());
+        println!("    {:KEY$} {:VAL$}  Recover alignments from haplotypes with pairwise divergence under\n\
+            {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}.\n\
+            {EMPTY}  Use zero to disable alignment recovery.",
+            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAF);
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -516,8 +509,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
-            Long("no-transfer") => args.transfer_alns = false,
-            Long("n-hh-alns") => args.n_hap_hap_alns = parser.value()?.parse()?,
+            Long("hap-div") => args.hap_div = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -1138,25 +1130,18 @@ fn analyze_locus(
         bg_distr.depth(), &args.assgn_params, windows_writer).map(Arc::new)?;
 
     let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
-    let hap_alns = if paf_filename.exists() {
-        // [TODO] Divergence from parameter?
-        Some(HapAlns::load(&paf_filename, &locus.set.contigs(), 0.01).map(Arc::new)?)
+    let hap_alns = if args.hap_div > 0.0 && paf_filename.exists() {
+        Some(HapAlns::load(&paf_filename, &locus.set.contigs(), args.hap_div).map(Arc::new)?)
     } else { None };
 
     let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
-    let all_alns = if args.debug >= DebugLvl::Full {
-        let reads_writer = ext::sys::create_gzip(&locus.out_dir.join("reads.csv.gz"))?;
-        let read_kmer_writer = ext::sys::create_gzip(&locus.out_dir.join("read_kmers.csv.gz"))?;
-        let aln_recalc_writer = if contig_infos.has_explicit_weights() {
-            Some(ext::sys::create_gzip(&locus.out_dir.join("weighted_reads.csv.gz"))?)
-        } else { None };
-        AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, usize::from(args.threads),
-            reads_writer, read_kmer_writer, aln_recalc_writer, hap_alns)?
+    let dbg_writers = if args.debug >= DebugLvl::Full {
+        locs::DbgWriters::new(&locus.out_dir)?
     } else {
-        AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache, &contig_infos,
-            &args.assgn_params, usize::from(args.threads), io::sink(), io::sink(), None, hap_alns)?
+        Default::default()
     };
+    let all_alns = AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache,
+        &contig_infos, &hap_alns, &args.assgn_params, usize::from(args.threads), dbg_writers)?;
 
     if filenames.reads_filename.exists() {
         // Alignments are succesfully loaded, now we can remove file with reads.
