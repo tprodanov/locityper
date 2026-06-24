@@ -147,7 +147,7 @@ impl Aligner {
     pub fn new(
         penalties: Penalties,
         accuracy: u8,
-        bound: Option<i32>,
+        band: Option<i32>,
         enable_semiglobal: bool,
     ) -> Self {
         assert!(1 <= accuracy && accuracy <= MAX_ACCURACY, "Cannot construct WFA aligner for accuracy {}", accuracy);
@@ -164,7 +164,7 @@ impl Aligner {
         // Compute score and CIGAR as well.
         attributes.alignment_scope = cwfa::alignment_scope_t_compute_alignment;
 
-        if let Some(k) = bound {
+        if let Some(k) = band {
             attributes.heuristic.strategy = cwfa::wf_heuristic_strategy_wf_heuristic_banded_adaptive;
             attributes.heuristic.min_k = -k;
             attributes.heuristic.max_k = k;

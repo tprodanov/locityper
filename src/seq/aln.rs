@@ -217,13 +217,6 @@ impl Alignment {
         self.dist = Some(dist);
     }
 
-    // /// Returns sorted key: first sort by contig id, then by read end.
-    // pub fn sort_key(&self) -> u16 {
-    //     // Total number of contigs is checked in `ContigNames::new`.
-    //     (self.interval.contig_id().get() << 1) | (self.read_end.as_u16())
-    //     [TODO] If this becomes needed, change definition to allow for more contigs.
-    // }
-
     /// Returns insert size (distance between smallest start and largest end).
     /// Returns u32::MAX if two mates are not on the same strand.
     #[inline(always)]

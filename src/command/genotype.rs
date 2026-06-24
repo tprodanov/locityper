@@ -139,7 +139,7 @@ impl Default for Args {
             assgn_params: Default::default(),
             solvers: Vec::new(),
 
-            hap_div: 0.02,
+            hap_div: 0.05,
         }
     }
 }
