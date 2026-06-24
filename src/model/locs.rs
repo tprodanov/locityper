@@ -1127,25 +1127,25 @@ impl AllAlignments {
         if opt_hap_alns.as_ref().is_none() {
             log::debug!("    Alignment recovery is disabled (pairwise haplotype alignments required)");
         }
-        let first_thread_reads = ungroupped_reads.pop().unwrap();
-        // One less than the number of threads.
-        let mut handles = Vec::with_capacity(threads - 1);
-        for thread_reads in ungroupped_reads {
-            let bg_distr = Arc::clone(bg_distr);
-            let contig_set = Arc::clone(contig_set);
-            let contig_infos = Arc::clone(contig_infos);
-            let opt_hap_alns = opt_hap_alns.as_ref().map(Arc::clone);
-            let params = params.clone();
-            handles.push(thread::spawn(move || recover_and_group_alignments(thread_reads, &bg_distr, &opt_hap_alns,
-                &contig_infos, &contig_set, &params)));
-        }
-        let (mut all_alns, mut n_rec_alns) = recover_and_group_alignments(first_thread_reads, bg_distr,
-            &opt_hap_alns, &contig_infos, &contig_set, params);
-        for handle in handles {
-            let tup = handle.join().expect("Process failed for unknown reason");
-            all_alns.extend(tup.0);
-            n_rec_alns += tup.1;
-        }
+        let (all_alns, n_rec_alns) = if threads == 1 {
+            recover_and_group_alignments(ungroupped_reads.pop().unwrap(), bg_distr, &opt_hap_alns, &contig_infos,
+                &contig_set, params)
+        } else {
+            thread::scope(|s| {
+                let handles: Vec<_> = ungroupped_reads.into_iter()
+                    .map(|thread_reads| s.spawn(|| recover_and_group_alignments(thread_reads, &bg_distr, &opt_hap_alns,
+                        &contig_infos, &contig_set, &params)))
+                    .collect();
+                let mut all_alns = AllAlignments::default();
+                let mut n_rec_alns = 0;
+                for handle in handles {
+                    let tup = handle.join().expect("Thread failed for unknown reason");
+                    all_alns.extend(tup.0);
+                    n_rec_alns += tup.1;
+                }
+                (all_alns, n_rec_alns)
+            })
+        };
 
         if opt_hap_alns.is_some() {
             log::debug!("    Recovered +{:.3} alignments / read / haplotype ({:.3} total)",
