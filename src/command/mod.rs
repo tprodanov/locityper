@@ -5,6 +5,7 @@ mod genotype;
 mod align;
 mod recruit;
 pub mod prune;
+mod augment;
 mod paf_vcf;
 
 use std::{
@@ -34,6 +35,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
         "r" | "recruit" => recruit::run(&argv[2..])?,
 
         "prune" => prune::run(&argv[2..])?,
+        "augment" => augment::run(&argv[2..])?,
         "aln" | "align" => align::run(&argv[2..])?,
         "paf-vcf" | "paf-to-vcf" => paf_vcf::run(&argv[2..])?,
 
@@ -82,6 +84,7 @@ fn print_citation() {
 
 fn print_help() {
     const WIDTH: usize = 12;
+    // const EMPTY: &'static str = const_format::str_repeat!(" ", 4 + WIDTH);
     print_version();
     println!("\n{} {} command [arguments]",
         "Usage:".bold(), PROGRAM);
@@ -89,6 +92,8 @@ fn print_help() {
     println!("\n{}", "[ Target loci ]".bold());
     println!("    {:WIDTH$} Create database with target locus/loci (formerly {}).",
         "t, target".red(), "add".red());
+    println!("    {:WIDTH$} Augment database with haplotype alignments and other supplemental files.",
+        "   augment".red());
     println!("    {:WIDTH$} Remove similar target haplotypes.",
         "   prune".red());
 

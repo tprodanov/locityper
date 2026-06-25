@@ -392,3 +392,45 @@ impl Drop for PipeGuard {
         }
     }
 }
+
+pub struct LockFile {
+    path: PathBuf,
+    active: bool,
+}
+
+impl LockFile {
+    /// Tries to create a lock file at a given location.
+    /// Returns `None` if file already exists.
+    pub fn try_create(path: PathBuf) -> crate::Result<Option<Self>> {
+        // `create_new` will return an error if file already exists.
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => Ok(Some(Self { path, active: true })),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+            Err(e) => Err(crate::Error::Io(e, vec![path])),
+        }
+    }
+
+    /// Returns path to the lock file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn release_inner(&mut self) -> crate::Result<()> {
+        assert!(self.active, "Lock file was already released");
+        self.active = false;
+        fs::remove_file(&self.path).map_err(add_path!(&self.path))
+    }
+
+    /// Deletes the lock file.
+    pub fn release(mut self) -> crate::Result<()> {
+        self.release_inner()
+    }
+}
+
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        if let Err(e) = self.release_inner() {
+            log::warn!("Could not delete lock file {}: {:?}", self.path.display(), e);
+        }
+    }
+}
