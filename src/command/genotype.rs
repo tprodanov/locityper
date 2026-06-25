@@ -582,12 +582,12 @@ fn load_priors(path: &Path) -> crate::Result<HashMap<String, HashMap<String, f64
                 "Cannot parse genotype priors: offending line {:?} (priors must be in log-10 space)", line));
         }
 
-        if let Some(old_prior) = res.entry(locus.to_owned()).or_default().insert(gt.to_owned(), prior) {
-            if old_prior != prior {
-                return Err(error!(InvalidData,
-                    "Cannot parse genotype priors: locus {} genotype {} contains two priors ({} and {})",
-                    locus, gt, Ln::from_log10(old_prior), Ln::from_log10(prior)));
-            }
+        if let Some(old_prior) = res.entry(locus.to_owned()).or_default().insert(gt.to_owned(), prior)
+            && old_prior != prior
+        {
+            return Err(error!(InvalidData,
+                "Cannot parse genotype priors: locus {} genotype {} contains two priors ({} and {})",
+                locus, gt, Ln::from_log10(old_prior), Ln::from_log10(prior)));
         }
     }
     Ok(res)

@@ -3,7 +3,7 @@ name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
 version = "1.6.1"
 rust-version = "1.91"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 htslib = { package = "rust-htslib", version = "0.51", default-features = false, features = ["bzip2", "curl", "lzma"] }

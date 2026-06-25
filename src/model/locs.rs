@@ -594,10 +594,8 @@ impl GrouppedAlignments {
     /// Returns the highest probability at given contig.
     pub fn best_at_contig(&self, contig_id: ContigId) -> f64 {
         let i = bisect::left_by(&self.aln_pairs, |paln| paln.contig_id().cmp(&contig_id));
-        if let Some(aln) = self.aln_pairs.get(i) {
-            if aln.contig_id() == contig_id {
-                return aln.ln_prob();
-            }
+        if let Some(aln) = self.aln_pairs.get(i) && aln.contig_id() == contig_id {
+            return aln.ln_prob();
         }
         self.unmapped_prob
     }

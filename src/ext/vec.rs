@@ -349,7 +349,7 @@ where T: Copy,
         action(v);
     } else if n == 2 {
         action(v);
-        action(unsafe { &[*v.get_unchecked(1), *v.get_unchecked(0)] });
+        action(&unsafe { [*v.get_unchecked(1), *v.get_unchecked(0)] });
     } else {
         let mut buffer = v.to_vec();
         let mut c = vec![0; n];

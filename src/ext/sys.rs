@@ -352,10 +352,8 @@ impl PipeGuard {
         for (exe, child, output) in itertools::izip!(&self.executables, &mut self.children, &mut self.outputs) {
             writeln!(s, "{}", get_program_version(&exe).bold()).unwrap();
             if let Some(mut child) = child.take() {
-                if let Err(e) = child.kill() {
-                    if e.kind() != io::ErrorKind::InvalidInput {
-                        writeln!(s, "    {}: {}", "Could not kill process".red(), e).unwrap();
-                    }
+                if let Err(e) = child.kill() && e.kind() != io::ErrorKind::InvalidInput {
+                    writeln!(s, "    {}: {}", "Could not kill process".red(), e).unwrap();
                 }
                 *output = child.wait_with_output();
             }

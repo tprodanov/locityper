@@ -9,12 +9,10 @@ use std::{
 pub fn path(path: impl AsRef<Path>) -> String {
     static HOME: LazyLock<Option<PathBuf>> = LazyLock::new(|| std::env::var_os("HOME").map(|s| PathBuf::from(s)));
     let path = path.as_ref();
-    if let Some(home) = (*HOME).as_ref() {
-        if let Ok(suffix) = path.strip_prefix(home) {
-            let tilde_path = Path::new("~").join(suffix);
-            let s = tilde_path.to_string_lossy();
-            return if s.contains(char::is_whitespace) { format!("'{}'", s) } else { s.into_owned() };
-        }
+    if let Some(home) = (*HOME).as_ref() && let Ok(suffix) = path.strip_prefix(home) {
+        let tilde_path = Path::new("~").join(suffix);
+        let s = tilde_path.to_string_lossy();
+        return if s.contains(char::is_whitespace) { format!("'{}'", s) } else { s.into_owned() };
     }
     let s = path.to_string_lossy();
     if s.contains(char::is_whitespace) { format!("'{}'", s) } else { s.into_owned() }

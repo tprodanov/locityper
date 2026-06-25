@@ -976,7 +976,7 @@ impl SearchableCigar {
         }
 
         let mut read_cigar_iter = read_cigar.iter();
-        let CigarItem { op: mut op1, len: mut rem1 } = read_cigar_iter.next().expect("Read CIGAR is empty");
+        let &CigarItem { op: mut op1, len: mut rem1 } = read_cigar_iter.next().expect("Read CIGAR is empty");
         // For both read and haplotypes, `_pos` is the current position in both cigars.
         // `_last` is the end of the sequence added to the new cigar.
         // So, gap `_last.._pos` is not yet aligned.

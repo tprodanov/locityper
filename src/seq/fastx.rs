@@ -730,10 +730,9 @@ impl FastxRead for DirectBamReader {
     /// Reads the next record, and returns true if the read was successful (false if no more reads available).
     fn read_next(&mut self, record: &mut BamRecord) -> crate::Result<bool> {
         while !record.read_from(&mut self.current_reader, i64::MIN)? {
-            if let Some(reader) = self.future_readers.pop() {
-                self.current_reader = reader;
-            } else {
-                return Ok(false);
+            match self.future_readers.pop() {
+                Some(reader) => self.current_reader = reader,
+                None => return Ok(false),
             }
         }
         Ok(true)

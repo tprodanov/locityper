@@ -1233,10 +1233,9 @@ where T: RecruitableRecord,
                     Ok(recv_shipment) => {
                         any_action = true;
                         self.to_write.push(recv_shipment);
-                        if let Some(send_shipment) = self.to_send.pop() {
-                            sender.send(send_shipment).expect("Recruitment worker has failed!");
-                        } else {
-                            *is_busy = false;
+                        match self.to_send.pop() {
+                            Some(send_shipment) => sender.send(send_shipment).expect("Recruitment worker has failed!"),
+                            None => *is_busy = false,
                         }
                     }
                     Err(TryRecvError::Empty) => { continue; }
