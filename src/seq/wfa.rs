@@ -336,13 +336,8 @@ impl Aligner {
         self.align::<LEFT>(aligner, subseq1, subseq2, cigar);
         if !LEFT {
             let mut soft_clipping = 0;
-            loop {
-                match cigar.last() {
-                    Some(item) if item.operation() != Operation::Equal
-                        => soft_clipping += u32::from(item.operation().consumes_query()) * item.len(),
-                    _ => break,
-                }
-                cigar.pop();
+            while let Some(item) = cigar.pop_if(|item| item.operation() != Operation::Equal) {
+                soft_clipping += u32::from(item.operation().consumes_query()) * item.len();
             }
             if soft_clipping > 0 {
                 cigar.push_unchecked(Operation::Ins, soft_clipping);

@@ -370,6 +370,15 @@ impl Cigar {
         Some(item)
     }
 
+    /// Removes last entry in the CIGAR if predicate returns true.
+    pub fn pop_if(&mut self, predicate: impl FnOnce(&CigarItem) -> bool) -> Option<CigarItem> {
+        let item = self.tuples.pop_if(|item| predicate(item))?;
+        let (cons_query, cons_ref) = item.op.consumes_query_ref();
+        self.qlen -= u32::from(cons_query) * item.len;
+        self.rlen -= u32::from(cons_ref) * item.len;
+        Some(item)
+    }
+
     #[inline(always)]
     pub fn last(&self) -> Option<&CigarItem> {
         self.tuples.last()
