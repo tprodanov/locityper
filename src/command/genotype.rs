@@ -102,6 +102,7 @@ struct Args {
     solvers: Vec<String>,
 
     hap_div: f64,
+    transfer_fails: u32,
 }
 
 impl Default for Args {
@@ -140,6 +141,7 @@ impl Default for Args {
             solvers: Vec::new(),
 
             hap_div: 0.05,
+            transfer_fails: 100,
         }
     }
 }
@@ -237,9 +239,13 @@ fn print_help(extended: bool) {
 
         println!("\n{}", "Alignment recovery:".bold());
         println!("    {:KEY$} {:VAL$}  Recover alignments from haplotypes with pairwise divergence under\n\
-            {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}.\n\
-            {EMPTY}  Use zero to disable alignment recovery.",
-            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAF);
+            {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}\n\
+            {EMPTY}  (see {}). Use zero to disable alignment recovery.",
+            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAF,
+            "locityper align".underline());
+        println!("    {:KEY$} {:VAL$}  Skip to next alignment whenever alignment tranfer produces high edit\n\
+            {EMPTY}  distance {} times [{}]. Use \"inf\" to continue indefinitely.",
+            "    --transf-fails".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.transfer_fails));
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -510,6 +516,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("samtools") => args.samtools = parser.value()?.parse()?,
 
             Long("hap-div") => args.hap_div = parser.value()?.parse()?,
+            Long("transf-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -1131,7 +1138,7 @@ fn analyze_locus(
 
     let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
     let hap_alns = if args.hap_div > 0.0 && paf_filename.exists() {
-        Some(HapAlns::load(&paf_filename, &locus.set.contigs(), args.hap_div).map(Arc::new)?)
+        HapAlns::load(&paf_filename, &locus.set.contigs(), args.hap_div, args.transfer_fails)?.map(Arc::new)
     } else { None };
 
     let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;

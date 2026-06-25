@@ -30,19 +30,24 @@ pub struct HapAlns {
     /// For each contig, contains list of other indices and number of matches.
     /// Inner lists are ordered by decreasing edit distance.
     best_ixs: Vec<Vec<(ContigId, u32)>>,
+
+    transfer_fails: u32,
 }
 
 impl HapAlns {
     /// Loads alignments from a PAF file, keep <= `n_alns` best alignments per haplotype.
+    /// Returns `None` if no alignments were loaded.
     pub fn load(
         filename: &Path,
         contigs: &ContigNames,
         max_div: f64,
-    ) -> crate::Result<Self> {
+        transfer_fails: u32,
+    ) -> crate::Result<Option<Self>> {
         let mut aln_matrix = TriangleMatrix::new(contigs.len(), None);
         let mut best_ixs = vec![Vec::new(); contigs.len()];
         let min_simil = 1.0 - max_div;
         let mut file = ext::sys::open(filename).map(PafFile::new)?;
+        let mut added_any = false;
         while let Some(entry) = file.next() {
             let entry = entry?;
             let hap1: &str = entry.query_name();
@@ -66,10 +71,16 @@ impl HapAlns {
             *matrix_cell = Some(SearchableCigar::new(&cigar, id1 > id2));
             best_ixs[id1.ix()].push((id2, n_matches));
             best_ixs[id2.ix()].push((id1, n_matches));
+            added_any = true;
+        }
+
+        if !added_any {
+            log::warn!("All pairwise haplotype alignments were skipped");
+            return Ok(None);
         }
 
         best_ixs.iter_mut().for_each(|v| v.sort_by(|a, b| b.1.cmp(&a.1)));
-        Ok(Self { aln_matrix, best_ixs })
+        Ok(Some(Self { aln_matrix, best_ixs, transfer_fails }))
     }
 
     /// Try to identify any new alignments for a given read/read pair.
@@ -96,6 +107,7 @@ impl HapAlns {
             let read_end = source_aln.read_end();
             let read_seq = read_data.mate_data(read_end).get_seq(source_strand);
             let passable_dist = prelim_alignments.passable_dist(read_end);
+            let mut n_fails = 0..self.transfer_fails;
 
             for &(target_contig_id, _) in &self.best_ixs[source_contig_id.ix()] {
                 let target_seq = contig_set.get_seq(target_contig_id);
@@ -127,7 +139,8 @@ impl HapAlns {
                 let cigar_ref_len = new_cigar.ref_len();
                 // Either too high edit distance or too short alignment.
                 if cigar_ref_len.abs_diff(new_cigar.query_len()) > passable_dist || cigar_ref_len < MIN_ALN_SIZE {
-                    continue
+                    // Break if produced too many fails for this specific alignment.
+                    if n_fails.next().is_none() { break } else { continue };
                 }
 
                 let interval = Interval::new(Arc::clone(contig_set.contigs()), target_contig_id,
