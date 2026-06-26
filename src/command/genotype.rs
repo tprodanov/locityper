@@ -359,10 +359,9 @@ fn print_help(extended: bool) {
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
-    println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun all loci ({}); do not rerun\n\
-        {EMPTY}  read recruitment ({}); do not rerun completed loci ({}).",
-        "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
-        "all".yellow(), "part".yellow(), "none".yellow());
+    println!("    {:KEY$} {:VAL$}  Rerun everything ({}); do not rerun read recruitment ({});\n\
+        {EMPTY}  or do not rerun completed loci ({}, default).",
+        "    --rerun".green(), "STR".yellow(), "all".yellow(), "part".yellow(), "none".yellow());
     println!("    {:KEY$} {:VAL$}  Stop after one of the steps: {}, {} or {} (default).",
         "    --stop-after".green(), "STR".yellow(),
         "recruit".yellow(), "map".yellow(), "all".yellow());

@@ -479,10 +479,9 @@ fn print_help(extended: bool) {
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
-    println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun everything ({}); do not rerun\n\
-        {EMPTY}  read mapping ({}); do not rerun ({}).",
-        "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
-        "all".yellow(), "part".yellow(), "none".yellow());
+    println!("    {:KEY$} {:VAL$}  Rerun everything ({}); do not rerun read mapping ({});\n\
+        {EMPTY}  or do not rerun ({}, default).",
+        "    --rerun".green(), "STR".yellow(), "all".yellow(), "part".yellow(), "none".yellow());
     println!("    {:KEY$} {:VAL$}  Simply describe already preprocessed data.",
         "    --describe".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Save debug CSV files.",
