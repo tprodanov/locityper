@@ -18,6 +18,7 @@ use crate::{
     },
     err::{error, validate_param, add_path},
     math::RoundDiv,
+    algo::IntSet,
 };
 
 /// Alignment/divergence calculation parameters.
@@ -26,7 +27,10 @@ pub struct Params {
     pub skip_div: bool,
     pub div_k: u8,
     pub div_w: u8,
+    /// Do not align sequences with higher minimizer divergence.
     pub thresh_div: f64,
+    /// Same as thresh_div, but for specified `--against` targets.
+    pub against_div: f64,
     pub penalties: Penalties,
     pub backbone_ks: Vec<u8>,
     pub accuracy: u8,
@@ -40,6 +44,7 @@ impl Default for Params {
             div_k: 15,
             div_w: 15,
             thresh_div: 0.5,
+            against_div: 1.0,
             penalties: Default::default(),
             backbone_ks: vec![25, 51, 101],
             accuracy: 9,
@@ -83,11 +88,16 @@ impl Params {
 pub fn align_sequences(
     entries: Vec<NamedSeq>,
     pairs: Vec<(u32, u32)>,
+    mut against_ixs: IntSet<u32>,
     params: &Params,
     threads: u16,
     mut outputs: Vec<impl io::Write + Send + 'static>,
 ) -> crate::Result<()>
 {
+    if params.thresh_div == params.against_div {
+        // Now against_ixs do not matter.
+        against_ixs.clear();
+    }
     let n_entries = entries.len();
     // Find sequences that actually appear.
     let mut entry_in_use = vec![false; n_entries];
@@ -103,9 +113,9 @@ pub fn align_sequences(
     let (minimizers, kmers) = fill_kmers_singlethread(&entries, &entry_in_use, params);
 
     if threads == 1 {
-        align_all_singlethread(&entries, &pairs, &minimizers, &kmers, params, &mut outputs[0], true)
+        align_all_singlethread(&entries, &pairs, &against_ixs, &minimizers, &kmers, params, &mut outputs[0], true)
     } else {
-        align_all_parallel(entries, pairs, minimizers, kmers, params, usize::from(threads), outputs)
+        align_all_parallel(entries, pairs, against_ixs, minimizers, kmers, params, usize::from(threads), outputs)
     }
 }
 
@@ -277,6 +287,7 @@ fn process_pair(
     minimizers: &[Vec<u64>],
     kmers: &[SeqKmers],
     params: &Params,
+    thresh_div: f64,
     aligner: &Aligner,
     buf1: &mut Vec<(u32, u32)>,
     buf2: &mut String,
@@ -290,7 +301,7 @@ fn process_pair(
 
     let opt_div = if params.skip_div { None } else { Some(div::jaccard_distance(&minimizers[i], &minimizers[j])) };
     buf2.clear();
-    if opt_div.map(|(_, dv)| dv <= params.thresh_div).unwrap_or(false) {
+    if opt_div.map(|(_, dv)| dv <= thresh_div).unwrap_or(true) {
         let (cigar, score) = align_multik(aligner, i, entry1, j, entry2, kmers, params, buf1)?;
         let mut nmatches = 0;
         let mut nerrs = 0;
@@ -324,6 +335,7 @@ fn process_pair(
 fn align_all_singlethread(
     entries: &[NamedSeq],
     pairs: &[(u32, u32)],
+    against_ixs: &IntSet<u32>,
     minimizers: &[Vec<u64>],
     kmers: &[SeqKmers],
     params: &Params,
@@ -338,7 +350,10 @@ fn align_all_singlethread(
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;
     for (ix, &(i, j)) in pairs.iter().enumerate() {
-        process_pair(entries, i as usize, j as usize, minimizers, kmers, params, &aligner, &mut buf1, &mut buf2, out)?;
+        let thresh_div = if against_ixs.contains(&i) || against_ixs.contains(&j) {
+            params.against_div } else { params.thresh_div };
+        process_pair(entries, i as usize, j as usize, minimizers, kmers, params, thresh_div, &aligner,
+            &mut buf1, &mut buf2, out)?;
         if verbose && (ix & LOG_FREQ) == LOG_FREQ {
             log::debug!("    Aligned ≈{:5.1}% pairs", mult * ix as f64);
         }
@@ -349,6 +364,7 @@ fn align_all_singlethread(
 fn align_all_parallel(
     entries: Vec<NamedSeq>,
     pairs: Vec<(u32, u32)>,
+    against_ixs: IntSet<u32>,
     minimizers: Vec<Vec<u64>>,
     kmers: Vec<SeqKmers>,
     params: &Params,
@@ -358,6 +374,7 @@ fn align_all_parallel(
 {
     let entries = Arc::new(entries);
     let pairs = Arc::new(pairs);
+    let against_ixs = Arc::new(against_ixs);
     let minimizers = Arc::new(minimizers);
     let kmers = Arc::new(kmers);
 
@@ -374,12 +391,14 @@ fn align_all_parallel(
         {
             let entries = Arc::clone(&entries);
             let pairs = Arc::clone(&pairs);
+            let against_ixs = Arc::clone(&against_ixs);
             let minimizers = Arc::clone(&minimizers);
             let kmers = Arc::clone(&kmers);
             let params = params.clone();
             let verbose = worker_ix == 0;
             handles.push(thread::spawn(move || {
-                align_all_singlethread(&entries, &pairs[start..end], &minimizers, &kmers, &params, &mut out, verbose)
+                align_all_singlethread(&entries, &pairs[start..end],
+                    &against_ixs, &minimizers, &kmers, &params, &mut out, verbose)
             }));
         }
         start = end;

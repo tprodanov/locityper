@@ -18,7 +18,7 @@ use crate::{
         NamedSeq,
         kmers::Kmer,
     },
-    algo::{HashMap, Hasher},
+    algo::{IntSet, HashMap, Hasher, TwoU32},
 };
 
 struct Args {
@@ -29,7 +29,7 @@ struct Args {
     all_pairs: bool,
     pairs: Vec<String>,
     pairs_file: Option<PathBuf>,
-    against: Option<String>,
+    against: Vec<String>,
     threads: u16,
     ignore_missing: bool,
 
@@ -46,7 +46,7 @@ impl Default for Args {
             all_pairs: false,
             pairs: Vec::new(),
             pairs_file: None,
-            against: None,
+            against: Vec::new(),
             threads: 8,
             ignore_missing: false,
 
@@ -60,10 +60,9 @@ impl Args {
         validate_param!(self.input.is_some(), "Input FASTA file is not provided (see -i/--input)");
         validate_param!(self.output.is_some(), "Output PAF path is not provided (see -o/--output)");
 
-        validate_param!(u8::from(self.all_pairs) + u8::from(!self.pairs.is_empty())
-            + u8::from(self.pairs_file.is_some()) + u8::from(self.against.is_some()) == 1,
-            "Exactly one argument -p/-P/-A/--against is required");
-
+        if self.all_pairs && (!self.pairs.is_empty() || self.pairs_file.is_some()) {
+            log::warn!("It is redundant to provide both -A and -p/-P");
+        }
         self.params.validate()?;
         Ok(self)
     }
@@ -88,7 +87,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Prefix for temporary files (for multiple threads).",
         "    --prefix".green(), "PATH".yellow());
 
-    println!("\n{} (mutually exclusive):", "Alignment pairs".bold());
+    println!("\n{}:", "Alignment pairs".bold());
     println!("    {:KEY$} {:VAL$}  Find alignments for these pairs (two names separated by comma),\n\
         {EMPTY}  many pairs allowed.",
         "-p, --pairs".green(), "STR+".yellow());
@@ -96,8 +95,10 @@ fn print_help() {
         "-P, --pairs-file".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Find alignments for all pairs.",
         "-A, --all".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Align all sequence against {}.",
-        "    --against".green(), "STR".yellow(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Align all sequence against the given haplotype(s).\n\
+        {EMPTY}  Maximum divergence is controlled by {}, not {}.",
+        "    --against".green(), "STR+".yellow(),
+        "--against-div".green(), "-D".green());
 
     println!("\n{}", "Alignment arguments:".bold());
     println!("    {} {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
@@ -109,6 +110,10 @@ fn print_help() {
         {EMPTY}  Use {} to align everything.",
         "-D, --thresh-div".green(), "NUM".yellow(), "NUM".yellow(), super::fmt_def_f64(defaults.params.thresh_div),
         "-D 1".green());
+    println!("    {:KEY$} {:VAL$}  For alignments against specific target ({}), do not align\n\
+        {EMPTY}  sequences with minimizer divergence >= {} [{}].",
+        "    --against-div".green(), "NUM".yellow(),
+        "--against".green(), "NUM".yellow(), super::fmt_def_f64(defaults.params.against_div));
     println!("    {:KEY$} {:VAL$}  One or more k-mer sizes (5 <= k <= {}) for backbone alignment,\n\
         {EMPTY}  separated by comma [{}].",
         "-k, --backbone".green(), "INT".yellow(), ruint::aliases::U256::MAX_KMER_SIZE,
@@ -157,7 +162,11 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             }
             Short('P') | Long("pairs-file") => args.pairs_file = Some(parser.value()?.parse()?),
             Short('A') | Long("all") | Long("all-pairs") => args.all_pairs = true,
-            Long("against") => args.against = Some(parser.value()?.parse()?),
+            Long("against") => {
+                for val in parser.values()? {
+                    args.against.push(val.parse()?);
+                }
+            }
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
             {
@@ -200,9 +209,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 fn parse_pair(
     split_pair: &[&str],
     name2id: &HashMap<&str, u32>,
-    pairs: &mut Vec<(u32, u32)>,
     warn: bool,
-) -> crate::Result<()>
+) -> crate::Result<Option<(u32, u32)>>
 {
     if split_pair.len() != 2 {
         return Err(error!(InvalidInput, "Cannot parse pair `{:?}`: exactly two names required", split_pair));
@@ -214,27 +222,23 @@ fn parse_pair(
         if warn {
             log::warn!("Cannot find sequence `{}`", name1);
         }
-        return Ok(())
+        return Ok(None)
     };
     let Some(&id2) = name2id.get(name2) else {
         if warn {
             log::warn!("Cannot find sequence `{}`", name2);
         }
-        return Ok(())
+        return Ok(None)
     };
     if id1 == id2 {
         log::error!("Cannot align sequence to itself ({})", name1);
+        Ok(None)
     } else {
-        pairs.push((id2, id1));
+        Ok(Some((id2, id1)))
     }
-    Ok(())
 }
 
-fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> {
-    if args.all_pairs {
-        return Ok(TriangleMatrix::indices(seqs.len()).map(|(i, j)| (i as u32, j as u32)).collect())
-    }
-
+fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<(Vec<(u32, u32)>, IntSet<u32>)> {
     let mut name2id = HashMap::<&str, u32>::with_capacity_and_hasher(seqs.len(), Hasher::default());
     for (i, entry) in seqs.iter().enumerate() {
         if name2id.insert(entry.name(), i as u32).is_some() {
@@ -242,10 +246,15 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
         }
     }
 
-    let mut pairs = Vec::new();
+    let mut pairs = IntSet::default();
+    if args.all_pairs {
+        pairs.extend(TriangleMatrix::indices(seqs.len()).map(|(i, j)| TwoU32(i as u32, j as u32)));
+    }
     for pair in args.pairs.iter() {
         let split: SmallVec<[&str; 2]> = pair.split(',').collect();
-        parse_pair(&split, &name2id, &mut pairs, !args.ignore_missing)?;
+        if let Some((i, j)) = parse_pair(&split, &name2id, !args.ignore_missing)? {
+            pairs.insert(TwoU32(i, j));
+        }
     }
 
     if let Some(path) = &args.pairs_file {
@@ -256,16 +265,24 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
                 continue;
             }
             let split: SmallVec<[&str; 2]> = line.split_whitespace().collect();
-            parse_pair(&split, &name2id, &mut pairs, !args.ignore_missing)?;
+            if let Some((i, j)) = parse_pair(&split, &name2id, !args.ignore_missing)? {
+                pairs.insert(TwoU32(i, j));
+            }
         }
     }
 
-    if let Some(against) = &args.against {
-        let i = *name2id.get(against as &str)
-            .ok_or_else(|| error!(InvalidInput, "Cannot find sequence `{}`", against))?;
-        pairs.extend((0..seqs.len() as u32).filter(|&j| i != j).map(|j| (i, j)));
+    let mut against_ixs = IntSet::default();
+    for name in &args.against {
+        match name2id.get(name as &str) {
+            Some(&i) => {
+                pairs.extend((0..seqs.len() as u32).filter(|&j| i != j).map(|j| TwoU32(i, j)));
+                against_ixs.insert(i);
+            }
+            None => log::warn!("Cannot find sequence `{}` (--against)", name),
+        }
     }
-    Ok(pairs)
+    let pairs = pairs.into_iter().map(|TwoU32(i, j)| (i, j)).collect();
+    Ok((pairs, against_ixs))
 }
 
 struct TempFilenames(Vec<PathBuf>);
@@ -339,7 +356,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let mut fasta_reader = fastx::Reader::from_path(args.input.as_ref().unwrap())?;
     let entries = fasta_reader.read_named_seqs()?;
-    let pairs = load_pairs(&args, &entries)?;
+    let (pairs, against_ixs) = load_pairs(&args, &entries)?;
     if pairs.is_empty() {
         return Err(error!(InvalidInput, "No alignments to compute"));
     }
@@ -359,7 +376,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         files.push(ext::sys::create(filename)?);
     }
 
-    dist::align_sequences(entries, pairs, &args.params, threads, files)?;
+    dist::align_sequences(entries, pairs, against_ixs, &args.params, threads, files)?;
     ext::sys::merge_files(out_filename, &temp_filenames.0)?;
     temp_filenames.disarm();
 

@@ -1,5 +1,6 @@
 use std::{
     time::Instant,
+    path::PathBuf,
 };
 use colored::Colorize;
 use crate::{
@@ -12,36 +13,44 @@ use crate::{
         dist, wfa,
         kmers::Kmer,
     },
+    algo::HashSet,
 };
 
-enum HaplotypeSelection {
-    Dominating,
-    Clusters,
-}
-
 struct Args {
-    tag: Option<String>,
-    make_default: bool,
-    haplotype_selection: HaplotypeSelection,
-    max_div: f64,
-    div_window: u32,
-    threads: u16,
+    database: Option<PathBuf>,
+    subset_loci: HashSet<String>,
+    ref_name: Option<String>,
 
-    align_params: dist::Params,
+    skip_basis: bool,
+    basis_tag: Option<String>,
+    make_default: bool,
+    basis_div: f64,
+    div_window: u32,
+    basis_leaveout: Vec<String>,
+    basis_iters: usize,
+
+    threads: u16,
+    aln_params: dist::Params,
     rerun: super::Rerun,
 }
 
 impl Default for Args {
     fn default() -> Self {
         Self {
-            tag: None,
-            make_default: true,
-            haplotype_selection: HaplotypeSelection::Dominating,
-            max_div: 0.01,
-            div_window: 1000,
-            threads: 8,
+            database: None,
+            subset_loci: Default::default(),
+            ref_name: None,
 
-            align_params: Default::default(),
+            skip_basis: false,
+            basis_tag: None,
+            make_default: true,
+            basis_div: 0.01,
+            div_window: 1000,
+            basis_leaveout: Vec::new(),
+            basis_iters: 100,
+
+            threads: 8,
+            aln_params: Default::default(),
             rerun: super::Rerun::None,
         }
     }
@@ -61,12 +70,12 @@ fn print_help() {
     let defaults = Args::default();
     println!("{} For each locus:", "Augment database.".yellow());
     println!("  - constructs pairwise haplotype alignments (locityper align),");
-    println!("  - constructs local VCF file (locityper paf-vcf),");
+    // println!("  - constructs local VCF file (locityper paf-vcf),");
     println!("  - extracts basis haplotypes for faster read-to-haplotype alignment.");
     println!("Multiple instances can be run over the same output directory at the same time.");
 
     print!("\n{}", "Usage:".bold());
-    println!(" {} [TODO]", super::PROGRAM);
+    println!(" {} augment -d db -n ref_name", super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Database with loci haplotypes.",
@@ -75,47 +84,49 @@ fn print_help() {
         "    --subset-loci".green(), "STR+".yellow());
 
     println!("\n{}", "Alignment parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Reference haplotype name. Needed for the VCF construction.",
-        "    --ref-name".green(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Reference haplotype name.\n\
+        {EMPTY}  Alignments to this haplotype will be constructed in any case.",
+        "-n, --ref-name".green(), "STR".yellow());
     println!("    {}  {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
         "-m, --minimizer".green(), "INT INT".yellow(),
-        super::fmt_def(defaults.align_params.div_k), super::fmt_def(defaults.align_params.div_w));
+        super::fmt_def(defaults.aln_params.div_k), super::fmt_def(defaults.aln_params.div_w));
     println!("    {:KEY$} {:VAL$}  Do not align sequences with minimizer divergence >= {} [{}].\n\
         {EMPTY}  Use {} to align everything.",
-        "-D, --thresh-div".green(), "NUM".yellow(), "NUM".yellow(), super::fmt_def_f64(defaults.align_params.thresh_div),
+        "-D, --thresh-div".green(), "NUM".yellow(), "NUM".yellow(), super::fmt_def_f64(defaults.aln_params.thresh_div),
         "-D 1".green());
     println!("    {:KEY$} {:VAL$}  One or more k-mer sizes (5 <= k <= {}) for backbone alignment,\n\
         {EMPTY}  separated by comma [{}].",
         "-k, --backbone".green(), "INT".yellow(), ruint::aliases::U256::MAX_KMER_SIZE,
-        super::fmt_def(defaults.align_params.backbone_str()));
+        super::fmt_def(defaults.aln_params.backbone_str()));
     println!("    {:KEY$} {:VAL$}  Do not complete gaps over this size [{}].",
-        "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.align_params.max_gap)));
+        "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.aln_params.max_gap)));
     println!("    {:KEY$} {:VAL$}  Alignment accuracy level (1-{}) [{}].",
-        "-a, --accuracy".green(), "INT".yellow(), wfa::MAX_ACCURACY, super::fmt_def(defaults.align_params.accuracy));
+        "-a, --accuracy".green(), "INT".yellow(), wfa::MAX_ACCURACY, super::fmt_def(defaults.aln_params.accuracy));
     println!("    {:KEY$} {:VAL$}  Penalty for mismatch [{}].",
-        "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.align_params.penalties.mismatch));
+        "-M, --mismatch".green(), "INT".yellow(), super::fmt_def(defaults.aln_params.penalties.mismatch));
     println!("    {:KEY$} {:VAL$}  Gap open penalty [{}].",
-        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.align_params.penalties.gap_open));
+        "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.aln_params.penalties.gap_open));
     println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
-        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.align_params.penalties.gap_extend));
+        "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.aln_params.penalties.gap_extend));
 
     println!("\n{} (used for faster read mapping)", "Basis haplotypes selection:".bold());
     println!("    {:KEY$} {:VAL$}  Skip basis haplotypes selection.",
-        "    --skip-basis".green(), super::flag())
-    println!("    {:KEY$} {:VAL$}  Custom tag for the basis haplotypes (haplotypes-{}.fa.gz).",
+        "    --skip-basis".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Custom tag for the basis haplotypes (haplotypes-basis.{}.fa.gz).",
         "-t, --tag".green(), "STR".yellow(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Do not make these basis haplotypes default.",
         "    --not-default".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Selection of basis haplotypes:\n\
-        {EMPTY}  {} set ({}; default) or hierarchical {} ({}).",
-        "    --sel-basis".green(), "STR".yellow(),
-        "dominating".yellow(), "d".yellow(), "clusters".yellow(), "c".yellow());
-    println!("    {:KEY$} {:VAL$}  Maximum sequence divergence between collapsed haplotypes [{}].",
-        "    --collapse-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.max_div));
+    println!("    {:KEY$} {:VAL$}  Maximum seq. divergence from the basis haplotypes [{}].",
+        "    --basis-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.basis_div));
     println!("    {:KEY$} {:VAL$}  Calculate divergence across {} bp moving windows [{}].\n\
         {EMPTY}  Use \"inf\" for global divergence over the whole alignment.",
         "    --div-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.div_window)));
-    // println!("    {:KEY$} {:VAL$}  Only for ")
+    println!("    {:KEY$} {:VAL$}  Remove sample(s) from the basis haplotypes.\n\
+        {EMPTY}  Removed haplotypes can be replaced by identical haplotypes with another name.\n\
+        {EMPTY}  Needed for subsequent {}.",
+        "    --basis-lo".green(), "STR+".yellow(), "locityper genotype --lo".underline());
+    println!("    {:KEY$} {:VAL$}  Find the smallest basis set in {} iterations [{}].",
+        "    --basis-iters".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.basis_iters));
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Rerun everything ({}); do not rerun haplotype alignment ({});\n\
@@ -140,18 +151,49 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            // Short('p') | Long("paf") => args.paf = Some(parser.value()?.parse()?),
-            // Short('f') | Long("fasta") => args.fasta = Some(parser.value()?.parse()?),
-            // Short('d') | Long("discarded") => args.disc_filename = parser.value()?.parse()?,
-            // Short('o') | Long("output") => {
-            //     let mut values = parser.values()?.take(2);
-            //     args.out_merged = Some(values.next().expect("First argument is always present").parse()?);
-            //     if let Some(val) = values.next() {
-            //         args.out_separate = Some(val.parse()?);
-            //     }
-            // }
-            // Short('r') | Long("ref-hap") => args.ref_hap = Some(parser.value()?.parse()?),
-            // Short('R') | Long("region") => args.region = parser.value()?.parse()?,
+            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Long("subset-loci") | Long("loci-subset") => {
+                for val in parser.values()? {
+                    args.subset_loci.insert(val.parse()?);
+                }
+            }
+
+            Short('n') | Long("ref-name") => args.ref_name = Some(parser.value()?.parse()?),
+            Short('m') | Long("minimizer") | Long("minimizers") =>
+            {
+                args.aln_params.div_k = parser.value()?.parse()?;
+                args.aln_params.div_w = parser.value()?.parse()?;
+            }
+            Short('D') | Long("thresh-div") => args.aln_params.thresh_div = parser.value()?.parse()?,
+            Short('k') | Long("backbone") | Long("backbone-ks") => {
+                let backbone_str: String = parser.value()?.parse()?;
+                args.aln_params.backbone_ks = backbone_str.split(',').map(str::parse)
+                    .collect::<Result<Vec<u8>, _>>()
+                    .map_err(|_| error!(InvalidInput,
+                    "Cannot parse `-k {}`: must be list of integers separated by comma", backbone_str))?;
+            }
+            Short('g') | Long("max-gap") => args.aln_params.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
+            Short('a') | Long("accuracy") => args.aln_params.accuracy = parser.value()?.parse()?,
+            Short('M') | Long("mismatch") => args.aln_params.penalties.mismatch = parser.value()?.parse()?,
+            Short('O') | Long("gap-open") | Long("gap-opening") =>
+                args.aln_params.penalties.gap_open = parser.value()?.parse()?,
+            Short('E') | Long("gap-extend") | Long("gap-extension") =>
+                args.aln_params.penalties.gap_extend = parser.value()?.parse()?,
+
+            Long("skip-basis") => args.skip_basis = true,
+            Short('t') | Long("tag") => args.basis_tag = Some(parser.value()?.parse()?),
+            Long("not-default") => args.make_default = false,
+            Long("basis-div") => args.basis_div = parser.value()?.parse()?,
+            Long("div-window") => args.div_window = parser.value()?.parse::<PrettyU32>()?.get(),
+            Long("basis-lo") => {
+                for val in parser.values()? {
+                    args.basis_leaveout.push(val.parse()?);
+                }
+            }
+            Long("basis-iters") => args.basis_iters = parser.value()?.parse()?,
+
+            Long("rerun") => args.rerun = parser.value()?.parse()?,
+            Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();
