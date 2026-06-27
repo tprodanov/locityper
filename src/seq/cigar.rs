@@ -2,7 +2,7 @@
 
 use std::{
     fmt::{self, Write},
-    cmp::min,
+    cmp::{min, max},
     ops::Index,
 };
 use htslib::bam::record;
@@ -232,6 +232,12 @@ impl fmt::Display for CigarItem {
     }
 }
 
+/// This function is needed for speeding up `if val { X } else { 0 }`, which we will write as `bool_mask(val) & X`.
+#[inline(always)]
+fn bool_mask(val: bool) -> u32 {
+    u32::from(val).wrapping_neg()
+}
+
 /// Wrapper over vector of `CigarItem`.
 #[derive(Default, Clone)]
 pub struct Cigar {
@@ -339,8 +345,8 @@ impl Cigar {
 
     pub fn push_item_unchecked(&mut self, item: CigarItem) {
         let (cons_query, cons_ref) = item.op.consumes_query_ref();
-        self.qlen += u32::from(cons_query) * item.len;
-        self.rlen += u32::from(cons_ref) * item.len;
+        self.qlen += bool_mask(cons_query) & item.len;
+        self.rlen += bool_mask(cons_ref) & item.len;
         self.tuples.push(item);
     }
 
@@ -353,8 +359,8 @@ impl Cigar {
     /// Push a new entry, merges with the latest entry, if relevant.
     pub fn push_checked(&mut self, op: Operation, len: u32) {
         let (cons_query, cons_ref) = op.consumes_query_ref();
-        self.qlen += u32::from(cons_query) * len;
-        self.rlen += u32::from(cons_ref) * len;
+        self.qlen += bool_mask(cons_query) & len;
+        self.rlen += bool_mask(cons_ref) & len;
         match self.tuples.last_mut() {
             Some(item) if item.op == op => item.len += len,
             _ => self.tuples.push(CigarItem::new(op, len)),
@@ -365,8 +371,8 @@ impl Cigar {
     pub fn pop(&mut self) -> Option<CigarItem> {
         let item = self.tuples.pop()?;
         let (cons_query, cons_ref) = item.op.consumes_query_ref();
-        self.qlen -= u32::from(cons_query) * item.len;
-        self.rlen -= u32::from(cons_ref) * item.len;
+        self.qlen -= bool_mask(cons_query) & item.len;
+        self.rlen -= bool_mask(cons_ref) & item.len;
         Some(item)
     }
 
@@ -374,8 +380,8 @@ impl Cigar {
     pub fn pop_if(&mut self, predicate: impl FnOnce(&CigarItem) -> bool) -> Option<CigarItem> {
         let item = self.tuples.pop_if(|item| predicate(item))?;
         let (cons_query, cons_ref) = item.op.consumes_query_ref();
-        self.qlen -= u32::from(cons_query) * item.len;
-        self.rlen -= u32::from(cons_ref) * item.len;
+        self.qlen -= bool_mask(cons_query) & item.len;
+        self.rlen -= bool_mask(cons_ref) & item.len;
         Some(item)
     }
 
@@ -618,10 +624,69 @@ impl Cigar {
                     return false;
                 }
             }
-            qpos += u32::from(cons_query) * item.len;
-            rpos += u32::from(cons_ref) * item.len;
+            qpos += bool_mask(cons_query) & item.len;
+            rpos += bool_mask(cons_ref) & item.len;
         }
         true
+    }
+
+    /// Returns maximum divergence, observed across any window of the given size.
+    pub fn max_local_divergence(&self, window: u32) -> f64 {
+        // l_ = window start, r_ = window end.
+        // For both positions, store `rem` - remainder of the current CIGAR item and
+        // `mask`, which is 0 for "=" operation and 11..111b for everything else.
+        let mut r_iter = self.tuples.iter();
+        let mut r_rem;
+        let mut r_mask;
+        let mut window_rem = window;
+        let mut edit = 0;
+        loop {
+            match r_iter.next() {
+                Some(item) if item.len > window_rem => {
+                    r_rem = item.len - window_rem;
+                    r_mask = bool_mask(item.op != Operation::Equal);
+                    edit += r_mask & window_rem;
+                    break;
+                }
+                Some(item) => {
+                    edit += bool_mask(item.op != Operation::Equal) & item.len;
+                    window_rem -= item.len;
+                }
+                None => {
+                    // Reached the end of alignment before we reached the end of window.
+                    let aln_len = window - window_rem;
+                    return f64::from(edit) / f64::from(aln_len);
+                }
+            }
+        }
+        let mut max_edit = edit;
+
+        let mut l_iter = self.tuples.iter();
+        let &CigarItem { op: tmp_op, len: mut l_rem } = l_iter.next().expect("CIGAR must be non-empty");
+        let mut l_mask = bool_mask(tmp_op != Operation::Equal);
+
+        // Simultaneously go through the left and right iterator, subtract left edit, add right edit.
+        loop {
+            let shift = min(l_rem, r_rem);
+            edit = edit + r_mask & shift - l_mask & shift;
+            max_edit = max(max_edit, edit);
+
+            if shift == r_rem {
+                let Some(item) = r_iter.next() else { break };
+                r_rem = item.len;
+                r_mask = bool_mask(item.op != Operation::Equal);
+            } else {
+                r_rem -= shift;
+            }
+            if shift == l_rem {
+                let item = l_iter.next().expect("Left iterator could not overtake the right one");
+                l_rem = item.len;
+                l_mask = bool_mask(item.op != Operation::Equal);
+            } else {
+                l_rem -= shift;
+            }
+        }
+        f64::from(max_edit) / f64::from(window)
     }
 }
 
@@ -818,10 +883,10 @@ impl<'a, V: VecOrNone<u8>> ExtCigarData<'a, V> {
 fn raw_clipping(raw_cigar: &[u32]) -> u32 {
     let n = raw_cigar.len();
     let first = CigarItem::from_u32(raw_cigar[0]);
-    let mut clipping = u32::from(!first.op.consumes_ref()) * first.len;
+    let mut clipping = bool_mask(!first.op.consumes_ref()) & first.len;
     if n > 0 {
         let last = CigarItem::from_u32(raw_cigar[raw_cigar.len() - 1]);
-        clipping += u32::from(!last.op.consumes_ref()) * last.len;
+        clipping += bool_mask(!last.op.consumes_ref()) & last.len;
     }
     clipping
 }
@@ -966,7 +1031,7 @@ impl SearchableCigar {
         let mut rem2 = hap_cigar_item.len -  shift;
 
         // Alignment starting position in the new haplotype. Could change when soft clipping is examined.
-        let mut aln_start = hap_cigar_item.pos[pos_ix!(!TO_REF)] + u32::from(op2.consumes_ref()) * shift;
+        let mut aln_start = hap_cigar_item.pos[pos_ix!(!TO_REF)] + bool_mask(op2.consumes_ref()) & shift;
         let hap_len = ref_seq.len() as u32;
 
         // If read is completely enclosed in a "=" entry + padding, simply copy the alignment.
@@ -1079,9 +1144,9 @@ fn double_cigar_move_and_shift(
 
     // If both CIGAR shifts, take minimal of rems, otherwise, take one of the rems directly.
     let shift = if read_cigar_shifts && (!hap_cigar_shifts || *rem1 <= *rem2) { *rem1 } else { *rem2 };
-    *pos1 += u32::from(read_moves) * shift;
-    *rem1 -= u32::from(read_cigar_shifts) * shift;
-    *pos2 += u32::from(hap_moves) * shift;
-    *rem2 -= u32::from(hap_cigar_shifts) * shift;
+    *pos1 += bool_mask(read_moves) & shift;
+    *rem1 -= bool_mask(read_cigar_shifts) & shift;
+    *pos2 += bool_mask(hap_moves) & shift;
+    *rem2 -= bool_mask(hap_cigar_shifts) & shift;
     shift
 }
