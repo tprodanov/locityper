@@ -254,9 +254,40 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
+/// For a database directory, iterates over all `loci/*` subdirs, checks with `subset_loci` (if not empty)
+/// and returns a vector of subdirectory + locus name.
+pub fn load_loci_subdirs(db_dir: &Path) -> crate::Result<Vec<(String, PathBuf)>> {
+    let loci_dir = db_dir.join(paths::LOCI_DIR);
+    if !loci_dir.exists() {
+        return Err(error!(InvalidInput, "Database directory {} does not exist", ext::fmt::path(&loci_dir)));
+    }
+
+    let mut res = Vec::new();
+    for entry in std::fs::read_dir(&loci_dir).map_err(add_path!(loci_dir))? {
+        let entry = entry.map_err(add_path!(!))?;
+        let file_type = entry.file_type().map_err(add_path!(entry.path()))?;
+        if !(file_type.is_dir() || file_type.is_symlink()) {
+            continue;
+        }
+
+        let db_locus_dir = entry.path();
+        let Some(name) = db_locus_dir.file_name().unwrap().to_str() else {
+            log::error!("Skipping directory {:?} - filename is not a valid UTF-8", db_locus_dir);
+            continue
+        };
+        let name = name.to_owned();
+        if name.starts_with(".") {
+            log::trace!("Skipping hidden directory {}", name);
+            continue;
+        }
+        res.push((name, db_locus_dir));
+    }
+    Ok(res)
+}
+
 /// Loads named intervals from a list of loci and a list of BED files. Names must not repeat.
 /// Additionally, returns optional FASTA filename for each locus.
-fn load_loci(
+fn parse_loci(
     contigs: &Arc<ContigNames>,
     loci: &[(String, String, Option<PathBuf>)],
     bed_files: &[PathBuf],
@@ -745,7 +776,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let (contigs, mut fasta_reader) = ContigNames::load_indexed_fasta("REF", args.reference.as_ref().unwrap())?;
     let contigs = Arc::new(contigs);
-    let loci = load_loci(&contigs, &args.loci, &args.bed_files, args.variants.is_none())?;
+    let loci = parse_loci(&contigs, &args.loci, &args.bed_files, args.variants.is_none())?;
     let mut vcf_data = if let Some(vcf_filename) = &args.variants {
         let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
         let ref_name = args.ref_name.as_ref().map(String::clone)

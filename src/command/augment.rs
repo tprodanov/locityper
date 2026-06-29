@@ -1,6 +1,9 @@
 use std::{
+    fs,
     time::Instant,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    fmt::Write as FmtWrite,
+    cmp::{min, max},
 };
 use colored::Colorize;
 use crate::{
@@ -10,11 +13,13 @@ use crate::{
         fmt::PrettyU32,
     },
     seq::{
-        dist, wfa,
+        dist, wfa, fastx,
+        contigs::{ContigId, ContigSet},
         kmers::Kmer,
     },
-    algo::HashSet,
+    algo::{self, HashSet, IntSet, TwoU32},
 };
+use super::{paths, Rerun};
 
 struct Args {
     database: Option<PathBuf>,
@@ -27,11 +32,10 @@ struct Args {
     basis_div: f64,
     div_window: u32,
     basis_leaveout: Vec<String>,
-    basis_iters: usize,
 
     threads: u16,
     aln_params: dist::Params,
-    rerun: super::Rerun,
+    rerun: Rerun,
 }
 
 impl Default for Args {
@@ -47,17 +51,20 @@ impl Default for Args {
             basis_div: 0.01,
             div_window: 1000,
             basis_leaveout: Vec::new(),
-            basis_iters: 100,
 
             threads: 8,
             aln_params: Default::default(),
-            rerun: super::Rerun::None,
+            rerun: Rerun::None,
         }
     }
 }
 
 impl Args {
     fn validate(self) -> crate::Result<Self> {
+        validate_param!(self.database.is_some(), "Input database is not provided (see -i/--input)");
+        validate_param!(self.ref_name.is_some(), "Reference haplotype name must be provided");
+        validate_param!(self.basis_div >= 0.0 && self.basis_div <= 1.0,
+            "Basis divergence ({}) must be between 0 and 1", self.basis_div);
         Ok(self)
     }
 }
@@ -125,8 +132,6 @@ fn print_help() {
         {EMPTY}  Removed haplotypes can be replaced by identical haplotypes with another name.\n\
         {EMPTY}  Needed for subsequent {}.",
         "    --basis-lo".green(), "STR+".yellow(), "locityper genotype --lo".underline());
-    println!("    {:KEY$} {:VAL$}  Find the smallest basis set in {} iterations [{}].",
-        "    --basis-iters".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.basis_iters));
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Rerun everything ({}); do not rerun haplotype alignment ({});\n\
@@ -151,7 +156,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('d') | Long("db") | Long("database") => args.database = Some(parser.value()?.parse()?),
+            Short('d') | Long("database") | Short('i') | Long("input") => args.database = Some(parser.value()?.parse()?),
             Long("subset-loci") | Long("loci-subset") => {
                 for val in parser.values()? {
                     args.subset_loci.insert(val.parse()?);
@@ -190,7 +195,6 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     args.basis_leaveout.push(val.parse()?);
                 }
             }
-            Long("basis-iters") => args.basis_iters = parser.value()?.parse()?,
 
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
@@ -209,11 +213,127 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
     Ok(args)
 }
 
+/// Construct basis tag as "d{div}-{window}" with suffix "-loNAME,NAME,NAME" if necessary.
+fn construct_basis_tag(args: &Args) -> crate::Result<String> {
+    let mut tag = format!("d{}", crate::math::fmt_signif(args.basis_div, 5));
+    if args.div_window == u32::MAX {
+        write!(tag, "-global").unwrap();
+    } else {
+        write!(tag, "-{}", ext::fmt::PrettyU32(args.div_window)).unwrap();
+    }
+    if !args.basis_leaveout.is_empty() {
+        write!(tag, "-lo{}", args.basis_leaveout.join(",")).unwrap();
+    }
+    if tag.len() >= 128 {
+        Err(error!(
+            RuntimeError, "Automatic tag name is too long ({} chars.), please provide tag using --tag", tag.len()))
+    } else {
+        Ok(tag)
+    }
+}
+
+fn construct_dominant_set(
+    locus: &str,
+    dir: &Path,
+    args: &Args,
+    tag: &str,
+) -> crate::Result<bool> {
+    let basis_filename = dir.join(format!("haplotypes-basis.{}.fa.gz", tag));
+    if basis_filename.exists() {
+        if args.rerun == Rerun::Part || args.rerun == Rerun::All {
+            log::debug!("    Overwritting basis file `{}`", ext::fmt::path(&basis_filename));
+        } else {
+            log::debug!("    Basis file `{}` already exists, skipping it", ext::fmt::path(&basis_filename));
+            return Ok(false);
+        }
+    }
+    let fasta_fname = dir.join(paths::LOCUS_FASTA);
+    let contig_set = ContigSet::load(locus, &fasta_fname)?;
+    let contigs = contig_set.contigs();
+
+    // [TODO] Leave-out
+
+    let mut adjacencies = vec![Vec::new(); contig_set.len()];
+    let paf_filename = dir.join(paths::LOCUS_PAF);
+    let mut paf_file = ext::sys::open(paf_filename).map(dist::PafFile::new)?;
+    let max_window_edit = (f64::from(args.div_window) * args.basis_div).floor() as u32;
+    let mut pairs = IntSet::default();
+    let mut n_edges = 0;
+    while let Some(entry) = paf_file.next().transpose()? {
+        let Some(i) = contigs.try_get_id(entry.query_name()) else { continue };
+        let Some(j) = contigs.try_get_id(entry.target_name()) else { continue };
+        if !pairs.insert(TwoU32(u32::from(min(i, j).get()), u32::from(max(i, j).get()))) {
+            log::warn!("Pair {} - {} appears twice in the PAF file", entry.query_name(), entry.target_name());
+            continue;
+        }
+        // Can't do anything if there is no CIGAR.
+        let Some(cigar) = entry.cigar().transpose()? else { continue };
+        let aln_len = entry.aln_len()?;
+        let global_edit = aln_len - entry.n_matches()?;
+
+        let add_edge = if aln_len <= args.div_window {
+            f64::from(global_edit) <= args.basis_div * f64::from(aln_len)
+        } else {
+            global_edit <= max_window_edit || cigar.max_local_edit(args.div_window) <= max_window_edit
+        };
+        if add_edge {
+            n_edges += 1;
+            adjacencies[i.ix()].push(j.ix());
+            adjacencies[j.ix()].push(i.ix());
+        }
+    }
+
+    log::info!("    In total, {} similar haplotype pairs ({:.1}%)",
+        n_edges, 100.0 * f64::from(n_edges) / ext::TriangleMatrix::calc_linear_len(contig_set.len()) as f64);
+    let dominant_set = algo::dom_set::find_dominating_set(&adjacencies);
+    log::info!("    Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",
+        dominant_set.len(), contig_set.len(), 100.0 - dominant_set.len() as f64 / contig_set.len() as f64 * 100.0);
+    let tmp_filename = basis_filename.with_extension(".tmp.gz");
+    let mut fasta_writer = ext::sys::create_gzip(&tmp_filename)?;
+    for i in dominant_set {
+        let id = ContigId::new(i);
+        fastx::write_fasta(&mut fasta_writer, contigs.get_name(id).as_bytes(), contig_set.get_seq(id))
+            .map_err(add_path!(tmp_filename))?;
+    }
+    fs::rename(&tmp_filename, &basis_filename).map_err(add_path!(tmp_filename, &basis_filename))?;
+    Ok(true)
+}
+
+fn process_locus(
+    locus: &str,
+    dir: &Path,
+    args: &Args,
+    tag: &str,
+) -> crate::Result<bool> {
+    let Some(lock_file) = ext::sys::LockFile::try_create(dir.join("augment.lock"))? else { return Ok(false) };
+
+    let mut did_anything = false;
+    // [TODO] Construct alignments.
+    did_anything |= construct_dominant_set(locus, dir, args, tag)?;
+
+    lock_file.release()?;
+    Ok(did_anything)
+}
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
+
+    let tag = match args.basis_tag.clone() {
+        Some(v) => v,
+        None => construct_basis_tag(&args)?,
+    };
+
+    let loci_subdirs = super::add::load_loci_subdirs(
+        args.database.as_ref().expect("Database directory must be provided"))?;
+    for (locus, locus_dir) in loci_subdirs {
+        if !args.subset_loci.is_empty() && !args.subset_loci.contains(&locus) {
+            log::trace!("Skipping locus {} (not in the subset loci)", locus);
+            continue;
+        }
+        process_locus(&locus, &locus_dir, &args, &tag)?;
+    }
 
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())

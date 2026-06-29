@@ -410,19 +410,22 @@ impl LockFile {
         }
     }
 
-    /// Returns path to the lock file.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
+    // /// Returns path to the lock file.
+    // pub fn path(&self) -> &Path {
+    //     &self.path
+    // }
 
     fn release_inner(&mut self) -> crate::Result<()> {
-        assert!(self.active, "Lock file was already released");
-        self.active = false;
-        fs::remove_file(&self.path).map_err(add_path!(&self.path))
+        if self.active {
+            self.active = false;
+            fs::remove_file(&self.path).map_err(add_path!(&self.path))?;
+        }
+        Ok(())
     }
 
     /// Deletes the lock file.
     pub fn release(mut self) -> crate::Result<()> {
+        assert!(self.active, "Lock file was already released");
         self.release_inner()
     }
 }

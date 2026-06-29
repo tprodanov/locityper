@@ -23,7 +23,7 @@ use super::{
 };
 
 struct Args {
-    input: Option<PathBuf>,
+    database: Option<PathBuf>,
     output: Option<PathBuf>,
     alignments: String,
     subset_loci: HashSet<String>,
@@ -40,7 +40,7 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            input: None,
+            database: None,
             output: None,
             alignments: "haplotypes.paf.gz".to_string(),
             subset_loci: HashSet::default(),
@@ -58,7 +58,7 @@ impl Default for Args {
 
 impl Args {
     fn validate(mut self) -> crate::Result<Self> {
-        validate_param!(self.input.is_some(), "Input database is not provided (see -i/--input)");
+        validate_param!(self.database.is_some(), "Input database is not provided (see -i/--input)");
         validate_param!(self.only_tree || self.output.is_some(), "Output database is not provided (see -o/--output)");
         validate_param!(!self.only_tree || !self.skip_tree, "--skip-tree and --only-tree cannot be used together");
 
@@ -71,12 +71,12 @@ impl Args {
 
         if !self.alignments.contains("{}") {
             // Make path to alignments INPUT/loci/{}/ALIGNMENTS
-            let mut new_alignments = self.input.clone().unwrap();
+            let mut new_alignments = self.database.clone().unwrap();
             new_alignments.push(paths::LOCI_DIR);
             new_alignments.push("{}");
             new_alignments.push(&self.alignments);
             self.alignments = new_alignments.to_str().ok_or_else(|| error!(InvalidInput,
-                "Input database has invalid UTF-8 name `{}`", self.input.as_ref().unwrap().display()))?
+                "Input database has invalid UTF-8 name `{}`", self.database.as_ref().unwrap().display()))?
                 .to_owned();
         }
         Ok(self)
@@ -92,12 +92,12 @@ fn print_help() {
     println!("{}", "Remove similar target haplotypes.".yellow());
 
     print!("\n{}", "Usage:".bold());
-    println!(" {} -i db -o pruned_db [args]", super::PROGRAM);
-    println!(" {} -i db --only-tree [args]", super::PROGRAM);
+    println!(" {} -d db -o pruned_db [args]", super::PROGRAM);
+    println!(" {} -d db --only-tree [args]", super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory.",
-        "-i, --input".green(), "DIR".yellow());
+        "-d, --database".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output pruned database directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Path to alignment .paf[.gz] files [{}].\n\
@@ -142,7 +142,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
 
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('i') | Long("input") => args.input = Some(parser.value()?.parse()?),
+            Short('d') | Long("database") | Short('i') | Long("input") => args.database = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Short('a') | Long("aln") | Long("alignments") => args.alignments = parser.value()?.parse()?,
 
@@ -584,7 +584,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     super::greet();
     let timer = Instant::now();
 
-    let input = args.input.as_ref().expect("Input path must be defined");
+    let input = args.database.as_ref().expect("Input path must be defined");
     let output: &Path;
     let rerun;
     if args.only_tree {

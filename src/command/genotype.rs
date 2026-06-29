@@ -535,26 +535,6 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
     Ok(args)
 }
 
-fn locus_name_matches<'a>(path: &'a Path, subset_loci: &HashSet<String>) -> Option<&'a str> {
-    match path.file_name().unwrap().to_str() {
-        None => {
-            log::error!("Skipping directory {:?} - filename is not a valid UTF-8", path);
-            None
-        }
-        Some(name) => {
-            if !subset_loci.is_empty() && !subset_loci.contains(name) {
-                log::trace!("Skipping locus {} (not in the subset loci)", name);
-                None
-            } else if name.starts_with(".") {
-                log::trace!("Skipping hidden directory {}", name);
-                None
-            } else {
-                Some(name)
-            }
-        }
-    }
-}
-
 /// Loads priors from a file with three columns: <locus> <genotype> <log10-prior>.
 /// Repeated lines <locus> <genotype> are not allowed.
 ///
@@ -725,38 +705,29 @@ pub(super) fn load_loci(
     let mut loci_names = HashSet::default();
 
     for db_path in databases {
-        let db_path = db_path.as_ref().join(paths::LOCI_DIR);
-        if !db_path.exists() {
-            log::error!("Database directory {} does not exist", ext::fmt::path(&db_path));
-            continue;
-        }
-
-        for entry in fs::read_dir(&db_path).map_err(add_path!(db_path))? {
-            let entry = entry.map_err(add_path!(!))?;
-            let file_type = entry.file_type().map_err(add_path!(entry.path()))?;
-            if !(file_type.is_dir() || file_type.is_symlink()) {
+        let loci_subdirs = super::add::load_loci_subdirs(db_path.as_ref())?;
+        total_entries += loci_subdirs.len();
+        for (name, db_locus_dir) in loci_subdirs {
+            if !subset_loci.is_empty() && !subset_loci.contains(&name) {
+                log::trace!("Skipping locus {} (not in the subset loci)", name);
                 continue;
             }
-
-            total_entries += 1;
-            let db_locus_dir = entry.path();
-            let Some(name) = locus_name_matches(&db_locus_dir, subset_loci) else { continue };
             if !db_locus_dir.join(paths::SUCCESS).exists() {
-                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
+                log::error!("Skipping database directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
                 continue;
             }
             if !loci_names.insert(name.to_owned()) {
-                log::error!("Duplicate locus {} in the database, ignoring second instance", name);
+                log::error!("Duplicate locus {} in the database, ignoring the second instance", name);
                 continue;
             }
-            let out_locus_dir = out_loci_dir.join(name);
+            let out_locus_dir = out_loci_dir.join(&name);
             if !rerun.prepare_and_clean_dir(&out_locus_dir, |path| clean_dir(path, &mut n_warnings))? {
                 continue;
             }
 
             let fasta_fname = db_locus_dir.join(paths::LOCUS_FASTA);
             let kmers_fname = db_locus_dir.join(paths::KMERS);
-            let mut locus_data = match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
+            let mut locus_data = match ContigSet::load_with_kmer_counts(&name, &fasta_fname, &kmers_fname) {
                 Ok((set, kmer_counts)) => LocusData::new(set, kmer_counts, &db_locus_dir, &out_locus_dir),
                 Err(e) => {
                     log::error!("Could not load locus information from {}: {}",

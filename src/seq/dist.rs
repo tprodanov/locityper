@@ -18,7 +18,6 @@ use crate::{
     },
     err::{error, validate_param, add_path},
     math::RoundDiv,
-    algo::IntSet,
 };
 
 /// Alignment/divergence calculation parameters.
@@ -88,15 +87,15 @@ impl Params {
 pub fn align_sequences(
     entries: Vec<NamedSeq>,
     pairs: Vec<(u32, u32)>,
-    mut against_ixs: IntSet<u32>,
+    mut against_contig: Vec<bool>,
     params: &Params,
     threads: u16,
     mut outputs: Vec<impl io::Write + Send + 'static>,
 ) -> crate::Result<()>
 {
     if params.thresh_div == params.against_div {
-        // Now against_ixs do not matter.
-        against_ixs.clear();
+        // Now against_contig do not matter.
+        against_contig.clear();
     }
     let n_entries = entries.len();
     // Find sequences that actually appear.
@@ -113,9 +112,9 @@ pub fn align_sequences(
     let (minimizers, kmers) = fill_kmers_singlethread(&entries, &entry_in_use, params);
 
     if threads == 1 {
-        align_all_singlethread(&entries, &pairs, &against_ixs, &minimizers, &kmers, params, &mut outputs[0], true)
+        align_all_singlethread(&entries, &pairs, &against_contig, &minimizers, &kmers, params, &mut outputs[0], true)
     } else {
-        align_all_parallel(entries, pairs, against_ixs, minimizers, kmers, params, usize::from(threads), outputs)
+        align_all_parallel(entries, pairs, against_contig, minimizers, kmers, params, usize::from(threads), outputs)
     }
 }
 
@@ -335,7 +334,7 @@ fn process_pair(
 fn align_all_singlethread(
     entries: &[NamedSeq],
     pairs: &[(u32, u32)],
-    against_ixs: &IntSet<u32>,
+    against_contig: &[bool],
     minimizers: &[Vec<u64>],
     kmers: &[SeqKmers],
     params: &Params,
@@ -350,7 +349,7 @@ fn align_all_singlethread(
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;
     for (ix, &(i, j)) in pairs.iter().enumerate() {
-        let thresh_div = if against_ixs.contains(&i) || against_ixs.contains(&j) {
+        let thresh_div = if against_contig[i as usize] || against_contig[j as usize] {
             params.against_div } else { params.thresh_div };
         process_pair(entries, i as usize, j as usize, minimizers, kmers, params, thresh_div, &aligner,
             &mut buf1, &mut buf2, out)?;
@@ -364,7 +363,7 @@ fn align_all_singlethread(
 fn align_all_parallel(
     entries: Vec<NamedSeq>,
     pairs: Vec<(u32, u32)>,
-    against_ixs: IntSet<u32>,
+    against_contig: Vec<bool>,
     minimizers: Vec<Vec<u64>>,
     kmers: Vec<SeqKmers>,
     params: &Params,
@@ -374,7 +373,6 @@ fn align_all_parallel(
 {
     let entries = Arc::new(entries);
     let pairs = Arc::new(pairs);
-    let against_ixs = Arc::new(against_ixs);
     let minimizers = Arc::new(minimizers);
     let kmers = Arc::new(kmers);
 
@@ -391,14 +389,14 @@ fn align_all_parallel(
         {
             let entries = Arc::clone(&entries);
             let pairs = Arc::clone(&pairs);
-            let against_ixs = Arc::clone(&against_ixs);
+            let against_contig = against_contig.clone();
             let minimizers = Arc::clone(&minimizers);
             let kmers = Arc::clone(&kmers);
             let params = params.clone();
             let verbose = worker_ix == 0;
             handles.push(thread::spawn(move || {
                 align_all_singlethread(&entries, &pairs[start..end],
-                    &against_ixs, &minimizers, &kmers, &params, &mut out, verbose)
+                    &against_contig, &minimizers, &kmers, &params, &mut out, verbose)
             }));
         }
         start = end;
@@ -518,6 +516,11 @@ impl<'a> PafLine<'a> {
     #[allow(unused)]
     pub fn aln_len(&self) -> crate::Result<u32> {
         self.split[10].parse().map_err(|_| self.parse_error())
+    }
+
+    #[allow(unused)]
+    pub fn divergence(&self) -> crate::Result<f64> {
+        Ok(1.0 - f64::from(self.n_matches()?) / f64::from(self.aln_len()?))
     }
 
     /// Returns CIGAR if present.

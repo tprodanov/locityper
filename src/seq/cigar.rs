@@ -630,8 +630,9 @@ impl Cigar {
         true
     }
 
-    /// Returns maximum divergence, observed across any window of the given size.
-    pub fn max_local_divergence(&self, window: u32) -> f64 {
+    /// Returns maximum edit distance, observed across any window of the given size.
+    /// Returns full alignment edit distance if window is larger than the alignment size.
+    pub fn max_local_edit(&self, window: u32) -> u32 {
         // l_ = window start, r_ = window end.
         // For both positions, store `rem` - remainder of the current CIGAR item and
         // `mask`, which is 0 for "=" operation and 11..111b for everything else.
@@ -640,7 +641,9 @@ impl Cigar {
         let mut r_mask;
         let mut window_rem = window;
         let mut edit = 0;
+        // log::debug!("Run local edit at {:?}, window {}", &self, window);
         loop {
+            // log::debug!("window_rem = {}, edit = {}", window_rem, edit);
             match r_iter.next() {
                 Some(item) if item.len > window_rem => {
                     r_rem = item.len - window_rem;
@@ -652,14 +655,12 @@ impl Cigar {
                     edit += bool_mask(item.op != Operation::Equal) & item.len;
                     window_rem -= item.len;
                 }
-                None => {
-                    // Reached the end of alignment before we reached the end of window.
-                    let aln_len = window - window_rem;
-                    return f64::from(edit) / f64::from(aln_len);
-                }
+                // Reached the end of alignment before we reached the end of window.
+                None => return edit,
             }
         }
         let mut max_edit = edit;
+        // log::debug!("At the start, edit = {}, r_rem = {}, r_mask = {}", edit, r_rem, r_mask);
 
         let mut l_iter = self.tuples.iter();
         let &CigarItem { op: tmp_op, len: mut l_rem } = l_iter.next().expect("CIGAR must be non-empty");
@@ -668,11 +669,14 @@ impl Cigar {
         // Simultaneously go through the left and right iterator, subtract left edit, add right edit.
         loop {
             let shift = min(l_rem, r_rem);
-            edit = edit + r_mask & shift - l_mask & shift;
+            edit = edit + (r_mask & shift) - (l_mask & shift);
+            // log::debug!("l_rem = {:3}, r_rem = {:3}, shift = {:3}, l_mask = {}, r_mask = {}, edit = {:3}",
+            //     l_rem, r_rem, shift, l_mask, r_mask, edit);
             max_edit = max(max_edit, edit);
 
             if shift == r_rem {
                 let Some(item) = r_iter.next() else { break };
+                // log::debug!("    Next right = {}", item);
                 r_rem = item.len;
                 r_mask = bool_mask(item.op != Operation::Equal);
             } else {
@@ -680,13 +684,14 @@ impl Cigar {
             }
             if shift == l_rem {
                 let item = l_iter.next().expect("Left iterator could not overtake the right one");
+                // log::debug!("    Next left  = {}", item);
                 l_rem = item.len;
                 l_mask = bool_mask(item.op != Operation::Equal);
             } else {
                 l_rem -= shift;
             }
         }
-        f64::from(max_edit) / f64::from(window)
+        max_edit
     }
 }
 

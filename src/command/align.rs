@@ -3,6 +3,7 @@ use std::{
     time::Instant,
     io::{Write, BufRead},
     ffi::OsStr,
+    cmp::{min, max},
 };
 use colored::Colorize;
 use smallvec::SmallVec;
@@ -238,7 +239,10 @@ fn parse_pair(
     }
 }
 
-fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<(Vec<(u32, u32)>, IntSet<u32>)> {
+/// Loads all pairs from -a/-p/-P/--against arguments.
+/// Duplicate pairs are discarded (even if indices are switched), first one used.
+/// Returns vector and pairs and a vector of bools, indicating whether the contig was used in the --against argument.
+fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<(Vec<(u32, u32)>, Vec<bool>)> {
     let mut name2id = HashMap::<&str, u32>::with_capacity_and_hasher(seqs.len(), Hasher::default());
     for (i, entry) in seqs.iter().enumerate() {
         if name2id.insert(entry.name(), i as u32).is_some() {
@@ -246,14 +250,20 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<(Vec<(u32, u32)>,
         }
     }
 
-    let mut pairs = IntSet::default();
+    let mut pairs = Vec::new();
+    let mut pairs_set = IntSet::default();
+    let mut push_pair = |i: u32, j: u32| {
+        if pairs_set.insert(TwoU32(min(i, j), max(i, j))) {
+            pairs.push((i, j));
+        }
+    };
     if args.all_pairs {
-        pairs.extend(TriangleMatrix::indices(seqs.len()).map(|(i, j)| TwoU32(i as u32, j as u32)));
+        TriangleMatrix::indices(seqs.len()).for_each(|(i, j)| push_pair(i as u32, j as u32));
     }
     for pair in args.pairs.iter() {
         let split: SmallVec<[&str; 2]> = pair.split(',').collect();
         if let Some((i, j)) = parse_pair(&split, &name2id, !args.ignore_missing)? {
-            pairs.insert(TwoU32(i, j));
+            push_pair(i, j);
         }
     }
 
@@ -266,23 +276,22 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<(Vec<(u32, u32)>,
             }
             let split: SmallVec<[&str; 2]> = line.split_whitespace().collect();
             if let Some((i, j)) = parse_pair(&split, &name2id, !args.ignore_missing)? {
-                pairs.insert(TwoU32(i, j));
+                push_pair(i, j);
             }
         }
     }
 
-    let mut against_ixs = IntSet::default();
+    let mut against_contig = vec![false; seqs.len()];
     for name in &args.against {
         match name2id.get(name as &str) {
             Some(&i) => {
-                pairs.extend((0..seqs.len() as u32).filter(|&j| i != j).map(|j| TwoU32(i, j)));
-                against_ixs.insert(i);
+                (0..seqs.len() as u32).filter(|&j| i != j).for_each(|j| push_pair(i, j));
+                against_contig[i as usize] = true;
             }
             None => log::warn!("Cannot find sequence `{}` (--against)", name),
         }
     }
-    let pairs = pairs.into_iter().map(|TwoU32(i, j)| (i, j)).collect();
-    Ok((pairs, against_ixs))
+    Ok((pairs, against_contig))
 }
 
 struct TempFilenames(Vec<PathBuf>);
@@ -356,7 +365,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let mut fasta_reader = fastx::Reader::from_path(args.input.as_ref().unwrap())?;
     let entries = fasta_reader.read_named_seqs()?;
-    let (pairs, against_ixs) = load_pairs(&args, &entries)?;
+    let (pairs, against_contig) = load_pairs(&args, &entries)?;
     if pairs.is_empty() {
         return Err(error!(InvalidInput, "No alignments to compute"));
     }
@@ -376,7 +385,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         files.push(ext::sys::create(filename)?);
     }
 
-    dist::align_sequences(entries, pairs, against_ixs, &args.params, threads, files)?;
+    dist::align_sequences(entries, pairs, against_contig, &args.params, threads, files)?;
     ext::sys::merge_files(out_filename, &temp_filenames.0)?;
     temp_filenames.disarm();
 
