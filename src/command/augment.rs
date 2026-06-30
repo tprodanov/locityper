@@ -4,17 +4,18 @@ use std::{
     path::{Path, PathBuf},
     fmt::Write as FmtWrite,
     cmp::{min, max},
+    borrow::Cow,
 };
 use colored::Colorize;
 use crate::{
     err::{error, add_path, validate_param},
     ext::{
-        self,
+        self, TriangleMatrix,
         fmt::{PrettyU32, YesNo},
     },
     seq::{
         dist, wfa, fastx,
-        contigs::{ContigId, ContigSet},
+        contigs::{self, ContigId, ContigNames, ContigSet},
         kmers::Kmer,
     },
     algo::{self, HashSet, IntSet, TwoU32},
@@ -28,7 +29,7 @@ struct Args {
 
     skip_basis: bool,
     basis_tag: Option<String>,
-    make_default: bool,
+    make_default: Option<bool>,
     basis_div: f64,
     div_window: u32,
     basis_leaveout: Vec<String>,
@@ -47,7 +48,7 @@ impl Default for Args {
 
             skip_basis: false,
             basis_tag: None,
-            make_default: true,
+            make_default: None,
             basis_div: 0.01,
             div_window: 1000,
             basis_leaveout: Vec::new(),
@@ -122,8 +123,9 @@ fn print_help() {
         "    --skip-basis".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Custom tag for the basis haplotypes (haplotypes-basis.{}.fa.gz).",
         "-t, --tag".green(), "STR".yellow(), "STR".yellow());
-    println!("    {:KEY$} {:VAL$}  Make these basis haplotypes default (yes/no) [{}].",
-        "    --default".green(), "y|n".yellow(), super::fmt_def("yes"));
+    println!("    {:KEY$} {:VAL$}  Make these basis haplotypes default (yes/no).\n\
+        {EMPTY}  Default: {}, unless {} is used.",
+        "    --default".green(), "y|n".yellow(), super::fmt_def("yes"), "--basis-lo".green());
     println!("    {:KEY$} {:VAL$}  Maximum seq. divergence from the basis haplotypes [{}].",
         "    --basis-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.basis_div));
     println!("    {:KEY$} {:VAL$}  Calculate divergence across {} bp moving windows [{}].\n\
@@ -188,7 +190,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
             Long("skip-basis") => args.skip_basis = true,
             Short('t') | Long("tag") => args.basis_tag = Some(parser.value()?.parse()?),
-            Long("default") => args.make_default = parser.value()?.parse::<YesNo>()?.into(),
+            Long("default") => args.make_default = Some(parser.value()?.parse::<YesNo>()?.into()),
             Long("basis-div") => args.basis_div = parser.value()?.parse()?,
             Long("div-window") => args.div_window = parser.value()?.parse::<PrettyU32>()?.get(),
             Long("basis-lo") => {
@@ -244,8 +246,8 @@ fn create_symlink(path1: &Path, path2: &Path) -> crate::Result<()> {
 }
 
 fn construct_dominant_set(
-    locus: &str,
     dir: &Path,
+    contig_set: &ContigSet,
     args: &Args,
     tag: &str,
 ) -> crate::Result<bool> {
@@ -256,18 +258,19 @@ fn construct_dominant_set(
             log::debug!("    Overwritting basis file `{}`", ext::fmt::path(&basis_filename));
         } else {
             log::debug!("    Basis file `{}` already exists, skipping it", ext::fmt::path(&basis_filename));
-            if args.make_default {
+            if args.make_default.expect("--default must not be None") {
                 create_symlink(&basis_filename, &default_filename)?;
             }
             return Ok(false);
         }
     }
-    let fasta_fname = dir.join(paths::LOCUS_FASTA);
-    let contig_set = ContigSet::load(locus, &fasta_fname)?;
+
+    let contig_set: Cow<ContigSet> = match args.basis_leaveout.is_empty() {
+        true => Cow::Borrowed(contig_set),
+        false => Cow::Owned(contig_set.extract_subset(&args.basis_leaveout.iter().cloned().collect(),
+                &dir.join(paths::DISCARDED_HAPS))?.1),
+    };
     let contigs = contig_set.contigs();
-
-    // [TODO] Leave-out
-
     let mut adjacencies = vec![Vec::new(); contig_set.len()];
     let paf_filename = dir.join(paths::LOCUS_PAF);
     let mut paf_file = ext::sys::open(paf_filename).map(dist::PafFile::new)?;
@@ -299,7 +302,7 @@ fn construct_dominant_set(
     }
 
     log::info!("    In total, {} similar haplotype pairs ({:.1}%)",
-        n_edges, 100.0 * f64::from(n_edges) / ext::TriangleMatrix::calc_linear_len(contig_set.len()) as f64);
+        n_edges, 100.0 * f64::from(n_edges) / TriangleMatrix::calc_linear_len(contig_set.len()) as f64);
     let dominant_set = algo::dom_set::find_dominating_set(&adjacencies);
     log::info!("    Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",
         dominant_set.len(), contig_set.len(), 100.0 - dominant_set.len() as f64 / contig_set.len() as f64 * 100.0);
@@ -312,10 +315,28 @@ fn construct_dominant_set(
     }
     fs::rename(&tmp_filename, &basis_filename).map_err(add_path!(tmp_filename, &basis_filename))?;
 
-    if args.make_default {
+    if args.make_default.expect("--default must not be None") {
         create_symlink(&basis_filename, &default_filename)?;
     }
     Ok(true)
+}
+
+fn find_ref_haplotype(contigs: &ContigNames, ref_name: &str, disc_filename: &Path) -> crate::Result<Option<ContigId>> {
+    if let Some(id) = contigs.try_get_id(ref_name) {
+        return Ok(Some(id));
+    }
+    if disc_filename.exists() {
+        let disc_haps = contigs::load_discarded_haplotypes(ext::sys::open(&disc_filename)?, &contigs)?;
+        for (id, other_haps) in disc_haps {
+            if let Some((_, is_identical)) = other_haps.iter().filter(|(name, _)| name == ref_name).next() {
+                if !is_identical { break };
+                log::debug!("Replacing reference haplotype {} with {}", ref_name, contigs.get_name(id));
+                return Ok(Some(id));
+            }
+        }
+    }
+    log::warn!("Could not find reference haplotype `{}`", ref_name);
+    Ok(None)
 }
 
 fn process_locus(
@@ -325,17 +346,51 @@ fn process_locus(
     tag: &str,
 ) -> crate::Result<bool> {
     let Some(lock_file) = ext::sys::LockFile::try_create(dir.join("augment.lock"))? else { return Ok(false) };
-
+    log::info!("Processing locus {}", locus);
     let mut did_anything = false;
+    let mut lazy_contig_set = None;
+    // [NOTE] Can be replaced with `Option::get_or_try_insert_with` once stabilized.
+    fn get_contig_set<'a>(lazy_contig_set: &'a mut Option<ContigSet>, locus: &str, dir: &Path)
+        -> crate::Result<&'a ContigSet>
+    {
+        if lazy_contig_set.is_none() {
+            *lazy_contig_set = Some(ContigSet::load(locus, &dir.join(paths::LOCUS_FASTA))?);
+        }
+        // Safety: just set lazy contig set to Some(_).
+        Ok(unsafe { lazy_contig_set.as_ref().unwrap_unchecked() })
+    }
+
+    let aln_filename = dir.join(paths::LOCUS_PAF);
+    if !aln_filename.exists() || args.rerun == Rerun::All {
+        let contig_set = get_contig_set(&mut lazy_contig_set, locus, dir)?;
+        let pairs = TriangleMatrix::indices(contig_set.len()).map(|(i, j)| (i as u32, j as u32)).collect();
+        log::info!("    Running pairwise haplotype alignment");
+        let mut against_contig = vec![false; contig_set.len()];
+        if let Some(ref_id) = find_ref_haplotype(contig_set.contigs(),
+            args.ref_name.as_ref().expect("Reference name must be provided"), &dir.join(paths::DISCARDED_HAPS))?
+        {
+            against_contig[ref_id.ix()] = true;
+        }
+        super::align::align(contig_set.create_named_sequences(), pairs, against_contig,
+            &aln_filename, &None, args.threads, &args.aln_params)?;
+    } else {
+        log::debug!("    Skipping alignments (already constructed)");
+    }
+
     // [TODO] Construct alignments.
-    did_anything |= construct_dominant_set(locus, dir, args, tag)?;
+    if !args.skip_basis {
+        let contig_set = get_contig_set(&mut lazy_contig_set, locus, dir)?;
+        did_anything |= construct_dominant_set(dir, &contig_set, args, tag)?;
+    } else {
+        log::debug!("    Skipping basis construction");
+    }
 
     lock_file.release()?;
     Ok(did_anything)
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
-    let args = parse_args(argv)?.validate()?;
+    let mut args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
 
@@ -343,6 +398,12 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         Some(v) => v,
         None => construct_basis_tag(&args)?,
     };
+    // If --default was not explicitely specified, set it to true if --basis-lo is empty.
+    args.make_default = Some(args.make_default.unwrap_or(args.basis_leaveout.is_empty()));
+    if !args.skip_basis {
+        log::info!("Basis haplotypes will have tag \"{}\" and will{} be saved as default",
+            tag, if args.make_default.unwrap() { Default::default() } else { " not".bold() });
+    }
 
     let loci_subdirs = super::add::load_loci_subdirs(
         args.database.as_ref().expect("Database directory must be provided"))?;

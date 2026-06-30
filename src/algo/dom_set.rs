@@ -110,6 +110,7 @@ fn find_dominating_set_ilp(graph: &Adjacencies) -> (Vec<usize>, russcip::status:
     (output, status)
 }
 
+#[cfg(feature = "scip")]
 fn validate_solution(graph: &Adjacencies, set: &[usize]) -> bool {
     let mut dominated = vec![false; graph.len()];
     for &i in set {

@@ -358,6 +358,34 @@ impl Drop for TempFilenames {
     }
 }
 
+pub(super) fn align(
+    entries: Vec<NamedSeq>,
+    pairs: Vec<(u32, u32)>,
+    against_contig: Vec<bool>,
+    output: &Path,
+    prefix: &Option<PathBuf>,
+    threads: u16,
+    params: &dist::Params,
+) -> crate::Result<()> {
+    let threads = usize::from(threads).min(pairs.len()) as u16;
+    let mut files = Vec::with_capacity(usize::from(threads));
+    files.push(ext::sys::create(output)?);
+    writeln!(files[0], "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
+        params.div_k, params.div_w, params.thresh_div,
+        params.backbone_str(), params.accuracy, params.max_gap).map_err(add_path!(output))?;
+
+    // Create output file now, this way we are sure it can be opened.
+    let mut temp_filenames = TempFilenames::new(output, prefix, threads)?;
+    for filename in &temp_filenames.0 {
+        files.push(ext::sys::create(filename)?);
+    }
+
+    dist::align_sequences(entries, pairs, against_contig, params, threads, files)?;
+    ext::sys::merge_files(output, &temp_filenames.0)?;
+    temp_filenames.disarm();
+    Ok(())
+}
+
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let args = parse_args(argv)?.validate()?;
     super::greet();
@@ -369,25 +397,11 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     if pairs.is_empty() {
         return Err(error!(InvalidInput, "No alignments to compute"));
     }
+
     log::info!("Align {} pairs across {} sequences", pairs.len(), entries.len());
-    let threads = usize::from(args.threads).min(pairs.len()) as u16;
-
-    let mut files = Vec::with_capacity(usize::from(threads));
-    let out_filename = args.output.as_ref().unwrap();
-    files.push(ext::sys::create(out_filename)?);
-    writeln!(files[0], "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
-        args.params.div_k, args.params.div_w, args.params.thresh_div,
-        args.params.backbone_str(), args.params.accuracy, args.params.max_gap).map_err(add_path!(out_filename))?;
-
-    // Create output file now, this way we are sure it can be opened.
-    let mut temp_filenames = TempFilenames::new(out_filename, &args.prefix, threads)?;
-    for filename in &temp_filenames.0 {
-        files.push(ext::sys::create(filename)?);
-    }
-
-    dist::align_sequences(entries, pairs, against_contig, &args.params, threads, files)?;
-    ext::sys::merge_files(out_filename, &temp_filenames.0)?;
-    temp_filenames.disarm();
+    align(entries, pairs, against_contig,
+        args.output.as_ref().expect("Output path must be defined"), &args.prefix,
+        args.threads, &args.params)?;
 
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())

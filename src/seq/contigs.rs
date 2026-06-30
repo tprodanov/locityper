@@ -13,7 +13,7 @@ use crate::{
     err::{Error, error, add_path},
     ext,
     seq::{
-        fastx,
+        fastx, NamedSeq,
         counts::KmerCounts,
     },
     algo::{HashMap, HashSet, IntMap},
@@ -262,6 +262,7 @@ impl fmt::Display for GenomeVersion {
 }
 
 /// Contigs, their complete sequences, and k-mer counts.
+#[derive(Clone)]
 pub struct ContigSet {
     contigs: Arc<ContigNames>,
     seqs: Vec<Vec<u8>>,
@@ -397,6 +398,12 @@ impl ContigSet {
             replaced.len(), ext::vec::join_up_to(&replaced, 5));
         let seqs = ixs.iter().map(|&i| self.seqs[i].clone()).collect();
         Ok((ixs, ContigSet::new(Arc::new(contigs), seqs)))
+    }
+
+    pub fn create_named_sequences(&self) -> Vec<NamedSeq> {
+        itertools::izip!(self.contigs.names(), &self.seqs)
+            .map(|(name, seq)| NamedSeq::new(name.to_owned(), seq.to_owned()))
+            .collect()
     }
 }
 
