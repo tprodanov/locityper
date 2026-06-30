@@ -10,7 +10,7 @@ use crate::{
     err::{error, add_path, validate_param},
     ext::{
         self,
-        fmt::PrettyU32,
+        fmt::{PrettyU32, YesNo},
     },
     seq::{
         dist, wfa, fastx,
@@ -79,7 +79,8 @@ fn print_help() {
     println!("  - constructs pairwise haplotype alignments (locityper align),");
     // println!("  - constructs local VCF file (locityper paf-vcf),");
     println!("  - extracts basis haplotypes for faster read-to-haplotype alignment.");
-    println!("Multiple instances can be run over the same output directory at the same time.");
+    println!("Multiple instances can be run over the same output directory at the same time,");
+    println!("unless --rerun is used.");
 
     print!("\n{}", "Usage:".bold());
     println!(" {} augment -d db -n ref_name", super::PROGRAM);
@@ -121,8 +122,8 @@ fn print_help() {
         "    --skip-basis".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Custom tag for the basis haplotypes (haplotypes-basis.{}.fa.gz).",
         "-t, --tag".green(), "STR".yellow(), "STR".yellow());
-    println!("    {:KEY$} {:VAL$}  Do not make these basis haplotypes default.",
-        "    --not-default".green(), super::flag());
+    println!("    {:KEY$} {:VAL$}  Make these basis haplotypes default (yes/no) [{}].",
+        "    --default".green(), "y|n".yellow(), super::fmt_def("yes"));
     println!("    {:KEY$} {:VAL$}  Maximum seq. divergence from the basis haplotypes [{}].",
         "    --basis-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.basis_div));
     println!("    {:KEY$} {:VAL$}  Calculate divergence across {} bp moving windows [{}].\n\
@@ -187,7 +188,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
             Long("skip-basis") => args.skip_basis = true,
             Short('t') | Long("tag") => args.basis_tag = Some(parser.value()?.parse()?),
-            Long("not-default") => args.make_default = false,
+            Long("default") => args.make_default = parser.value()?.parse::<YesNo>()?.into(),
             Long("basis-div") => args.basis_div = parser.value()?.parse()?,
             Long("div-window") => args.div_window = parser.value()?.parse::<PrettyU32>()?.get(),
             Long("basis-lo") => {
@@ -215,12 +216,12 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 /// Construct basis tag as "d{div}-{window}" with suffix "-loNAME,NAME,NAME" if necessary.
 fn construct_basis_tag(args: &Args) -> crate::Result<String> {
-    let mut tag = format!("d{}", crate::math::fmt_signif(args.basis_div, 5));
-    if args.div_window == u32::MAX {
-        write!(tag, "-global").unwrap();
+    let mut tag = if args.div_window == u32::MAX {
+        "global".to_owned()
     } else {
-        write!(tag, "-{}", ext::fmt::PrettyU32(args.div_window)).unwrap();
-    }
+        format!("{}", ext::fmt::PrettyU32(args.div_window))
+    };
+    write!(tag, "-d{}", crate::math::fmt_signif(args.basis_div, 5)).unwrap();
     if !args.basis_leaveout.is_empty() {
         write!(tag, "-lo{}", args.basis_leaveout.join(",")).unwrap();
     }
@@ -232,6 +233,16 @@ fn construct_basis_tag(args: &Args) -> crate::Result<String> {
     }
 }
 
+fn create_symlink(path1: &Path, path2: &Path) -> crate::Result<()> {
+    log::debug!("    Soft linking {} -> {}", ext::fmt::path(path1), ext::fmt::path(path2));
+    // Second check is needed if the symlink exists but points to a missing file.
+    if path2.exists() || path2.is_symlink() {
+        std::fs::remove_file(path2).map_err(add_path!(path2))?;
+    }
+    std::os::unix::fs::symlink(path1.file_name().expect("File has an empty basename"), path2)
+        .map_err(add_path!(path1, path2))
+}
+
 fn construct_dominant_set(
     locus: &str,
     dir: &Path,
@@ -239,11 +250,15 @@ fn construct_dominant_set(
     tag: &str,
 ) -> crate::Result<bool> {
     let basis_filename = dir.join(format!("haplotypes-basis.{}.fa.gz", tag));
+    let default_filename = dir.join(paths::DEFAULT_BASIS_FASTA);
     if basis_filename.exists() {
         if args.rerun == Rerun::Part || args.rerun == Rerun::All {
             log::debug!("    Overwritting basis file `{}`", ext::fmt::path(&basis_filename));
         } else {
             log::debug!("    Basis file `{}` already exists, skipping it", ext::fmt::path(&basis_filename));
+            if args.make_default {
+                create_symlink(&basis_filename, &default_filename)?;
+            }
             return Ok(false);
         }
     }
@@ -296,6 +311,10 @@ fn construct_dominant_set(
             .map_err(add_path!(tmp_filename))?;
     }
     fs::rename(&tmp_filename, &basis_filename).map_err(add_path!(tmp_filename, &basis_filename))?;
+
+    if args.make_default {
+        create_symlink(&basis_filename, &default_filename)?;
+    }
     Ok(true)
 }
 

@@ -9,7 +9,10 @@ pub(super) const LOCI_DIR: &'static str = "loci";
 pub(super) const LOCUS_BED: &'static str = "ref.bed";
 /// Path to all non-identical locus haplotypes.
 pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
-/// Path to all non-identical locus haplotypes.
+/// Symlink with default basis haplotypes, used for read mapping.
+pub(super) const DEFAULT_BASIS_FASTA: &'static str = "haplotypes-basis.fa.gz";
+
+/// Alignments between haplotypes.
 pub(super) const LOCUS_PAF: &'static str = "haplotypes.paf.gz";
 /// Path to pairwise distances between haplotypes.
 pub(super) const DISTANCES: &'static str = "distances.bin";
