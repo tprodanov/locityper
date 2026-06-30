@@ -347,14 +347,9 @@ impl ContigSet {
     pub fn extract_subset(
         &self,
         leave_out: &HashSet<String>,
-        disc_filename: &Path,
+        disc_haps: &DiscardedHaplotypes,
     ) -> crate::Result<(Vec<usize>, Self)> {
-        let disc_haps = if disc_filename.exists() {
-            load_discarded_haplotypes(ext::sys::open(&disc_filename)?, &self.contigs)?
-        } else {
-            Default::default()
-        };
-        if !discarded_all_identical(&disc_haps) {
+        if !disc_haps.all_identical() {
             log::warn!("[{}] Haplotypes were previously pruned (~ in discarded haplotypes). \
                 Leave-out genotyping may lose relevant previously discarded haplotypes",
                 self.contigs.tag());
@@ -369,7 +364,7 @@ impl ContigSet {
             let mut found = false;
             let mut replaced_now = false;
             if sample_or_haplotype_in_set(&name, &leave_out) {
-                if let Some(discarded) = disc_haps.get(&ContigId::new(i)) {
+                if let Some(discarded) = disc_haps.identical_to(ContigId::new(i)) {
                     for (oth_name, is_identical) in discarded {
                         if *is_identical && !sample_or_haplotype_in_set(oth_name, &leave_out) {
                             replaced_now = true;
@@ -464,59 +459,86 @@ impl fmt::Display for Genotype {
     }
 }
 
-pub type DiscardedHaplotypes = IntMap<ContigId, Vec<(String, bool)>>;
-
-/// Loads `discarded_haplotypes.txt` file, with lines `haplotype (= or ~) haplotype2, haplotype3, ...`.
-/// Returns map (retained contig id) -> Vec of (discarded name, is_identical).
-pub fn load_discarded_haplotypes(
-    f: impl BufRead,
-    contigs: &ContigNames,
-) -> crate::Result<DiscardedHaplotypes>
-{
-    // Map { retained -> (discarded, identical) }, where retained is not found in `contigs`.
-    let mut corresp_unknown: HashMap<String, Vec<(String, bool)>> = HashMap::default();
-    // Same, but retained haplotype if found, and replaced with its id.
-    let mut corresp = IntMap::default();
-
-    for line in f.lines() {
-        let line = line.map_err(add_path!(!))?;
-        let split: Vec<_> = line.split_whitespace().collect();
-        if split.len() < 3 {
-            return Err(error!(InvalidInput, "Each line in discarded haplotypes must have at least 3 columns"));
-        }
-        let identical = split[1] == "=";
-
-        let mut rhs = Vec::with_capacity(split.len() - 2);
-        for contig in &split[2..] {
-            let contig = contig.strip_suffix(',').unwrap_or(contig);
-            if contigs.contains(contig) {
-                log::warn!("{}Haplotype {} is marked as discarded, but present in the haplotypes fasta",
-                    if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
-                continue;
-            }
-            rhs.push((contig.to_string(), identical));
-            if let Some(v) = corresp_unknown.remove(contig) {
-                rhs.extend(v.into_iter().map(|(contig2, identical2)| (contig2, identical && identical2)));
-            }
-        }
-
-        match contigs.try_get_id(split[0]) {
-            Some(id) => corresp.insert(id, rhs),
-            None => corresp_unknown.insert(split[0].to_string(), rhs),
-        };
-    }
-
-    if let Some(contig) = corresp_unknown.keys().next() {
-        log::warn!("{}Haplotype {} is on the left side of the discarded haplotypes, but missing from the fasta",
-            if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
-    }
-    Ok(corresp)
+pub struct DiscardedHaplotypes {
+    /// From each retained contig, list of discarded contigs.
+    /// Boolean flag contains false if two haplotypes are not identical (~ symbol).
+    by_contig: IntMap<ContigId, Vec<(String, bool)>>,
+    all_identical: bool,
 }
 
-/// Returns true if all discarded haplotypes are identical to one of the retained haplotypes.
-/// Will be false if `locityper prune` was used.
-pub fn discarded_all_identical(disc_haplotypes: &DiscardedHaplotypes) -> bool {
-    disc_haplotypes.values().flat_map(|v| v.iter()).all(|(_, identical)| *identical)
+impl Default for DiscardedHaplotypes {
+    fn default() -> Self {
+        Self {
+            by_contig: Default::default(),
+            all_identical: true,
+        }
+    }
+}
+
+impl DiscardedHaplotypes {
+    /// Tries to read discarded haplotypes from a given filename.
+    /// Does not warn on missing files.
+    pub fn load_if_present(filename: &Path, contigs: &ContigNames) -> crate::Result<Self> {
+        if filename.exists() {
+            Self::load(ext::sys::open(filename)?, contigs)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    pub fn load(file: impl BufRead, contigs: &ContigNames) -> crate::Result<Self> {
+        // Same, but retained haplotype if found, and replaced with its id.
+        let mut by_contig = IntMap::default();
+        // Map { retained -> (discarded, identical) }, where retained is not found in `contigs`.
+        let mut corresp_unknown: HashMap<String, Vec<(String, bool)>> = HashMap::default();
+        let mut all_identical = true;
+        for line in file.lines() {
+            let line = line.map_err(add_path!(!))?;
+            let split: Vec<_> = line.split_whitespace().collect();
+            if split.len() < 3 {
+                return Err(error!(InvalidInput, "Each line in discarded haplotypes must have at least 3 columns"));
+            }
+            let identical = split[1] == "=";
+            all_identical &= identical;
+
+            let mut rhs = Vec::with_capacity(split.len() - 2);
+            for contig in &split[2..] {
+                let contig = contig.strip_suffix(',').unwrap_or(contig);
+                if contigs.contains(contig) {
+                    log::warn!("{}Haplotype {} is marked as discarded, but present in the haplotypes fasta",
+                        if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
+                    continue;
+                }
+                rhs.push((contig.to_string(), identical));
+                if let Some(v) = corresp_unknown.remove(contig) {
+                    rhs.extend(v.into_iter().map(|(contig2, identical2)| (contig2, identical && identical2)));
+                }
+            }
+
+            match contigs.try_get_id(split[0]) {
+                Some(id) => by_contig.insert(id, rhs),
+                None => corresp_unknown.insert(split[0].to_string(), rhs),
+            };
+        }
+
+        if let Some(contig) = corresp_unknown.keys().next() {
+            log::warn!("{}Haplotype {} is on the left side of the discarded haplotypes, but missing from the fasta",
+                if contigs.tag().is_empty() { String::new() } else { format!("[{}] ", contigs.tag()) }, contig);
+        }
+        Ok(Self { by_contig, all_identical })
+    }
+
+    pub fn by_contig(&self) -> &IntMap<ContigId, Vec<(String, bool)>> {
+        &self.by_contig
+    }
+
+    pub fn all_identical(&self) -> bool {
+        self.all_identical
+    }
+
+    pub fn identical_to(&self, contig_id: ContigId) -> Option<&Vec<(String, bool)>> {
+        self.by_contig.get(&contig_id)
+    }
 }
 
 /// Returns true if `name` is in `set`, or, if `name` ends with `.N` / `_N` / `-N` (N is a single digit)

@@ -8,10 +8,10 @@ use std::{
 use colored::Colorize;
 use crate::{
     ext::{self, TriangleMatrix},
-    algo::{HashSet, IntMap},
+    algo::{HashSet},
     seq::{
-        fastx, div, contigs,
-        ContigId, ContigNames,
+        fastx, div,
+        contigs::{ContigId, ContigNames, DiscardedHaplotypes},
         counts::KmerCounts,
     },
     err::{validate_param, error, add_path},
@@ -370,7 +370,7 @@ fn cluster_haplotypes(
     mut thresh: f64,
     n_clusters: Option<usize>,
     power: PowerMean,
-    disc_haps: &IntMap<ContigId, Vec<(String, bool)>>,
+    disc_haps: &DiscardedHaplotypes,
     mut nwk_writer: impl Write,
     mut disc_haps_writer: impl Write,
 ) -> crate::Result<Vec<ContigId>>
@@ -394,7 +394,7 @@ fn cluster_haplotypes(
     }
 
     let mut clusters: Vec<_> = contigs.ids().map(|id| Cluster::new(id, contigs)).collect();
-    for (id, haps) in disc_haps.iter() {
+    for (id, haps) in disc_haps.by_contig() {
         clusters[id.ix()].add_identical(haps.iter().map(|(name, _)| name as &str));
     }
 
@@ -541,9 +541,9 @@ fn process_locus(
         Default::default()
     } else {
         ext::sys::open(&disc_filename)?.read_to_end(&mut disc_haps_data).map_err(add_path!(disc_filename))?;
-        contigs::load_discarded_haplotypes(&disc_haps_data as &[u8], contigs)?
+        DiscardedHaplotypes::load(&disc_haps_data as &[u8], contigs)?
     };
-    if !contigs::discarded_all_identical(&disc_haplotypes) {
+    if !disc_haplotypes.all_identical() {
         log::warn!("[{}] Haplotypes were previously pruned (~ in discarded haplotypes). Tree will be inaccurate",
             contigs.tag());
     }

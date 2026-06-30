@@ -20,7 +20,7 @@ use crate::{
     },
     seq::{
         self, interv, recruit, fastx, div, Interval,
-        contigs::{ContigId, ContigNames, ContigSet, Genotype},
+        contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
         transfer::HapAlns,
@@ -736,8 +736,9 @@ pub(super) fn load_loci(
                 }
             };
             if !leave_out.is_empty() {
-                let (ixs, new_set) = locus_data.set.extract_subset(leave_out,
-                    &db_locus_dir.join(paths::DISCARDED_HAPS))?;
+                let disc_haps = DiscardedHaplotypes::load_if_present(&db_locus_dir.join(paths::DISCARDED_HAPS),
+                    locus_data.set.contigs())?;
+                let (ixs, new_set) = locus_data.set.extract_subset(leave_out, &disc_haps)?;
                 locus_data.set = Arc::new(new_set);
                 if ixs.len() != locus_data.init_nhaps {
                     locus_data.kmer_counts = locus_data.kmer_counts.thin_out(ixs.iter().copied());

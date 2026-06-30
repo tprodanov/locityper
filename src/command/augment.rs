@@ -10,12 +10,12 @@ use colored::Colorize;
 use crate::{
     err::{error, add_path, validate_param},
     ext::{
-        self, TriangleMatrix,
+        self, TriangleMatrix, LazyResult,
         fmt::{PrettyU32, YesNo},
     },
     seq::{
         dist, wfa, fastx,
-        contigs::{self, ContigId, ContigNames, ContigSet},
+        contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
         kmers::Kmer,
     },
     algo::{self, HashSet, IntSet, TwoU32},
@@ -34,6 +34,7 @@ struct Args {
     div_window: u32,
     basis_leaveout: Vec<String>,
 
+    skip_vcf: bool,
     threads: u16,
     aln_params: dist::Params,
     rerun: Rerun,
@@ -49,10 +50,11 @@ impl Default for Args {
             skip_basis: false,
             basis_tag: None,
             make_default: None,
-            basis_div: 0.01,
-            div_window: 1000,
+            basis_div: 0.02,
+            div_window: 200,
             basis_leaveout: Vec::new(),
 
+            skip_vcf: false,
             threads: 8,
             aln_params: Default::default(),
             rerun: Rerun::None,
@@ -78,7 +80,7 @@ fn print_help() {
     let defaults = Args::default();
     println!("{} For each locus:", "Augment database.".yellow());
     println!("  - constructs pairwise haplotype alignments (locityper align),");
-    // println!("  - constructs local VCF file (locityper paf-vcf),");
+    println!("  - constructs local VCF file (locityper paf-vcf),");
     println!("  - extracts basis haplotypes for faster read-to-haplotype alignment.");
     println!("Multiple instances can be run over the same output directory at the same time,");
     println!("unless --rerun is used.");
@@ -137,6 +139,8 @@ fn print_help() {
         "    --basis-lo".green(), "STR+".yellow(), "locityper genotype --lo".underline());
 
     println!("\n{}", "Optional arguments:".bold());
+    println!("    {:KEY$} {:VAL$}  Do not construct local VCF files.",
+        "    --skip-vcf".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Rerun everything ({}); do not rerun haplotype alignment ({});\n\
         {EMPTY}  or do not rerun completed loci ({}, default).",
         "    --rerun".green(), "STR".yellow(), "all".yellow(), "part".yellow(), "none".yellow());
@@ -199,6 +203,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
 
+            Long("skip-vcf") => args.skip_vcf = parser.value()?.parse()?,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
 
@@ -236,7 +241,7 @@ fn construct_basis_tag(args: &Args) -> crate::Result<String> {
 }
 
 fn create_symlink(path1: &Path, path2: &Path) -> crate::Result<()> {
-    log::debug!("    Soft linking {} -> {}", ext::fmt::path(path1), ext::fmt::path(path2));
+    log::debug!("        Soft linking {} -> {}", ext::fmt::path(path1), ext::fmt::path(path2));
     // Second check is needed if the symlink exists but points to a missing file.
     if path2.exists() || path2.is_symlink() {
         std::fs::remove_file(path2).map_err(add_path!(path2))?;
@@ -248,27 +253,27 @@ fn create_symlink(path1: &Path, path2: &Path) -> crate::Result<()> {
 fn construct_dominant_set(
     dir: &Path,
     contig_set: &ContigSet,
+    disc_haps: &DiscardedHaplotypes,
     args: &Args,
     tag: &str,
 ) -> crate::Result<bool> {
     let basis_filename = dir.join(format!("haplotypes-basis.{}.fa.gz", tag));
     let default_filename = dir.join(paths::DEFAULT_BASIS_FASTA);
     if basis_filename.exists() {
-        if args.rerun == Rerun::Part || args.rerun == Rerun::All {
-            log::debug!("    Overwritting basis file `{}`", ext::fmt::path(&basis_filename));
-        } else {
+        if args.rerun == Rerun::None {
             log::debug!("    Basis file `{}` already exists, skipping it", ext::fmt::path(&basis_filename));
             if args.make_default.expect("--default must not be None") {
                 create_symlink(&basis_filename, &default_filename)?;
             }
             return Ok(false);
+        } else {
+            log::debug!("    Overwritting basis file `{}`", ext::fmt::path(&basis_filename));
         }
     }
 
     let contig_set: Cow<ContigSet> = match args.basis_leaveout.is_empty() {
         true => Cow::Borrowed(contig_set),
-        false => Cow::Owned(contig_set.extract_subset(&args.basis_leaveout.iter().cloned().collect(),
-                &dir.join(paths::DISCARDED_HAPS))?.1),
+        false => Cow::Owned(contig_set.extract_subset(&args.basis_leaveout.iter().cloned().collect(), disc_haps)?.1),
     };
     let contigs = contig_set.contigs();
     let mut adjacencies = vec![Vec::new(); contig_set.len()];
@@ -301,10 +306,10 @@ fn construct_dominant_set(
         }
     }
 
-    log::info!("    In total, {} similar haplotype pairs ({:.1}%)",
+    log::info!("        In total, {} similar haplotype pairs ({:.1}%)",
         n_edges, 100.0 * f64::from(n_edges) / TriangleMatrix::calc_linear_len(contig_set.len()) as f64);
     let dominant_set = algo::dom_set::find_dominating_set(&adjacencies);
-    log::info!("    Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",
+    log::info!("        Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",
         dominant_set.len(), contig_set.len(), 100.0 - dominant_set.len() as f64 / contig_set.len() as f64 * 100.0);
     let tmp_filename = basis_filename.with_extension(".tmp.gz");
     let mut fasta_writer = ext::sys::create_gzip(&tmp_filename)?;
@@ -321,18 +326,19 @@ fn construct_dominant_set(
     Ok(true)
 }
 
-fn find_ref_haplotype(contigs: &ContigNames, ref_name: &str, disc_filename: &Path) -> crate::Result<Option<ContigId>> {
+fn find_ref_haplotype(
+    contigs: &ContigNames,
+    disc_haps: &DiscardedHaplotypes,
+    ref_name: &str,
+) -> crate::Result<Option<ContigId>> {
     if let Some(id) = contigs.try_get_id(ref_name) {
         return Ok(Some(id));
     }
-    if disc_filename.exists() {
-        let disc_haps = contigs::load_discarded_haplotypes(ext::sys::open(&disc_filename)?, &contigs)?;
-        for (id, other_haps) in disc_haps {
-            if let Some((_, is_identical)) = other_haps.iter().filter(|(name, _)| name == ref_name).next() {
-                if !is_identical { break };
-                log::debug!("Replacing reference haplotype {} with {}", ref_name, contigs.get_name(id));
-                return Ok(Some(id));
-            }
+    for (&id, other_haps) in disc_haps.by_contig() {
+        if let Some((_, is_identical)) = other_haps.iter().filter(|(name, _)| name == ref_name).next() {
+            if !is_identical { break };
+            log::debug!("Replacing reference haplotype {} with {}", ref_name, contigs.get_name(id));
+            return Ok(Some(id));
         }
     }
     log::warn!("Could not find reference haplotype `{}`", ref_name);
@@ -348,41 +354,53 @@ fn process_locus(
     let Some(lock_file) = ext::sys::LockFile::try_create(dir.join("augment.lock"))? else { return Ok(false) };
     log::info!("Processing locus {}", locus);
     let mut did_anything = false;
-    let mut lazy_contig_set = None;
-    // [NOTE] Can be replaced with `Option::get_or_try_insert_with` once stabilized.
-    fn get_contig_set<'a>(lazy_contig_set: &'a mut Option<ContigSet>, locus: &str, dir: &Path)
-        -> crate::Result<&'a ContigSet>
-    {
-        if lazy_contig_set.is_none() {
-            *lazy_contig_set = Some(ContigSet::load(locus, &dir.join(paths::LOCUS_FASTA))?);
-        }
-        // Safety: just set lazy contig set to Some(_).
-        Ok(unsafe { lazy_contig_set.as_ref().unwrap_unchecked() })
-    }
+    let fasta_filename = dir.join(paths::LOCUS_FASTA);
+    // Lazily load contig set and discarded haplotypes.
+    let mut lazy_data = LazyResult::new(|| -> crate::Result<_> {
+        let contig_set = ContigSet::load(locus, &fasta_filename)?;
+        let disc_haps = DiscardedHaplotypes::load_if_present(&dir.join(paths::DISCARDED_HAPS), contig_set.contigs())?;
+        let ref_id = find_ref_haplotype(contig_set.contigs(), &disc_haps,
+            args.ref_name.as_ref().expect("Reference name must be provided"))?;
+        Ok((contig_set, disc_haps, ref_id))
+    });
 
     let aln_filename = dir.join(paths::LOCUS_PAF);
     if !aln_filename.exists() || args.rerun == Rerun::All {
-        let contig_set = get_contig_set(&mut lazy_contig_set, locus, dir)?;
+        let (contig_set, _, ref_id) = lazy_data.get()?;
         let pairs = TriangleMatrix::indices(contig_set.len()).map(|(i, j)| (i as u32, j as u32)).collect();
         log::info!("    Running pairwise haplotype alignment");
         let mut against_contig = vec![false; contig_set.len()];
-        if let Some(ref_id) = find_ref_haplotype(contig_set.contigs(),
-            args.ref_name.as_ref().expect("Reference name must be provided"), &dir.join(paths::DISCARDED_HAPS))?
-        {
+        if let Some(ref_id) = ref_id {
             against_contig[ref_id.ix()] = true;
         }
         super::align::align(contig_set.create_named_sequences(), pairs, against_contig,
             &aln_filename, &None, args.threads, &args.aln_params)?;
+        did_anything = true;
     } else {
         log::debug!("    Skipping alignments (already constructed)");
     }
 
-    // [TODO] Construct alignments.
-    if !args.skip_basis {
-        let contig_set = get_contig_set(&mut lazy_contig_set, locus, dir)?;
-        did_anything |= construct_dominant_set(dir, &contig_set, args, tag)?;
+    let vcf_filename = dir.join("haplotypes.vcf.gz");
+    if args.skip_vcf || (vcf_filename.exists() && args.rerun == Rerun::None) {
+        log::debug!("    Skipping local VCF file");
     } else {
+        log::info!("    Constructing a local VCF file");
+        let (contig_set, disc_haps, ref_id) = lazy_data.get()?;
+        if let Some(ref_id) = ref_id
+        && let Some((chrom, shift)) = super::paf_vcf::load_region("auto", &fasta_filename)? {
+            super::paf_vcf::convert_to_vcf(
+                &aln_filename, contig_set, disc_haps, *ref_id, &chrom, shift, &vcf_filename, None)?;
+        } else {
+            log::error!("Cannot construct local VCF: reference contig not found or \
+                could not identify reference coordinates");
+        }
+    }
+
+    if args.skip_basis {
         log::debug!("    Skipping basis construction");
+    } else {
+        let (contig_set, disc_haps, _) = lazy_data.get()?;
+        did_anything |= construct_dominant_set(dir, contig_set, disc_haps, args, tag)?;
     }
 
     lock_file.release()?;

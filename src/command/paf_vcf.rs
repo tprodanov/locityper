@@ -16,12 +16,9 @@ use crate::{
         interv,
         dist::PafFile,
         cigar::{Cigar, Operation},
-        contigs::{self, ContigId, ContigNames, ContigSet},
+        contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
     },
-    algo::{
-        bisect,
-        HashMap, IntMap,
-    },
+    algo::{bisect, HashMap},
 };
 
 struct Args {
@@ -136,7 +133,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
 /// Returns chromosome name and 0-based start position.
-fn load_region(s: &str, fasta_filename: &Path) -> crate::Result<Option<(String, u32)>> {
+pub(super) fn load_region(s: &str, fasta_filename: &Path) -> crate::Result<Option<(String, u32)>> {
     if s == "none" { return Ok(None) };
 
     let filename = if s == "auto" {
@@ -541,7 +538,7 @@ fn combine_variants(
 fn group_haplotypes(
     contigs: &ContigNames,
     ref_id: ContigId,
-    disc_haps: &IntMap<ContigId, Vec<(String, bool)>>,
+    disc_haps: &DiscardedHaplotypes,
 ) -> crate::Result<Vec<(String, Vec<Option<usize>>)>>
 {
     // First, regular contig name, with lazy *? specifier.
@@ -568,13 +565,31 @@ fn group_haplotypes(
         if i != ref_id.ix() {
             add(i, contig)?;
         }
-        for (hap, _) in disc_haps.get(&ContigId::new(i)).into_iter().flat_map(|vec| vec.iter()) {
+        for (hap, _) in disc_haps.identical_to(ContigId::new(i)).into_iter().flat_map(|vec| vec.iter()) {
             add(i, hap)?;
         }
     }
     let mut groupped: Vec<_> = map.into_iter().collect();
     groupped.sort_unstable();
     Ok(groupped)
+}
+
+pub(super) fn convert_to_vcf(
+    paf_filename: &Path,
+    contig_set: &ContigSet,
+    disc_haps: &DiscardedHaplotypes,
+    ref_id: ContigId,
+    chrom: &str, shift: u32,
+    out_merged: &Path,
+    out_separate: Option<&Path>,
+) -> crate::Result<()>
+{
+    if !disc_haps.all_identical() {
+        log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
+    }
+    let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
+    let vars = process_paf(paf_filename, &contig_set, ref_id)?;
+    combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps, out_merged, out_separate)
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
@@ -597,21 +612,17 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     };
     let disc_haps = match disc_filename {
         Some(fname) if fname.exists() =>
-            contigs::load_discarded_haplotypes(ext::sys::open(fname)?, contig_set.contigs())?,
+            DiscardedHaplotypes::load(ext::sys::open(fname)?, contig_set.contigs())?,
         Some(fname) if args.disc_filename != "auto" => {
             log::debug!("Skip discarded haplotypes, file {} does not exist", fname.display());
             Default::default()
         }
-        _ => Default::default()
+        _ => Default::default(),
     };
-    if !contigs::discarded_all_identical(&disc_haps) {
-        log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
-    }
-    let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
 
     let (chrom, shift) = load_region(&args.region, fasta_filename)?.unwrap_or((ref_hap.clone(), 0));
-    let vars = process_paf(args.paf.as_ref().expect("PAF filename must be provided"), &contig_set, ref_id)?;
-    combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps,
+    convert_to_vcf(args.paf.as_ref().expect("PAF filename must be provided"),
+        &contig_set, &disc_haps, ref_id, &chrom, shift,
         args.out_merged.as_ref().expect("Merged output VCF must be present"),
         args.out_separate.as_ref().map(|fname| fname as &Path))?;
 
