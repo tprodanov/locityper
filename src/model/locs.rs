@@ -267,6 +267,7 @@ impl PosCollection {
 pub(crate) struct PrelimAlignments {
     alns: Vec<Alignment>,
     pos_collection: PosCollection,
+    good_dist: [u32; 2],
     passable_dist: [u32; 2],
     best_edit: [u32; 2],
     best_lik: [f64; 2],
@@ -277,15 +278,20 @@ impl PrelimAlignments {
         Self {
             alns: Vec::new(),
             pos_collection: Default::default(),
+            good_dist: [u32::MAX; 2],
             passable_dist: [u32::MAX; 2],
             best_edit: [u32::MAX; 2],
             best_lik: [f64::NEG_INFINITY; 2],
         }
     }
 
-    #[inline]
-    fn set_passable_dist(&mut self, read_end: ReadEnd, dist: u32) {
-        self.passable_dist[read_end.ix()] = dist;
+    fn set_thresholds(&mut self, read_end: ReadEnd, good_dist: u32, passable_dist: u32) {
+        self.good_dist[read_end.ix()] = good_dist;
+        self.passable_dist[read_end.ix()] = passable_dist;
+    }
+
+    fn best_edit_is_good(&self) -> bool {
+        self.best_edit[0] <= self.good_dist[0] && self.best_edit[1] <= self.good_dist[1]
     }
 
     /// Adds new alignment. Returns false if edit distance is under `passable_dist`.
@@ -459,6 +465,8 @@ impl<R: bam::Read> LaggedReader<R> {
 /// until the next primary alignment.
 struct Data<'a> {
     tid2contig: Vec<ContigId>,
+    /// Stores true if haplotypes in the BAM files represent a strict subset of the contig set.
+    strict_subset: bool,
     contig_set: &'a ContigSet,
     contig_infos: &'a ContigInfos,
     err_prof: &'a ErrorProfile,
@@ -479,6 +487,7 @@ impl<'a> Data<'a> {
         Ok(Self {
             are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
             err_prof: bg_distr.error_profile(),
+            strict_subset: tid2contig.len() < contig_set.len(),
             contig_set, contig_infos, tid2contig, edit_dist_cache, params,
         })
     }
@@ -526,7 +535,7 @@ fn read_next_alns<'a>(
         passable_dist += threshold_dist - good_dist;
     }
 
-    prelim_alignments.set_passable_dist(read_end, passable_dist);
+    prelim_alignments.set_thresholds(read_end, threshold_dist, passable_dist);
     if !prelim_alignments.push(aln, data.contig_set.contigs(), data.err_prof) {
         // Primary alignment is not good enough.
         reader.skip_until_primary()?;
@@ -549,7 +558,8 @@ fn read_next_alns<'a>(
     }
 
     let best_edit = prelim_alignments.best_edit[read_end.ix()];
-    if best_edit > threshold_dist {
+    let req_edit = if data.strict_subset { passable_dist } else { threshold_dist };
+    if best_edit > req_edit {
         return Ok(false);
     }
     read_data.weight *= if best_edit <= good_dist { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
@@ -1230,6 +1240,9 @@ fn recover_and_group_alignments(
         if let Some(hap_alns) = opt_hap_alns {
             rec_alns += hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
                 bg_distr.error_profile());
+        }
+        if !read_alignments.best_edit_is_good() {
+            continue;
         }
         read_alignments.finalize();
 

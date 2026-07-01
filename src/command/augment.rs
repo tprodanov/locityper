@@ -386,10 +386,12 @@ fn process_locus(
     } else {
         log::info!("    Constructing a local VCF file");
         let (contig_set, disc_haps, ref_id) = lazy_data.get()?;
-        if let Some(ref_id) = ref_id
-        && let Some((chrom, shift)) = super::paf_vcf::load_region("auto", &fasta_filename)? {
+        let contigs = contig_set.contigs();
+        if let &Some(ref_id) = ref_id
+            && let Some((chrom, shift)) = super::paf_vcf::load_region("auto", &fasta_filename, contigs.get_len(ref_id))?
+        {
             super::paf_vcf::convert_to_vcf(
-                &aln_filename, contig_set, disc_haps, *ref_id, &chrom, shift, &vcf_filename, None)?;
+                &aln_filename, contig_set, disc_haps, ref_id, &chrom, shift, &vcf_filename, None)?;
         } else {
             log::error!("Cannot construct local VCF: reference contig not found or \
                 could not identify reference coordinates");

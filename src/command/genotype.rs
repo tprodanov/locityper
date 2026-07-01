@@ -19,7 +19,8 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        self, interv, recruit, fastx, div, Interval,
+        self, interv, recruit, div, Interval,
+        fastx::{self, FastxRead, SingleRecord},
         contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
@@ -73,6 +74,7 @@ struct Args {
     preproc: Option<PathBuf>,
     databases: Vec<PathBuf>,
     output: Option<PathBuf>,
+    basis: String,
 
     subset_loci: HashSet<String>,
     ploidy: u8,
@@ -112,6 +114,7 @@ impl Default for Args {
             preproc: None,
             databases: Vec::new(),
             output: None,
+            basis: "auto".to_string(),
 
             subset_loci: HashSet::default(),
             ploidy: 2,
@@ -215,6 +218,12 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Database directory (see {}).\n\
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
         "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " target").underline());
+    println!("    {:KEY$} {:VAL$}  Haplotype basis to speed up read mapping (see {}).\n\
+        {EMPTY}  Default ({}): use haplotypes-basis.fa.gz if exists in the database,\n\
+        {EMPTY}  otherwise haplotypes.fa.gz (use {} to skip basis haplotypes).\n\
+        {EMPTY}  For all other values, use haplotypes-basis.{}.fa.gz.",
+        "    --basis".green(), "STR".yellow(), concatcp!(super::PROGRAM, " augment").underline(),
+        "auto".yellow(), "none".yellow(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",
@@ -417,6 +426,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     args.databases.push(val.parse()?);
                 }
             }
+            Long("basis") => args.basis = parser.value()?.parse()?,
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Long("subset-loci") | Long("loci-subset") => {
                 for val in parser.values()? {
@@ -991,25 +1001,58 @@ fn create_mapping_command(
     cmd
 }
 
+/// Based on the basis/leave-out arguments returns a path to the fasta file, as well as a flag
+/// indicating whether the file needs to be deleted later.
+fn get_mapping_fasta_filename(
+    locus: &LocusData,
+    args: &Args,
+) -> crate::Result<(PathBuf, bool)> {
+    let full_fname = locus.db_dir.join(paths::LOCUS_FASTA);
+    let def_basis_fname = locus.db_dir.join(paths::DEFAULT_BASIS_FASTA);
+    let (filename, is_full) = match &args.basis as &str {
+        "auto" => if def_basis_fname.exists() { (def_basis_fname, false) } else { (full_fname, true) },
+        "none" => (full_fname, true),
+        s => (locus.db_dir.join(format!("haplotypes-basis.{}.fa.gz", s)), false),
+    };
+    if !filename.exists() {
+        return Err(error!(InvalidInput, "Haplotypes file {} does not exist", ext::fmt::path(filename)));
+    }
+
+    if !args.leave_out.is_empty() {
+        if is_full {
+            // Create a new FASTA without left-out haplotypes.
+            let new_fasta_filename = locus.out_dir.join("haplotypes.fa");
+            log::info!("    Copying non-left-out haplotypes to {}", ext::fmt::path(&new_fasta_filename));
+            let mut fasta_writer = ext::sys::create_file(&new_fasta_filename)?;
+            for (name, seq) in izip!(locus.set.contigs().names(), locus.set.seqs()) {
+                seq::write_multiline_fasta(&mut fasta_writer, name.as_bytes(), seq)
+                    .map_err(add_path!(new_fasta_filename))?;
+            }
+            return Ok((new_fasta_filename, true));
+        } else {
+            // Validate that only relevant haplotypes are in the basis.
+            let mut fasta_reader = fastx::Reader::from_path(&filename)?;
+            let mut record = Default::default();
+            while fasta_reader.read_next(&mut record)? {
+                let name = record.name_str()?;
+                if !locus.set.contigs().contains(name) {
+                    return Err(error!(InvalidInput, "Basis haplotypes file {} contains left-out haplotypes. \
+                        Please, either use --basis none, or leave out haplotypes during basis construction",
+                        ext::fmt::path(&filename)));
+                }
+            }
+        }
+    }
+    Ok((filename, false))
+}
+
 fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args: &Args) -> crate::Result<()> {
     if filenames.aln_filename.exists() {
         log::info!("    Skipping read mapping");
         return Ok(());
     }
 
-    let in_fasta: PathBuf = if args.leave_out.is_empty() {
-        locus.db_dir.join(paths::LOCUS_FASTA)
-    } else {
-        let fasta_filename = locus.out_dir.join("haplotypes.fa");
-        log::info!("    Copying left-out haplotypes to {}", ext::fmt::path(&fasta_filename));
-        let mut fasta_writer = ext::sys::create_file(&fasta_filename)?;
-        for (name, seq) in izip!(locus.set.contigs().names(), locus.set.seqs()) {
-            seq::write_multiline_fasta(&mut fasta_writer, name.as_bytes(), seq)
-                .map_err(add_path!(fasta_filename))?;
-        }
-        fasta_filename
-    };
-
+    let (in_fasta, delete_after) = get_mapping_fasta_filename(locus, args)?;
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &filenames.reads_filename, bg_distr.seq_info(),
@@ -1038,7 +1081,7 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     fs::rename(&filenames.tmp_aln_filename, &filenames.aln_filename)
         .map_err(add_path!(filenames.tmp_aln_filename, filenames.aln_filename))?;
-    if !args.leave_out.is_empty() {
+    if delete_after {
         fs::remove_file(&in_fasta).map_err(add_path!(in_fasta))?;
     }
     Ok(())

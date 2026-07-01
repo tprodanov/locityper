@@ -13,7 +13,8 @@ use crate::{
     err::{Error, error, add_path},
     ext,
     seq::{
-        fastx, NamedSeq,
+        fastx::{self, SingleRecord},
+        NamedSeq,
         counts::KmerCounts,
     },
     algo::{HashMap, HashSet, IntMap},
@@ -283,12 +284,11 @@ impl ContigSet {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let mut contigs = ContigNames::new(tag);
         let mut seqs = Vec::new();
-        fasta_reader.read_all(|name, seq| {
-            contigs.add(name, seq.len())?;
-            seqs.push(seq.to_owned());
-            Ok(())
-        })?;
-
+        let mut record = Default::default();
+        while fasta_reader.read_next_standardized(&mut record)? {
+            contigs.add(record.name_str()?.to_owned(), record.seq().len())?;
+            seqs.push(record.seq().to_owned());
+        }
         Ok(Self::new(Arc::new(contigs), seqs))
     }
 

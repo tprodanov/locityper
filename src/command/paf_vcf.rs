@@ -133,10 +133,10 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
 /// Returns chromosome name and 0-based start position.
-pub(super) fn load_region(s: &str, fasta_filename: &Path) -> crate::Result<Option<(String, u32)>> {
+pub(super) fn load_region(s: &str, fasta_filename: &Path, ref_len: u32) -> crate::Result<Option<(String, u32)>> {
     if s == "none" { return Ok(None) };
 
-    let filename = if s == "auto" {
+    let fname = if s == "auto" {
         Path::new(fasta_filename).parent()
             .ok_or_else(|| error!(RuntimeError, "Cannot get parent directory for {}", s))?
             .join(super::paths::LOCUS_BED)
@@ -145,31 +145,44 @@ pub(super) fn load_region(s: &str, fasta_filename: &Path) -> crate::Result<Optio
         let interval_re = Regex::new(interv::INTERVAL_PATTERN).unwrap();
         if let Some(captures) = pos_re.captures(s).or_else(|| interval_re.captures(s)) {
             let chrom = captures[1].to_string();
-            let pos: PrettyU32 = captures[2].parse()
-                .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?;
-            return Ok(Some((chrom, pos.get().strict_sub(1))));
+            let start = captures[2].parse::<PrettyU32>()
+                .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get().strict_sub(1);
+            let end = captures[3].parse::<PrettyU32>()
+                .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get();
+            if end - start != ref_len {
+                return Err(error!(InvalidData,
+                    "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
+                    chrom, start + 1, end, end - start, ref_len));
+            }
+            return Ok(Some((chrom, start)));
         }
         PathBuf::from(s)
     };
 
-    if !filename.exists() {
-        log::error!("Cannot find BED file {}, using relative locus coordinates", filename.display());
+    if !fname.exists() {
+        log::error!("Cannot find BED file {}, using relative locus coordinates", fname.display());
         return Ok(None);
     }
 
-    let mut lines = ext::sys::open(&filename)?.lines();
-    let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
-        .map_err(add_path!(filename))?;
-    let trimmed_line = line.trim();
-    let mut split = trimmed_line.split('\t');
-    let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+    let mut lines = ext::sys::open(&fname)?.lines();
+    let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
+        .map_err(add_path!(fname))?;
+    let trimmed = line.trim();
+    let mut split = trimmed.split('\t');
+    let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
         .to_string();
-    let pos: u32 = split.next()
-        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})",
-            filename.display(), trimmed_line))?
-        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}",
-            trimmed_line, filename.display()))?;
-    Ok(Some((chrom, pos)))
+    let start: u32 = split.next()
+        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
+        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
+    let end: u32 = split.next()
+        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
+        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
+    if end - start != ref_len {
+        return Err(error!(InvalidData,
+            "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
+            chrom, start + 1, end, end - start, ref_len));
+    }
+    Ok(Some((chrom, start)))
 }
 
 #[derive(Clone, Debug)]
@@ -602,6 +615,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let ref_hap = args.ref_hap.clone().expect("Reference haplotype must be provided");
     let ref_id = contig_set.contigs().try_get_id(&ref_hap)
         .ok_or_else(|| error!(InvalidInput, "Reference haplotype {} not found in the fasta file", ref_hap))?;
+    let ref_len = contig_set.contigs().get_len(ref_id);
 
     let disc_filename = match &args.disc_filename as &str {
         "auto" => Some(Path::new(fasta_filename).parent()
@@ -620,7 +634,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         _ => Default::default(),
     };
 
-    let (chrom, shift) = load_region(&args.region, fasta_filename)?.unwrap_or((ref_hap.clone(), 0));
+    let (chrom, shift) = load_region(&args.region, fasta_filename, ref_len)?.unwrap_or((ref_hap.clone(), 0));
     convert_to_vcf(args.paf.as_ref().expect("PAF filename must be provided"),
         &contig_set, &disc_haps, ref_id, &chrom, shift,
         args.out_merged.as_ref().expect("Merged output VCF must be present"),
