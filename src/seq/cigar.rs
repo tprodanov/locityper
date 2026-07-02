@@ -641,9 +641,7 @@ impl Cigar {
         let mut r_mask;
         let mut window_rem = window;
         let mut edit = 0;
-        // log::debug!("Run local edit at {:?}, window {}", &self, window);
         loop {
-            // log::debug!("window_rem = {}, edit = {}", window_rem, edit);
             match r_iter.next() {
                 Some(item) if item.len > window_rem => {
                     r_rem = item.len - window_rem;
@@ -660,7 +658,6 @@ impl Cigar {
             }
         }
         let mut max_edit = edit;
-        // log::debug!("At the start, edit = {}, r_rem = {}, r_mask = {}", edit, r_rem, r_mask);
 
         let mut l_iter = self.tuples.iter();
         let &CigarItem { op: tmp_op, len: mut l_rem } = l_iter.next().expect("CIGAR must be non-empty");
@@ -670,8 +667,6 @@ impl Cigar {
         loop {
             let shift = min(l_rem, r_rem);
             edit = edit + (r_mask & shift) - (l_mask & shift);
-            // log::debug!("l_rem = {:3}, r_rem = {:3}, shift = {:3}, l_mask = {}, r_mask = {}, edit = {:3}",
-            //     l_rem, r_rem, shift, l_mask, r_mask, edit);
             max_edit = max(max_edit, edit);
 
             if shift == r_rem {
@@ -684,7 +679,6 @@ impl Cigar {
             }
             if shift == l_rem {
                 let item = l_iter.next().expect("Left iterator could not overtake the right one");
-                // log::debug!("    Next left  = {}", item);
                 l_rem = item.len;
                 l_mask = bool_mask(item.op != Operation::Equal);
             } else {

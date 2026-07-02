@@ -1015,17 +1015,39 @@ fn in_bounds(alns: &[Alignment], boundary: u32, contigs: &ContigNames) -> bool {
 
 #[derive(Default)]
 struct ReadCounts {
-    total: u32,
+    good_reads: u32,
     poorly_mapped: u32,
     out_of_bounds: u32,
     few_kmers: u32,
+
+    original_alns: usize,
+    recovered_alns: usize,
 }
 
 impl ReadCounts {
-    fn to_string(&self, use_reads: usize, is_paired_end: bool) -> String {
-        format!("Use {} read{}s. Discard {} poorly mapped, {} out of bounds and {} with few unique k-mers",
-            use_reads, if is_paired_end { " pair" } else { "" },
-            self.poorly_mapped, self.out_of_bounds, self.few_kmers)
+    fn add(&mut self, oth: &Self) {
+        self.good_reads += oth.good_reads;
+        self.poorly_mapped += oth.poorly_mapped;
+        self.out_of_bounds += oth.out_of_bounds;
+        self.few_kmers += oth.few_kmers;
+
+        self.original_alns += oth.original_alns;
+        self.recovered_alns += oth.recovered_alns;
+    }
+
+    fn total_reads(&self) -> u32 {
+        self.good_reads + self.poorly_mapped + self.out_of_bounds + self.few_kmers
+    }
+
+    fn print_log(&self, is_paired_end: bool, n_contigs: usize) {
+        log::debug!("    Use {} read{}s. Discard {} poorly mapped, {} out of bounds and {} with few unique k-mers",
+            self.good_reads, if is_paired_end { " pair" } else { "" },
+            self.poorly_mapped, self.out_of_bounds, self.few_kmers);
+        let divisor = ((1 + usize::from(is_paired_end)) * n_contigs * self.good_reads as usize) as f64;
+        log::debug!("    Found {:.3} alignments / read / haplotype (loaded {:.3} + recovered {:.3})",
+            (self.original_alns + self.recovered_alns) as f64 / divisor,
+            self.original_alns as f64 / divisor, self.recovered_alns as f64 / divisor,
+        );
     }
 }
 
@@ -1090,10 +1112,8 @@ impl AllAlignments {
 
         let mut counts = ReadCounts::default();
         let mut ungroupped_reads = vec![Vec::new(); usize::from(threads)];
-        let mut n_orig_alns = 0;
         let mut total_index = 0..;
         while reader.has_more() {
-            counts.total += 1;
             let mut read_data = ReadData::default();
             let mut prelim_alignments = PrelimAlignments::new();
             let mut well_mapped = read_next_alns(&data, &mut reader, ReadEnd::First,
@@ -1126,16 +1146,13 @@ impl AllAlignments {
             } else {
                 unique_kmers.calculate_read_weight(&mut read_data, &mut io::sink()).expect("No errors expected");
             }
-            n_orig_alns += prelim_alignments.len();
             ungroupped_reads[total_index.next().unwrap() % threads].push((read_data, prelim_alignments));
         }
-        let divisor = ((1 + usize::from(is_paired_end)) * contig_set.len() * total_index.next().unwrap()) as f64;
-        log::debug!("    Loaded     {:.3} alignments / read / haplotype", n_orig_alns as f64 / divisor);
 
         if opt_hap_alns.as_ref().is_none() {
             log::debug!("    Alignment recovery is disabled (pairwise haplotype alignments required)");
         }
-        let (all_alns, n_rec_alns) = if threads == 1 {
+        let (all_alns, counts2) = if threads == 1 {
             recover_and_group_alignments(ungroupped_reads.pop().unwrap(), bg_distr, &opt_hap_alns, &contig_infos,
                 &contig_set, params)
         } else {
@@ -1145,23 +1162,20 @@ impl AllAlignments {
                         &contig_infos, &contig_set, &params)))
                     .collect();
                 let mut all_alns = AllAlignments::default();
-                let mut n_rec_alns = 0;
+                let mut counts2 = ReadCounts::default();
                 for handle in handles {
                     let tup = handle.join().expect("Thread failed for unknown reason");
                     all_alns.extend(tup.0);
-                    n_rec_alns += tup.1;
+                    counts2.add(&tup.1);
                 }
-                (all_alns, n_rec_alns)
+                (all_alns, counts2)
             })
         };
+        counts.add(&counts2);
 
-        if opt_hap_alns.is_some() {
-            log::debug!("    Recovered +{:.3} alignments / read / haplotype ({:.3} total)",
-            n_rec_alns as f64 / divisor, (n_rec_alns + n_orig_alns) as f64 / divisor);
-        }
         counts.few_kmers = all_alns.unused_reads.len() as u32;
-        log::debug!("    {}", counts.to_string(all_alns.reads.len(), is_paired_end));
-        if collisions > 2 && collisions * 100 > counts.total {
+        counts.print_log(is_paired_end, contig_set.len());
+        if collisions > 2 && collisions * 100 > counts.total_reads() {
             return Err(error!(RuntimeError, "Too many read name collisions ({}). \
                 Possibly, paired-end reads are processed as single-end reads.", collisions))
         }
@@ -1217,7 +1231,7 @@ impl AllAlignments {
 
 /// If possible, recover additional read alignments; then group read pairs together.
 /// - Returns AllAlignments (that can be combined from different threads),
-/// - number of new recovered alignments.
+/// - Updated read counts.
 fn recover_and_group_alignments(
     prelim_alignments: Vec<(ReadData, PrelimAlignments)>,
     bg_distr: &BgDistr,
@@ -1225,7 +1239,7 @@ fn recover_and_group_alignments(
     contig_infos: &ContigInfos,
     contig_set: &ContigSet,
     params: &super::Params,
-) -> (AllAlignments, usize) {
+) -> (AllAlignments, ReadCounts) {
     // Accuracy under 6 produces CIGARs without =/X.
     const ALIGNER_ACCURACY: u8 = 6;
     // For read alignment, use 10 bp band
@@ -1233,15 +1247,18 @@ fn recover_and_group_alignments(
     let aligner = Aligner::new(Default::default(), ALIGNER_ACCURACY, ALIGNER_BAND, true);
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let mut buffer = Vec::with_capacity(16);
+    let mut counts = ReadCounts::default();
 
     let mut all_alns = AllAlignments::default();
-    let mut rec_alns = 0;
     for (read_data, mut read_alignments) in prelim_alignments {
+        let original_alns = read_alignments.len();
+        let mut recovered_alns = 0;
         if let Some(hap_alns) = opt_hap_alns {
-            rec_alns += hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
+            recovered_alns += hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
                 bg_distr.error_profile());
         }
         if !read_alignments.best_edit_is_good() {
+            counts.poorly_mapped += 1;
             continue;
         }
         read_alignments.finalize();
@@ -1256,10 +1273,14 @@ fn recover_and_group_alignments(
         };
         // TODO: Rethink this, reads may be needed for read depth!
         if groupped_alns.weight() >= params.min_weight {
+            counts.good_reads += 1;
+            counts.original_alns += original_alns;
+            counts.recovered_alns += recovered_alns;
             all_alns.reads.push(groupped_alns);
         } else {
+            counts.few_kmers += 1;
             all_alns.unused_reads.push(groupped_alns);
         }
     }
-    (all_alns, rec_alns)
+    (all_alns, counts)
 }

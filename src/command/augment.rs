@@ -129,10 +129,10 @@ fn print_help() {
         {EMPTY}  Default: {}, unless {} is used.",
         "    --default".green(), "y|n".yellow(), super::fmt_def("yes"), "--basis-lo".green());
     println!("    {:KEY$} {:VAL$}  Maximum seq. divergence from the basis haplotypes [{}].",
-        "    --basis-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.basis_div));
+        "-s, --basis-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.basis_div));
     println!("    {:KEY$} {:VAL$}  Calculate divergence across {} bp moving windows [{}].\n\
         {EMPTY}  Use \"inf\" for global divergence over the whole alignment.",
-        "    --div-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.div_window)));
+        "-w, --div-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.div_window)));
     println!("    {:KEY$} {:VAL$}  Remove sample(s) from the basis haplotypes.\n\
         {EMPTY}  Removed haplotypes can be replaced by identical haplotypes with another name.\n\
         {EMPTY}  Needed for subsequent {}.",
@@ -195,8 +195,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("skip-basis") => args.skip_basis = true,
             Short('t') | Long("tag") => args.basis_tag = Some(parser.value()?.parse()?),
             Long("default") => args.make_default = Some(parser.value()?.parse::<YesNo>()?.into()),
-            Long("basis-div") => args.basis_div = parser.value()?.parse()?,
-            Long("div-window") => args.div_window = parser.value()?.parse::<PrettyU32>()?.get(),
+            Short('s') | Long("basis-div") => args.basis_div = parser.value()?.parse()?,
+            Short('w') | Long("div-window") => args.div_window = parser.value()?.parse::<PrettyU32>()?.get(),
             Long("basis-lo") => {
                 for val in parser.values()? {
                     args.basis_leaveout.push(val.parse()?);
@@ -226,9 +226,9 @@ fn construct_basis_tag(args: &Args) -> crate::Result<String> {
     let mut tag = if args.div_window == u32::MAX {
         "global".to_owned()
     } else {
-        format!("{}", ext::fmt::PrettyU32(args.div_window))
+        format!("w{}", ext::fmt::PrettyU32(args.div_window))
     };
-    write!(tag, "-d{}", crate::math::fmt_signif(args.basis_div, 5)).unwrap();
+    write!(tag, "-s{}", crate::math::fmt_signif(args.basis_div, 5)).unwrap();
     if !args.basis_leaveout.is_empty() {
         write!(tag, "-lo{}", args.basis_leaveout.join(",")).unwrap();
     }
