@@ -11,6 +11,7 @@ use crate::{
     ext::vec::VecOrNone,
     seq::wfa::{Penalties, Aligner},
     algo::bisect,
+    math::RoundDiv,
 };
 
 /// Subset of CIGAR operations.
@@ -691,7 +692,7 @@ impl Cigar {
     /// Finds locally similar moving windows (size = `window`, step = `step`)
     /// whose edit distances do not exceed `max_edit`.
     ///
-    /// Fills `indices` with the corresponding window indices.
+    /// Appends `indices` with the corresponding window indices (vector is not cleared).
     pub fn locally_similar<const IN_QUERY: bool>(
         &self,
         window: u32,
@@ -747,8 +748,7 @@ impl Cigar {
                 let next_saved_pos = pos1 + i32::rem_euclid(-(pos1 as i32), step as i32) as u32;
                 for pos in (next_saved_pos..pos1 + shift).step_by(step as usize) {
                     let curr_shift = pos - pos1;
-                    let curr_edit = edit + (mask2 & curr_shift) - (mask1 & curr_shift);
-                    if curr_edit <= max_edit {
+                    if edit + (mask2 & curr_shift) - (mask1 & curr_shift) <= max_edit {
                         indices.push((pos / step) as usize);
                     }
                 }
@@ -779,6 +779,11 @@ impl Cigar {
                 }
             }
         }
+        if edit <= max_edit {
+            indices.push(pos1.fast_ceil_div(step) as usize);
+        }
+        assert!(pos1 + window == pos2);
+        assert!(pos2 == if IN_QUERY { self.qlen } else { self.rlen });
     }
 }
 

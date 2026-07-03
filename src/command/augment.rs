@@ -4,7 +4,7 @@ use std::{
     time::Instant,
     path::{Path, PathBuf},
     fmt::Write as FmtWrite,
-    cmp::{min, max},
+    cmp::max,
     borrow::Cow,
 };
 use colored::Colorize;
@@ -13,13 +13,16 @@ use crate::{
     ext::{
         self, TriangleMatrix, LazyResult,
         fmt::{PrettyU32, YesNo},
+        vec::BitArray,
     },
     seq::{
         dist, wfa, fastx,
+        cigar::Cigar,
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
         kmers::Kmer,
     },
-    algo::{self, HashSet, IntSet, TwoU32},
+    algo::{self, HashSet},
+    math::RoundDiv,
 };
 use super::{paths, Rerun};
 
@@ -28,11 +31,12 @@ struct Args {
     subset_loci: HashSet<String>,
     ref_name: Option<String>,
 
+    divergence: f64,
+    window: u32,
+    step: Option<u32>,
     skip_basis: bool,
     basis_tag: Option<String>,
     make_default: Option<bool>,
-    basis_div: f64,
-    div_window: u32,
     basis_leaveout: Vec<String>,
 
     skip_vcf: bool,
@@ -48,11 +52,12 @@ impl Default for Args {
             subset_loci: Default::default(),
             ref_name: None,
 
+            divergence: 0.01,
+            window: 250,
+            step: None,
             skip_basis: false,
             basis_tag: None,
             make_default: None,
-            basis_div: 0.02,
-            div_window: 200,
             basis_leaveout: Vec::new(),
 
             skip_vcf: false,
@@ -67,8 +72,12 @@ impl Args {
     fn validate(self) -> crate::Result<Self> {
         validate_param!(self.database.is_some(), "Input database is not provided (see -i/--input)");
         validate_param!(self.ref_name.is_some(), "Reference haplotype name must be provided");
-        validate_param!(self.basis_div >= 0.0 && self.basis_div <= 1.0,
-            "Basis divergence ({}) must be between 0 and 1", self.basis_div);
+        validate_param!(self.divergence >= 0.0 && self.divergence <= 1.0,
+            "Basis divergence ({}) must be between 0 and 1", self.divergence);
+        if let Some(step) = self.step {
+            validate_param!(0 < step && step <= self.window,
+                "Step size ({}) must be over 0 and not greater than the window size ({})", step, self.window);
+        }
         Ok(self)
     }
 }
@@ -121,23 +130,28 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
         "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.aln_params.penalties.gap_extend));
 
-    println!("\n{} (used for faster read mapping)", "Basis haplotypes selection:".bold());
-    println!("    {:KEY$} {:VAL$}  Skip basis haplotypes selection.",
-        "    --skip-basis".green(), super::flag());
+    println!("\n{}", "Basis haplotypes selection:".bold());
+    println!("    Each original haplotype will be similar ({}) to one of the basis haplotypes", "-x".green());
+    println!("    at each moving window ({}, {}). Basis haplotypes will be used for faster read mapping.",
+        "-w".green(), "-s".green());
+    println!("    {:KEY$} {:VAL$}  Maximum seq. divergence from the basis haplotypes [{}].",
+        "-x, --divergence".green(), "NUM".yellow(), super::fmt_def_f64(defaults.divergence));
+    println!("    {:KEY$} {:VAL$}  Calculate divergence across {} bp moving windows [{}].\n\
+        {EMPTY}  Use \"inf\" for global divergence over the whole alignment.",
+        "-w, --window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.window)));
+    println!("    {:KEY$} {:VAL$}  Moving window step [half of {}].",
+        "-s, --step".green(), "INT".yellow(), "-w".green());
     println!("    {:KEY$} {:VAL$}  Custom tag for the basis haplotypes (haplotypes-basis.{}.fa.gz).",
         "-t, --tag".green(), "STR".yellow(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Make these basis haplotypes default (yes/no).\n\
         {EMPTY}  Default: {}, unless {} is used.",
         "    --default".green(), "y|n".yellow(), super::fmt_def("yes"), "--basis-lo".green());
-    println!("    {:KEY$} {:VAL$}  Maximum seq. divergence from the basis haplotypes [{}].",
-        "-s, --basis-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.basis_div));
-    println!("    {:KEY$} {:VAL$}  Calculate divergence across {} bp moving windows [{}].\n\
-        {EMPTY}  Use \"inf\" for global divergence over the whole alignment.",
-        "-w, --div-window".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.div_window)));
     println!("    {:KEY$} {:VAL$}  Remove sample(s) from the basis haplotypes.\n\
         {EMPTY}  Removed haplotypes can be replaced by identical haplotypes with another name.\n\
         {EMPTY}  Needed for subsequent {}.",
         "    --basis-lo".green(), "STR+".yellow(), "locityper genotype --lo".underline());
+    println!("    {:KEY$} {:VAL$}  Skip basis haplotypes selection.",
+        "    --skip-basis".green(), super::flag());
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Do not construct local VCF files.",
@@ -193,18 +207,19 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.aln_params.penalties.gap_extend = parser.value()?.parse()?,
 
+            Short('x') | Long("divergence") => args.divergence = parser.value()?.parse()?,
+            Short('w') | Long("window") => args.window = parser.value()?.parse::<PrettyU32>()?.get(),
+            Short('s') | Long("step") => args.step = Some(parser.value()?.parse::<PrettyU32>()?.get()),
             Long("skip-basis") => args.skip_basis = true,
             Short('t') | Long("tag") => args.basis_tag = Some(parser.value()?.parse()?),
             Long("default") => args.make_default = Some(parser.value()?.parse::<YesNo>()?.into()),
-            Short('s') | Long("basis-div") => args.basis_div = parser.value()?.parse()?,
-            Short('w') | Long("div-window") => args.div_window = parser.value()?.parse::<PrettyU32>()?.get(),
             Long("basis-lo") => {
                 for val in parser.values()? {
                     args.basis_leaveout.push(val.parse()?);
                 }
             }
 
-            Long("skip-vcf") => args.skip_vcf = parser.value()?.parse()?,
+            Long("skip-vcf") => args.skip_vcf = true,
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
 
@@ -224,12 +239,16 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 /// Construct basis tag as "d{div}-{window}" with suffix "-loNAME,NAME,NAME" if necessary.
 fn construct_basis_tag(args: &Args) -> crate::Result<String> {
-    let mut tag = if args.div_window == u32::MAX {
-        "global".to_owned()
+    let mut tag = String::new();
+    write!(tag, "x{}", crate::math::fmt_signif(args.divergence, 5)).unwrap();
+    if args.window == u32::MAX {
+        write!(tag, "-global").unwrap();
     } else {
-        format!("w{}", ext::fmt::PrettyU32(args.div_window))
+        write!(tag, "-w{}", ext::fmt::PrettyU32(args.window)).unwrap();
+        if let Some(step) = args.step {
+            write!(tag, "-s{}", ext::fmt::PrettyU32(step)).unwrap();
+        }
     };
-    write!(tag, "-s{}", crate::math::fmt_signif(args.basis_div, 5)).unwrap();
     if !args.basis_leaveout.is_empty() {
         write!(tag, "-lo{}", args.basis_leaveout.join(",")).unwrap();
     }
@@ -251,38 +270,62 @@ fn create_symlink(path1: &Path, path2: &Path) -> crate::Result<()> {
         .map_err(add_path!(path1, path2))
 }
 
+fn update_bitarray<const IN_QUERY: bool>(
+    cigar: &Cigar,
+    global_div: f64,
+    bitarrays: &mut [BitArray],
+    oth_index: usize,
+    buf_indices: &mut Vec<usize>,
+    step: u32,
+    max_window_edit: u32,
+    args: &Args,
+) {
+    buf_indices.clear();
+    if (if IN_QUERY { cigar.query_len() } else { cigar.ref_len() }) <= args.window {
+        if global_div <= args.divergence {
+            buf_indices.push(0);
+        }
+    } else {
+        cigar.locally_similar::<IN_QUERY>(args.window, step, max_window_edit, buf_indices);
+    }
+    for &w in buf_indices as &[usize] {
+        bitarrays[w].set_true(oth_index);
+    }
+}
+
 fn inner_construct_dominant_set(
     mut paf_file: dist::PafFile<impl BufRead>,
     contigs: &ContigNames,
     args: &Args,
 ) -> crate::Result<Vec<usize>> {
-    let mut adjacencies = vec![Vec::new(); contigs.len()];
-    let max_window_edit = (f64::from(args.div_window) * args.basis_div).floor() as u32;
-    let mut
+    let max_window_edit = (f64::from(args.window) * args.divergence).floor() as u32;
+    let step = args.step.unwrap_or(max(args.window >> 1, 1));
+    // For each contig and each window, store similarities to other contigs.
+    let mut bitarrays: Vec<_> = contigs.lengths().iter().enumerate().map(|(i, &l)| {
+        let n_windows = (l - args.window).fast_ceil_div(step) as usize + 1;
+        let mut bitarr = BitArray::new(contigs.len());
+        bitarr.set_true(i);
+        vec![bitarr; n_windows as usize]
+    }).collect();
 
+    let mut indices = Vec::new();
     while let Some(entry) = paf_file.next().transpose()? {
-        let Some(i) = contigs.try_get_id(entry.query_name()) else { continue };
-        let Some(j) = contigs.try_get_id(entry.target_name()) else { continue };
-        if !pairs.insert(TwoU32(u32::from(min(i, j).get()), u32::from(max(i, j).get()))) {
-            log::warn!("Pair {} - {} appears twice in the PAF file", entry.query_name(), entry.target_name());
-            continue;
-        }
-        // Can't do anything if there is no CIGAR.
+        let Some(i) = contigs.try_get_id(entry.query_name()).map(ContigId::ix) else { continue };
+        let Some(j) = contigs.try_get_id(entry.target_name()).map(ContigId::ix) else { continue };
+        if i == j { continue };
         let Some(cigar) = entry.cigar().transpose()? else { continue };
-        let aln_len = entry.aln_len()?;
-        let global_edit = aln_len - entry.n_matches()?;
-
-        let add_edge = if aln_len <= args.div_window {
-            f64::from(global_edit) <= args.basis_div * f64::from(aln_len)
-        } else {
-            global_edit <= max_window_edit || cigar.max_local_edit(args.div_window) <= max_window_edit
-        };
-        if add_edge {
-            adjacencies[i.ix()].push(j.ix());
-            adjacencies[j.ix()].push(i.ix());
-        }
+        let global_div = entry.divergence()?;
+        update_bitarray::<true >(&cigar, global_div, &mut bitarrays[i], j, &mut indices, step, max_window_edit, args);
+        update_bitarray::<false>(&cigar, global_div, &mut bitarrays[j], i, &mut indices, step, max_window_edit, args);
     }
-    Ok(algo::dom_set::find_dominating_set(&adjacencies))
+
+    let mut constraints = HashSet::default();
+    for bitarray in bitarrays.into_iter().flatten() {
+        constraints.insert(bitarray);
+    }
+    log::debug!("        Using ILP to find a basis set over {} haplotypes and {} constraints",
+        contigs.len(), constraints.len());
+    Ok(algo::dom_set::find_dominating_set(contigs.len(), constraints.iter()))
 }
 
 fn construct_dominant_set(
@@ -313,7 +356,7 @@ fn construct_dominant_set(
     };
     let contigs = contig_set.contigs();
     let paf_filename = dir.join(paths::LOCUS_PAF);
-    let mut paf_file = ext::sys::open(paf_filename).map(dist::PafFile::new)?;
+    let paf_file = ext::sys::open(paf_filename).map(dist::PafFile::new)?;
     let dominant_set = inner_construct_dominant_set(paf_file, contigs, args)?;
 
     log::info!("        Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",
@@ -399,6 +442,7 @@ fn process_locus(
         {
             super::paf_vcf::convert_to_vcf(
                 &aln_filename, contig_set, disc_haps, ref_id, &chrom, shift, &vcf_filename, None)?;
+            did_anything = true;
         } else {
             log::error!("Cannot construct local VCF: reference contig not found or \
                 could not identify reference coordinates");

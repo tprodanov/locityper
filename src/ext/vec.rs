@@ -395,6 +395,7 @@ const BUCKET_PWR: u32 = 6;
 const BUCKET_MOD: usize = (1 << BUCKET_PWR) - 1;
 
 /// Non-growable bit array.
+#[derive(Clone, PartialEq, Eq)]
 pub struct BitArray {
     storage: Vec<Block>,
     n_bits: usize,
@@ -408,6 +409,11 @@ impl BitArray {
             storage: vec![0; storage_len],
             n_bits
         }
+    }
+
+    #[allow(unused)]
+    pub fn len(&self) -> usize {
+        self.n_bits
     }
 
     #[inline(always)]
@@ -427,10 +433,19 @@ impl BitArray {
         }
     }
 
+    #[inline(always)]
+    pub fn set_true(&mut self, i: usize) {
+        self.set_generic::<true>(i)
+    }
+
     #[inline]
     pub fn get(&self, i: usize) -> bool {
         let (offset, mask) = self.offset_and_mask(i);
         (self.storage[offset] & mask) != 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = bool> {
+        (0..self.n_bits).map(|i| self.get(i))
     }
 
     /// Returns iterator over indices, for which one is stored.
@@ -446,5 +461,11 @@ impl Hash for BitArray {
         for block in &self.storage {
             block.hash(state);
         }
+    }
+}
+
+impl fmt::Debug for BitArray {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.iter().map(|v| write!(f, "{}", u8::from(v))).collect()
     }
 }
