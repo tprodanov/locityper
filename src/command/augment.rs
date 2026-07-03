@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::BufRead,
     time::Instant,
     path::{Path, PathBuf},
     fmt::Write as FmtWrite,
@@ -250,6 +251,40 @@ fn create_symlink(path1: &Path, path2: &Path) -> crate::Result<()> {
         .map_err(add_path!(path1, path2))
 }
 
+fn inner_construct_dominant_set(
+    mut paf_file: dist::PafFile<impl BufRead>,
+    contigs: &ContigNames,
+    args: &Args,
+) -> crate::Result<Vec<usize>> {
+    let mut adjacencies = vec![Vec::new(); contigs.len()];
+    let max_window_edit = (f64::from(args.div_window) * args.basis_div).floor() as u32;
+    let mut
+
+    while let Some(entry) = paf_file.next().transpose()? {
+        let Some(i) = contigs.try_get_id(entry.query_name()) else { continue };
+        let Some(j) = contigs.try_get_id(entry.target_name()) else { continue };
+        if !pairs.insert(TwoU32(u32::from(min(i, j).get()), u32::from(max(i, j).get()))) {
+            log::warn!("Pair {} - {} appears twice in the PAF file", entry.query_name(), entry.target_name());
+            continue;
+        }
+        // Can't do anything if there is no CIGAR.
+        let Some(cigar) = entry.cigar().transpose()? else { continue };
+        let aln_len = entry.aln_len()?;
+        let global_edit = aln_len - entry.n_matches()?;
+
+        let add_edge = if aln_len <= args.div_window {
+            f64::from(global_edit) <= args.basis_div * f64::from(aln_len)
+        } else {
+            global_edit <= max_window_edit || cigar.max_local_edit(args.div_window) <= max_window_edit
+        };
+        if add_edge {
+            adjacencies[i.ix()].push(j.ix());
+            adjacencies[j.ix()].push(i.ix());
+        }
+    }
+    Ok(algo::dom_set::find_dominating_set(&adjacencies))
+}
+
 fn construct_dominant_set(
     dir: &Path,
     contig_set: &ContigSet,
@@ -271,44 +306,16 @@ fn construct_dominant_set(
         }
     }
 
+    log::info!("    Constructing basis haplotypes set");
     let contig_set: Cow<ContigSet> = match args.basis_leaveout.is_empty() {
         true => Cow::Borrowed(contig_set),
         false => Cow::Owned(contig_set.extract_subset(&args.basis_leaveout.iter().cloned().collect(), disc_haps)?.1),
     };
     let contigs = contig_set.contigs();
-    let mut adjacencies = vec![Vec::new(); contig_set.len()];
     let paf_filename = dir.join(paths::LOCUS_PAF);
     let mut paf_file = ext::sys::open(paf_filename).map(dist::PafFile::new)?;
-    let max_window_edit = (f64::from(args.div_window) * args.basis_div).floor() as u32;
-    let mut pairs = IntSet::default();
-    let mut n_edges = 0;
-    while let Some(entry) = paf_file.next().transpose()? {
-        let Some(i) = contigs.try_get_id(entry.query_name()) else { continue };
-        let Some(j) = contigs.try_get_id(entry.target_name()) else { continue };
-        if !pairs.insert(TwoU32(u32::from(min(i, j).get()), u32::from(max(i, j).get()))) {
-            log::warn!("Pair {} - {} appears twice in the PAF file", entry.query_name(), entry.target_name());
-            continue;
-        }
-        // Can't do anything if there is no CIGAR.
-        let Some(cigar) = entry.cigar().transpose()? else { continue };
-        let aln_len = entry.aln_len()?;
-        let global_edit = aln_len - entry.n_matches()?;
+    let dominant_set = inner_construct_dominant_set(paf_file, contigs, args)?;
 
-        let add_edge = if aln_len <= args.div_window {
-            f64::from(global_edit) <= args.basis_div * f64::from(aln_len)
-        } else {
-            global_edit <= max_window_edit || cigar.max_local_edit(args.div_window) <= max_window_edit
-        };
-        if add_edge {
-            n_edges += 1;
-            adjacencies[i.ix()].push(j.ix());
-            adjacencies[j.ix()].push(i.ix());
-        }
-    }
-
-    log::info!("        In total, {} similar haplotype pairs ({:.1}%)",
-        n_edges, 100.0 * f64::from(n_edges) / TriangleMatrix::calc_linear_len(contig_set.len()) as f64);
-    let dominant_set = algo::dom_set::find_dominating_set(&adjacencies);
     log::info!("        Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",
         dominant_set.len(), contig_set.len(), 100.0 - dominant_set.len() as f64 / contig_set.len() as f64 * 100.0);
     let tmp_filename = basis_filename.with_extension(".tmp.gz");

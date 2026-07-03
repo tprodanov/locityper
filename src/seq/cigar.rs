@@ -687,6 +687,99 @@ impl Cigar {
         }
         max_edit
     }
+
+    /// Finds locally similar moving windows (size = `window`, step = `step`)
+    /// whose edit distances do not exceed `max_edit`.
+    ///
+    /// Fills `indices` with the corresponding window indices.
+    pub fn locally_similar<const IN_QUERY: bool>(
+        &self,
+        window: u32,
+        step: u32,
+        max_edit: u32,
+        indices: &mut Vec<usize>,
+    ) {
+        indices.clear();
+        // ...1 = variables at the window start, ...2 = variables at the window end.
+        let mut pos2 = 0;
+        let mut iter2 = self.tuples.iter();
+        let mut edit = 0;
+        // Store `rem` - remainder of the current CIGAR item and last operation `op`.
+        let (mut rem2, mut op2) = loop {
+            if let Some(item) = iter2.next() {
+                let moves_pos = if IN_QUERY { item.op.consumes_query() } else { item.op.consumes_ref() };
+                if moves_pos {
+                    let window_rem = window - pos2;
+                    let shift = min(item.len, window_rem);
+                    edit += bool_mask(item.op != Operation::Equal) & shift;
+                    pos2 += shift;
+                    if item.len > window_rem {
+                        break (item.len - window_rem, item.op);
+                    }
+                } else {
+                    edit += item.len;
+                }
+            } else {
+                // Reached the end of alignment.
+                if edit <= max_edit {
+                    indices.push(0);
+                }
+                return;
+            }
+        };
+
+        let mut iter1 = self.tuples.iter();
+        let &CigarItem { op: mut op1, len: mut rem1 } = iter1.next().expect("CIGAR must be non-empty");
+        let mut pos1 = 0;
+        // Simultaneously go through the left and right iterator, subtract left edit, add right edit.
+        loop {
+            let shift = min(rem1, rem2);
+            let moves_pos1 = if IN_QUERY { op1.consumes_query() } else { op1.consumes_ref() };
+            let moves_pos2 = if IN_QUERY { op2.consumes_query() } else { op2.consumes_ref() };
+            // Move either both positions, or only update CIGAR entry that does not move position.
+            let upd1 = (moves_pos1 == moves_pos2) || !moves_pos1;
+            let upd2 = (moves_pos1 == moves_pos2) || !moves_pos2;
+
+            if moves_pos1 && moves_pos2 {
+                let mask1 = bool_mask(op1 != Operation::Equal);
+                let mask2 = bool_mask(op2 != Operation::Equal);
+                // Smallest i * step >= pos1.
+                let next_saved_pos = pos1 + i32::rem_euclid(-(pos1 as i32), step as i32) as u32;
+                for pos in (next_saved_pos..pos1 + shift).step_by(step as usize) {
+                    let curr_shift = pos - pos1;
+                    let curr_edit = edit + (mask2 & curr_shift) - (mask1 & curr_shift);
+                    if curr_edit <= max_edit {
+                        indices.push((pos / step) as usize);
+                    }
+                }
+                pos1 += shift;
+                pos2 += shift;
+                edit = edit + (mask2 & shift) - (mask1 & shift);
+            } else {
+                // Do not move left/right positions, only update these CIGAR entries that do not move positions.
+                edit = edit + (bool_mask(upd2) & shift) - (bool_mask(upd1) & shift);
+            }
+
+            if upd2 {
+                if shift == rem2 {
+                    let Some(item) = iter2.next() else { break };
+                    rem2 = item.len;
+                    op2 = item.op;
+                } else {
+                    rem2 -= shift;
+                }
+            }
+            if upd1 {
+                if shift == rem1 {
+                    let item = iter1.next().expect("Left iterator could not overtake the right one");
+                    rem1 = item.len;
+                    op1 = item.op;
+                } else {
+                    rem1 -= shift;
+                }
+            }
+        }
+    }
 }
 
 impl PartialEq for Cigar {
