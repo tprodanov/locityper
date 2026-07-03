@@ -483,14 +483,24 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let loci_subdirs = super::add::load_loci_subdirs(
         args.database.as_ref().expect("Database directory must be provided"))?;
     let mut completed = 0;
+    let mut skipped = 0;
+    let mut errors = 0;
     for (locus, locus_dir) in loci_subdirs {
         if !args.subset_loci.is_empty() && !args.subset_loci.contains(&locus) {
             log::trace!("Skipping locus {} (not in the subset loci)", locus);
+            skipped += 1;
             continue;
         }
-        completed += process_locus(&locus, &locus_dir, &args, &tag)?;
+        match process_locus(&locus, &locus_dir, &args, &tag) {
+            Ok(true) => completed += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                log::error!("Error in locus {}: {}", locus, e.display());
+                errors += 1;
+            }
+        }
     }
-    log::info!("Completed {} loci", completed);
-    log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));
+    log::info!("Completed {} loci, skipped {}, errors in {} loci", completed, skipped, errors);
+    log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }
