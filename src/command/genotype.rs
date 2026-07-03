@@ -143,8 +143,8 @@ impl Default for Args {
             assgn_params: Default::default(),
             solvers: Vec::new(),
 
-            hap_div: 0.1,
-            transfer_fails: 100,
+            hap_div: 1.0,
+            transfer_fails: 5000,
         }
     }
 }
@@ -160,7 +160,8 @@ impl Args {
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
         validate_param!(!self.recr_bed.starts_with("~~"),
-            "--recr-bed ~~STR.bed was replaced with --recr-bed @@STR (extension needs to be included as well)");
+            "--recr-bed ~~FILENAME was deprecated in favor of \
+             --recr-bed @@FILENAME.bed (extension needs to be included as well)");
         if self.alt_contig_len > 0 && !self.recr_bed.is_empty() && !self.recr_bed.starts_with("@@") {
             log::debug!("Recruitment BED file (--recr-bed) provided \
                 with non-zero alternative contig len (--recr-alt-len)");

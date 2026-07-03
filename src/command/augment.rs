@@ -401,7 +401,11 @@ fn process_locus(
     args: &Args,
     tag: &str,
 ) -> crate::Result<bool> {
-    let Some(lock_file) = ext::sys::LockFile::try_create(dir.join("augment.lock"))? else { return Ok(false) };
+    let lock_filename = dir.join("augment.lock");
+    let Some(lock_file) = ext::sys::LockFile::try_create(lock_filename.clone())? else {
+        log::debug!("Skipping locus {} (lock exists {})", locus, ext::fmt::path(&lock_filename));
+        return Ok(false)
+    };
     log::info!("Processing locus {}", locus);
     let mut did_anything = false;
     let fasta_filename = dir.join(paths::LOCUS_FASTA);
@@ -478,14 +482,15 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let loci_subdirs = super::add::load_loci_subdirs(
         args.database.as_ref().expect("Database directory must be provided"))?;
+    let mut completed = 0;
     for (locus, locus_dir) in loci_subdirs {
         if !args.subset_loci.is_empty() && !args.subset_loci.contains(&locus) {
             log::trace!("Skipping locus {} (not in the subset loci)", locus);
             continue;
         }
-        process_locus(&locus, &locus_dir, &args, &tag)?;
+        completed += process_locus(&locus, &locus_dir, &args, &tag)?;
     }
-
+    log::info!("Completed {} loci", completed);
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
 }
