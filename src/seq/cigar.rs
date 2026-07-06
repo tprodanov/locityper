@@ -672,7 +672,6 @@ impl Cigar {
 
             if shift == r_rem {
                 let Some(item) = r_iter.next() else { break };
-                // log::debug!("    Next right = {}", item);
                 r_rem = item.len;
                 r_mask = bool_mask(item.op != Operation::Equal);
             } else {
@@ -1001,22 +1000,6 @@ pub fn clipping_rate(record: &record::Record) -> f64 {
     }
 }
 
-/// Since we can't use generic constants to define other constants, use this macro.
-/// For boolean constant TO_REF it will return 0 if true and 1 otherwise.
-macro_rules! pos_ix {
-    ($to_ref:expr) => { const { if $to_ref { 0 } else { 1 } } }
-}
-
-/// Extended CIGAR item, which comparing to `CigarItem`
-/// contains query and reference positions and the start of the operation.
-#[derive(Clone, Copy, Debug)]
-pub struct ExtCigarItem {
-    op: Operation,
-    len: u32,
-    /// Query and target positions.
-    pos: [u32; 2],
-}
-
 /// To speed up binary search, store cigar index for each position = i << STEP_PWR. With pwr = 8, step is 256 bp.
 pub const SPARSE_STEP_PWR: u32 = 8;
 const SPARSE_MASK: u32 = (1 << SPARSE_STEP_PWR) - 1;
@@ -1037,98 +1020,187 @@ fn update_sparse_index(
     }
 }
 
+/// Search direction, either from query to reference, or reference to query.
+pub trait CigarDirection : Copy {
+    /// In an array of two values [qpos, rpos], returns index of the qpos.
+    /// In q_to_r direction, this is 0, otherwise 1.
+    fn query_ix(self) -> usize;
+
+    /// In an array of two values [qpos, rpos], returns index of the rpos.
+    /// In q_to_r direction, this is 1, otherwise 0.
+    fn ref_ix(self) -> usize;
+
+    /// Returns query position out of two positions.
+    /// In q_to_r direction, returns the first value, otherwise the second.
+    fn query_pos(self, pos: [u32; 2]) -> u32;
+
+    /// Returns reference position out of two positions.
+    /// In q_to_r direction, returns the second value, otherwise the first.
+    fn ref_pos(self, pos: [u32; 2]) -> u32;
+
+    /// In q_to_r direction, returns operation itself, otherwise its inversion.
+    fn operation(self, operation: Operation) -> Operation;
+}
+
+#[derive(Clone, Copy)]
+pub struct QueryToRef;
+
+impl CigarDirection for QueryToRef {
+    #[inline(always)]
+    fn query_ix(self) -> usize { 0 }
+
+    #[inline(always)]
+    fn ref_ix(self) -> usize { 1 }
+
+    #[inline(always)]
+    fn query_pos(self, [qpos, _]: [u32; 2]) -> u32 { qpos }
+
+    #[inline(always)]
+    fn ref_pos(self, [_, rpos]: [u32; 2]) -> u32 { rpos }
+
+    #[inline(always)]
+    fn operation(self, operation: Operation) -> Operation { operation }
+}
+
+#[derive(Clone, Copy)]
+pub struct RefToQuery;
+
+impl CigarDirection for RefToQuery {
+    #[inline(always)]
+    fn query_ix(self) -> usize { 1 }
+
+    #[inline(always)]
+    fn ref_ix(self) -> usize { 0 }
+
+    #[inline(always)]
+    fn query_pos(self, [_, rpos]: [u32; 2]) -> u32 { rpos }
+
+    #[inline(always)]
+    fn ref_pos(self, [qpos, _]: [u32; 2]) -> u32 { qpos }
+
+    #[inline(always)]
+    fn operation(self, operation: Operation) -> Operation { operation.invert() }
+}
+
+/// Structure, returned by `CigarIndex::find_approx_position`.
+#[derive(Clone, Copy, Debug)]
+pub struct ApproxPosition {
+    pub min_cigar_ix: u32,
+    pub max_cigar_ix: u32,
+    pub approx_pos: u32,
+}
+
+/// Structure, returned by `CigarIndex::find_cigar_offset`.
+#[derive(Clone, Copy, Debug)]
+pub struct CigarOffset {
+    pub cigar_ix: usize,
+    pub qpos_at_ix: u32,
+    pub rpos_at_ix: u32,
+}
+
 /// Extension over CIGAR that answers queries "convert range start..end to another sequence" in log(n) time,
 /// where n is the number of operations in this CIGAR.
 #[derive(Clone)]
-pub struct SearchableCigar {
-    items: Vec<ExtCigarItem>,
+pub struct CigarIndex {
+    /// Length = cigar.len()
+    /// For each iteration, stores query and reference position at the start of the element.
+    positions: Vec<[u32; 2]>,
     /// Outer index: 0 = query -> ref, 1 = ref -> query.
     /// Inner vector: for each position = i * STEP store cigar index and corresponding position in the other sequence.
     /// As the final value, each vector contains cigar length - 1 and length of the other sequence.
     sparse_index: [Vec<(u32, u32)>; 2],
 }
 
-impl SearchableCigar {
-    pub fn new(cigar: &Cigar, invert: bool) -> Self {
-        let (qlen, rlen) = if invert { (cigar.rlen, cigar.qlen) } else { (cigar.qlen, cigar.rlen) };
-        let mut items = Vec::with_capacity(cigar.len());
+impl CigarIndex {
+    pub fn new(cigar: &Cigar) -> Self {
+        let mut positions = Vec::with_capacity(cigar.len());
         let mut qpos = 0;
         let mut rpos = 0;
-        let mut sparse_index_qr = Vec::with_capacity(2 + (qlen.saturating_sub(1) >> SPARSE_STEP_PWR) as usize);
-        let mut sparse_index_rq = Vec::with_capacity(2 + (rlen.saturating_sub(1) >> SPARSE_STEP_PWR) as usize);
-        for (cigar_ix, &item) in cigar.iter().enumerate() {
+        let mut sparse_index_qr = Vec::with_capacity(2 + (cigar.qlen.saturating_sub(1) >> SPARSE_STEP_PWR) as usize);
+        let mut sparse_index_rq = Vec::with_capacity(2 + (cigar.rlen.saturating_sub(1) >> SPARSE_STEP_PWR) as usize);
+        for (cigar_ix, &CigarItem { len, op }) in cigar.iter().enumerate() {
             let cigar_ix = cigar_ix as u32;
-            let op = if invert { item.op.invert() } else { item.op };
-            items.push(ExtCigarItem {
-                len: item.len,
-                op,
-                pos: [qpos, rpos],
-            });
+            positions.push([qpos, rpos]);
             let (cons_query, cons_ref) = op.consumes_query_ref();
             let old_qpos = qpos;
             if cons_query {
-                update_sparse_index(&mut sparse_index_qr, cigar_ix, item.len, qpos, rpos, cons_ref);
-                qpos += item.len;
+                update_sparse_index(&mut sparse_index_qr, cigar_ix, len, qpos, rpos, cons_ref);
+                qpos += len;
             }
             if cons_ref {
-                update_sparse_index(&mut sparse_index_rq, cigar_ix, item.len, rpos, old_qpos, cons_query);
-                rpos += item.len
+                update_sparse_index(&mut sparse_index_rq, cigar_ix, len, rpos, old_qpos, cons_query);
+                rpos += len
             }
         }
-        sparse_index_qr.push((cigar.len().strict_sub(1) as u32, rlen));
-        sparse_index_rq.push((cigar.len().strict_sub(1) as u32, qlen));
+        sparse_index_qr.push((cigar.len().strict_sub(1) as u32, cigar.rlen));
+        sparse_index_rq.push((cigar.len().strict_sub(1) as u32, cigar.qlen));
         Self {
-            items,
+            positions,
             sparse_index: [sparse_index_qr, sparse_index_rq],
         }
     }
 
     /// Based on query position, returns approximate reference position.
-    /// Returns (min possible cigar ix, max possible cigar ix, approximate_ref_position).
     #[inline]
-    pub fn find_approx_position<const TO_REF: bool>(&self, qpos: u32) -> (u32, u32, u32) {
-        let sparse_index = &self.sparse_index[pos_ix!(TO_REF)];
+    pub fn find_approx_position(&self, qpos: u32, direction: impl CigarDirection) -> ApproxPosition {
+        let sparse_index = &self.sparse_index[direction.query_ix()];
         let i = qpos >> SPARSE_STEP_PWR;
         assert!(i as usize + 1 <= sparse_index.len());
         let (min_cigar_ix, rpos1) = unsafe { *sparse_index.get_unchecked(i as usize) };
         let (max_cigar_ix, rpos2) = unsafe { *sparse_index.get_unchecked(i as usize + 1) };
-
         // Same as rpos1 + (qpos - qpos1) * (rpos2 - rpos1) / (qpos2 - qpos1), because:
         //     qpos & SPARSE_MASK = qpos - qpos1
         //     X >> SPARSE_STEP_PWR = X / (qpos2 - qpos1)
-        let approx_rpos = rpos1 + (((qpos & SPARSE_MASK) * (rpos2 - rpos1)) >> SPARSE_STEP_PWR);
-        (min_cigar_ix, max_cigar_ix, approx_rpos)
+        let approx_pos = rpos1 + (((qpos & SPARSE_MASK) * (rpos2 - rpos1)) >> SPARSE_STEP_PWR);
+        ApproxPosition { min_cigar_ix, max_cigar_ix, approx_pos }
     }
 
+    /// Refines approximate position, finding specific CIGAR index, query and ref positions at that point.
+    #[inline]
+    pub fn find_cigar_offset(
+        &self,
+        qpos: u32,
+        approx_pos: ApproxPosition,
+        direction: impl CigarDirection,
+    ) -> CigarOffset {
+        let cigar_ix = if approx_pos.min_cigar_ix == approx_pos.max_cigar_ix {
+            approx_pos.min_cigar_ix as usize
+        } else {
+            bisect::right_by_at(&self.positions, |&pos| direction.query_pos(pos).cmp(&qpos),
+                approx_pos.min_cigar_ix as usize, approx_pos.max_cigar_ix as usize + 1).strict_sub(1)
+        };
+        let pos = self.positions[cigar_ix];
+        CigarOffset {
+            cigar_ix,
+            qpos_at_ix: direction.query_pos(pos),
+            rpos_at_ix: direction.ref_pos(pos),
+        }
+    }
+}
+
+impl Cigar {
     /// Suppose a read was aligned to a "query" side of this searchable cigar, and corresponding cursor was obtained
     /// using `find_position`. Then, this function transfers read alignment from "query" to "target" haplotype.
     /// Returns new start coordinate and a new CIGAR.
-    pub fn transfer_alignment<const TO_REF: bool>(
+    pub fn transfer_alignment(
         &self,
         qpos: u32,
-        min_cigar_ix: u32,
-        max_cigar_ix: u32,
+        cigar_offset: CigarOffset,
         read_cigar: &Cigar,
         read_seq: &[u8],
         ref_seq: &[u8],
         aligner: &Aligner,
+        direction: impl CigarDirection,
     ) -> (u32, Cigar) {
-        let cigar_ix = if min_cigar_ix == max_cigar_ix {
-            min_cigar_ix as usize
-        } else {
-            bisect::right_by_at(&self.items, |item| item.pos[pos_ix!(TO_REF)].cmp(&qpos),
-                min_cigar_ix as usize, max_cigar_ix as usize + 1).strict_sub(1)
-        };
-
         // Extract relevant entries from the haplotype-haplotype cigar.
-        let mut hap_cigar_iter = self.items[cigar_ix..].iter();
-        let hap_cigar_item = hap_cigar_iter.next().unwrap();
-        let mut op2 = if TO_REF { hap_cigar_item.op } else { hap_cigar_item.op.invert() };
-        let shift = qpos - hap_cigar_item.pos[pos_ix!(TO_REF)];
-        let mut rem2 = hap_cigar_item.len -  shift;
+        let mut hap_cigar_iter = self.tuples[cigar_offset.cigar_ix..].iter();
+        let tmp = hap_cigar_iter.next().unwrap();
+        let mut op2 = direction.operation(tmp.op);
+        let shift = qpos - cigar_offset.qpos_at_ix;
+        let mut rem2 = tmp.len - shift;
 
         // Alignment starting position in the new haplotype. Could change when soft clipping is examined.
-        let mut aln_start = hap_cigar_item.pos[pos_ix!(!TO_REF)] + bool_mask(op2.consumes_ref()) & shift;
+        let mut aln_start = cigar_offset.rpos_at_ix + (bool_mask(op2.consumes_ref()) & shift);
         let hap_len = ref_seq.len() as u32;
 
         // If read is completely enclosed in a "=" entry + padding, simply copy the alignment.
@@ -1183,7 +1255,7 @@ impl SearchableCigar {
             if rem2 == 0 {
                 let Some(tmp) = hap_cigar_iter.next() else { break };
                 rem2 = tmp.len;
-                op2 = if TO_REF { tmp.op } else { tmp.op.invert() };
+                op2 = direction.operation(tmp.op);
             }
         }
         if read_last != read_cigar.qlen {
