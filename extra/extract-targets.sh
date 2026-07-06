@@ -250,13 +250,13 @@ function process_genome {
     local short_name
     # :- if unset or empty, use $genome_name
     short_name="${names["$genome_name"]:-"$genome_name"}"
-    [[ "$short_name" != skip ]] || return
+    [[ "$short_name" != skip ]] || return 0
 
     local prefix="${output}/${short_name}"
     local ok_file="${prefix}.ok"
     local lock_file="${prefix}.lock"
-    [[ ! -f "$ok_file" ]] || return
-    ( set -C; 2>/dev/null > "$lock_file" ) || return
+    [[ ! -f "$ok_file" ]] || return 0
+    ( set -C; 2>/dev/null > "$lock_file" ) || return 0
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR
 
     # ===== START ======
