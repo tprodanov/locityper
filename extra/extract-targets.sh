@@ -143,7 +143,7 @@ function parse_params {
     [[ -z "${targets_fa-}" ]] && have_targets_fa=n || have_targets_fa=y
     [[ -z "${targets_bed-}" ]] && have_targets_bed=n || have_targets_bed=y
 
-    if [[ ${combine[@]} ]]; then
+    if [[ ${combine[@]:+${combine[@]}} ]]; then
         [[ "$have_targets_bed" = y ]] || panic "--combine requires -b"
     else
         [[ $have_targets_fa = y || $have_targets_bed = y ]] || panic "Either -t or -b is required"
@@ -163,7 +163,7 @@ function parse_params {
 }
 
 function combine_files {
-    [[ ${combine[@]} ]] || return 0
+    [[ ${combine[@]:+${combine[@]}} ]] || return 0
 
     local lock_file="${output}/lock"
     ( set -C; 2>/dev/null > "$lock_file" ) || \
