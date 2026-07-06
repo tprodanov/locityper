@@ -12,6 +12,7 @@ Usage: $SCRIPT_NAME \\
     (-a assemblies.agc | -g assemblies_dir) \\
     (-t targets.fa | -b targets.bed -r reference.fa) \\
     -o directory [args]
+then:  $SCRIPT_NAME -b targets.bed --combine directory -o final_directory
 
 │ Maps target sequences to assembly genomes and extracts corresponding subregions.
 │ Multiple instances of this script can be run in parallel on the same output directory,
@@ -29,6 +30,10 @@ Input/output arguments:
     -r, --reference   FILE  Provide reference genome (must be indexed) to extract reference haplotypes.
                             Only relevant together with -b/--target-bed.
     -o, --output      DIR   Output directory.
+        --combine     DIR   After all genomes were processed (potentially in multiple parallel instances),
+                            combine fasta files from DIR into a new final directory.
+                            Can be specified multiple times to provide multiple input directories.
+                            If -b is provided, copies it with new fifth column to the output directory.
 
 Filter arguments:
     -d, --distance    INT   Merge PAF entries if distance is smaller than INT [${distance}].
@@ -69,18 +74,19 @@ function panic {
 }
 
 function parse_params {
+    combine=()
+
     min_len=0.5
     min_simil=0.3
     distance=5000
     count=1
-    names_file=
 
     preset=asm20
     threads=3
     secondary=50
     score_ratio=0.5
 
-    long1=help,agc:,genomes:,names:,targets:,targets-bed:,reference:,output:
+    long1=help,agc:,genomes:,names:,targets:,targets-bed:,reference:,output,combine:
     long2=distance:,min-len:,min-simil:,count:
     long3=preset:,threads:,secondary:,score-ratio:
     ARGS="$(getopt -o a:g:n:t:b:r:o:d:l:s:N:x:@:p:h --long "${long1},${long2},${long3}" \
@@ -102,6 +108,8 @@ function parse_params {
                 names_file="$2"; shift 2 ;;
             -o | --output )
                 output="$2"; shift 2 ;;
+            --combine )
+                combine+=( "$2" ); shift 2 ;;
             -d | --distance )
                 distance="$2"; shift 2 ;;
             -l | --min-len )
@@ -131,23 +139,67 @@ function parse_params {
         minimap2_args+=( "$@" )
     fi
 
+    [[ ! -z "${output-}" ]]   || panic "Missing required parameter -o/--output"
     [[ -z "${targets_fa-}" ]] && have_targets_fa=n || have_targets_fa=y
     [[ -z "${targets_bed-}" ]] && have_targets_bed=n || have_targets_bed=y
-    [[ $have_targets_fa != $have_targets_bed ]] || panic "Require either -t or -b, but not both"
 
-    [[ $have_targets_fa = n || -f "${targets_fa-}" ]] || panic "Targets file ${targets_fa-} not found"
-    [[ $have_targets_bed = n || ( -f "${targets_bed-}" && -f "${reference-}" ) ]] \
-        || panic "Targets BED file ${targets_bed-} or reference FASTA ${reference-} not found or not provided"
+    if [[ ${combine[@]} ]]; then
+        [[ "$have_targets_bed" = y ]] || panic "--combine requires -b"
+    else
+        [[ $have_targets_fa = y || $have_targets_bed = y ]] || panic "Either -t or -b is required"
+        if [[ $have_targets_fa = y && $have_targets_bed = y ]]; then
+            msg "Both -t and -b are provided, will use FASTA from -t"
+            have_targets_bed=n
+        fi
 
-    [[ ! -z "${output-}" ]]   || panic "Missing required parameter -o/--output"
+        [[ $have_targets_fa = n || -f "${targets_fa-}" ]] || panic "Targets file ${targets_fa-} not found"
+        [[ $have_targets_bed = n || ( -f "${targets_bed-}" && -f "${reference-}" ) ]] \
+            || panic "Targets BED file ${targets_bed-} or reference FASTA ${reference-} not found or not provided"
 
-    [[ -z "${agc_file-}" ]] && have_agc=n || have_agc=y
-    [[ -z "${genomes_dir-}" ]] && have_genomes=n || have_genomes=y
-    [[ $have_agc != $have_genomes ]] || panic "Require either -a or -g, but not both"
+        [[ -z "${agc_file-}" ]] && have_agc=n || have_agc=y
+        [[ -z "${genomes_dir-}" ]] && have_genomes=n || have_genomes=y
+        [[ $have_agc != $have_genomes ]] || panic "Require either -a or -g, but not both"
+    fi
+}
+
+function combine_files {
+    [[ ${combine[@]} ]] || return 0
+
+    local lock_file="${output}/lock"
+    ( set -C; 2>/dev/null > "$lock_file" ) || \
+        panic "Output directory is locked. --combine is not supposed to work in parallel"
+    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR
+
+    rm -f "${output}/"*.fa.gz
+    find "${combine[@]}" -name "*.fa.gz" | \
+        awk -F/ 'BEGIN {OFS=FS} {
+            sample = $(NF - 1)
+            basename = $NF
+            if (seen[(sample basename)]++) {
+                if (!seen[sample]++) {
+                    printf("Ignoring second occurance of sample \"%s\"\n", sample) > "/dev/stderr";
+                }
+            } else {
+                print;
+            }
+        }' | while read filename; do
+            cat "$filename" >> "${output}/$(basename "$filename")"
+        done
+
+    cat "${targets_bed}" | while read chrom start end target extra; do
+        if [[ -f "${output}/${target}.fa.gz" ]]; then
+            # Output BED file (fifth column = FASTA with locus haplotypes).
+            echo -e "${chrom}\t${start}\t${end}\t${target}\t${target}.fa.gz"
+        fi
+    done > "${output}/targets.bed"
+
+    rm -f "${lock_file}"
+    trap - INT TERM ERR
+    exit 0
 }
 
 function load_names {
-    [[ ! -z "$names_file" ]] || return 0
+    [[ ! -z "${names_file-}" ]] || return 0
     while read name upd_name; do
         names["$name"]="$upd_name"
     done < "$names_file"
@@ -229,7 +281,6 @@ function process_genome {
     # At this point, $prefix.bed.gz will have columns
     # chrom, start, end, strand (+/-), target name, length fraction, similarity.
 
-    local written_any=no
     rm -f "${prefix}/"*.fa{,.gz}
     # Take $count first entries,
     #     convert into: region, strand faidx argument ("-i" or ""), suffix ("" or "-<INDEX>").
@@ -257,11 +308,9 @@ function process_genome {
             samtools faidx "$genome_fasta" "$region" $strand_arg | \
                 seqtk seq -U -l 120 | \
                 sed "1c>${short_name}${suffix} ${region}" >> "${prefix}/${target}.fa"
-            written_any=yes
         done
-    if [[ written_any = yes ]]; then
-        gzip "${prefix}"/*.fa
-    fi
+    # This way we don't have to worry about zero matches.
+    find "${prefix}" -name "*.fa" -exec gzip {} ';'
 
     [[ $have_agc = n ]] || rm "${genome_fasta}"{,.fai}
     # ===== END ======
@@ -273,10 +322,12 @@ function process_genome {
 
 setup_colors
 parse_params "$@"
+combine_files
+mkdir -p "$output"
+
 declare -A names
 load_names
 
-mkdir -p "$output"
 prepare_targets
 # zcat -f opens plain files as well. sed -n does not print by default.
 readarray -t target_names < <(zcat -f "$targets_fa" | sed -n 's/>//p' | sort -u)
