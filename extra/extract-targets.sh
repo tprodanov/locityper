@@ -12,7 +12,7 @@ Usage: $SCRIPT_NAME \\
     (-a assemblies.agc | -g assemblies_dir) \\
     (-t targets.fa | -b targets.bed -r reference.fa) \\
     -o directory [args]
-then:  $SCRIPT_NAME -b targets.bed --combine directory -o final_directory
+then:  $SCRIPT_NAME [-b targets.bed] --combine directory -o final_directory
 
 │ Maps target sequences to assembly genomes and extracts corresponding subregions.
 │ Multiple instances of this script can be run in parallel on the same output directory,
