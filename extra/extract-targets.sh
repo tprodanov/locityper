@@ -3,33 +3,52 @@
 set -Eeuo pipefail
 shopt -s nullglob
 
+readonly SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]:-$0}")"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 
 function help_message {
   cat <<HELP
-Usage: $SCRIPT_NAME (-a FILE | -g DIR) -t FILE -o DIR [-d INT] [args] [-- minimap-args]
+Usage: $SCRIPT_NAME \\
+    (-a assemblies.agc | -g assemblies_dir) \\
+    (-t targets.fa | -b targets.bed -r reference.fa) \\
+    -o directory [args]
 
 │ Maps target sequences to assembly genomes and extracts corresponding subregions.
 │ Multiple instances of this script can be run in parallel on the same output directory,
 │ as it creates "*.lock" files for haplotypes in progress and ".ok" files for the finished haplotypes.
 
-Available options:
-    -a, --agc      FILE  Input AGC file.
-    -g, --genomes  DIR   Directory with various genome assemblies (.fa[.gz]).
-                         Mutually exclusive with -a/--agc.
-    -n, --names    FILE  Optional: replace genome names (first column) with another name (second column).
-                         In case of -g/--genomes, first column should match file basename without extension.
-    -t, --targets  FILE  FASTA file with target sequences. Name lines should not contain spaces.
-    -o, --output   DIR   Output directory.
-    -d, --distance INT   Merge PAF entries if distance is smaller than INT [${distance}].
-    -f, --min-frac NUM   Output regions longer than NUM * target length [${min_frac}].
-    -N, --count    INT   Extract top N sequences (by length) for each haplotype and target [${count}].
-    -h, --help           Print this help and exit.
+Input/output arguments:
+    -a, --agc         FILE  Input AGC file.
+    -g, --genomes     DIR   Directory with various genome assemblies (.fa[.gz]).
+                            Mutually exclusive with -a/--agc.
+    -n, --names       FILE  Optional: replace genome names (first column) with another name (second column).
+                            In case of -g/--genomes, first column should match file basename without extension.
+                            Use "skip" in the second column to skip this samples.
+    -t, --targets     FILE  FASTA file with target sequences. Name lines should not contain spaces.
+    -b, --targets-bed FILE  Instead of -t/--targets, provide BED file with reference locus coordinates.
+    -r, --reference   FILE  Provide reference genome (must be indexed) to extract reference haplotypes.
+                            Only relevant together with -b/--target-bed.
+    -o, --output      DIR   Output directory.
 
-Provide minimap2 arguments after --
-    Default arguments are "-cx asm20 -t 3 -N 100 -p 0.5"
+Filter arguments:
+    -d, --distance    INT   Merge PAF entries if distance is smaller than INT [${distance}].
+    -l, --min-len     NUM   Consider regions longer than NUM * target length [${min_len}].
+    -s, --min-simil   NUM   Consider regions with approximate similarity over NUM [${min_simil}].
+    -N, --count       INT   Extract top N sequences (by length) for each haplotype and target [${count}].
+
+Minimap2 arguments:
+    -x, --preset      STR   Minimap2 preset [${preset}].
+    -@, --threads     INT   Minimap2 threads [${threads}].
+    -S, --secondary   INT   Number of secondary alignments [${secondary}].
+    -p, --score-ratio NUM   Secondary-to-primary score ratio [${score_ratio}].
+    --  ARGUMENTS           If necessary, provide additional minimap2 arguments.
+
+Other arguments:
+    -h, --help              Print this help and exit.
 HELP
 }
+
+# [TODO] Separate provide minimap arguments.
 
 function setup_colors {
     readonly RED="\e[31m"
@@ -50,13 +69,21 @@ function panic {
 }
 
 function parse_params {
-    min_frac=0.7
+    min_len=0.5
+    min_simil=0.3
     distance=5000
     count=1
     names_file=
 
-    ARGS="$(getopt -o a:g:n:t:o:d:f:N:h \
-        --long agc:,genomes:,names:,targets:,output:,distance:,min-frac:,count:,help \
+    preset=asm20
+    threads=3
+    secondary=50
+    score_ratio=0.5
+
+    long1=help,agc:,genomes:,names:,targets:,targets-bed:,reference:,output:
+    long2=distance:,min-len:,min-simil:,count:
+    long3=preset:,threads:,secondary:,score-ratio:
+    ARGS="$(getopt -o a:g:n:t:b:r:o:d:l:s:N:x:@:p:h --long "${long1},${long2},${long3}" \
         --name "$SCRIPT_NAME" -- "$@")"
     eval set -- "$ARGS"
     while :; do
@@ -66,17 +93,31 @@ function parse_params {
             -g | --genomes )
                 genomes_dir="$2"; shift 2 ;;
             -t | --targets )
-                targets_file="$2"; shift 2 ;;
+                targets_fa="$2"; shift 2 ;;
+            -b | --targets-bed )
+                targets_bed="$2"; shift 2 ;;
+            -r | --reference )
+                reference="$2"; shift 2 ;;
             -n | --names )
                 names_file="$2"; shift 2 ;;
             -o | --output )
                 output="$2"; shift 2 ;;
             -d | --distance )
                 distance="$2"; shift 2 ;;
-            -f | --min-frac )
-                min_frac="$2"; shift 2 ;;
+            -l | --min-len )
+                min_len="$2"; shift 2 ;;
+            -s | --min-simil )
+                min_simil="$2"; shift 2 ;;
             -N | --count )
                 count="$2"; shift 2 ;;
+            -x | --preset )
+                preset="$2"; shift 2 ;;
+            -@ | --threads )
+                threads="$2"; shift 2 ;;
+            -S | --secondary )
+                secondary="$2"; shift 2 ;;
+            -p | --score-ratio )
+                score_ratio="$2"; shift 2 ;;
             -h | --help)
                 help_message; exit 0;
                 ;;
@@ -85,14 +126,19 @@ function parse_params {
         esac
     done
 
+    minimap2_args=( -c -x "$preset" -t "$threads" -N "$secondary" -p "$score_ratio" )
     if [[ ${#@} -ne 0 ]]; then
-        minimap2_args=( "$@" )
-    else
-        minimap2_args=( -cx asm20 -t 3 -N 100 -p 0.5 )
+        minimap2_args+=( "$@" )
     fi
 
-    [[ ! -z "${targets_file-}" ]] || panic "Missing required parameter -t/--targets"
-    [[ -f "${targets_file}" ]] || panic "Targets file ${targets_file} not found"
+    [[ -z "${targets_fa-}" ]] && have_targets_fa=n || have_targets_fa=y
+    [[ -z "${targets_bed-}" ]] && have_targets_bed=n || have_targets_bed=y
+    [[ $have_targets_fa != $have_targets_bed ]] || panic "Require either -t or -b, but not both"
+
+    [[ $have_targets_fa = n || -f "${targets_fa-}" ]] || panic "Targets file ${targets_fa-} not found"
+    [[ $have_targets_bed = n || ( -f "${targets_bed-}" && -f "${reference-}" ) ]] \
+        || panic "Targets BED file ${targets_bed-} or reference FASTA ${reference-} not found or not provided"
+
     [[ ! -z "${output-}" ]]   || panic "Missing required parameter -o/--output"
 
     [[ -z "${agc_file-}" ]] && have_agc=n || have_agc=y
@@ -107,6 +153,37 @@ function load_names {
     done < "$names_file"
 }
 
+function prepare_targets {
+    [[ $have_targets_bed = y ]] || return 0
+
+    targets_fa="${output}/__targets__.fa"
+    local targets_tmp="${targets_fa}.tmp"
+    local targets_lock="${targets_fa}.lock"
+
+    msg "Extracting target sequences"
+    # Try to take lock 10 times.
+    for i in {1..10}; do
+        if ! ( set -C; 2>/dev/null > "$targets_lock" ); then
+            # If lock exists, wait 20 seconds until it releases.
+            timeout 20 sh -c "while [[ -f \"${targets_lock}\" ]]; do sleep 0.1; done"
+            [[ $? -eq 0 ]] || panic "Lock file ${targets_lock} exists for too long, perhaps relevant process was killed"
+            [[ ! -f "${targets_fa}" ]] || return
+        else
+            trap 'rm -f "${targets_lock}"; exit 1' INT TERM ERR
+            cat "${targets_bed}" | while read chrom start end name extra; do
+                samtools faidx "${reference}" "${chrom}:$((start+1))-${end}" | \
+                    seqtk seq -U -l 120 | \
+                    sed "1c>$name"
+            done > "${targets_tmp}"
+            mv "${targets_tmp}" "${targets_fa}"
+            rm -f "${targets_lock}"
+            trap - INT TERM ERR
+            return
+        fi
+    done
+    panic "Most likely, reference target sequences could not be extracted in other instances of this program"
+}
+
 function process_genome {
     local arg="$1"
     local genome_name
@@ -115,16 +192,13 @@ function process_genome {
     local short_name
     # :- if unset or empty, use $genome_name
     short_name="${names["$genome_name"]:-"$genome_name"}"
+    [[ "$short_name" != skip ]] || return
 
     local prefix="${output}/${short_name}"
     local ok_file="${prefix}.ok"
     local lock_file="${prefix}.lock"
-    if [[ -f "$ok_file" ]]; then
-        return
-    fi
-    if ! ( set -C; 2>/dev/null > "$lock_file" ); then
-        return
-    fi
+    [[ ! -f "$ok_file" ]] || return
+    ( set -C; 2>/dev/null > "$lock_file" ) || return
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR
 
     # ===== START ======
@@ -144,46 +218,52 @@ function process_genome {
     local paf_filename="${prefix}.paf.gz"
     if [[ ! -f "$paf_filename" ]]; then
         msg "    Mapping targets to assembly"
-        minimap2 "${minimap2_args[@]}" "$genome_fasta" "$targets_file" 2> /dev/null | \
+        minimap2 "${minimap2_args[@]}" "$genome_fasta" "$targets_fa" 2> /dev/null | \
             gzip > "${paf_filename}.tmp" \
             && mv "${paf_filename}"{.tmp,}
     fi
 
     msg "    Extracting subsequences"
-    for target in "${target_names[@]}"; do
-        # * Take PAF for given target and convert to BED file
-        #       columns: chrom, start, end, strand (±1 * length), target length
-        # * Sort and merge, sum fourth column
-        # * Convert columns: chrom, start, end, strand (+/-), target name, length / target_length.
-        zcat "${paf_filename}" | \
-            awk -F$'\t' -v target="$target" \
-                'BEGIN{OFS=FS} $1 == target { print $6, $8, $9, ($5 == "+" ? 1 : -1) * ($4 - $3), $2 }' | \
-            sort -k1,1V -k2,2n | \
-            bedtools merge -d "$distance" -c 4,5 -o sum,distinct 2> /dev/null | \
-            awk -F$'\t' -v target="$target" \
-                'BEGIN{OFS=FS} { print $1, $2, $3, ($4 >= 0 ? "+" : "-"), target, ($3-$2) / $5 }' |
-                sort -k6,6gr > "${prefix}/${target}.bed"
+    "$SCRIPT_DIR/inner/merge_hits.py" "$paf_filename" -g "${short_name}" -o "${prefix}.bed.gz" -d "$distance" \
+        2> "${prefix}.warnings.csv"
+    # At this point, $prefix.bed.gz will have columns
+    # chrom, start, end, strand (+/-), target name, length fraction, similarity.
 
-        # Take $count first entries,
-        #     convert into: region, strand faidx argument ("-i" or ""), suffix ("" or "-<INDEX>").
-        # Then, fetch regions from the current assembly.
-        awk -F$'\t' -v count="$count" -v min_frac="$min_frac" \
-            'BEGIN{OFS=";"} NR <= count && $6 >= min_frac {
-                region = $1 ":" ($2+1) "-" $3;
-                strand_arg = $4 == "+" ? "" : "-i";
-                suffix = NR == 1 ? "" : ("-" NR);
-                print region, strand_arg, suffix
-            }' "${prefix}/${target}.bed" | \
-            while IFS=";" read region strand_arg suffix; do
-                samtools faidx "$genome_fasta" "$region" $strand_arg | \
-                    sed "1c>${short_name}${suffix} ${region}"
-            done | gzip > "${prefix}/${target}.fa.gz"
-    done
+    local written_any=no
+    rm -f "${prefix}/"*.fa{,.gz}
+    # Take $count first entries,
+    #     convert into: region, strand faidx argument ("-i" or ""), suffix ("" or "-<INDEX>").
+    # Then, fetch regions from the current assembly.
+    zcat "${prefix}.bed.gz" | \
+        awk -F$'\t' -v name="$short_name" -v min_len="$min_len" -v min_simil="$min_simil" -v max_count="$count" \
+            -v warnings_file="${prefix}.warnings.csv" \
+            'BEGIN{OFS=";"} $6 >= min_len && $7 >= min_simil {
+                target = $5;
+                ind = ++target_count[target];
+                if (ind <= max_count) {
+                    region = $1 ":" ($2+1) "-" $3;
+                    strand_arg = $4 == "+" ? "" : "-i";
+                    suffix = ind == 1 ? "" : ("-" ind);
+                    print target, region, strand_arg, suffix
+                }
+            } END {
+                for (target in target_count) {
+                    if (target_count[target] > max_count) {
+                        printf("%s\t%s\tFound too many hits (%d)\n", target, name, target_count[target]) >> warnings_file
+                    }
+                }
+            }' | \
+        while IFS=";" read target region strand_arg suffix; do
+            samtools faidx "$genome_fasta" "$region" $strand_arg | \
+                seqtk seq -U -l 120 | \
+                sed "1c>${short_name}${suffix} ${region}" >> "${prefix}/${target}.fa"
+            written_any=yes
+        done
+    if [[ written_any = yes ]]; then
+        gzip "${prefix}"/*.fa
+    fi
 
     [[ $have_agc = n ]] || rm "${genome_fasta}"{,.fai}
-
-    cat "${prefix}"/*.bed | gzip > "${prefix}.bed.gz"
-    rm "${prefix}"/*.bed
     # ===== END ======
 
     touch "${ok_file}"
@@ -196,10 +276,11 @@ parse_params "$@"
 declare -A names
 load_names
 
-# zcat -f opens plain files as well. sed -n does not print by default.
-readarray -t target_names < <(zcat -f "$targets_file" | sed -n 's/>//p' | sort -u)
-
 mkdir -p "$output"
+prepare_targets
+# zcat -f opens plain files as well. sed -n does not print by default.
+readarray -t target_names < <(zcat -f "$targets_fa" | sed -n 's/>//p' | sort -u)
+
 if [[ $have_agc = y ]]; then
     agc listset "$agc_file" | while read genome; do
         process_genome "$genome"
