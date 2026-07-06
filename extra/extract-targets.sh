@@ -281,7 +281,9 @@ function process_genome {
     fi
 
     msg "    Extracting subsequences"
-    "$SCRIPT_DIR/inner/merge_hits.py" "$paf_filename" -g "${short_name}" -o "${prefix}.bed.gz" -d "$distance" \
+    "$SCRIPT_DIR/inner/merge_hits.py" "$paf_filename" \
+        -g "${short_name}" -o "${prefix}.bed.gz" \
+        -d "$distance" -l "$min_len" -s "$min_simil" \
         2> "${prefix}.warnings.csv"
     # At this point, $prefix.bed.gz will have columns
     # chrom, start, end, strand (+/-), target name, length fraction, similarity.
@@ -291,9 +293,9 @@ function process_genome {
     #     convert into: region, strand faidx argument ("-i" or ""), suffix ("" or "-<INDEX>").
     # Then, fetch regions from the current assembly.
     zcat "${prefix}.bed.gz" | \
-        awk -F$'\t' -v name="$short_name" -v min_len="$min_len" -v min_simil="$min_simil" -v max_count="$count" \
+        awk -F$'\t' -v name="$short_name" -v max_count="$count" \
             -v warnings_file="${prefix}.warnings.csv" \
-            'BEGIN{OFS=";"} $6 >= min_len && $7 >= min_simil {
+            'BEGIN{OFS=";"} {
                 target = $5;
                 ind = ++target_count[target];
                 if (ind <= max_count) {
