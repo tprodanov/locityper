@@ -212,8 +212,9 @@ function load_names {
 
 function prepare_targets {
     [[ $have_targets_bed = y ]] || return 0
-
     targets_fa="${output}/__targets__.fa"
+    [[ ! -f "${targets_fa}" ]] || return 0
+
     local targets_tmp="${targets_fa}.tmp"
     local targets_lock="${targets_fa}.lock"
 
@@ -224,7 +225,7 @@ function prepare_targets {
             # If lock exists, wait 20 seconds until it releases.
             timeout 20 sh -c "while [[ -f \"${targets_lock}\" ]]; do sleep 0.1; done"
             [[ $? -eq 0 ]] || panic "Lock file ${targets_lock} exists for too long, perhaps relevant process was killed"
-            [[ ! -f "${targets_fa}" ]] || return
+            [[ ! -f "${targets_fa}" ]] || return 0
         else
             trap 'rm -f "${targets_lock}"; exit 1' INT TERM ERR
             cat "${targets_bed}" | while read chrom start end name extra; do
@@ -235,7 +236,7 @@ function prepare_targets {
             mv "${targets_tmp}" "${targets_fa}"
             rm -f "${targets_lock}"
             trap - INT TERM ERR
-            return
+            return 0
         fi
     done
     panic "Most likely, reference target sequences could not be extracted in other instances of this program"
