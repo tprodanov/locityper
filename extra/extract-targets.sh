@@ -171,7 +171,7 @@ function combine_files {
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR
 
     rm -f "${output}/"*.fa.gz
-    find "${combine[@]}" -name "*.fa.gz" | \
+    find "${combine[@]}" -mindepth 2 -maxdepth 2 -name "*.fa.gz" | \
         awk -F/ 'BEGIN {OFS=FS} {
             sample = $(NF - 1)
             basename = $NF
@@ -185,6 +185,11 @@ function combine_files {
         }' | while read filename; do
             cat "$filename" >> "${output}/$(basename "$filename")"
         done
+
+    find "${combine[@]}" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
+    awk -F/ '!seen[$NF]++' | while read filename; do
+        cat "$filename"
+    done > "${output}/warnings.csv"
 
     cat "${targets_bed}" | while read chrom start end target extra; do
         if [[ -f "${output}/${target}.fa.gz" ]]; then
