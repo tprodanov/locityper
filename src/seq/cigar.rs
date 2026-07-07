@@ -11,7 +11,7 @@ use crate::{
     ext::vec::VecOrNone,
     seq::wfa::{Penalties, Aligner},
     algo::bisect,
-    math::RoundDiv,
+    math::{RoundDiv, bool_mask, ifelse0},
 };
 
 /// Subset of CIGAR operations.
@@ -233,12 +233,6 @@ impl fmt::Display for CigarItem {
     }
 }
 
-/// This function is needed for speeding up `if val { X } else { 0 }`, which we will write as `bool_mask(val) & X`.
-#[inline(always)]
-fn bool_mask(val: bool) -> u32 {
-    u32::from(val).wrapping_neg()
-}
-
 /// Wrapper over vector of `CigarItem`.
 #[derive(Default, Clone)]
 pub struct Cigar {
@@ -346,8 +340,8 @@ impl Cigar {
 
     pub fn push_item_unchecked(&mut self, item: CigarItem) {
         let (cons_query, cons_ref) = item.op.consumes_query_ref();
-        self.qlen += bool_mask(cons_query) & item.len;
-        self.rlen += bool_mask(cons_ref) & item.len;
+        self.qlen += ifelse0(cons_query, item.len);
+        self.rlen += ifelse0(cons_ref, item.len);
         self.tuples.push(item);
     }
 
@@ -360,8 +354,8 @@ impl Cigar {
     /// Push a new entry, merges with the latest entry, if relevant.
     pub fn push_checked(&mut self, op: Operation, len: u32) {
         let (cons_query, cons_ref) = op.consumes_query_ref();
-        self.qlen += bool_mask(cons_query) & len;
-        self.rlen += bool_mask(cons_ref) & len;
+        self.qlen += ifelse0(cons_query, len);
+        self.rlen += ifelse0(cons_ref, len);
         match self.tuples.last_mut() {
             Some(item) if item.op == op => item.len += len,
             _ => self.tuples.push(CigarItem::new(op, len)),
@@ -372,8 +366,8 @@ impl Cigar {
     pub fn pop(&mut self) -> Option<CigarItem> {
         let item = self.tuples.pop()?;
         let (cons_query, cons_ref) = item.op.consumes_query_ref();
-        self.qlen -= bool_mask(cons_query) & item.len;
-        self.rlen -= bool_mask(cons_ref) & item.len;
+        self.qlen -= ifelse0(cons_query, item.len);
+        self.rlen -= ifelse0(cons_ref, item.len);
         Some(item)
     }
 
@@ -381,8 +375,8 @@ impl Cigar {
     pub fn pop_if(&mut self, predicate: impl FnOnce(&CigarItem) -> bool) -> Option<CigarItem> {
         let item = self.tuples.pop_if(|item| predicate(item))?;
         let (cons_query, cons_ref) = item.op.consumes_query_ref();
-        self.qlen -= bool_mask(cons_query) & item.len;
-        self.rlen -= bool_mask(cons_ref) & item.len;
+        self.qlen -= ifelse0(cons_query, item.len);
+        self.rlen -= ifelse0(cons_ref, item.len);
         Some(item)
     }
 
@@ -625,8 +619,8 @@ impl Cigar {
                     return false;
                 }
             }
-            qpos += bool_mask(cons_query) & item.len;
-            rpos += bool_mask(cons_ref) & item.len;
+            qpos += ifelse0(cons_query, item.len);
+            rpos += ifelse0(cons_ref, item.len);
         }
         true
     }
@@ -711,7 +705,7 @@ impl Cigar {
                 if moves_pos {
                     let window_rem = window - pos2;
                     let shift = min(item.len, window_rem);
-                    edit += bool_mask(item.op != Operation::Equal) & shift;
+                    edit += ifelse0(item.op != Operation::Equal, shift);
                     pos2 += shift;
                     if item.len > window_rem {
                         break (item.len - window_rem, item.op);
@@ -979,10 +973,10 @@ impl<'a, V: VecOrNone<u8>> ExtCigarData<'a, V> {
 fn raw_clipping(raw_cigar: &[u32]) -> u32 {
     let n = raw_cigar.len();
     let first = CigarItem::from_u32(raw_cigar[0]);
-    let mut clipping = bool_mask(!first.op.consumes_ref()) & first.len;
+    let mut clipping = ifelse0(!first.op.consumes_ref(), first.len);
     if n > 0 {
         let last = CigarItem::from_u32(raw_cigar[raw_cigar.len() - 1]);
-        clipping += bool_mask(!last.op.consumes_ref()) & last.len;
+        clipping += ifelse0(!last.op.consumes_ref(), last.len);
     }
     clipping
 }
@@ -1040,6 +1034,9 @@ pub trait CigarDirection : Copy {
 
     /// In q_to_r direction, returns operation itself, otherwise its inversion.
     fn operation(self, operation: Operation) -> Operation;
+
+    /// False for q_to_r, true otherwise.
+    fn invert(self) -> bool;
 }
 
 #[derive(Clone, Copy)]
@@ -1060,6 +1057,9 @@ impl CigarDirection for QueryToRef {
 
     #[inline(always)]
     fn operation(self, operation: Operation) -> Operation { operation }
+
+    #[inline(always)]
+    fn invert(self) -> bool { false }
 }
 
 #[derive(Clone, Copy)]
@@ -1080,6 +1080,9 @@ impl CigarDirection for RefToQuery {
 
     #[inline(always)]
     fn operation(self, operation: Operation) -> Operation { operation.invert() }
+
+    #[inline(always)]
+    fn invert(self) -> bool { true}
 }
 
 /// Structure, returned by `CigarIndex::find_approx_position`.
@@ -1091,7 +1094,7 @@ pub struct ApproxPosition {
 }
 
 /// Structure, returned by `CigarIndex::find_cigar_offset`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct CigarOffset {
     pub cigar_ix: usize,
     pub qpos_at_ix: u32,
@@ -1182,7 +1185,10 @@ impl Cigar {
     /// Suppose a read was aligned to a "query" side of this searchable cigar, and corresponding cursor was obtained
     /// using `find_position`. Then, this function transfers read alignment from "query" to "target" haplotype.
     /// Returns new start coordinate and a new CIGAR.
-    pub fn transfer_alignment(
+    ///
+    /// [NOTE] Since `generic_const_exprs` is not yet stable, we have to specify two bool constants
+    /// where CLIPPING = !FULL_ALN.
+    fn transfer_alignment_inner<const FULL_ALN: bool, const CLIPPING: bool>(
         &self,
         qpos: u32,
         cigar_offset: CigarOffset,
@@ -1192,6 +1198,7 @@ impl Cigar {
         aligner: &Aligner,
         direction: impl CigarDirection,
     ) -> (u32, Cigar) {
+        use Operation::Equal;
         // Extract relevant entries from the haplotype-haplotype cigar.
         let mut hap_cigar_iter = self.tuples[cigar_offset.cigar_ix..].iter();
         let tmp = hap_cigar_iter.next().unwrap();
@@ -1200,13 +1207,21 @@ impl Cigar {
         let mut rem2 = tmp.len - shift;
 
         // Alignment starting position in the new haplotype. Could change when soft clipping is examined.
-        let mut aln_start = cigar_offset.rpos_at_ix + (bool_mask(op2.consumes_ref()) & shift);
+        let mut aln_start = cigar_offset.rpos_at_ix + ifelse0(op2.consumes_ref(), shift);
         let hap_len = ref_seq.len() as u32;
 
-        // If read is completely enclosed in a "=" entry + padding, simply copy the alignment.
-        const FULL_MATCH_PADDING: u32 = 3;
-        if op2 == Operation::Equal && shift >= FULL_MATCH_PADDING && rem2 >= read_cigar.rlen + FULL_MATCH_PADDING {
-            return (aln_start, read_cigar.clone());
+        if FULL_ALN {
+            if self.len() == 1 && self.tuples[0].op == Equal {
+                return (0, read_cigar.clone());
+            } else if read_cigar.len() == 1 && read_cigar.tuples[0].op == Equal {
+                return (0, if direction.invert() { self.invert() } else { self.clone() });
+            }
+        } else {
+            // If read is completely enclosed in a "=" entry + padding, simply copy the alignment.
+            const FULL_MATCH_PADDING: u32 = 3;
+            if op2 == Equal && shift >= FULL_MATCH_PADDING && rem2 >= read_cigar.rlen + FULL_MATCH_PADDING {
+                return (aln_start, read_cigar.clone());
+            }
         }
 
         let mut read_cigar_iter = read_cigar.iter();
@@ -1225,15 +1240,15 @@ impl Cigar {
         loop {
             // Copy operation from one of the CIGARs if both are "=" or one is "=" of sufficient length.
             const MIN_SIZE: u32 = 5;
-            let add_operation = match (op1 == Operation::Equal, op2 == Operation::Equal) {
-                (true, true) => Some(Operation::Equal),
+            let add_operation = match (op1 == Equal, op2 == Equal) {
+                (true, true) => Some(Equal),
                 (true, false) if rem1 >= MIN_SIZE => Some(op2),
                 (false, true) if rem2 >= MIN_SIZE => Some(op1),
                 _ => None,
             };
             if add_operation.is_some() {
                 if read_last == 0 && read_pos > 0 {
-                    aligner.align_clipping::<true>(ref_seq, read_seq,
+                    aligner.align_ends::<true, CLIPPING>(ref_seq, read_seq,
                         hap_last.saturating_sub(read_pos + CLIP_PADDING), hap_pos, read_last, read_pos, &mut new_cigar);
                     aln_start = aln_start + hap_pos - hap_last - new_cigar.rlen;
                 } else {
@@ -1259,13 +1274,28 @@ impl Cigar {
             }
         }
         if read_last != read_cigar.qlen {
-            aligner.align_clipping::<false>(ref_seq, read_seq,
+            aligner.align_ends::<false, CLIPPING>(ref_seq, read_seq,
                 hap_last, min(hap_len, hap_last + read_cigar.qlen - read_last + CLIP_PADDING),
                 read_last, read_cigar.qlen, &mut new_cigar);
         }
         assert_eq!(read_cigar.qlen, new_cigar.qlen);
         new_cigar.boundary_ins_to_soft();
         (aln_start, new_cigar)
+    }
+
+    #[inline]
+    pub fn transfer_alignment(
+        &self,
+        qpos: u32,
+        cigar_offset: CigarOffset,
+        read_cigar: &Cigar,
+        read_seq: &[u8],
+        ref_seq: &[u8],
+        aligner: &Aligner,
+        direction: impl CigarDirection,
+    ) -> (u32, Cigar) {
+        self.transfer_alignment_inner::<false, true>(
+            qpos, cigar_offset, read_cigar, read_seq, ref_seq, aligner, direction)
     }
 }
 
@@ -1313,9 +1343,9 @@ fn double_cigar_move_and_shift(
 
     // If both CIGAR shifts, take minimal of rems, otherwise, take one of the rems directly.
     let shift = if read_cigar_shifts && (!hap_cigar_shifts || *rem1 <= *rem2) { *rem1 } else { *rem2 };
-    *pos1 += bool_mask(read_moves) & shift;
-    *rem1 -= bool_mask(read_cigar_shifts) & shift;
-    *pos2 += bool_mask(hap_moves) & shift;
-    *rem2 -= bool_mask(hap_cigar_shifts) & shift;
+    *pos1 += ifelse0(read_moves, shift);
+    *rem1 -= ifelse0(read_cigar_shifts, shift);
+    *pos2 += ifelse0(hap_moves, shift);
+    *rem2 -= ifelse0(hap_cigar_shifts, shift);
     shift
 }

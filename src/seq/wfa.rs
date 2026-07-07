@@ -123,7 +123,7 @@ pub struct Aligner {
     global_aligner: *mut cwfa::wavefront_aligner_t,
     /// WFA aligner for left clipping (sequence right side should be aligned, left side can be unaligned)
     /// and right clipping.
-    semiglobal_aligner: Option<*mut cwfa::wavefront_aligner_t>,
+    semiglobal_aligner: *mut cwfa::wavefront_aligner_t,
     penalties: Penalties,
     /// At what size nX could not theoretically be replaced with 1I(n-1)=1D.
     /// For example, with default penalties (4,6,1)
@@ -136,9 +136,7 @@ pub struct Aligner {
 impl Drop for Aligner {
     fn drop(&mut self) {
         unsafe { cwfa::wavefront_aligner_delete(self.global_aligner) };
-        if let Some(ptr) = self.semiglobal_aligner {
-            unsafe { cwfa::wavefront_aligner_delete(ptr) };
-        }
+        unsafe { cwfa::wavefront_aligner_delete(self.semiglobal_aligner) };
     }
 }
 
@@ -148,7 +146,6 @@ impl Aligner {
         penalties: Penalties,
         accuracy: u8,
         band: Option<i32>,
-        enable_semiglobal: bool,
     ) -> Self {
         assert!(1 <= accuracy && accuracy <= MAX_ACCURACY, "Cannot construct WFA aligner for accuracy {}", accuracy);
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
@@ -177,12 +174,10 @@ impl Aligner {
         attributes.affine_penalties.gap_opening = penalties.gap_open;
         attributes.affine_penalties.gap_extension = penalties.gap_extend;
 
-        let semiglobal_aligner = if enable_semiglobal {
-            // Need positive match score for alignment to work.
-            attributes.affine_penalties.match_ = -max(1, attributes.affine_penalties.mismatch / 2);
-            attributes.alignment_form.span = cwfa::alignment_span_t_alignment_endsfree;
-            Some(unsafe { cwfa::wavefront_aligner_new(&mut attributes.clone()) })
-        } else { None };
+        // Need positive match score for alignment to work.
+        attributes.affine_penalties.match_ = -max(1, attributes.affine_penalties.mismatch / 2);
+        attributes.alignment_form.span = cwfa::alignment_span_t_alignment_endsfree;
+        let semiglobal_aligner = unsafe { cwfa::wavefront_aligner_new(&mut attributes.clone()) };
 
         attributes.affine_penalties.match_ = 0;
         attributes.alignment_form.span = cwfa::alignment_span_t_alignment_end2end;
@@ -303,7 +298,9 @@ impl Aligner {
         }
     }
 
-    pub fn align_clipping<const LEFT: bool>(
+    /// Use semi-global alignment to align sequences in either left-free or right-free mode.
+    /// If `CLIPPING`, replace all relevant non-matches with soft clipping.
+    pub fn align_ends<const LEFT: bool, const CLIPPING: bool>(
         &self,
         seq1: &[u8], // ref sequence
         seq2: &[u8], // query sequence
@@ -322,19 +319,22 @@ impl Aligner {
         let subseq1 = &seq1[i1 as usize..i2 as usize];
         let subseq2 = &seq2[j1 as usize..j2 as usize];
 
-        let aligner = self.semiglobal_aligner.expect("Semi-global aligner undefined");
         if LEFT {
             unsafe { cwfa::wavefront_aligner_set_alignment_free_ends(
-                aligner, subseq1.len() as i32, 0, subseq2.len() as i32, 0) };
+                self.semiglobal_aligner, subseq1.len() as i32, 0, subseq2.len() as i32, 0) };
         } else {
             unsafe { cwfa::wavefront_aligner_set_alignment_free_ends(
-                aligner, 0, subseq1.len() as i32, 0, subseq2.len() as i32) };
+                self.semiglobal_aligner, 0, subseq1.len() as i32, 0, subseq2.len() as i32) };
         }
 
         let subseq1 = &seq1[i1 as usize..i2 as usize];
         let subseq2 = &seq2[j1 as usize..j2 as usize];
-        self.align::<LEFT>(aligner, subseq1, subseq2, cigar);
-        if !LEFT {
+        if LEFT && CLIPPING {
+            self.align::<true>(self.semiglobal_aligner, subseq1, subseq2, cigar);
+        } else {
+            self.align::<false>(self.semiglobal_aligner, subseq1, subseq2, cigar);
+        }
+        if CLIPPING && !LEFT {
             let mut soft_clipping = 0;
             while let Some(item) = cigar.pop_if(|item| item.operation() != Operation::Equal) {
                 soft_clipping += u32::from(item.operation().consumes_query()) * item.len();

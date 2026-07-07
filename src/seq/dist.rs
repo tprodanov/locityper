@@ -330,7 +330,6 @@ fn process_pair(
     Ok(())
 }
 
-/// Total number of threads and `verbose` are needed for logging.
 fn align_all_singlethread(
     entries: &[NamedSeq],
     pairs: &[(u32, u32)],
@@ -344,7 +343,7 @@ fn align_all_singlethread(
 {
     let mut buf1 = Default::default();
     let mut buf2 = Default::default();
-    let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
+    let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None);
     let mult = 100.0 / pairs.len() as f64;
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;
@@ -369,8 +368,7 @@ fn align_all_parallel(
     params: &Params,
     threads: usize,
     outputs: Vec<impl io::Write + Send + 'static>,
-) -> crate::Result<()>
-{
+) -> crate::Result<()> {
     let entries = Arc::new(entries);
     let pairs = Arc::new(pairs);
     let minimizers = Arc::new(minimizers);
@@ -403,6 +401,19 @@ fn align_all_parallel(
     }
     assert_eq!(start, n_pairs);
     handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect()
+}
+
+/// Align all sequence pairs to each other, speeding up things using transitive
+fn smart_align_all_pairs(
+    entries: &[NamedSeq],
+    pairs: &[(u32, u32)],
+    against_contig: &[bool],
+    minimizers: &[Vec<u64>],
+    kmers: &[SeqKmers],
+    params: &Params,
+    out: &mut impl io::Write,
+) -> crate::Result<()> {
+    todo!()
 }
 
 /// Wrapper over a PAF file.

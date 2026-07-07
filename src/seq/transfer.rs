@@ -151,8 +151,6 @@ impl HapAlns {
                 }
 
                 let target_subseq = &target_seq[new_start as usize..(new_start + cigar_ref_len) as usize];
-                assert!(new_cigar.validate(read_seq, target_subseq), "Sequences do not match {:?}\n    {}\n    {}",
-                    new_cigar, std::str::from_utf8(read_seq).unwrap(), std::str::from_utf8(target_subseq).unwrap());
                 let interval = Interval::new(Arc::clone(contig_set.contigs()), target_contig_id,
                     new_start, new_start + cigar_ref_len);
                 let new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);

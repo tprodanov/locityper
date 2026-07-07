@@ -374,3 +374,16 @@ impl fmt::Display for PowerMean {
 //     // /// Calculate inner sum, without normalization.
 //     // pub fn sum(self, )
 // }
+
+
+/// This function is needed for speeding up `if val { X } else { 0 }`, which we will write as `bool_mask(val) & X`.
+#[inline(always)]
+pub fn bool_mask(val: bool) -> u32 {
+    u32::from(val).wrapping_neg()
+}
+
+/// If condition is true, returns `val`, else 0.
+#[inline(always)]
+pub fn ifelse0(condition: bool, val: u32) -> u32 {
+    bool_mask(condition) & val
+}
