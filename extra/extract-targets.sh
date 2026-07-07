@@ -139,7 +139,7 @@ function parse_params {
         minimap2_args+=( "$@" )
     fi
 
-    [[ ! -z "${output-}" ]]   || panic "Missing required parameter -o/--output"
+    [[ -n "${output-}" ]] || panic "Missing required parameter -o/--output"
     [[ -z "${targets_fa-}" ]] && have_targets_fa=n || have_targets_fa=y
     [[ -z "${targets_bed-}" ]] && have_targets_bed=n || have_targets_bed=y
 
@@ -169,6 +169,9 @@ function combine_files {
     ( set -C; 2>/dev/null > "$lock_file" ) || \
         panic "Output directory is locked. --combine is not supposed to work in parallel"
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR
+
+    [[ -n "$(find "${combine[@]}" -mindepth 1 -maxdepth 1 -name "*.lock" -print0 -quit)" ]] \
+        || panic "--combine directories contain *.lock files. Either wait for other finished threads, or delete them"
 
     rm -f "${output}/"*.fa.gz
     find "${combine[@]}" -mindepth 2 -maxdepth 2 -name "*.fa.gz" | \
@@ -204,7 +207,7 @@ function combine_files {
 }
 
 function load_names {
-    [[ ! -z "${names_file-}" ]] || return 0
+    [[ -n "${names_file-}" ]] || return 0
     while read name upd_name; do
         names["$name"]="$upd_name"
     done < "$names_file"
@@ -222,8 +225,8 @@ function prepare_targets {
     # Try to take lock 10 times.
     for i in {1..10}; do
         if ! ( set -C; 2>/dev/null > "$targets_lock" ); then
-            # If lock exists, wait 20 seconds until it releases.
-            timeout 20 sh -c "while [[ -f \"${targets_lock}\" ]]; do sleep 0.1; done"
+            # If lock exists, wait 30 seconds until it is released.
+            timeout 30 sh -c "while [[ -f \"${targets_lock}\" ]]; do sleep 0.1; done"
             [[ $? -eq 0 ]] || panic "Lock file ${targets_lock} exists for too long, perhaps relevant process was killed"
             [[ ! -f "${targets_fa}" ]] || return 0
         else
