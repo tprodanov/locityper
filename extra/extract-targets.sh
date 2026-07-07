@@ -12,7 +12,7 @@ Usage: $SCRIPT_NAME \\
     (-a assemblies.agc | -g assemblies_dir) \\
     (-t targets.fa | -b targets.bed -r reference.fa) \\
     -o directory [args]
-then:  $SCRIPT_NAME [-b targets.bed] --combine directory -o final_directory
+then:  $SCRIPT_NAME -b targets.bed --combine directory -o final_directory
 
 │ Maps target sequences to assembly genomes and extracts corresponding subregions.
 │ Multiple instances of this script can be run in parallel on the same output directory,
@@ -31,9 +31,8 @@ Input/output arguments:
                             Only relevant together with -b/--target-bed.
     -o, --output      DIR   Output directory.
         --combine     DIR   After all genomes were processed (potentially in multiple parallel instances),
-                            combine fasta files from DIR into a new final directory.
+                            combine fasta files from DIR into a new final directory (requires -b targets.bed).
                             Can be specified multiple times to provide multiple input directories.
-                            If -b is provided, copies it with new fifth column to the output directory.
 
 Filter arguments:
     -d, --distance    INT   Merge PAF entries if distance is smaller than INT [${distance}].
@@ -174,33 +173,25 @@ function combine_files {
         || panic "--combine directories contain *.lock files. Either wait for other finished threads, or delete them"
 
     msg "Combining ${combine[@]} -> ${output}"
-    rm -f "${output}/"*.fa.gz
-    find "${combine[@]}" -mindepth 2 -maxdepth 2 -name "*.fa.gz" | \
-        awk -F/ 'BEGIN {OFS=FS} {
-            sample = $(NF - 1)
-            basename = $NF
-            if (seen[(sample basename)]++) {
-                if (!seen[sample]++) {
-                    printf("Ignoring second occurance of sample \"%s\"\n", sample) > "/dev/stderr";
-                }
-            } else {
-                print;
-            }
-        }' | while read filename; do
-            cat "$filename" >> "${output}/$(basename "$filename")"
-        done
+    rm -f "${output}/targets.bed" "${output}/warnings.csv" "${output}/"*.fa.gz
+
+    local n_targets
+    n_targets="$(wc -l < "${targets_bed}")"
+    cat -n "${targets_bed}" | while read i chrom start end target extra; do
+        printf "[%3d / %3d] %s\n" "$i" "$n_targets" "$target" >&2
+        find "${combine[@]}" -mindepth 2 -maxdepth 2 -name "${target}.fa.gz" | \
+            awk -F/ '{
+                sample = $(NF - 1);
+                if (!seen[sample]++) { print }
+                else { printf("    Ignoring second occurance of sample \"%s\"\n", sample) > "/dev/stderr" }
+            }' | xargs -P 1 -n 50 cat > "${output}/${target}.fa.gz"
+        echo -e "${chrom}\t${start}\t${end}\t${target}\t${target}.fa.gz" >> "${output}/targets.bed"
+    done
 
     find "${combine[@]}" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
     awk -F/ '!seen[$NF]++' | while read filename; do
         cat "$filename"
     done > "${output}/warnings.csv"
-
-    cat "${targets_bed}" | while read chrom start end target extra; do
-        if [[ -f "${output}/${target}.fa.gz" ]]; then
-            # Output BED file (fifth column = FASTA with locus haplotypes).
-            echo -e "${chrom}\t${start}\t${end}\t${target}\t${target}.fa.gz"
-        fi
-    done > "${output}/targets.bed"
 
     rm -f "${lock_file}"
     trap - INT TERM ERR EXIT
