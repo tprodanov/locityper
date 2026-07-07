@@ -168,11 +168,12 @@ function combine_files {
     local lock_file="${output}/lock"
     ( set -C; 2>/dev/null > "$lock_file" ) || \
         panic "Output directory is locked. --combine is not supposed to work in parallel"
-    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR
+    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
 
-    [[ -n "$(find "${combine[@]}" -mindepth 1 -maxdepth 1 -name "*.lock" -print0 -quit)" ]] \
+    [[ -z "$(find "${combine[@]}" -mindepth 1 -maxdepth 1 -name "*.lock" -print0 -quit)" ]] \
         || panic "--combine directories contain *.lock files. Either wait for other finished threads, or delete them"
 
+    msg "Combining ${combine[@]} -> ${output}"
     rm -f "${output}/"*.fa.gz
     find "${combine[@]}" -mindepth 2 -maxdepth 2 -name "*.fa.gz" | \
         awk -F/ 'BEGIN {OFS=FS} {
@@ -202,7 +203,7 @@ function combine_files {
     done > "${output}/targets.bed"
 
     rm -f "${lock_file}"
-    trap - INT TERM ERR
+    trap - INT TERM ERR EXIT
     exit 0
 }
 
@@ -230,7 +231,7 @@ function prepare_targets {
             [[ $? -eq 0 ]] || panic "Lock file ${targets_lock} exists for too long, perhaps relevant process was killed"
             [[ ! -f "${targets_fa}" ]] || return 0
         else
-            trap 'rm -f "${targets_lock}"; exit 1' INT TERM ERR
+            trap 'rm -f "${targets_lock}"; exit 1' INT TERM ERR EXIT
             cat "${targets_bed}" | while read chrom start end name extra; do
                 samtools faidx "${reference}" "${chrom}:$((start+1))-${end}" | \
                     seqtk seq -U -l 120 | \
@@ -238,7 +239,7 @@ function prepare_targets {
             done > "${targets_tmp}"
             mv "${targets_tmp}" "${targets_fa}"
             rm -f "${targets_lock}"
-            trap - INT TERM ERR
+            trap - INT TERM ERR EXIT
             return 0
         fi
     done
@@ -260,7 +261,7 @@ function process_genome {
     local lock_file="${prefix}.lock"
     [[ ! -f "$ok_file" ]] || return 0
     ( set -C; 2>/dev/null > "$lock_file" ) || return 0
-    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR
+    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
 
     # ===== START ======
     msg "Processing $short_name"
@@ -328,13 +329,13 @@ function process_genome {
 
     touch "${ok_file}"
     rm -f "${lock_file}"
-    trap - INT TERM ERR
+    trap - INT TERM ERR EXIT
 }
 
 setup_colors
 parse_params "$@"
-combine_files
 mkdir -p "$output"
+combine_files
 
 declare -A names
 load_names
