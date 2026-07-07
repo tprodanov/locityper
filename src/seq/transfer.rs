@@ -9,7 +9,7 @@ use crate::{
         Interval,
         contigs::{ContigId, ContigNames, ContigSet},
         cigar::{Cigar, CigarIndex, QueryToRef, RefToQuery},
-        dist::PafFile,
+        paf::{PafParseResult, PafFile},
         aln::Alignment,
         wfa::Aligner,
     },
@@ -46,26 +46,23 @@ impl HapAlns {
         let min_simil = 1.0 - max_div;
         let mut file = ext::sys::open(filename).map(PafFile::new)?;
         let mut added_any = false;
-        while let Some(entry) = file.next() {
-            let entry = entry?;
-            let hap1: &str = entry.query_name();
-            let hap2: &str = entry.target_name();
-            let Some(id1) = contigs.try_get_id(hap1) else { continue };
-            let Some(id2) = contigs.try_get_id(hap2) else { continue };
+        while let Some(entry) = file.next(contigs, false)? {
+            let PafParseResult::Entry(mut entry) = entry else { continue };
+            let id1 = entry.query_id();
+            let id2 = entry.target_id();
             if id1 == id2 { continue };
-            // if std::cmp::min(id1, id2).get() != 270 || std::cmp::max(id1, id2).get() != 356 { continue };
             let matrix_cell = aln_matrix.get_symmetric_mut(id1.ix(), id2.ix());
             if matrix_cell.is_some() { continue };
 
-            if !entry.full_positive_alignment()? {
+            if !entry.full_positive_alignment() {
                 log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
-                    hap1, hap2);
+                    contigs.get_name(id1), contigs.get_name(id2));
                 continue
             }
-            let n_matches = entry.n_matches()?;
-            let simil = f64::from(n_matches) / f64::from(entry.aln_len()?);
+            let n_matches = entry.n_matches();
+            let simil = f64::from(n_matches) / f64::from(entry.aln_len());
             if simil < min_simil { continue };
-            let Some(mut cigar) = entry.cigar().transpose()? else { continue };
+            let Some(mut cigar) = entry.take_cigar() else { continue };
             if id1 > id2 {
                 cigar = cigar.invert();
             }

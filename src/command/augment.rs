@@ -17,6 +17,7 @@ use crate::{
     },
     seq::{
         dist, wfa, fastx,
+        paf::{PafFile, PafParseResult},
         cigar::Cigar,
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
         kmers::Kmer,
@@ -294,7 +295,7 @@ fn update_bitarray<const IN_QUERY: bool>(
 }
 
 fn inner_construct_dominant_set(
-    mut paf_file: dist::PafFile<impl BufRead>,
+    mut paf_file: PafFile<impl BufRead>,
     contigs: &ContigNames,
     args: &Args,
 ) -> crate::Result<Vec<usize>> {
@@ -309,12 +310,13 @@ fn inner_construct_dominant_set(
     }).collect();
 
     let mut indices = Vec::new();
-    while let Some(entry) = paf_file.next().transpose()? {
-        let Some(i) = contigs.try_get_id(entry.query_name()).map(ContigId::ix) else { continue };
-        let Some(j) = contigs.try_get_id(entry.target_name()).map(ContigId::ix) else { continue };
+    while let Some(entry) = paf_file.next(contigs, false)? {
+        let PafParseResult::Entry(entry) = entry else { continue };
+        let i = entry.query_id().ix();
+        let j = entry.target_id().ix();
         if i == j { continue };
-        let Some(cigar) = entry.cigar().transpose()? else { continue };
-        let global_div = entry.divergence()?;
+        let Some(cigar) = entry.cigar() else { continue };
+        let global_div = entry.divergence();
         update_bitarray::<true >(&cigar, global_div, &mut bitarrays[i], j, &mut indices, step, max_window_edit, args);
         update_bitarray::<false>(&cigar, global_div, &mut bitarrays[j], i, &mut indices, step, max_window_edit, args);
     }
@@ -356,7 +358,7 @@ fn construct_dominant_set(
     };
     let contigs = contig_set.contigs();
     let paf_filename = dir.join(paths::LOCUS_PAF);
-    let paf_file = ext::sys::open(paf_filename).map(dist::PafFile::new)?;
+    let paf_file = ext::sys::open(paf_filename).map(PafFile::new)?;
     let dominant_set = inner_construct_dominant_set(paf_file, contigs, args)?;
 
     log::info!("        Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",

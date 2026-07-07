@@ -14,7 +14,7 @@ use crate::{
     },
     seq::{
         interv,
-        dist::PafFile,
+        paf::{PafParseResult, PafFile},
         cigar::{Cigar, Operation},
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
     },
@@ -358,29 +358,29 @@ fn process_paf(
     var_ranges[ref_id.ix()] = Some(Vec::new());
 
     let mut file = ext::sys::open(paf_filename).map(PafFile::new)?;
-    while let Some(entry) = file.next() {
-        let entry = entry?;
-        let hap1: &str = entry.query_name();
-        let hap2: &str = entry.target_name();
-        let (hap, invert) = if ref_hap == hap1 {
-            (hap2, true)
-        } else if ref_hap == hap2 {
-            (hap1, false)
+    while let Some(entry) = file.next(contigs, false)? {
+        let mut entry = match entry {
+            PafParseResult::Entry(entry) => entry,
+            PafParseResult::UnknownContig(name) => {
+                log::warn!("Cannot find sequence for haplotype {}", name);
+                continue
+            }
+        };
+        let (hap_id, invert) = if ref_id == entry.query_id() {
+            (entry.target_id(), true)
+        } else if ref_id == entry.target_id() {
+            (entry.query_id(), false)
         } else {
             continue
         };
-        let Some(hap_id) = contigs.try_get_id(hap) else {
-            log::warn!("Cannot find sequence for haplotype {}", hap);
-            continue
-        };
-        if !entry.full_positive_alignment()? {
+        if !entry.full_positive_alignment() {
             log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
-                hap1, hap2);
+                contigs.get_name(hap_id), ref_hap);
             continue
         }
 
-        let Some(mut cigar) = entry.cigar().transpose()? else {
-            log::warn!("CIGAR missing for {} and {}", ref_hap, hap);
+        let Some(mut cigar) = entry.take_cigar() else {
+            log::warn!("CIGAR missing for {} and {}", ref_hap, contigs.get_name(hap_id));
             continue
         };
         if invert {
@@ -388,8 +388,8 @@ fn process_paf(
         }
         let hap_seq = contig_set.get_seq(hap_id);
         if cigar.query_len() != hap_seq.len() as u32 || cigar.ref_len() != ref_seq.len() as u32 {
-            log::error!("Incorrect CIGAR for {} and {} (expected lengths {},{}, got {},{})", ref_hap, hap,
-                cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
+            log::error!("Incorrect CIGAR for {} and {} (expected lengths {},{}, got {},{})",
+                ref_hap, contigs.get_name(hap_id), cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
             continue;
         }
         var_ranges[hap_id.ix()] = Some(process_haplotype(ref_seq, hap_seq, &cigar)?);

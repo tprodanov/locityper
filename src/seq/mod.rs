@@ -11,6 +11,7 @@ pub mod counts;
 pub mod wfa;
 pub mod dist;
 pub mod div;
+pub mod paf;
 pub mod transfer;
 
 pub use interv::{Interval, NamedInterval};
