@@ -6,6 +6,7 @@ use std::{
     fmt::Write as FmtWrite,
     cmp::max,
     borrow::Cow,
+    sync::Arc,
 };
 use colored::Colorize;
 use crate::{
@@ -413,7 +414,7 @@ fn process_locus(
     let fasta_filename = dir.join(paths::LOCUS_FASTA);
     // Lazily load contig set and discarded haplotypes.
     let mut lazy_data = LazyResult::new(|| -> crate::Result<_> {
-        let contig_set = ContigSet::load(locus, &fasta_filename)?;
+        let contig_set = ContigSet::load(locus, &fasta_filename).map(Arc::new)?;
         let disc_haps = DiscardedHaplotypes::load_if_present(&dir.join(paths::DISCARDED_HAPS), contig_set.contigs())?;
         let ref_id = find_ref_haplotype(contig_set.contigs(), &disc_haps,
             args.ref_name.as_ref().expect("Reference name must be provided"))?;
@@ -423,13 +424,14 @@ fn process_locus(
     let aln_filename = dir.join(paths::LOCUS_PAF);
     if !aln_filename.exists() || args.rerun == Rerun::All {
         let (contig_set, _, ref_id) = lazy_data.get()?;
-        let pairs = TriangleMatrix::indices(contig_set.len()).map(|(i, j)| (i as u32, j as u32)).collect();
+        let pairs = TriangleMatrix::indices(contig_set.len())
+            .map(|(i, j)| (ContigId::new(i), ContigId::new(j))).collect();
         log::info!("    Running pairwise haplotype alignment");
         let mut against_contig = vec![false; contig_set.len()];
         if let Some(ref_id) = ref_id {
             against_contig[ref_id.ix()] = true;
         }
-        super::align::align(contig_set.create_named_sequences(), pairs, against_contig,
+        super::align::align(Arc::clone(contig_set), pairs, against_contig,
             &aln_filename, &None, args.threads, &args.aln_params)?;
         did_anything = true;
     } else {

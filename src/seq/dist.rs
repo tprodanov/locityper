@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use crate::{
     seq::{
         wfa, div,
-        NamedSeq,
+        contigs::{ContigId, ContigNames, ContigSet},
         kmers::{self, Kmer},
         wfa::{Aligner, Penalties},
         cigar::{Cigar, Operation},
@@ -90,8 +90,8 @@ impl Params {
 
 /// Aligns sequences to each other.
 pub fn align_sequences(
-    entries: Vec<NamedSeq>,
-    pairs: Vec<(u32, u32)>,
+    contig_set: Arc<ContigSet>,
+    pairs: Vec<(ContigId, ContigId)>,
     mut against_contig: Vec<bool>,
     params: &Params,
     threads: u16,
@@ -102,24 +102,24 @@ pub fn align_sequences(
         // Now against_contig do not matter.
         against_contig.clear();
     }
-    let n_entries = entries.len();
+    let n_contigs = contig_set.len();
     // Find sequences that actually appear.
-    let mut entry_in_use = vec![false; n_entries];
-    let mut n_rem = n_entries;
+    let mut in_use = vec![false; n_contigs];
+    let mut n_rem = n_contigs;
     for &(i, j) in &pairs {
         // Will do -1 if old value was false.
-        n_rem -= usize::from(std::mem::replace(&mut entry_in_use[i as usize], true));
-        n_rem -= usize::from(std::mem::replace(&mut entry_in_use[j as usize], true));
+        n_rem -= usize::from(std::mem::replace(&mut in_use[i.ix()], true));
+        n_rem -= usize::from(std::mem::replace(&mut in_use[j.ix()], true));
         if n_rem == 0 {
             break;
         }
     }
-    let (minimizers, kmers) = fill_kmers_singlethread(&entries, &entry_in_use, params);
+    let (minimizers, kmers) = fill_kmers_singlethread(&contig_set, &in_use, params);
 
     if threads == 1 {
-        align_all_singlethread(&entries, &pairs, &against_contig, &minimizers, &kmers, params, &mut outputs[0], true)
+        align_all_singlethread(&contig_set, &pairs, &against_contig, &minimizers, &kmers, params, &mut outputs[0], true)
     } else {
-        align_all_parallel(entries, pairs, against_contig, minimizers, kmers, params, usize::from(threads), outputs)
+        align_all_parallel(contig_set, pairs, against_contig, minimizers, kmers, params, usize::from(threads), outputs)
     }
 }
 
@@ -147,17 +147,17 @@ fn precompute_kmers(seq: &[u8], k: u8, buf: &mut Vec<(u32, U256)>) -> SeqKmers {
 }
 
 fn fill_kmers_singlethread(
-    entries: &[NamedSeq],
-    entry_in_use: &[bool],
+    contig_set: &ContigSet,
+    in_use: &[bool],
     params: &Params,
 ) -> (Vec<Vec<u64>>, Vec<SeqKmers>)
 {
-    let mut minimizers = Vec::with_capacity(if params.skip_div { 0 } else { entries.len() });
+    let mut minimizers = Vec::with_capacity(if params.skip_div { 0 } else { contig_set.len() });
     // Backbone ks will be empty if no alignments need to be calculated.
-    let mut kmers = Vec::with_capacity(entries.len() * params.backbone_ks.len());
+    let mut kmers = Vec::with_capacity(contig_set.len() * params.backbone_ks.len());
 
     let mut kmer_buf = Vec::new();
-    for (entry, &in_use) in entries.iter().zip(entry_in_use) {
+    for (seq, &in_use) in contig_set.seqs().iter().zip(in_use) {
         if !in_use {
             minimizers.push(Vec::new());
             for _ in 0..params.backbone_ks.len() {
@@ -165,8 +165,6 @@ fn fill_kmers_singlethread(
             }
             continue;
         }
-
-        let seq = entry.seq();
         if !params.skip_div {
             // Expected num of minimizers = 2L / (w + 1), here we take 5/2 * ... more to be safe.
             let mut buf = Vec::with_capacity((5 * seq.len()).fast_round_div(2 * usize::from(params.div_w) + 2));
@@ -174,7 +172,6 @@ fn fill_kmers_singlethread(
             buf.sort_unstable();
             minimizers.push(buf);
         }
-
         for &k in &params.backbone_ks {
             kmers.push(precompute_kmers(seq, k, &mut kmer_buf));
         }
@@ -208,8 +205,10 @@ fn get_kmer_matches(kmers1: &SeqKmers, kmers2: &SeqKmers, buf: &mut Vec<(u32, u3
 
 fn align(
     aligner: &Aligner,
-    entry1: &NamedSeq,
-    entry2: &NamedSeq,
+    name1: &str,
+    seq1: &[u8],
+    name2: &str,
+    seq2: &[u8],
     kmer_matches: &[(u32, u32)],
     backbone_k: u32,
     max_gap: u32,
@@ -222,8 +221,6 @@ fn align(
     let mut j1 = 0;
     let mut curr_match = 0;
 
-    let seq1 = entry1.seq();
-    let seq2 = entry2.seq();
     for ix in sparse_aln.path.into_iter() {
         let (i2, j2) = kmer_matches[ix];
         if i1 > i2 {
@@ -250,18 +247,20 @@ fn align(
     let n2 = seq2.len() as u32;
     score += aligner.smart_align(seq1, seq2, i1, n1, j1, n2, max_gap, &mut cigar);
     assert_eq!(cigar.ref_len(), seq1.len() as u32,
-        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name(), entry2.name(), cigar);
+        "Alignment {} - {} produced incorrect CIGAR {}", name1, name2, cigar);
     assert_eq!(cigar.query_len(), seq2.len() as u32,
-        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name(), entry2.name(), cigar);
+        "Alignment {} - {} produced incorrect CIGAR {}", name1, name2, cigar);
     Ok((cigar, score))
 }
 
 fn align_multik(
     aligner: &Aligner,
-    i: usize,
-    entry1: &NamedSeq,
-    j: usize,
-    entry2: &NamedSeq,
+    i: ContigId,
+    name1: &str,
+    seq1: &[u8],
+    j: ContigId,
+    name2: &str,
+    seq2: &[u8],
     kmers: &[SeqKmers],
     params: &Params,
     buf: &mut Vec<(u32, u32)>,
@@ -271,23 +270,23 @@ fn align_multik(
     let mut best_score = i32::MIN;
     let n_backbones = params.backbone_ks.len();
     for (&k, kmers1, kmers2) in itertools::izip!(
-            &params.backbone_ks, &kmers[n_backbones * i..], &kmers[n_backbones * j..])
+            &params.backbone_ks, &kmers[n_backbones * i.ix()..], &kmers[n_backbones * j.ix()..])
     {
         get_kmer_matches(kmers1, kmers2, buf);
-        let (cigar, score) = align(aligner, entry1, entry2, buf, u32::from(k), params.max_gap)?;
+        let (cigar, score) = align(aligner, name1, seq1, name2, seq2, buf, u32::from(k), params.max_gap)?;
         if score > best_score {
             best_score = score;
             best_cigar = Some(cigar);
         }
     }
-    best_cigar.ok_or_else(|| error!(RuntimeError, "No alignment found between {} and {}", entry1.name(), entry2.name()))
+    best_cigar.ok_or_else(|| error!(RuntimeError, "No alignment found between {} and {}", name1, name2))
         .map(|cigar| (cigar, best_score))
 }
 
 fn process_pair(
-    entries: &[NamedSeq],
-    i: usize,
-    j: usize,
+    contig_set: &ContigSet,
+    i: ContigId,
+    j: ContigId,
     minimizers: &[Vec<u64>],
     kmers: &[SeqKmers],
     params: &Params,
@@ -298,15 +297,19 @@ fn process_pair(
     out: &mut impl io::Write,
 ) -> crate::Result<()>
 {
-    let entry1 = &entries[i as usize];
-    let entry2 = &entries[j as usize];
-    write!(out, "{}\t{len}\t0\t{len}\t+\t", entry2.name(), len = entry2.seq().len()).map_err(add_path!(!))?;
-    write!(out, "{}\t{len}\t0\t{len}\t", entry1.name(), len = entry1.seq().len()).map_err(add_path!(!))?;
+    let name1 = contig_set.contigs().get_name(i);
+    let name2 = contig_set.contigs().get_name(j);
+    let seq1 = contig_set.get_seq(i);
+    let seq2 = contig_set.get_seq(j);
+    write!(out, "{}\t{len}\t0\t{len}\t+\t", name2, len = seq2.len()).map_err(add_path!(!))?;
+    write!(out, "{}\t{len}\t0\t{len}\t", name1, len = seq1.len()).map_err(add_path!(!))?;
 
-    let opt_div = if params.skip_div { None } else { Some(div::jaccard_distance(&minimizers[i], &minimizers[j])) };
+    let opt_div = if params.skip_div { None } else {
+        Some(div::jaccard_distance(&minimizers[i.ix()], &minimizers[j.ix()]))
+    };
     buf2.clear();
     if opt_div.map(|(_, dv)| dv <= thresh_div).unwrap_or(true) {
-        let (cigar, score) = align_multik(aligner, i, entry1, j, entry2, kmers, params, buf1)?;
+        let (cigar, score) = align_multik(aligner, i, name1, seq1, j, name2, seq2, kmers, params, buf1)?;
         let mut nmatches = 0;
         let mut nerrs = 0;
         for item in cigar.iter() {
@@ -336,8 +339,8 @@ fn process_pair(
 }
 
 fn align_all_singlethread(
-    entries: &[NamedSeq],
-    pairs: &[(u32, u32)],
+    contig_set: &ContigSet,
+    pairs: &[(ContigId, ContigId)],
     against_contig: &[bool],
     minimizers: &[Vec<u64>],
     kmers: &[SeqKmers],
@@ -353,10 +356,9 @@ fn align_all_singlethread(
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;
     for (ix, &(i, j)) in pairs.iter().enumerate() {
-        let thresh_div = if against_contig[i as usize] || against_contig[j as usize] {
-            params.against_div } else { params.thresh_div };
-        process_pair(entries, i as usize, j as usize, minimizers, kmers, params, thresh_div, &aligner,
-            &mut buf1, &mut buf2, out)?;
+        let thresh_div = if against_contig[i.ix()] || against_contig[j.ix()]
+            { params.against_div } else { params.thresh_div };
+        process_pair(contig_set, i, j, minimizers, kmers, params, thresh_div, &aligner, &mut buf1, &mut buf2, out)?;
         if verbose && (ix & LOG_FREQ) == LOG_FREQ {
             log::debug!("    Aligned ≈{:5.1}% pairs", mult * ix as f64);
         }
@@ -365,8 +367,8 @@ fn align_all_singlethread(
 }
 
 fn align_all_parallel(
-    entries: Vec<NamedSeq>,
-    pairs: Vec<(u32, u32)>,
+    contig_set: Arc<ContigSet>,
+    pairs: Vec<(ContigId, ContigId)>,
     against_contig: Vec<bool>,
     minimizers: Vec<Vec<u64>>,
     kmers: Vec<SeqKmers>,
@@ -374,7 +376,6 @@ fn align_all_parallel(
     threads: usize,
     outputs: Vec<impl io::Write + Send + 'static>,
 ) -> crate::Result<()> {
-    let entries = Arc::new(entries);
     let pairs = Arc::new(pairs);
     let minimizers = Arc::new(minimizers);
     let kmers = Arc::new(kmers);
@@ -390,7 +391,7 @@ fn align_all_parallel(
         let end = start + (n_pairs - start).fast_ceil_div(threads - worker_ix);
         // Closure with cloned data.
         {
-            let entries = Arc::clone(&entries);
+            let contig_set = Arc::clone(&contig_set);
             let pairs = Arc::clone(&pairs);
             let against_contig = against_contig.clone();
             let minimizers = Arc::clone(&minimizers);
@@ -398,7 +399,7 @@ fn align_all_parallel(
             let params = params.clone();
             let verbose = worker_ix == 0;
             handles.push(thread::spawn(move || {
-                align_all_singlethread(&entries, &pairs[start..end],
+                align_all_singlethread(&contig_set, &pairs[start..end],
                     &against_contig, &minimizers, &kmers, &params, &mut out, verbose)
             }));
         }

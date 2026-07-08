@@ -4,6 +4,7 @@ use std::{
     io::{Write, BufRead},
     ffi::OsStr,
     cmp::{min, max},
+    sync::Arc,
 };
 use colored::Colorize;
 use smallvec::SmallVec;
@@ -15,11 +16,11 @@ use crate::{
         fmt::PrettyU32,
     },
     seq::{
-        fastx, dist, wfa,
-        NamedSeq,
+        dist, wfa,
+        contigs::{ContigId, ContigNames, ContigSet},
         kmers::Kmer,
     },
-    algo::{IntSet, HashMap, Hasher, TwoU32},
+    algo::{IntSet, TwoU32},
 };
 
 struct Args {
@@ -209,9 +210,9 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 fn parse_pair(
     split_pair: &[&str],
-    name2id: &HashMap<&str, u32>,
+    contigs: &ContigNames,
     warn: bool,
-) -> crate::Result<Option<(u32, u32)>>
+) -> crate::Result<Option<(ContigId, ContigId)>>
 {
     if split_pair.len() != 2 {
         return Err(error!(InvalidInput, "Cannot parse pair `{:?}`: exactly two names required", split_pair));
@@ -219,13 +220,13 @@ fn parse_pair(
     let name1 = split_pair[0];
     let name2 = split_pair[1];
 
-    let Some(&id1) = name2id.get(name1) else {
+    let Some(id1) = contigs.try_get_id(name1) else {
         if warn {
             log::warn!("Cannot find sequence `{}`", name1);
         }
         return Ok(None)
     };
-    let Some(&id2) = name2id.get(name2) else {
+    let Some(id2) = contigs.try_get_id(name2) else {
         if warn {
             log::warn!("Cannot find sequence `{}`", name2);
         }
@@ -242,27 +243,20 @@ fn parse_pair(
 /// Loads all pairs from -a/-p/-P/--against arguments.
 /// Duplicate pairs are discarded (even if indices are switched), first one used.
 /// Returns vector and pairs and a vector of bools, indicating whether the contig was used in the --against argument.
-fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<(Vec<(u32, u32)>, Vec<bool>)> {
-    let mut name2id = HashMap::<&str, u32>::with_capacity_and_hasher(seqs.len(), Hasher::default());
-    for (i, entry) in seqs.iter().enumerate() {
-        if name2id.insert(entry.name(), i as u32).is_some() {
-            return Err(error!(InvalidInput, "Duplicate sequence {} in the input FASTA file", entry.name()));
-        }
-    }
-
+fn load_pairs(contigs: &ContigNames, args: &Args) -> crate::Result<(Vec<(ContigId, ContigId)>, Vec<bool>)> {
     let mut pairs = Vec::new();
     let mut pairs_set = IntSet::default();
-    let mut push_pair = |i: u32, j: u32| {
-        if pairs_set.insert(TwoU32(min(i, j), max(i, j))) {
+    let mut push_pair = |i: ContigId, j: ContigId| {
+        if pairs_set.insert(TwoU32(min(i, j).get(), max(i, j).get())) {
             pairs.push((i, j));
         }
     };
     if args.all_pairs {
-        TriangleMatrix::indices(seqs.len()).for_each(|(i, j)| push_pair(i as u32, j as u32));
+        TriangleMatrix::indices(contigs.len()).for_each(|(i, j)| push_pair(ContigId::new(i), ContigId::new(j)));
     }
     for pair in args.pairs.iter() {
         let split: SmallVec<[&str; 2]> = pair.split(',').collect();
-        if let Some((i, j)) = parse_pair(&split, &name2id, !args.ignore_missing)? {
+        if let Some((i, j)) = parse_pair(&split, contigs, !args.ignore_missing)? {
             push_pair(i, j);
         }
     }
@@ -275,18 +269,18 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<(Vec<(u32, u32)>,
                 continue;
             }
             let split: SmallVec<[&str; 2]> = line.split_whitespace().collect();
-            if let Some((i, j)) = parse_pair(&split, &name2id, !args.ignore_missing)? {
+            if let Some((i, j)) = parse_pair(&split, contigs, !args.ignore_missing)? {
                 push_pair(i, j);
             }
         }
     }
 
-    let mut against_contig = vec![false; seqs.len()];
+    let mut against_contig = vec![false; contigs.len()];
     for name in &args.against {
-        match name2id.get(name as &str) {
-            Some(&i) => {
-                (0..seqs.len() as u32).filter(|&j| i != j).for_each(|j| push_pair(i, j));
-                against_contig[i as usize] = true;
+        match contigs.try_get_id(name as &str) {
+            Some(i) => {
+                (0..contigs.len() as u32).map(ContigId::new).filter(|&j| i != j).for_each(|j| push_pair(i, j));
+                against_contig[i.ix()] = true;
             }
             None => log::warn!("Cannot find sequence `{}` (--against)", name),
         }
@@ -359,8 +353,8 @@ impl Drop for TempFilenames {
 }
 
 pub(super) fn align(
-    entries: Vec<NamedSeq>,
-    pairs: Vec<(u32, u32)>,
+    contig_set: Arc<ContigSet>,
+    pairs: Vec<(ContigId, ContigId)>,
     against_contig: Vec<bool>,
     output: &Path,
     prefix: &Option<PathBuf>,
@@ -380,7 +374,7 @@ pub(super) fn align(
         files.push(ext::sys::create(filename)?);
     }
 
-    dist::align_sequences(entries, pairs, against_contig, params, threads, files)?;
+    dist::align_sequences(contig_set, pairs, against_contig, params, threads, files)?;
     ext::sys::merge_files(output, &temp_filenames.0)?;
     temp_filenames.disarm();
     Ok(())
@@ -391,15 +385,15 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     super::greet();
     let timer = Instant::now();
 
-    let mut fasta_reader = fastx::Reader::from_path(args.input.as_ref().unwrap())?;
-    let entries = fasta_reader.read_named_seqs()?;
-    let (pairs, against_contig) = load_pairs(&args, &entries)?;
+    let contig_set = ContigSet::load("Align-set", args.input.as_ref().expect("Input filename must be Some"))
+        .map(Arc::new)?;
+    let (pairs, against_contig) = load_pairs(contig_set.contigs(), &args)?;
     if pairs.is_empty() {
         return Err(error!(InvalidInput, "No alignments to compute"));
     }
 
-    log::info!("Align {} pairs across {} sequences", pairs.len(), entries.len());
-    align(entries, pairs, against_contig,
+    log::info!("Align {} pairs across {} sequences", pairs.len(), contig_set.len());
+    align(contig_set, pairs, against_contig,
         args.output.as_ref().expect("Output path must be defined"), &args.prefix,
         args.threads, &args.params)?;
 
