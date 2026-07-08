@@ -20,15 +20,15 @@ use crate::{
     algo::{HashMap, HashSet, IntMap},
 };
 
-/// Contig identificator - newtype over u16.
+/// Contig identificator - newtype over u32.
 /// Can be converted to `usize` using `id.ix()` method.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct ContigId(u16);
+pub struct ContigId(u32);
 
 impl ContigId {
     /// Creates a new ContigId.
     pub fn new<T>(val: T) -> ContigId
-    where T: TryInto<u16>,
+    where T: TryInto<u32>,
           T::Error: fmt::Debug,
     {
         ContigId(val.try_into().expect("Contig ID too large"))
@@ -36,14 +36,14 @@ impl ContigId {
 
     /// Get `u16` value of the contig id.
     #[inline(always)]
-    pub fn get(self) -> u16 {
+    pub fn get(self) -> u32 {
         self.0
     }
 
     /// Converts `ContigId` into `usize`.
     #[inline(always)]
     pub fn ix(self) -> usize {
-        usize::from(self.0)
+        self.0 as usize
     }
 }
 
@@ -55,7 +55,7 @@ impl fmt::Display for ContigId {
 
 impl std::hash::Hash for ContigId {
     fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
-        hasher.write_u16(self.0)
+        hasher.write_u32(self.0)
     }
 }
 
