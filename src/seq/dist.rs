@@ -13,10 +13,11 @@ use crate::{
         kmers::{self, Kmer},
         wfa::{Aligner, Penalties},
         cigar::{Cigar, Operation},
-        aln::Strand,
+        paf::PafEntry,
     },
     err::{error, validate_param, add_path},
     math::RoundDiv,
+    ext::TriangleMatrix,
 };
 
 /// Alignment/divergence calculation parameters.
@@ -33,6 +34,10 @@ pub struct Params {
     pub backbone_ks: Vec<u8>,
     pub accuracy: u8,
     pub max_gap: u32,
+
+    /// For all-v-all alignments, transfer alignments
+    /// if one of the two constructed alignments has divergence <= this value.
+    pub transitive_div: f64,
 }
 
 impl Default for Params {
@@ -47,6 +52,7 @@ impl Default for Params {
             backbone_ks: vec![25, 51, 101],
             accuracy: 9,
             max_gap: 500,
+            transitive_div: 0.0,
         }
     }
 }
@@ -402,15 +408,15 @@ fn align_all_parallel(
     handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect()
 }
 
-/// Align all sequence pairs to each other, speeding up things using transitive
-fn smart_align_all_pairs(
-    entries: &[NamedSeq],
-    pairs: &[(u32, u32)],
-    against_contig: &[bool],
-    minimizers: &[Vec<u64>],
-    kmers: &[SeqKmers],
-    params: &Params,
-    out: &mut impl io::Write,
-) -> crate::Result<()> {
-    todo!()
-}
+// /// Align all sequence pairs to each other, speeding up things using transitive
+// fn smart_align_all_pairs(
+//     entries: &[NamedSeq],
+//     pairs: &[(u32, u32)],
+//     against_contig: &[bool],
+//     minimizers: &[Vec<u64>],
+//     kmers: &[SeqKmers],
+//     params: &Params,
+//     out: &mut impl io::Write,
+// ) -> crate::Result<()> {
+//     todo!()
+// }

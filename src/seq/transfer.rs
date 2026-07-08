@@ -147,7 +147,6 @@ impl HapAlns {
                     if n_fails.next().is_none() { break } else { continue };
                 }
 
-                let target_subseq = &target_seq[new_start as usize..(new_start + cigar_ref_len) as usize];
                 let interval = Interval::new(Arc::clone(contig_set.contigs()), target_contig_id,
                     new_start, new_start + cigar_ref_len);
                 let new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);

@@ -53,6 +53,7 @@ impl<R: BufRead> PafFile<R> {
     }
 }
 
+#[derive(Clone)]
 pub struct PafEntry {
     query_id: ContigId,
     query_len: u32,
@@ -107,20 +108,36 @@ impl PafEntry {
         let n_matches = split[9].parse().map_err(|_| parse_error())?;
         let aln_len = split[10].parse().map_err(|_| parse_error())?;
 
-        let mut oth_tags = String::new();
-        let mut cigar = None;
+        let mut entry = Self { query_id, query_len, query_start, query_end, strand,
+            target_id, target_len, target_start, target_end, n_matches, aln_len,
+            cigar: None, oth_tags: String::new(),
+        };
         for tag in &split[12..] {
             if tag.starts_with("cg:Z:") {
-                cigar = Some(Cigar::from_str(&tag.as_bytes()[5..])?);
+                entry.cigar = Some(Cigar::from_str(&tag.as_bytes()[5..])?);
             } else if save_tags {
-                if oth_tags.is_empty() {
-                    oth_tags.push('\t');
-                }
-                oth_tags.push_str(tag);
+                entry.push_tag(tag);
             }
         }
-        Ok(Entry(Self { query_id, query_len, query_start, query_end, strand,
-            target_id, target_len, target_start, target_end, n_matches, aln_len, cigar, oth_tags }))
+        Ok(Entry(entry))
+    }
+
+    /// Creates a new PAF entry fully covering both contigs, on a positive strand, and with n_matches = aln_len = 0.
+    pub fn new(contigs: &ContigNames, query_id: ContigId, target_id: ContigId) -> Self {
+        let query_len = contigs.get_len(query_id);
+        let target_len = contigs.get_len(target_id);
+        Self {
+            query_id, query_len, target_id, target_len,
+            query_start: 0,
+            query_end: query_len,
+            target_start: 0,
+            target_end: target_len,
+            n_matches: 0,
+            aln_len: 0,
+            strand: Strand::Forward,
+            cigar: None,
+            oth_tags: String::new(),
+        }
     }
 
     #[inline(always)]
@@ -197,5 +214,16 @@ impl PafEntry {
 
     pub fn take_cigar(&mut self) -> Option<Cigar> {
         self.cigar.take()
+    }
+
+    pub fn other_tags(&self) -> &str {
+        &self.oth_tags
+    }
+
+    pub fn push_tag(&mut self, tag: &str) {
+        if self.oth_tags.is_empty() {
+            self.oth_tags.push('\t');
+        }
+        self.oth_tags.push_str(tag);
     }
 }
