@@ -184,7 +184,7 @@ impl ContigNames {
 
     /// Returns iterator over all contig IDs.
     pub fn ids(&self) -> impl Iterator<Item = ContigId> + std::iter::ExactSizeIterator {
-        (0..u16::try_from(self.len()).unwrap()).map(ContigId::new)
+        (0..u32::try_from(self.len()).unwrap()).map(ContigId::new)
     }
 
     /// Returns iterator over all contig names.

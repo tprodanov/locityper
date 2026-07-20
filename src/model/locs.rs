@@ -1244,7 +1244,7 @@ fn recover_and_group_alignments(
     const ALIGNER_ACCURACY: u8 = 6;
     // For read alignment, use 10 bp band
     const ALIGNER_BAND: Option<i32> = Some(10);
-    let aligner = Aligner::new(Default::default(), ALIGNER_ACCURACY, ALIGNER_BAND);
+    let aligner = Aligner::new(Default::default(), ALIGNER_ACCURACY, ALIGNER_BAND, true);
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let mut buffer = Vec::with_capacity(16);
     let mut counts = ReadCounts::default();

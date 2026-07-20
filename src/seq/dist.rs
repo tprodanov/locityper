@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
     cmp::Ordering,
     fmt::Write as FmtWrite,
+    cell::RefCell,
 };
 use ruint::aliases::U256;
 use smallvec::SmallVec;
@@ -117,7 +118,12 @@ pub fn align_sequences(
     let (minimizers, kmers) = fill_kmers_singlethread(&contig_set, &in_use, params);
 
     if threads == 1 {
-        align_all_singlethread(&contig_set, &pairs, &against_contig, &minimizers, &kmers, params, &mut outputs[0], true)
+        if params.transitive_div <= 0.0 {
+            align_all_singlethread(&contig_set, &pairs, &against_contig, &minimizers, &kmers, params,
+                &mut outputs[0], true)
+        } else {
+            todo!()
+        }
     } else {
         align_all_parallel(contig_set, pairs, against_contig, minimizers, kmers, params, usize::from(threads), outputs)
     }
@@ -203,12 +209,33 @@ fn get_kmer_matches(kmers1: &SeqKmers, kmers2: &SeqKmers, buf: &mut Vec<(u32, u3
     buf.sort_unstable();
 }
 
+#[derive(Clone, Copy)]
+struct RefEntry<'a> {
+    id: ContigId,
+    name: &'a str,
+    seq: &'a [u8],
+}
+
+impl<'a> RefEntry<'a> {
+    #[inline]
+    fn new(id: ContigId, name: &'a str, seq: &'a [u8]) -> Self {
+        Self { id, name, seq}
+    }
+
+    #[inline]
+    fn from_set(contig_set: &'a ContigSet, id: ContigId) -> Self {
+        Self {
+            id,
+            name: contig_set.contigs().get_name(id),
+            seq: contig_set.get_seq(id),
+        }
+    }
+}
+
 fn align(
     aligner: &Aligner,
-    name1: &str,
-    seq1: &[u8],
-    name2: &str,
-    seq2: &[u8],
+    entry1: RefEntry<'_>,
+    entry2: RefEntry<'_>,
     kmer_matches: &[(u32, u32)],
     backbone_k: u32,
     max_gap: u32,
@@ -234,7 +261,7 @@ fn align(
             cigar.push_unchecked(Operation::Equal, curr_match);
             curr_match = 0;
         }
-        score += aligner.smart_align(seq1, seq2, i1, i2, j1, j2, max_gap, &mut cigar);
+        score += aligner.smart_align(entry1.seq, i1, i2, entry2.seq, j1, j2, max_gap, &mut cigar);
         curr_match += backbone_k;
         i1 = i2 + backbone_k;
         j1 = j2 + backbone_k;
@@ -243,24 +270,20 @@ fn align(
     if curr_match > 0 {
         cigar.push_unchecked(Operation::Equal, curr_match);
     }
-    let n1 = seq1.len() as u32;
-    let n2 = seq2.len() as u32;
-    score += aligner.smart_align(seq1, seq2, i1, n1, j1, n2, max_gap, &mut cigar);
-    assert_eq!(cigar.ref_len(), seq1.len() as u32,
-        "Alignment {} - {} produced incorrect CIGAR {}", name1, name2, cigar);
-    assert_eq!(cigar.query_len(), seq2.len() as u32,
-        "Alignment {} - {} produced incorrect CIGAR {}", name1, name2, cigar);
+    let n1 = entry1.seq.len() as u32;
+    let n2 = entry2.seq.len() as u32;
+    score += aligner.smart_align(entry1.seq, i1, n1, entry2.seq, j1, n2, max_gap, &mut cigar);
+    assert_eq!(cigar.ref_len(), entry1.seq.len() as u32,
+        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name, entry2.name, cigar);
+    assert_eq!(cigar.query_len(), entry2.seq.len() as u32,
+        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name, entry2.name, cigar);
     Ok((cigar, score))
 }
 
 fn align_multik(
     aligner: &Aligner,
-    i: ContigId,
-    name1: &str,
-    seq1: &[u8],
-    j: ContigId,
-    name2: &str,
-    seq2: &[u8],
+    entry1: RefEntry<'_>,
+    entry2: RefEntry<'_>,
     kmers: &[SeqKmers],
     params: &Params,
     buf: &mut Vec<(u32, u32)>,
@@ -270,46 +293,137 @@ fn align_multik(
     let mut best_score = i32::MIN;
     let n_backbones = params.backbone_ks.len();
     for (&k, kmers1, kmers2) in itertools::izip!(
-            &params.backbone_ks, &kmers[n_backbones * i.ix()..], &kmers[n_backbones * j.ix()..])
+            &params.backbone_ks, &kmers[n_backbones * entry1.id.ix()..], &kmers[n_backbones * entry2.id.ix()..])
     {
         get_kmer_matches(kmers1, kmers2, buf);
-        let (cigar, score) = align(aligner, name1, seq1, name2, seq2, buf, u32::from(k), params.max_gap)?;
+        let (cigar, score) = align(aligner, entry1, entry2, buf, u32::from(k), params.max_gap)?;
         if score > best_score {
             best_score = score;
             best_cigar = Some(cigar);
         }
     }
-    best_cigar.ok_or_else(|| error!(RuntimeError, "No alignment found between {} and {}", name1, name2))
+    best_cigar.ok_or_else(|| error!(RuntimeError, "No alignment found between {} and {}", entry1.name, entry2.name))
         .map(|cigar| (cigar, best_score))
 }
 
-fn process_pair(
-    contig_set: &ContigSet,
-    i: ContigId,
-    j: ContigId,
+trait AlignerWrapper<'a> {
+    fn align(
+        &'a self,
+        entry1: RefEntry<'a>,
+        entry2: RefEntry<'a>,
+        buf: &mut Vec<(u32, u32)>,
+    ) -> crate::Result<(Cigar, i32)>;
+}
+
+struct DirectAligner<'a> {
+    aligner: &'a Aligner,
+    kmers: &'a [SeqKmers],
+    params: &'a Params,
+}
+
+impl<'a> DirectAligner<'a> {
+    fn new(aligner: &'a Aligner, kmers: &'a [SeqKmers], params: &'a Params) -> Self {
+        Self { aligner, kmers, params }
+    }
+}
+
+impl<'a> AlignerWrapper<'a> for DirectAligner<'a> {
+    #[inline(always)]
+    fn align(
+        &'a self,
+        entry1: RefEntry<'a>,
+        entry2: RefEntry<'a>,
+        buf: &mut Vec<(u32, u32)>,
+    ) -> crate::Result<(Cigar, i32)> {
+        align_multik(self.aligner, entry1, entry2, self.kmers, self.params, buf)
+    }
+}
+
+struct TransitiveAligner<'a> {
+    direct_aligner: DirectAligner<'a>,
+    /// For each contig, store its closest other contig, corresponding CIGAR and diversity.
+    /// Value is only stored if diversity is not greater than params.transitive_div
+    /// Closest other contig will always have smaller index than i.
+    closest: Vec<Option<(ContigId, Cigar, f64)>>,
+    cigars: TriangleMatrix<Option<Cigar>>,
+    n_transitive: RefCell<u32>,
+}
+
+impl<'a> TransitiveAligner<'a> {
+    fn new(direct_aligner: DirectAligner<'a>, n_contigs: usize) -> Self {
+        Self {
+            direct_aligner,
+            closest: vec![None; n_contigs],
+            cigars: TriangleMatrix::new(n_contigs, None),
+            n_transitive: RefCell::new(0),
+        }
+    }
+}
+
+impl<'a> AlignerWrapper<'a> for TransitiveAligner<'a> {
+    #[inline(always)]
+    fn align(
+        &'a self,
+        entry1: RefEntry<'a>,
+        entry2: RefEntry<'a>,
+        buf: &mut Vec<(u32, u32)>,
+    ) -> crate::Result<(Cigar, i32)> {
+        // Construct alignment i -> j if there exists haplotype k that is close to
+        let opt = if let Some((middle_id, cigar, _)) = &self.closest[entry1.id.ix()] {
+            Some((entry1, *middle_id, cigar, entry2))
+        } else if let Some((middle_id, cigar, _)) = &self.closest[entry2.id.ix()] {
+            Some((entry2, *middle_id, cigar, entry1))
+        } else {
+            None
+        };
+
+        if let Some((entry_i, j, cigar_ij, entry_k)) = opt
+            && let Some(cigar_jk) = &self.cigars.get_symmetric(j.ix(), entry_k.id.ix())
+        {
+            assert!(j < entry_i.id);
+            let cigar_ik = Cigar::find_transitive_alignment(cigar_ij, cigar_jk, entry_k.id < j,
+                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner);
+            assert!(cigar_ik.validate(entry_i.seq, entry_k.seq)); // [TODO] remove
+            let score = self.direct_aligner.aligner.penalties().calculate_score(&cigar_ik);
+            *self.n_transitive.borrow_mut() += 1;
+            Ok((cigar_ik, score))
+        } else {
+            self.direct_aligner.align(entry1, entry2, buf)
+        }
+    }
+}
+
+/// If necessary, calculates minimizer-based sequence divergence;
+/// if necessary, constructs actual alignment using `construct_aln` function;
+/// writes resulting PAF entry to `out` and return CIGAR.
+///
+/// Close `construct_alignment` takes two entries and returns CIGAR and its score.
+///
+/// If CIGAR was constructed, returns pair (CIGAR, sequence divergence).
+fn process_pair<'a>(
+    aligner: &'a impl AlignerWrapper<'a>,
+    entry1: RefEntry<'a>,
+    entry2: RefEntry<'a>,
+    against_contig: &[bool],
     minimizers: &[Vec<u64>],
-    kmers: &[SeqKmers],
     params: &Params,
-    thresh_div: f64,
-    aligner: &Aligner,
-    buf1: &mut Vec<(u32, u32)>,
-    buf2: &mut String,
+    buf_aligner: &mut Vec<(u32, u32)>,
+    buf_cigar: &mut String,
     out: &mut impl io::Write,
-) -> crate::Result<()>
+) -> crate::Result<Option<(Cigar, f64)>>
 {
-    let name1 = contig_set.contigs().get_name(i);
-    let name2 = contig_set.contigs().get_name(j);
-    let seq1 = contig_set.get_seq(i);
-    let seq2 = contig_set.get_seq(j);
-    write!(out, "{}\t{len}\t0\t{len}\t+\t", name2, len = seq2.len()).map_err(add_path!(!))?;
-    write!(out, "{}\t{len}\t0\t{len}\t", name1, len = seq1.len()).map_err(add_path!(!))?;
+    write!(out, "{}\t{len}\t0\t{len}\t+\t", entry2.name, len = entry2.seq.len()).map_err(add_path!(!))?;
+    write!(out, "{}\t{len}\t0\t{len}\t", entry1.name, len = entry1.seq.len()).map_err(add_path!(!))?;
 
     let opt_div = if params.skip_div { None } else {
-        Some(div::jaccard_distance(&minimizers[i.ix()], &minimizers[j.ix()]))
+        Some(div::jaccard_distance(&minimizers[entry1.id.ix()], &minimizers[entry2.id.ix()]))
     };
-    buf2.clear();
+    buf_cigar.clear();
+    let mut ret_val = None;
+    let thresh_div = if against_contig[entry1.id.ix()] || against_contig[entry2.id.ix()]
+        { params.against_div } else { params.thresh_div };
     if opt_div.map(|(_, dv)| dv <= thresh_div).unwrap_or(true) {
-        let (cigar, score) = align_multik(aligner, i, name1, seq1, j, name2, seq2, kmers, params, buf1)?;
+        let (cigar, score) = aligner.align(entry1, entry2, buf_aligner)?;
         let mut nmatches = 0;
         let mut nerrs = 0;
         for item in cigar.iter() {
@@ -323,7 +437,8 @@ fn process_pair(
         let dv = f64::from(nerrs) / f64::from(aln_len);
         let qv = if dv.is_finite() { -10.0 * dv.log10() } else { f64::INFINITY };
         write!(out, "\tNM:i:{}\tAS:i:{}\tdv:f:{:.9}\tqv:f:{:.6}", nerrs, score, dv, qv).map_err(add_path!(!))?;
-        write!(buf2, "{}", cigar).unwrap();
+        write!(buf_cigar, "{}", cigar).unwrap();
+        ret_val = Some((cigar, dv));
     } else {
         // Skip alignment.
         write!(out, "0\t0\t255").map_err(add_path!(!))?;
@@ -331,11 +446,11 @@ fn process_pair(
     if let Some((uniq_minims, minim_dv)) = opt_div {
         write!(out, "\tum:i:{}\tmd:f:{:.9}", uniq_minims, minim_dv).map_err(add_path!(!))?;
     }
-    if !buf2.is_empty() {
-        write!(out, "\tcg:Z:{}", buf2).map_err(add_path!(!))?;
+    if !buf_cigar.is_empty() {
+        write!(out, "\tcg:Z:{}", buf_cigar).map_err(add_path!(!))?;
     }
     writeln!(out).map_err(add_path!(!))?;
-    Ok(())
+    Ok(ret_val)
 }
 
 fn align_all_singlethread(
@@ -351,14 +466,14 @@ fn align_all_singlethread(
 {
     let mut buf1 = Default::default();
     let mut buf2 = Default::default();
-    let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None);
+    let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
+    let aligner_wrapper = DirectAligner::new(&aligner, kmers, params);
     let mult = 100.0 / pairs.len() as f64;
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;
     for (ix, &(i, j)) in pairs.iter().enumerate() {
-        let thresh_div = if against_contig[i.ix()] || against_contig[j.ix()]
-            { params.against_div } else { params.thresh_div };
-        process_pair(contig_set, i, j, minimizers, kmers, params, thresh_div, &aligner, &mut buf1, &mut buf2, out)?;
+        process_pair(&aligner_wrapper, RefEntry::from_set(contig_set, i), RefEntry::from_set(contig_set, j),
+            against_contig, minimizers, params, &mut buf1, &mut buf2, out)?;
         if verbose && (ix & LOG_FREQ) == LOG_FREQ {
             log::debug!("    Aligned ≈{:5.1}% pairs", mult * ix as f64);
         }
@@ -409,15 +524,40 @@ fn align_all_parallel(
     handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect()
 }
 
-// /// Align all sequence pairs to each other, speeding up things using transitive
-// fn smart_align_all_pairs(
-//     entries: &[NamedSeq],
-//     pairs: &[(u32, u32)],
-//     against_contig: &[bool],
-//     minimizers: &[Vec<u64>],
-//     kmers: &[SeqKmers],
-//     params: &Params,
-//     out: &mut impl io::Write,
-// ) -> crate::Result<()> {
-//     todo!()
-// }
+/// Align all sequence pairs to each other, speeding up things using transitive
+fn transitive_align_all_pairs(
+    contig_set: &ContigSet,
+    against_contig: &[bool],
+    minimizers: &[Vec<u64>],
+    kmers: &[SeqKmers],
+    params: &Params,
+    out: &mut impl io::Write,
+) -> crate::Result<()> {
+    let contigs = contig_set.contigs();
+    let n_contigs = contigs.len();
+    let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
+    let mut transitive_aligner = TransitiveAligner::new(DirectAligner::new(&aligner, kmers, params), contig_set.len());
+    let mut buf1 = Default::default();
+    let mut buf2 = Default::default();
+    // For each contig, store its closest other contig, corresponding CIGAR and diversity.
+    // Value is only stored if diversity is not greater than params.transitive_div
+    // Closest other contig will always have smaller index than i.
+    let mut closest: Vec<Option<(ContigId, Cigar, f64)>> = vec![None; n_contigs];
+    let mut cigars = TriangleMatrix::new(n_contigs, Option::<Cigar>::None);
+
+    for (i, j) in TriangleMatrix::indices(n_contigs) {
+        let entry1 = RefEntry::from_set(contig_set, ContigId::new(i));
+        let entry2 = RefEntry::from_set(contig_set, ContigId::new(j));
+        let res = process_pair(&transitive_aligner, entry1, entry2, against_contig, minimizers,
+            params, &mut buf1, &mut buf2, out)?;
+        if let Some((cigar, div)) = res && div <= params.transitive_div {
+            let prev_closest = &mut transitive_aligner.closest[entry2.id.ix()];
+            if let Some((_, _, prev_div)) = prev_closest && *prev_div < div {
+                // Do nothing
+            } else {
+                *prev_closest = Some((entry1.id, cigar, div));
+            }
+        }
+    }
+    Ok(())
+}

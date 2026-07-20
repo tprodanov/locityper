@@ -29,7 +29,6 @@ impl<R: BufRead> PafFile<R> {
     pub fn next<'a>(
         &'a mut self,
         contigs: &ContigNames,
-        save_tags: bool,
     ) -> crate::Result<Option<PafParseResult<'a>>> {
         loop {
             self.line.clear();
@@ -45,7 +44,7 @@ impl<R: BufRead> PafFile<R> {
                             self.line.pop();
                         }
                     }
-                    Some(PafEntry::parse(&self.line, contigs, save_tags)).transpose()
+                    Some(PafEntry::parse(&self.line, contigs)).transpose()
                 }
                 Err(e) => Err(crate::Error::Io(e, Vec::new())),
             }
@@ -69,7 +68,7 @@ pub struct PafEntry {
     n_matches: u32,
     aln_len: u32,
     cigar: Option<Cigar>,
-    oth_tags: String,
+    // oth_tags: String,
 }
 
 pub enum PafParseResult<'a> {
@@ -84,7 +83,7 @@ impl PafEntry {
     pub fn parse<'a>(
         line: &'a str,
         contigs: &ContigNames,
-        save_tags: bool,
+        // save_tags: bool,
     ) -> crate::Result<PafParseResult<'a>> {
         let parse_error = || error!(ParsingError, "Could not parse PAF line `{}`", line);
 
@@ -110,14 +109,15 @@ impl PafEntry {
 
         let mut entry = Self { query_id, query_len, query_start, query_end, strand,
             target_id, target_len, target_start, target_end, n_matches, aln_len,
-            cigar: None, oth_tags: String::new(),
+            cigar: None,
+            // oth_tags: String::new(),
         };
         for tag in &split[12..] {
             if tag.starts_with("cg:Z:") {
                 entry.cigar = Some(Cigar::from_str(&tag.as_bytes()[5..])?);
-            } else if save_tags {
-                entry.push_tag(tag);
-            }
+            } // else if save_tags {
+            //    entry.push_tag(tag);
+            // }
         }
         Ok(Entry(entry))
     }
@@ -136,7 +136,7 @@ impl PafEntry {
             aln_len: 0,
             strand: Strand::Forward,
             cigar: None,
-            oth_tags: String::new(),
+            // oth_tags: String::new(),
         }
     }
 
@@ -216,14 +216,14 @@ impl PafEntry {
         self.cigar.take()
     }
 
-    pub fn other_tags(&self) -> &str {
-        &self.oth_tags
-    }
+    // pub fn other_tags(&self) -> &str {
+    //     &self.oth_tags
+    // }
 
-    pub fn push_tag(&mut self, tag: &str) {
-        if self.oth_tags.is_empty() {
-            self.oth_tags.push('\t');
-        }
-        self.oth_tags.push_str(tag);
-    }
+    // pub fn push_tag(&mut self, tag: &str) {
+    //     if self.oth_tags.is_empty() {
+    //         self.oth_tags.push('\t');
+    //     }
+    //     self.oth_tags.push_str(tag);
+    // }
 }

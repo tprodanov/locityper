@@ -46,7 +46,7 @@ impl HapAlns {
         let min_simil = 1.0 - max_div;
         let mut file = ext::sys::open(filename).map(PafFile::new)?;
         let mut added_any = false;
-        while let Some(entry) = file.next(contigs, false)? {
+        while let Some(entry) = file.next(contigs)? {
             let PafParseResult::Entry(mut entry) = entry else { continue };
             let id1 = entry.query_id();
             let id2 = entry.target_id();
@@ -132,11 +132,11 @@ impl HapAlns {
 
                 let (new_start, new_cigar) = if query_to_ref {
                     let offset = cigar_index.find_cigar_offset(source_aln_start, approx_pos, QueryToRef);
-                    haps_cigar.transfer_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
+                    haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
                         aligner, QueryToRef)
                 } else {
                     let offset = cigar_index.find_cigar_offset(source_aln_start, approx_pos, RefToQuery);
-                    haps_cigar.transfer_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
+                    haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
                         aligner, RefToQuery)
                 };
                 const MIN_ALN_SIZE: u32 = 50;

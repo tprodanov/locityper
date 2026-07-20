@@ -252,7 +252,7 @@ fn load_pairs(contigs: &ContigNames, args: &Args) -> crate::Result<(Vec<(ContigI
         }
     };
     if args.all_pairs {
-        TriangleMatrix::indices(contigs.len()).for_each(|(i, j)| push_pair(ContigId::new(i), ContigId::new(j)));
+        TriangleMatrix::indices_u32(contigs.len()).for_each(|(i, j)| push_pair(ContigId::new(i), ContigId::new(j)));
     }
     for pair in args.pairs.iter() {
         let split: SmallVec<[&str; 2]> = pair.split(',').collect();

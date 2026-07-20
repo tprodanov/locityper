@@ -510,6 +510,11 @@ impl Cigar {
         data.new_cigar
     }
 
+    #[inline(always)]
+    pub fn full_sequence_match(&self) -> bool {
+        self.tuples.len() == 1 && self.tuples[0].op == Operation::Equal
+    }
+
     /// Returns soft clipping on the left and right.
     pub fn soft_clipping(&self) -> (u32, u32) {
         assert!(!self.is_empty(), "Cannot calculate soft clipping on an empty CIGAR!");
@@ -1037,6 +1042,16 @@ pub trait CigarDirection : Copy {
 
     /// False for q_to_r, true otherwise.
     fn invert(self) -> bool;
+
+    #[inline(always)]
+    fn query_len(self, cigar: &Cigar) -> u32 {
+        if self.invert() { cigar.rlen } else { cigar.qlen }
+    }
+
+    #[inline(always)]
+    fn ref_len(self, cigar: &Cigar) -> u32 {
+        if self.invert() { cigar.qlen } else { cigar.rlen }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1182,57 +1197,56 @@ impl CigarIndex {
 }
 
 impl Cigar {
-    /// Suppose a read was aligned to a "query" side of this searchable cigar, and corresponding cursor was obtained
-    /// using `find_position`. Then, this function transfers read alignment from "query" to "target" haplotype.
-    /// Returns new start coordinate and a new CIGAR.
+    /// Given two alignments (cigar_ij and cigar_jk), where sequence i starts at start_i compared to sequence j,
+    /// computes new alignment from i to k.
     ///
-    /// [NOTE] Since `generic_const_exprs` is not yet stable, we have to specify two bool constants
-    /// where CLIPPING = !FULL_ALN.
-    fn transfer_alignment_inner<const FULL_ALN: bool, const CLIPPING: bool>(
-        &self,
-        qpos: u32,
-        cigar_offset: CigarOffset,
-        read_cigar: &Cigar,
-        read_seq: &[u8],
-        ref_seq: &[u8],
+    /// Returns new CIGAR and start in position k.
+    ///
+    /// Based on `direction_jk`, j can be query or reference compared to k.
+    fn transfer_alignment<const FULL_ALN: bool>(
+        start_j: u32,
+        offset: CigarOffset,
+        cigar_ij: &Cigar,
+        cigar_jk: &Cigar,
+        direction_jk: impl CigarDirection,
+        seq_i: &[u8],
+        seq_k: &[u8],
         aligner: &Aligner,
-        direction: impl CigarDirection,
     ) -> (u32, Cigar) {
         use Operation::Equal;
-        // Extract relevant entries from the haplotype-haplotype cigar.
-        let mut hap_cigar_iter = self.tuples[cigar_offset.cigar_ix..].iter();
-        let tmp = hap_cigar_iter.next().unwrap();
-        let mut op2 = direction.operation(tmp.op);
-        let shift = qpos - cigar_offset.qpos_at_ix;
+        let mut cigar_jk_iter = cigar_jk.tuples[offset.cigar_ix..].iter();
+        let tmp = cigar_jk_iter.next().unwrap();
+        let mut op2 = direction_jk.operation(tmp.op);
+        let shift = start_j - offset.qpos_at_ix;
         let mut rem2 = tmp.len - shift;
 
         // Alignment starting position in the new haplotype. Could change when soft clipping is examined.
-        let mut aln_start = cigar_offset.rpos_at_ix + ifelse0(op2.consumes_ref(), shift);
-        let hap_len = ref_seq.len() as u32;
+        let mut start_k = offset.rpos_at_ix + ifelse0(op2.consumes_ref(), shift);
+        let len_k = seq_k.len() as u32;
 
         if FULL_ALN {
-            if self.len() == 1 && self.tuples[0].op == Equal {
-                return (0, read_cigar.clone());
-            } else if read_cigar.len() == 1 && read_cigar.tuples[0].op == Equal {
-                return (0, if direction.invert() { self.invert() } else { self.clone() });
+            if cigar_ij.full_sequence_match() {
+                return (0, if direction_jk.invert() { cigar_jk.invert() } else { cigar_jk.clone() });
+            } else if cigar_jk.full_sequence_match() {
+                return (0, cigar_ij.clone());
             }
         } else {
             // If read is completely enclosed in a "=" entry + padding, simply copy the alignment.
             const FULL_MATCH_PADDING: u32 = 3;
-            if op2 == Equal && shift >= FULL_MATCH_PADDING && rem2 >= read_cigar.rlen + FULL_MATCH_PADDING {
-                return (aln_start, read_cigar.clone());
+            if op2 == Equal && shift >= FULL_MATCH_PADDING && rem2 >= cigar_ij.rlen + FULL_MATCH_PADDING {
+                return (start_k, cigar_ij.clone());
             }
         }
 
-        let mut read_cigar_iter = read_cigar.iter();
-        let &CigarItem { op: mut op1, len: mut rem1 } = read_cigar_iter.next().expect("Read CIGAR is empty");
-        // For both read and haplotypes, `_pos` is the current position in both cigars.
-        // `_last` is the end of the sequence added to the new cigar.
-        // So, gap `_last.._pos` is not yet aligned.
-        let mut read_last = 0;
-        let mut read_pos = 0;
-        let mut hap_last = aln_start;
-        let mut hap_pos = aln_start;
+        let mut cigar_ij_iter = cigar_ij.iter();
+        let &CigarItem { len: mut rem1, op: mut op1 } = cigar_ij_iter.next().expect("CIGAR is empty");
+        // For sequences i (1) and k (2), `pos` is the current position in both cigars.
+        // `last` is the end of the sequence added to the new cigar.
+        // So, gap `last..pos` is not yet aligned.
+        let mut last1 = 0;
+        let mut pos1 = 0;
+        let mut last2 = start_k;
+        let mut pos2 = start_k;
 
         // When aligning padding, compare read tail v. haplotype sequence of length(tail) + PADDING.
         const CLIP_PADDING: u32 = 3;
@@ -1247,55 +1261,82 @@ impl Cigar {
                 _ => None,
             };
             if add_operation.is_some() {
-                if read_last == 0 && read_pos > 0 {
-                    aligner.align_ends::<true, CLIPPING>(ref_seq, read_seq,
-                        hap_last.saturating_sub(read_pos + CLIP_PADDING), hap_pos, read_last, read_pos, &mut new_cigar);
-                    aln_start = aln_start + hap_pos - hap_last - new_cigar.rlen;
+                if !FULL_ALN && last1 == 0 && pos1 > 0 {
+                    aligner.align_ends::<true>(seq_k, last2.saturating_sub(pos1 + CLIP_PADDING), pos2,
+                        seq_i, last1, pos1, &mut new_cigar);
+                    start_k = start_k + pos2 - last2 - new_cigar.rlen;
                 } else {
-                    aligner.smart_align(ref_seq, read_seq, hap_last, hap_pos, read_last, read_pos, (), &mut new_cigar);
+                    aligner.smart_align(seq_k, last2, pos2, seq_i, last1, pos1, (), &mut new_cigar);
                 }
             }
             // Based on the two operations, calculate how much positions and CIGAR shifts should be updated.
-            let shift = double_cigar_move_and_shift(op1, op2, &mut read_pos, &mut rem1, &mut hap_pos, &mut rem2);
+            let shift = double_cigar_move_and_shift(op1, op2, &mut pos1, &mut rem1, &mut pos2, &mut rem2);
             if let Some(op) = add_operation {
                 new_cigar.push_checked(op, shift);
-                read_last = read_pos;
-                hap_last = hap_pos;
+                last1 = pos1;
+                last2 = pos2;
             }
 
             if rem1 == 0 {
-                let Some(tmp) = read_cigar_iter.next() else { break };
-                CigarItem { op: op1, len: rem1 } = *tmp;
+                let Some(tmp) = cigar_ij_iter.next() else { break };
+                CigarItem { len: rem1, op: op1 } = *tmp;
             }
             if rem2 == 0 {
-                let Some(tmp) = hap_cigar_iter.next() else { break };
+                let Some(tmp) = cigar_jk_iter.next() else { break };
                 rem2 = tmp.len;
-                op2 = direction.operation(tmp.op);
+                op2 = direction_jk.operation(tmp.op);
             }
         }
-        if read_last != read_cigar.qlen {
-            aligner.align_ends::<false, CLIPPING>(ref_seq, read_seq,
-                hap_last, min(hap_len, hap_last + read_cigar.qlen - read_last + CLIP_PADDING),
-                read_last, read_cigar.qlen, &mut new_cigar);
+        let len_i = seq_i.len() as u32;
+        if last1 != len_i {
+            if FULL_ALN {
+                aligner.smart_align(seq_k, last2, len_k, seq_i, last1, len_i, (), &mut new_cigar);
+            } else {
+                aligner.align_ends::<false>(seq_k, last2, min(len_k, last2 + len_i - last1 + CLIP_PADDING),
+                    seq_i, last1, len_i, &mut new_cigar);
+            }
         }
-        assert_eq!(read_cigar.qlen, new_cigar.qlen);
+        assert_eq!(len_i, new_cigar.qlen);
         new_cigar.boundary_ins_to_soft();
-        (aln_start, new_cigar)
+        (start_k, new_cigar)
     }
 
     #[inline]
-    pub fn transfer_alignment(
+    pub fn transfer_read_alignment(
         &self,
         qpos: u32,
-        cigar_offset: CigarOffset,
+        offset: CigarOffset,
         read_cigar: &Cigar,
         read_seq: &[u8],
         ref_seq: &[u8],
         aligner: &Aligner,
         direction: impl CigarDirection,
     ) -> (u32, Cigar) {
-        self.transfer_alignment_inner::<false, true>(
-            qpos, cigar_offset, read_cigar, read_seq, ref_seq, aligner, direction)
+        Self::transfer_alignment::<false>(
+            qpos, offset, read_cigar, self, direction, read_seq, ref_seq, aligner)
+    }
+
+    /// Using alignments between haplotypes i, j and j, k; find new alignment between i and k.
+    /// In alignment i-j j is reference if `j_ref_ij`;
+    /// similarly, in alignment j-k k is reference ij `k_ref_jk`.
+    #[inline]
+    pub fn find_transitive_alignment(
+        cigar_ij: &Cigar,
+        cigar_jk: &Cigar,
+        k_ref_jk: bool,
+        seq_i: &[u8],
+        seq_k: &[u8],
+        aligner: &Aligner,
+    ) -> Cigar {
+        let offset0 = CigarOffset::default();
+        let (pos, cigar) = if k_ref_jk {
+            Self::transfer_alignment::<true>(0, offset0, cigar_ij, cigar_jk, QueryToRef, seq_i, seq_k, aligner)
+        } else {
+            Self::transfer_alignment::<true>(0, offset0, cigar_ij, cigar_jk, RefToQuery, seq_i, seq_k, aligner)
+        };
+        assert_eq!(pos, 0);
+        assert_eq!(cigar.rlen, seq_k.len() as u32);
+        cigar
     }
 }
 
