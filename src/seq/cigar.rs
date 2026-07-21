@@ -1176,8 +1176,8 @@ impl Cigar {
         let mut i = 0;
         let mut qpos1 = 0;
         let mut rpos1 = 0;
-        // Alignment size since the last anchor.
-        let mut interm_aln_size = 0;
+        // Will contain 0b01 if encountered deletion and 0b10 if encountered insertion.
+        let mut flag = 0_u8;
         // Actual query and reference position at the current operation.
         let mut qpos2 = 0;
         let mut rpos2 = 0;
@@ -1189,7 +1189,7 @@ impl Cigar {
                 let qshift = qpos2 - qpos1;
                 let rshift = rpos2 - rpos1;
                 // There was both a deletion and an insertion after the last anchor.
-                if interm_aln_size > max(qshift, rshift) && !max_gap.under(qshift) && !max_gap.under(rshift) {
+                if flag == 0b11 && !max_gap.under(qshift) && !max_gap.under(rshift) {
                     let new_cigar = lazy_new_cigar.get_or_insert_with(|| Cigar {
                         tuples: self.tuples[..i].to_vec(),
                         qlen: qpos1,
@@ -1203,7 +1203,7 @@ impl Cigar {
                 rpos2 += len;
                 qpos1 = qpos2;
                 rpos1 = rpos2;
-                interm_aln_size = 0;
+                flag = 0;
                 if let Some(new_cigar) = &mut lazy_new_cigar {
                     new_cigar.tuples.extend_from_slice(&self.tuples[i..j]);
                     new_cigar.push_checked(op, len);
@@ -1214,13 +1214,13 @@ impl Cigar {
             } else {
                 qpos2 += ifelse0(cons_query, len);
                 rpos2 += ifelse0(cons_ref, len);
-                interm_aln_size += len;
+                flag |= u8::from(!cons_query) | (u8::from(!cons_ref) << 1);
             }
         }
 
         let qshift = qpos2 - qpos1;
         let rshift = rpos2 - rpos1;
-        if interm_aln_size > max(qshift, rshift) && !max_gap.under(qshift) && !max_gap.under(rshift) {
+        if flag == 0b11 && !max_gap.under(qshift) && !max_gap.under(rshift) {
             // There were >=2 gap operations in a row at the end of the cigar.
             let new_cigar = lazy_new_cigar.get_or_insert_with(|| Cigar {
                 tuples: self.tuples[..i].to_vec(),
