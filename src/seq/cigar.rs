@@ -1163,18 +1163,21 @@ impl CigarIndex {
 }
 
 impl Cigar {
-    /// Removes conflicting gaps in the CIGAR.
+    /// Realign potentially incorrect parts of the alignment.
     fn optimize(
         &mut self,
         ref_seq: &[u8],
         query_seq: &[u8],
         aligner: &Aligner,
         max_gap: impl wfa::Threshold,
+        anchor_size: u32,
     ) {
         // Index after the last match (= or X), and the corresponding query and reference positions.
         let mut i = 0;
         let mut qpos1 = 0;
         let mut rpos1 = 0;
+        // Alignment size since the last anchor.
+        let mut interm_aln_size = 0;
         // Actual query and reference position at the current operation.
         let mut qpos2 = 0;
         let mut rpos2 = 0;
@@ -1182,9 +1185,11 @@ impl Cigar {
 
         for (j, &CigarItem { op, len }) in self.iter().enumerate() {
             let (cons_query, cons_ref) = op.consumes_query_ref();
-            if cons_query && cons_ref {
-                if i + 1 < j && !max_gap.under(qpos2 - qpos1) && !max_gap.under(rpos2 - rpos1) {
-                    // There were >=2 gap operations in a row and gap is not too large.
+            if cons_query && cons_ref && len >= anchor_size {
+                let qshift = qpos2 - qpos1;
+                let rshift = rpos2 - rpos1;
+                // There was both a deletion and an insertion after the last anchor.
+                if interm_aln_size > max(qshift, rshift) && !max_gap.under(qshift) && !max_gap.under(rshift) {
                     let new_cigar = lazy_new_cigar.get_or_insert_with(|| Cigar {
                         tuples: self.tuples[..i].to_vec(),
                         qlen: qpos1,
@@ -1194,11 +1199,11 @@ impl Cigar {
                     i = j;
                 }
 
-                // Match or mismatch.
                 qpos2 += len;
                 rpos2 += len;
                 qpos1 = qpos2;
                 rpos1 = rpos2;
+                interm_aln_size = 0;
                 if let Some(new_cigar) = &mut lazy_new_cigar {
                     new_cigar.tuples.extend_from_slice(&self.tuples[i..j]);
                     new_cigar.push_checked(op, len);
@@ -1209,11 +1214,13 @@ impl Cigar {
             } else {
                 qpos2 += ifelse0(cons_query, len);
                 rpos2 += ifelse0(cons_ref, len);
+                interm_aln_size += len;
             }
         }
 
-        let n = self.len();
-        if i + 1 < n && !max_gap.under(qpos2 - qpos1) && !max_gap.under(rpos2 - rpos1) {
+        let qshift = qpos2 - qpos1;
+        let rshift = rpos2 - rpos1;
+        if interm_aln_size > max(qshift, rshift) && !max_gap.under(qshift) && !max_gap.under(rshift) {
             // There were >=2 gap operations in a row at the end of the cigar.
             let new_cigar = lazy_new_cigar.get_or_insert_with(|| Cigar {
                 tuples: self.tuples[..i].to_vec(),
@@ -1221,7 +1228,7 @@ impl Cigar {
                 rlen: rpos1,
             });
             aligner.smart_align(ref_seq, rpos1, rpos2, query_seq, qpos1, qpos2, (), new_cigar);
-            i = n;
+            i = self.len();
         }
         if let Some(mut new_cigar) = lazy_new_cigar {
             new_cigar.tuples.extend_from_slice(&self.tuples[i..]);
@@ -1346,9 +1353,12 @@ impl Cigar {
         }
         assert_eq!(len_i, new_cigar.qlen);
         if GLOBAL_ALN {
-            new_cigar.optimize(seq_k, seq_i, aligner, max_gap);
+            const MAX_OPTIMIZATION_GAP: u32 = 1000;
+            const OPTIMIZATION_ANCHOR: u32 = 51;
+            new_cigar.optimize(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
+        } else {
+            new_cigar.boundary_ins_to_soft();
         }
-        new_cigar.boundary_ins_to_soft();
         (start_k, new_cigar)
     }
 

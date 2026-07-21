@@ -54,7 +54,7 @@ impl Default for Params {
             accuracy: 9,
             max_gap: 500,
             transitive_div: 0.02,
-            transitive_anchor: 51,
+            transitive_anchor: 101,
         }
     }
 }
