@@ -1202,11 +1202,13 @@ impl Cigar {
     ///
     /// Returns new CIGAR and start in position k.
     ///
-    /// Based on `direction_jk`, j can be query or reference compared to k.
-    fn transfer_alignment<const FULL_ALN: bool>(
+    /// Based on `direction_ij`, i can be query or reference compared to k;
+    /// `direction_jk`, j can be query or reference compared to k.
+    fn transfer_alignment<const GLOBAL_ALN: bool, const ANCHOR_SIZE: u32>(
         start_j: u32,
         offset: CigarOffset,
         cigar_ij: &Cigar,
+        direction_ij: impl CigarDirection,
         cigar_jk: &Cigar,
         direction_jk: impl CigarDirection,
         seq_i: &[u8],
@@ -1224,22 +1226,25 @@ impl Cigar {
         let mut start_k = offset.rpos_at_ix + ifelse0(op2.consumes_ref(), shift);
         let len_k = seq_k.len() as u32;
 
-        if FULL_ALN {
+        if GLOBAL_ALN {
             if cigar_ij.full_sequence_match() {
                 return (0, if direction_jk.invert() { cigar_jk.invert() } else { cigar_jk.clone() });
             } else if cigar_jk.full_sequence_match() {
-                return (0, cigar_ij.clone());
+                return (0, if direction_ij.invert() { cigar_ij.invert() } else { cigar_ij.clone() });
             }
         } else {
             // If read is completely enclosed in a "=" entry + padding, simply copy the alignment.
             const FULL_MATCH_PADDING: u32 = 3;
+            debug_assert!(!direction_ij.invert());
             if op2 == Equal && shift >= FULL_MATCH_PADDING && rem2 >= cigar_ij.rlen + FULL_MATCH_PADDING {
                 return (start_k, cigar_ij.clone());
             }
         }
 
         let mut cigar_ij_iter = cigar_ij.iter();
-        let &CigarItem { len: mut rem1, op: mut op1 } = cigar_ij_iter.next().expect("CIGAR is empty");
+        let tmp = cigar_ij_iter.next().expect("CIGAR is empty");
+        let mut rem1 = tmp.len;
+        let mut op1 = direction_ij.operation(tmp.op);
         // For sequences i (1) and k (2), `pos` is the current position in both cigars.
         // `last` is the end of the sequence added to the new cigar.
         // So, gap `last..pos` is not yet aligned.
@@ -1252,16 +1257,15 @@ impl Cigar {
         const CLIP_PADDING: u32 = 3;
         let mut new_cigar = Cigar::new();
         loop {
-            // Copy operation from one of the CIGARs if both are "=" or one is "=" of sufficient length.
-            const MIN_SIZE: u32 = 5;
+            // Copy operation from one of the CIGARs if one is "=" of sufficient length.
             let add_operation = match (op1 == Equal, op2 == Equal) {
-                (true, true) => Some(Equal),
-                (true, false) if rem1 >= MIN_SIZE => Some(op2),
-                (false, true) if rem2 >= MIN_SIZE => Some(op1),
+                (true, true) if min(rem1, rem2) >= ANCHOR_SIZE => Some(Equal),
+                (true, false) if rem1 >= ANCHOR_SIZE => Some(op2),
+                (false, true) if rem2 >= ANCHOR_SIZE => Some(op1),
                 _ => None,
             };
             if add_operation.is_some() {
-                if !FULL_ALN && last1 == 0 && pos1 > 0 {
+                if !GLOBAL_ALN && last1 == 0 && pos1 > 0 {
                     aligner.align_ends::<true>(seq_k, last2.saturating_sub(pos1 + CLIP_PADDING), pos2,
                         seq_i, last1, pos1, &mut new_cigar);
                     start_k = start_k + pos2 - last2 - new_cigar.rlen;
@@ -1279,7 +1283,8 @@ impl Cigar {
 
             if rem1 == 0 {
                 let Some(tmp) = cigar_ij_iter.next() else { break };
-                CigarItem { len: rem1, op: op1 } = *tmp;
+                rem1 = tmp.len;
+                op1 = direction_ij.operation(tmp.op);
             }
             if rem2 == 0 {
                 let Some(tmp) = cigar_jk_iter.next() else { break };
@@ -1289,7 +1294,7 @@ impl Cigar {
         }
         let len_i = seq_i.len() as u32;
         if last1 != len_i {
-            if FULL_ALN {
+            if GLOBAL_ALN {
                 aligner.smart_align(seq_k, last2, len_k, seq_i, last1, len_i, (), &mut new_cigar);
             } else {
                 aligner.align_ends::<false>(seq_k, last2, min(len_k, last2 + len_i - last1 + CLIP_PADDING),
@@ -1312,16 +1317,18 @@ impl Cigar {
         aligner: &Aligner,
         direction: impl CigarDirection,
     ) -> (u32, Cigar) {
-        Self::transfer_alignment::<false>(
-            qpos, offset, read_cigar, self, direction, read_seq, ref_seq, aligner)
+        const ANCHOR_SIZE: u32 = 5;
+        Self::transfer_alignment::<false, ANCHOR_SIZE>(
+            qpos, offset, read_cigar, QueryToRef, self, direction, read_seq, ref_seq, aligner)
     }
 
-    /// Using alignments between haplotypes i, j and j, k; find new alignment between i and k.
+    /// Using alignments between haplotypes i, j and j, k; find new alignment between i (query) and k (reference).
     /// In alignment i-j j is reference if `j_ref_ij`;
     /// similarly, in alignment j-k k is reference ij `k_ref_jk`.
     #[inline]
     pub fn find_transitive_alignment(
         cigar_ij: &Cigar,
+        j_ref_ij: bool,
         cigar_jk: &Cigar,
         k_ref_jk: bool,
         seq_i: &[u8],
@@ -1329,13 +1336,20 @@ impl Cigar {
         aligner: &Aligner,
     ) -> Cigar {
         let offset0 = CigarOffset::default();
-        let (pos, cigar) = if k_ref_jk {
-            Self::transfer_alignment::<true>(0, offset0, cigar_ij, cigar_jk, QueryToRef, seq_i, seq_k, aligner)
-        } else {
-            Self::transfer_alignment::<true>(0, offset0, cigar_ij, cigar_jk, RefToQuery, seq_i, seq_k, aligner)
+        const ANCHOR_SIZE: u32 = 101;
+        let (pos, cigar) = match (j_ref_ij, k_ref_jk) {
+            (true, true) => Self::transfer_alignment::<true, ANCHOR_SIZE>(
+                0, offset0, cigar_ij, QueryToRef, cigar_jk, QueryToRef, seq_i, seq_k, aligner),
+            (true, false) => Self::transfer_alignment::<true, ANCHOR_SIZE>(
+                0, offset0, cigar_ij, QueryToRef, cigar_jk, RefToQuery, seq_i, seq_k, aligner),
+            (false, true) => Self::transfer_alignment::<true, ANCHOR_SIZE>(
+                0, offset0, cigar_ij, RefToQuery, cigar_jk, QueryToRef, seq_i, seq_k, aligner),
+            (false, false) => Self::transfer_alignment::<true, ANCHOR_SIZE>(
+                0, offset0, cigar_ij, RefToQuery, cigar_jk, RefToQuery, seq_i, seq_k, aligner),
         };
         assert_eq!(pos, 0);
         assert_eq!(cigar.rlen, seq_k.len() as u32);
+        assert!(cigar.validate(seq_i, seq_k)); // [TODO] REMOVE
         cigar
     }
 }

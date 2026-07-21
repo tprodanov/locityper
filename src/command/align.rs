@@ -120,6 +120,9 @@ fn print_help() {
         {EMPTY}  separated by comma [{}].",
         "-k, --backbone".green(), "INT".yellow(), ruint::aliases::U256::MAX_KMER_SIZE,
         super::fmt_def(defaults.params.backbone_str()));
+    println!("    {:KEY$} {:VAL$}  Transitively speed up alignment by using existing alignments with\n\
+        {EMPTY}  divergence under this value (use 0 to disable) [{}].",
+        "    --transitive".green(), "NUM".yellow(), super::fmt_def_f64(defaults.params.transitive_div));
     println!("    {:KEY$} {:VAL$}  Do not complete gaps over this size [{}].",
         "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.params.max_gap)));
     println!("    {:KEY$} {:VAL$}  Alignment accuracy level (1-{}) [{}].",
@@ -184,6 +187,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     .map_err(|_| error!(InvalidInput,
                     "Cannot parse `-k {}`: must be list of integers separated by comma", backbone_str))?;
             }
+            Long("transitive") => args.params.transitive_div = parser.value()?.parse()?,
             Short('g') | Long("max-gap") => args.params.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('a') | Long("accuracy") => args.params.accuracy = parser.value()?.parse()?,
             Short('M') | Long("mismatch") => args.params.penalties.mismatch = parser.value()?.parse()?,
@@ -242,7 +246,9 @@ fn parse_pair(
 
 /// Loads all pairs from -a/-p/-P/--against arguments.
 /// Duplicate pairs are discarded (even if indices are switched), first one used.
-/// Returns vector and pairs and a vector of bools, indicating whether the contig was used in the --against argument.
+/// Returns
+/// - vector of pairs,
+/// - vector of bools, indicating whether the contig was used in the --against argument.
 fn load_pairs(contigs: &ContigNames, args: &Args) -> crate::Result<(Vec<(ContigId, ContigId)>, Vec<bool>)> {
     let mut pairs = Vec::new();
     let mut pairs_set = IntSet::default();

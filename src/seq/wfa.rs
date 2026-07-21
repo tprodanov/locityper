@@ -88,7 +88,7 @@ impl Penalties {
         let mut score = 0;
         for item in cigar.iter() {
             let len = item.len() as i32;
-            score += match item.operation() {
+            score -= match item.operation() {
                 Operation::Equal => 0,
                 Operation::Diff => self.mismatch * len,
                 Operation::Soft | Operation::Ins | Operation::Del => self.gap_open + self.gap_extend * len,

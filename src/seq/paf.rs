@@ -122,24 +122,6 @@ impl PafEntry {
         Ok(Entry(entry))
     }
 
-    /// Creates a new PAF entry fully covering both contigs, on a positive strand, and with n_matches = aln_len = 0.
-    pub fn new(contigs: &ContigNames, query_id: ContigId, target_id: ContigId) -> Self {
-        let query_len = contigs.get_len(query_id);
-        let target_len = contigs.get_len(target_id);
-        Self {
-            query_id, query_len, target_id, target_len,
-            query_start: 0,
-            query_end: query_len,
-            target_start: 0,
-            target_end: target_len,
-            n_matches: 0,
-            aln_len: 0,
-            strand: Strand::Forward,
-            cigar: None,
-            // oth_tags: String::new(),
-        }
-    }
-
     #[inline(always)]
     pub fn query_id(&self) -> ContigId {
         self.query_id

@@ -10,11 +10,10 @@ use smallvec::SmallVec;
 use crate::{
     seq::{
         wfa, div,
-        contigs::{ContigId, ContigNames, ContigSet},
+        contigs::{ContigId, ContigSet},
         kmers::{self, Kmer},
         wfa::{Aligner, Penalties},
         cigar::{Cigar, Operation},
-        paf::PafEntry,
     },
     err::{error, validate_param, add_path},
     math::RoundDiv,
@@ -93,16 +92,12 @@ impl Params {
 pub fn align_sequences(
     contig_set: Arc<ContigSet>,
     pairs: Vec<(ContigId, ContigId)>,
-    mut against_contig: Vec<bool>,
+    against_contig: Vec<bool>,
     params: &Params,
     threads: u16,
     mut outputs: Vec<impl io::Write + Send + 'static>,
 ) -> crate::Result<()>
 {
-    if params.thresh_div == params.against_div {
-        // Now against_contig do not matter.
-        against_contig.clear();
-    }
     let n_contigs = contig_set.len();
     // Find sequences that actually appear.
     let mut in_use = vec![false; n_contigs];
@@ -117,15 +112,19 @@ pub fn align_sequences(
     }
     let (minimizers, kmers) = fill_kmers_singlethread(&contig_set, &in_use, params);
 
+    // Assume that pairs do not repeat.
+    let use_transitivity = params.transitive_div > 0.0
+        && pairs.len() * 10 >= TriangleMatrix::calc_linear_len(contig_set.len());
     if threads == 1 {
-        if params.transitive_div <= 0.0 {
-            align_all_singlethread(&contig_set, &pairs, &against_contig, &minimizers, &kmers, params,
-                &mut outputs[0], true)
+        if use_transitivity {
+            transitive_align_pairs_singlethread(
+                &contig_set, &pairs, &against_contig, &minimizers, &kmers, params, &mut outputs[0])
         } else {
-            todo!()
+            align_pairs_singlethread(
+                &contig_set, &pairs, &against_contig, &minimizers, &kmers, params, &mut outputs[0], true)
         }
     } else {
-        align_all_parallel(contig_set, pairs, against_contig, minimizers, kmers, params, usize::from(threads), outputs)
+        align_pairs_parallel(contig_set, pairs, against_contig, minimizers, kmers, params, threads, outputs)
     }
 }
 
@@ -217,10 +216,10 @@ struct RefEntry<'a> {
 }
 
 impl<'a> RefEntry<'a> {
-    #[inline]
-    fn new(id: ContigId, name: &'a str, seq: &'a [u8]) -> Self {
-        Self { id, name, seq}
-    }
+    // #[inline]
+    // fn new(id: ContigId, name: &'a str, seq: &'a [u8]) -> Self {
+    //     Self { id, name, seq}
+    // }
 
     #[inline]
     fn from_set(contig_set: &'a ContigSet, id: ContigId) -> Self {
@@ -316,13 +315,13 @@ trait AlignerWrapper<'a> {
 }
 
 struct DirectAligner<'a> {
-    aligner: &'a Aligner,
+    aligner: Aligner,
     kmers: &'a [SeqKmers],
     params: &'a Params,
 }
 
 impl<'a> DirectAligner<'a> {
-    fn new(aligner: &'a Aligner, kmers: &'a [SeqKmers], params: &'a Params) -> Self {
+    fn new(aligner: Aligner, kmers: &'a [SeqKmers], params: &'a Params) -> Self {
         Self { aligner, kmers, params }
     }
 }
@@ -335,7 +334,31 @@ impl<'a> AlignerWrapper<'a> for DirectAligner<'a> {
         entry2: RefEntry<'a>,
         buf: &mut Vec<(u32, u32)>,
     ) -> crate::Result<(Cigar, i32)> {
-        align_multik(self.aligner, entry1, entry2, self.kmers, self.params, buf)
+        align_multik(&self.aligner, entry1, entry2, self.kmers, self.params, buf)
+    }
+}
+
+/// CIGAR for contigs a < b (indices not stored).
+/// `ref_smaller` is true when `a` is reference and `b` is query.
+#[derive(Clone)]
+struct DirectedCigar {
+    cigar: Cigar,
+    ref_smaller: bool,
+}
+
+impl DirectedCigar {
+    #[inline(always)]
+    fn new(cigar: Cigar, query_id: ContigId, ref_id: ContigId) -> Self {
+        Self {
+            cigar,
+            ref_smaller: ref_id < query_id,
+        }
+    }
+
+    /// Assuming both i and j are true contig indices for this CIGAR, returns true if `j` is reference and `i` is query.
+    #[inline(always)]
+    fn second_is_ref(&self, i: ContigId, j: ContigId) -> bool {
+        (j < i) == self.ref_smaller
     }
 }
 
@@ -344,9 +367,11 @@ struct TransitiveAligner<'a> {
     /// For each contig, store its closest other contig, corresponding CIGAR and diversity.
     /// Value is only stored if diversity is not greater than params.transitive_div
     /// Closest other contig will always have smaller index than i.
-    closest: Vec<Option<(ContigId, Cigar, f64)>>,
-    cigars: TriangleMatrix<Option<Cigar>>,
-    n_transitive: RefCell<u32>,
+    closest: Vec<Option<(ContigId, DirectedCigar, f64)>>,
+    cigars: TriangleMatrix<Option<DirectedCigar>>,
+    /// Number of transitive and non-transitive alignments.
+    /// Values are stored in `RefCell` because we have to use them in non-mut function call.
+    counts: RefCell<(u32, u32)>,
 }
 
 impl<'a> TransitiveAligner<'a> {
@@ -355,7 +380,7 @@ impl<'a> TransitiveAligner<'a> {
             direct_aligner,
             closest: vec![None; n_contigs],
             cigars: TriangleMatrix::new(n_contigs, None),
-            n_transitive: RefCell::new(0),
+            counts: RefCell::new((0, 0)),
         }
     }
 }
@@ -364,38 +389,61 @@ impl<'a> AlignerWrapper<'a> for TransitiveAligner<'a> {
     #[inline(always)]
     fn align(
         &'a self,
-        entry1: RefEntry<'a>,
-        entry2: RefEntry<'a>,
+        entry_k: RefEntry<'a>,
+        entry_i: RefEntry<'a>,
         buf: &mut Vec<(u32, u32)>,
     ) -> crate::Result<(Cigar, i32)> {
-        // Construct alignment i -> j if there exists haplotype k that is close to
-        let opt = if let Some((middle_id, cigar, _)) = &self.closest[entry1.id.ix()] {
-            Some((entry1, *middle_id, cigar, entry2))
-        } else if let Some((middle_id, cigar, _)) = &self.closest[entry2.id.ix()] {
-            Some((entry2, *middle_id, cigar, entry1))
+        let k = entry_k.id;
+        let i = entry_i.id;
+        let opt_cigar = if let Some((j, cigar_jk, _)) = &self.closest[k.ix()]
+            && let Some(cigar_ij) = &self.cigars.get_symmetric(i.ix(), j.ix())
+        {
+            // log::debug!("    Transitive {} : {} - {}", k.ix(), j.ix(), i.ix());
+            // log::debug!("        {:?} r{} q{}  {}", cigar_jk.cigar,
+            //     cigar_jk.cigar.ref_len(), cigar_jk.cigar.query_len(),
+            //     cigar_jk.ref_smaller);
+            // log::debug!("        {:?} r{} q{}  {} {}", cigar_ij.cigar,
+            //     cigar_ij.cigar.ref_len(), cigar_ij.cigar.query_len(),
+            //     cigar_ij.ref_smaller, cigar_ij.second_is_ref(*j, i));
+            Some(Cigar::find_transitive_alignment(
+                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j),
+                &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
+                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner))
+        } else if let Some((j, cigar_ij, _)) = &self.closest[i.ix()]
+            && let Some(cigar_jk) = &self.cigars.get_symmetric(k.ix(), j.ix())
+        {
+            // log::debug!("    Transitive {} - {} : {}", k.ix(), j.ix(), i.ix());
+            // log::debug!("        {:?} r{} q{}  {} {}", cigar_jk.cigar,
+            //     cigar_jk.cigar.ref_len(), cigar_jk.cigar.query_len(),
+            //     cigar_jk.ref_smaller, cigar_jk.second_is_ref(k, *j));
+            // log::debug!("        {:?} r{} q{}  {}", cigar_ij.cigar,
+            //     cigar_ij.cigar.ref_len(), cigar_ij.cigar.query_len(),
+            //     cigar_ij.ref_smaller);
+            Some(Cigar::find_transitive_alignment(
+                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j),
+                &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
+                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner))
         } else {
+            // log::debug!("    Non transitive");
             None
         };
 
-        if let Some((entry_i, j, cigar_ij, entry_k)) = opt
-            && let Some(cigar_jk) = &self.cigars.get_symmetric(j.ix(), entry_k.id.ix())
-        {
-            assert!(j < entry_i.id);
-            let cigar_ik = Cigar::find_transitive_alignment(cigar_ij, cigar_jk, entry_k.id < j,
-                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner);
-            assert!(cigar_ik.validate(entry_i.seq, entry_k.seq)); // [TODO] remove
+        if let Some(cigar_ik) = opt_cigar {
             let score = self.direct_aligner.aligner.penalties().calculate_score(&cigar_ik);
-            *self.n_transitive.borrow_mut() += 1;
+            self.counts.borrow_mut().0 += 1;
             Ok((cigar_ik, score))
         } else {
-            self.direct_aligner.align(entry1, entry2, buf)
+            self.counts.borrow_mut().1 += 1;
+            self.direct_aligner.align(entry_k, entry_i, buf)
         }
     }
 }
 
 /// If necessary, calculates minimizer-based sequence divergence;
-/// if necessary, constructs actual alignment using `construct_aln` function;
+/// if necessary, constructs actual alignment using `aligner`;
 /// writes resulting PAF entry to `out` and return CIGAR.
+///
+/// In the alignment, `entry1` is reference and `entry2` is query.
 ///
 /// Close `construct_alignment` takes two entries and returns CIGAR and its score.
 ///
@@ -453,7 +501,7 @@ fn process_pair<'a>(
     Ok(ret_val)
 }
 
-fn align_all_singlethread(
+fn align_pairs_singlethread(
     contig_set: &ContigSet,
     pairs: &[(ContigId, ContigId)],
     against_contig: &[bool],
@@ -467,7 +515,7 @@ fn align_all_singlethread(
     let mut buf1 = Default::default();
     let mut buf2 = Default::default();
     let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
-    let aligner_wrapper = DirectAligner::new(&aligner, kmers, params);
+    let aligner_wrapper = DirectAligner::new(aligner, kmers, params);
     let mult = 100.0 / pairs.len() as f64;
     // Power of 2 minus 1.
     const LOG_FREQ: usize = 255;
@@ -481,20 +529,21 @@ fn align_all_singlethread(
     Ok(())
 }
 
-fn align_all_parallel(
+fn align_pairs_parallel(
     contig_set: Arc<ContigSet>,
     pairs: Vec<(ContigId, ContigId)>,
     against_contig: Vec<bool>,
     minimizers: Vec<Vec<u64>>,
     kmers: Vec<SeqKmers>,
     params: &Params,
-    threads: usize,
+    threads: u16,
     outputs: Vec<impl io::Write + Send + 'static>,
 ) -> crate::Result<()> {
     let pairs = Arc::new(pairs);
     let minimizers = Arc::new(minimizers);
     let kmers = Arc::new(kmers);
 
+    let threads = usize::from(threads);
     let mut handles = Vec::with_capacity(threads);
     let n_pairs = pairs.len();
     let mut start = 0;
@@ -514,7 +563,7 @@ fn align_all_parallel(
             let params = params.clone();
             let verbose = worker_ix == 0;
             handles.push(thread::spawn(move || {
-                align_all_singlethread(&contig_set, &pairs[start..end],
+                align_pairs_singlethread(&contig_set, &pairs[start..end],
                     &against_contig, &minimizers, &kmers, &params, &mut out, verbose)
             }));
         }
@@ -525,39 +574,56 @@ fn align_all_parallel(
 }
 
 /// Align all sequence pairs to each other, speeding up things using transitive
-fn transitive_align_all_pairs(
+fn transitive_align_pairs_singlethread(
     contig_set: &ContigSet,
+    pairs: &[(ContigId, ContigId)],
     against_contig: &[bool],
     minimizers: &[Vec<u64>],
     kmers: &[SeqKmers],
     params: &Params,
     out: &mut impl io::Write,
 ) -> crate::Result<()> {
-    let contigs = contig_set.contigs();
-    let n_contigs = contigs.len();
     let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
-    let mut transitive_aligner = TransitiveAligner::new(DirectAligner::new(&aligner, kmers, params), contig_set.len());
+    let mut transitive_aligner = TransitiveAligner::new(DirectAligner::new(aligner, kmers, params), contig_set.len());
     let mut buf1 = Default::default();
     let mut buf2 = Default::default();
-    // For each contig, store its closest other contig, corresponding CIGAR and diversity.
-    // Value is only stored if diversity is not greater than params.transitive_div
-    // Closest other contig will always have smaller index than i.
-    let mut closest: Vec<Option<(ContigId, Cigar, f64)>> = vec![None; n_contigs];
-    let mut cigars = TriangleMatrix::new(n_contigs, Option::<Cigar>::None);
 
-    for (i, j) in TriangleMatrix::indices(n_contigs) {
-        let entry1 = RefEntry::from_set(contig_set, ContigId::new(i));
-        let entry2 = RefEntry::from_set(contig_set, ContigId::new(j));
+    const LOG_FREQ: usize = 255;
+    let mult = 100.0 / pairs.len() as f64;
+    for (ix, &(i, j)) in pairs.iter().enumerate() {
+        let entry1 = RefEntry::from_set(contig_set, i);
+        let entry2 = RefEntry::from_set(contig_set, j);
+        // log::debug!("{} (len {})  {} (len {})", i.ix(), entry1.seq.len(), j.ix(), entry2.seq.len());
         let res = process_pair(&transitive_aligner, entry1, entry2, against_contig, minimizers,
             params, &mut buf1, &mut buf2, out)?;
-        if let Some((cigar, div)) = res && div <= params.transitive_div {
-            let prev_closest = &mut transitive_aligner.closest[entry2.id.ix()];
-            if let Some((_, _, prev_div)) = prev_closest && *prev_div < div {
-                // Do nothing
-            } else {
-                *prev_closest = Some((entry1.id, cigar, div));
+        // let res = if i == 4 && j == 5 {
+        // } else {
+        //     process_pair(&transitive_aligner.direct_aligner, entry1, entry2, against_contig, minimizers,
+        //         params, &mut buf1, &mut buf2, out)?
+        // };
+        if let Some((cigar, div)) = res {
+            let dir_cigar = DirectedCigar::new(cigar, j, i);
+            // log::debug!("    Save CIGAR {:?} r{} q{}  {}",
+            //     dir_cigar.cigar, dir_cigar.cigar.ref_len(), dir_cigar.cigar.query_len(), dir_cigar.ref_smaller);
+            if div <= params.transitive_div {
+                let prev_closest = &mut transitive_aligner.closest[j.ix()];
+                if let Some((_, _, prev_div)) = prev_closest && *prev_div < div {} else {
+                    // log::debug!("Save closest [{}] = ({}, dv {})", entry2.id.ix(), entry1.id.ix(), div);
+                    *prev_closest = Some((i, dir_cigar.clone(), div));
+                }
             }
+            transitive_aligner.cigars[(i.ix(), j.ix())] = Some(dir_cigar);
+        }
+        if (ix & LOG_FREQ) == LOG_FREQ {
+            let counts = transitive_aligner.counts.borrow();
+            let total = counts.0 + counts.1;
+            log::debug!("    Aligned ≈{:5.1}% pairs ({:.1}% transitive)", mult * ix as f64,
+                100.0 * f64::from(counts.0) / f64::from(total));
         }
     }
+    let (transitive, non_transitive) = transitive_aligner.counts.take();
+    let total = transitive + non_transitive;
+    log::debug!("    Sped up alignment for {}/{} pairs ({:.1}%)", transitive, total,
+        100.0 * f64::from(transitive) / f64::from(total));
     Ok(())
 }
