@@ -9,30 +9,28 @@ readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
 function help_message {
   cat <<HELP
 Usage: $SCRIPT_NAME \\
-    (-a assemblies.agc | -g assemblies_dir) \\
-    (-t targets.fa | -b targets.bed -r reference.fa) \\
+    -i assemblies [-i assemblies2 ...] [-n aliases.txt] \\
+    -c targets.bed -r reference.fa [-t targets.fa] \\
     -o directory [args]
-then:  $SCRIPT_NAME -b targets.bed --combine directory -o final_directory
 
 │ Maps target sequences to assembly genomes and extracts corresponding subregions.
 │ Multiple instances of this script can be run in parallel on the same output directory,
 │ as it creates "*.lock" files for haplotypes in progress and ".ok" files for the finished haplotypes.
 
 Input/output arguments:
-    -a, --agc         FILE  Input AGC file.
-    -g, --genomes     DIR   Directory with various genome assemblies (.fa[.gz]).
-                            Mutually exclusive with -a/--agc.
+    -i, --input   FILE|DIR  Input assemblies: either AGC file, FA[.gz] file, or directory with FA[.gz] files.
+                            Can be repeated multiple times. Repeated assemblies will be skipped.
+                            All extensions must be in lowercase.
     -n, --names       FILE  Optional: replace genome names (first column) with another name (second column).
-                            In case of -g/--genomes, first column should match file basename without extension.
-                            Use "skip" in the second column to skip this samples.
-    -t, --targets     FILE  FASTA file with target sequences. Name lines should not contain spaces.
-    -b, --targets-bed FILE  Instead of -t/--targets, provide BED file with reference locus coordinates.
-    -r, --reference   FILE  Provide reference genome (must be indexed) to extract reference haplotypes.
-                            Only relevant together with -b/--target-bed.
-    -o, --output      DIR   Output directory.
-        --combine     DIR   After all genomes were processed (potentially in multiple parallel instances),
-                            combine fasta files from DIR into a new final directory (requires -b targets.bed).
-                            Can be specified multiple times to provide multiple input directories.
+                            In case of the FASTA files, first column should match basename without extension.
+                            Use "skip" in the second column to skip this assembly.
+    -c, --coordinates FILE  BED file with reference locus coordinates.
+    -r, --reference   FILE  Reference genome.
+    -t, --targets     FILE  Optional: instead of fetching target sequences from the reference,
+                            directly provide them in this FASTA file. Names must match -c/--coordinates.
+    -o, --output      DIR   Output directory. Will contain subdirectories
+                            "by_assembly" with local haplotypes extracted from each assembly,
+                            and "panels" with combined reference panels for each locus.
 
 Filter arguments:
     -d, --distance    INT   Merge PAF entries if distance is smaller than INT [${distance}].
@@ -48,6 +46,9 @@ Minimap2 arguments:
     --  ARGUMENTS           If necessary, provide additional minimap2 arguments.
 
 Other arguments:
+    -T, --timeout     INT   Number of minutes the script will wait for other instances to finish
+                            in order to start combining reference panels [${timeout}].
+                            If timeout is exceeded, this instance will stop.
     -h, --help              Print this help and exit.
 HELP
 }
@@ -73,7 +74,7 @@ function panic {
 }
 
 function parse_params {
-    combine=()
+    input=()
 
     min_len=0.5
     min_simil=0.3
@@ -81,34 +82,31 @@ function parse_params {
     count=1
 
     preset=asm20
-    threads=3
+    threads=1
     secondary=50
     score_ratio=0.5
+    timeout=10
 
-    long1=help,agc:,genomes:,names:,targets:,targets-bed:,reference:,output,combine:
+    long1=help,input:,names:,coordinates:,reference:,targets:,output:
     long2=distance:,min-len:,min-simil:,count:
-    long3=preset:,threads:,secondary:,score-ratio:
-    ARGS="$(getopt -o a:g:n:t:b:r:o:d:l:s:N:x:@:p:h --long "${long1},${long2},${long3}" \
+    long3=preset:,threads:,secondary:,score-ratio:,timeout:
+    ARGS="$(getopt -o i:n:c:r:t:o:d:l:s:N:x:@:p:T:h --long "${long1},${long2},${long3}" \
         --name "$SCRIPT_NAME" -- "$@")"
     eval set -- "$ARGS"
     while :; do
         case "$1" in
-            -a | --agc )
-                agc_file="$2"; shift 2 ;;
-            -g | --genomes )
-                genomes_dir="$2"; shift 2 ;;
-            -t | --targets )
-                targets_fa="$2"; shift 2 ;;
-            -b | --targets-bed )
+            -i | --input )
+                input+=( "$2" ); shift 2 ;;
+            -n | --names )
+                names_file="$2"; shift 2 ;;
+            -c | --coord | --coordinates )
                 targets_bed="$2"; shift 2 ;;
             -r | --reference )
                 reference="$2"; shift 2 ;;
-            -n | --names )
-                names_file="$2"; shift 2 ;;
+            -t | --targets )
+                targets_fa="$2"; shift 2 ;;
             -o | --output )
                 output="$2"; shift 2 ;;
-            --combine )
-                combine+=( "$2" ); shift 2 ;;
             -d | --distance )
                 distance="$2"; shift 2 ;;
             -l | --min-len )
@@ -125,6 +123,8 @@ function parse_params {
                 secondary="$2"; shift 2 ;;
             -p | --score-ratio )
                 score_ratio="$2"; shift 2 ;;
+            -T | --timeout )
+                timeout="$2"; shift 2 ;;
             -h | --help)
                 help_message; exit 0;
                 ;;
@@ -138,64 +138,15 @@ function parse_params {
         minimap2_args+=( "$@" )
     fi
 
+    [[ ${input[@]:+${input[@]}} ]] || panic "Missing -i/--input"
+    [[ -n "${targets_bed-}" ]] || panic "Missing required parameter -c/--coordinates"
+    [[ -n "${reference-}" ]] || panic "Missing required parameter -r/--reference"
     [[ -n "${output-}" ]] || panic "Missing required parameter -o/--output"
-    [[ -z "${targets_fa-}" ]] && have_targets_fa=n || have_targets_fa=y
-    [[ -z "${targets_bed-}" ]] && have_targets_bed=n || have_targets_bed=y
+    [[ -n "${targets_fa-}" ]] && have_targets_fa=y || have_targets_fa=n
 
-    if [[ ${combine[@]:+${combine[@]}} ]]; then
-        [[ "$have_targets_bed" = y ]] || panic "--combine requires -b"
-    else
-        [[ $have_targets_fa = y || $have_targets_bed = y ]] || panic "Either -t or -b is required"
-        if [[ $have_targets_fa = y && $have_targets_bed = y ]]; then
-            msg "Both -t and -b are provided, will use FASTA from -t"
-            have_targets_bed=n
-        fi
-
-        [[ $have_targets_fa = n || -f "${targets_fa-}" ]] || panic "Targets file ${targets_fa-} not found"
-        [[ $have_targets_bed = n || ( -f "${targets_bed-}" && -f "${reference-}" ) ]] \
-            || panic "Targets BED file ${targets_bed-} or reference FASTA ${reference-} not found or not provided"
-
-        [[ -z "${agc_file-}" ]] && have_agc=n || have_agc=y
-        [[ -z "${genomes_dir-}" ]] && have_genomes=n || have_genomes=y
-        [[ $have_agc != $have_genomes ]] || panic "Require either -a or -g, but not both"
-    fi
-}
-
-function combine_files {
-    [[ ${combine[@]:+${combine[@]}} ]] || return 0
-
-    local lock_file="${output}/lock"
-    ( set -C; 2>/dev/null > "$lock_file" ) || \
-        panic "Output directory is locked. --combine is not supposed to work in parallel"
-    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
-
-    [[ -z "$(find "${combine[@]}" -mindepth 1 -maxdepth 1 -name "*.lock" -print0 -quit)" ]] \
-        || panic "--combine directories contain *.lock files. Either wait for other finished threads, or delete them"
-
-    msg "Combining ${combine[@]} -> ${output}"
-    rm -f "${output}/targets.bed" "${output}/warnings.csv" "${output}/"*.fa.gz
-
-    local n_targets
-    n_targets="$(wc -l < "${targets_bed}")"
-    cat -n "${targets_bed}" | while read i chrom start end target extra; do
-        printf "[%3d / %3d] %s\n" "$i" "$n_targets" "$target" >&2
-        find "${combine[@]}" -mindepth 2 -maxdepth 2 -name "${target}.fa.gz" | \
-            awk -F/ '{
-                sample = $(NF - 1);
-                if (!seen[sample]++) { print }
-                else { printf("    Ignoring second occurance of sample \"%s\"\n", sample) > "/dev/stderr" }
-            }' | xargs -P 1 -n 50 cat > "${output}/${target}.fa.gz"
-        echo -e "${chrom}\t${start}\t${end}\t${target}\t${target}.fa.gz" >> "${output}/targets.bed"
-    done
-
-    find "${combine[@]}" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
-    awk -F/ '!seen[$NF]++' | while read filename; do
-        cat "$filename"
-    done > "${output}/warnings.csv"
-
-    rm -f "${lock_file}"
-    trap - INT TERM ERR EXIT
-    exit 0
+    [[ $have_targets_fa = n || -f "${targets_fa-}" ]] || panic "Targets file ${targets_fa-} not found"
+    [[ -f "${targets_bed-}" && -f "${reference-}" ]] \
+        || panic "Targets BED file ${targets_bed-} or reference FASTA ${reference-} not found"
 }
 
 function load_names {
@@ -206,7 +157,7 @@ function load_names {
 }
 
 function prepare_targets {
-    [[ $have_targets_bed = y ]] || return 0
+    [[ $have_targets_fa = n ]] || return 0
     targets_fa="${output}/__targets__.fa"
     [[ ! -f "${targets_fa}" ]] || return 0
 
@@ -237,29 +188,33 @@ function prepare_targets {
     panic "Most likely, reference target sequences could not be extracted in other instances of this program"
 }
 
-function process_genome {
+function process_assembly {
     local arg="$1"
+    local agc_file="${2-}"
     local genome_name
-    [[ $have_agc = y ]] && genome_name="$arg" || genome_name="$(basename "${arg%.fa*}")"
+    [[ -n "$agc_file" ]] && genome_name="$arg" || genome_name="$(basename "${arg%.fa*}")"
 
     local short_name
     # :- if unset or empty, use $genome_name
     short_name="${names["$genome_name"]:-"$genome_name"}"
     [[ "$short_name" != skip ]] || return 0
 
-    local prefix="${output}/${short_name}"
+    local prefix="${output1}/${short_name}"
     local ok_file="${prefix}.ok"
     local lock_file="${prefix}.lock"
+    # Needed to account for all unfinished threads.
+    local todo_file="${prefix}.todo"
     [[ ! -f "$ok_file" ]] || return 0
     ( set -C; 2>/dev/null > "$lock_file" ) || return 0
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
+    touch "${todo_file}"
 
     # ===== START ======
     msg "Processing $short_name"
     mkdir -p "$prefix"
 
     local genome_fasta
-    if [[ $have_agc = y ]]; then
+    if [[ -n "$agc_file" ]]; then
         msg "    Extracting genome sequence"
         genome_fasta="${prefix}.fa"
         agc getset "$agc_file" "$genome_name" > "${genome_fasta}"
@@ -315,18 +270,118 @@ function process_genome {
     # This way we don't have to worry about zero matches.
     find "${prefix}" -name "*.fa" -exec gzip {} ';'
 
-    [[ $have_agc = n ]] || rm "${genome_fasta}"{,.fai}
+    [[ -z "$agc_file" ]] || rm "${genome_fasta}"{,.fai}
     # ===== END ======
 
     touch "${ok_file}"
+    rm -f "${lock_file}" "${todo_file}"
+    trap - INT TERM ERR EXIT
+}
+
+function process_assemblies {
+    for curr in "${input[@]}"; do
+        if [[ -d "$curr" ]]; then
+            for filename in "${curr}"/*.fa{,sta}{,.gz}; do
+                process_assembly "$filename"
+            done
+        elif [[ "$curr" =~ \.fa(sta)?(\.gz)?$ ]]; then
+            process_assembly "$curr"
+        elif [[ "$curr" =~ \.agc$ ]]; then
+            agc listset "$curr" | while read assembly; do
+                process_assembly "$assembly" "$curr"
+            done
+        else
+            panic "Unexpected value --input $curr, expected either a directory, FASTA or AGC file (with lowercase extension)."
+        fi
+    done
+}
+
+function combine_locus {
+    local target="$1"
+
+    local prefix="${output2}/${target}"
+    local ok_file="${prefix}.ok"
+    local lock_file="${prefix}.lock"
+    local todo_file="${prefix}.todo"
+    if [[ -f "$ok_file" ]]; then
+        if [[ "$ok_file" -ot "$latest_ok_file" ]]; then
+            rm "$ok_file"
+        else
+            return 0
+        fi
+    fi
+    ( set -C; 2>/dev/null > "$lock_file" ) || return 0
+    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
+    touch "${todo_file}"
+
+    # ===== START ======
+    msg "[${target}] Combining haplotypes"
+    # Use `find` so that we don't exceed the max number of arguments.
+    find "$output1" -mindepth 2 -maxdepth 2 -name "${target}.fa.gz" | \
+        xargs -P 1 -n 50 cat > "${output1}/${target}.fa.gz"
+    # ===== END ======
+
+    touch "${ok_file}"
+    rm -f "${lock_file}" "${todo_file}"
+    trap - INT TERM ERR EXIT
+}
+
+function combine_panels {
+    local timeout_sec
+    timeout_sec=$((timeout * 60))
+    local ready=n
+    for i in $(seq 0 "$timeout_sec"); do
+        local unfinished
+        unfinished="$(find "${output1}" -mindepth 1 -maxdepth 1 -name "*.todo" -print -quit)"
+        if [[ -z "$unfinished" ]]; then
+            ready=y
+            break
+        else
+            if [[ "$i" = 0 ]]; then
+                msg "Waiting $timeout minutes for unfinished jobs (such as $unfinished)"
+            fi
+            sleep 1
+        fi
+    done
+    [[ "$ready" == y ]] || \
+        panic "Cannot combine reference panels: exceeded timeout (-T) and there are unfinished jobs"
+
+    latest_ok_file="$(find "${output1}" -mindepth 1 -maxdepth 1 -name "*.ok" -printf "%T@\t%p\n" | sort -k1,1gr | \
+        head -n1 | cut -f2)"
+    cut -f4 "$targets_bed" | while read target; do
+        combine_locus "$target"
+    done
+
+    [[ ! -f "${output2}/targets.bed" || ! -f "${output2}/warnings.csv" ]] || return 0
+    local lock_file="${output2}/targets.lock"
+    ( set -C; 2>/dev/null > "$lock_file" ) || return 0
+    trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
+
+    cut -f-4 "$targets_bed" | awk -F$'\t' 'BEGIN{OFS=FS} { print $0, ($4 ".fa.gz") }' > "${output2}/targets.bed.tmp"
+    find "$output1" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
+        xargs -P 1 -n 50 cat > "${output2}/warnings.csv.tmp"
+    mv "${output2}/targets.bed"{.tmp,}
+    mv "${output2}/warnings.csv"{.tmp,}
+
     rm -f "${lock_file}"
     trap - INT TERM ERR EXIT
 }
 
+function check_completion {
+    if [[ -f "${output2}/targets.bed"
+            && -z "$(find "$output1" "$output2" -mindepth 1 -maxdepth 1 -name "*.todo" -print -quit)" ]]; then
+        msg "All jobs completed"
+        touch "${output2}/ok"
+    else
+        msg "Some jobs incomplete, please wait for other instances to complete, run additional instances, or check for error messages"
+    fi
+}
+
 setup_colors
 parse_params "$@"
-mkdir -p "$output"
-combine_files
+output1="$output/by_assembly"
+output2="$output/panels"
+mkdir -p "$output1" "$output2"
 
 declare -A names
 load_names
@@ -334,13 +389,6 @@ load_names
 prepare_targets
 # zcat -f opens plain files as well. sed -n does not print by default.
 readarray -t target_names < <(zcat -f "$targets_fa" | sed -n 's/>//p' | sort -u)
-
-if [[ $have_agc = y ]]; then
-    agc listset "$agc_file" | while read genome; do
-        process_genome "$genome"
-    done
-else
-    for filename in "${genomes_dir}"/*.fa{,sta}{,.gz}; do
-        process_genome "$filename"
-    done
-fi
+process_assemblies
+combine_panels
+check_completion
