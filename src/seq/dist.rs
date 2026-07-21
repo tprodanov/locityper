@@ -398,33 +398,16 @@ impl<'a> AlignerWrapper<'a> for TransitiveAligner<'a> {
         let opt_cigar = if let Some((j, cigar_jk, _)) = &self.closest[k.ix()]
             && let Some(cigar_ij) = &self.cigars.get_symmetric(i.ix(), j.ix())
         {
-            // log::debug!("    Transitive {} : {} - {}", k.ix(), j.ix(), i.ix());
-            // log::debug!("        {:?} r{} q{}  {}", cigar_jk.cigar,
-            //     cigar_jk.cigar.ref_len(), cigar_jk.cigar.query_len(),
-            //     cigar_jk.ref_smaller);
-            // log::debug!("        {:?} r{} q{}  {} {}", cigar_ij.cigar,
-            //     cigar_ij.cigar.ref_len(), cigar_ij.cigar.query_len(),
-            //     cigar_ij.ref_smaller, cigar_ij.second_is_ref(*j, i));
             Some(Cigar::find_transitive_alignment(
-                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j),
-                &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
-                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner))
+                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j), &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
+                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner, self.direct_aligner.params.max_gap))
         } else if let Some((j, cigar_ij, _)) = &self.closest[i.ix()]
             && let Some(cigar_jk) = &self.cigars.get_symmetric(k.ix(), j.ix())
         {
-            // log::debug!("    Transitive {} - {} : {}", k.ix(), j.ix(), i.ix());
-            // log::debug!("        {:?} r{} q{}  {} {}", cigar_jk.cigar,
-            //     cigar_jk.cigar.ref_len(), cigar_jk.cigar.query_len(),
-            //     cigar_jk.ref_smaller, cigar_jk.second_is_ref(k, *j));
-            // log::debug!("        {:?} r{} q{}  {}", cigar_ij.cigar,
-            //     cigar_ij.cigar.ref_len(), cigar_ij.cigar.query_len(),
-            //     cigar_ij.ref_smaller);
             Some(Cigar::find_transitive_alignment(
-                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j),
-                &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
-                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner))
+                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j), &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
+                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner, self.direct_aligner.params.max_gap))
         } else {
-            // log::debug!("    Non transitive");
             None
         };
 
@@ -593,22 +576,13 @@ fn transitive_align_pairs_singlethread(
     for (ix, &(i, j)) in pairs.iter().enumerate() {
         let entry1 = RefEntry::from_set(contig_set, i);
         let entry2 = RefEntry::from_set(contig_set, j);
-        // log::debug!("{} (len {})  {} (len {})", i.ix(), entry1.seq.len(), j.ix(), entry2.seq.len());
         let res = process_pair(&transitive_aligner, entry1, entry2, against_contig, minimizers,
             params, &mut buf1, &mut buf2, out)?;
-        // let res = if i == 4 && j == 5 {
-        // } else {
-        //     process_pair(&transitive_aligner.direct_aligner, entry1, entry2, against_contig, minimizers,
-        //         params, &mut buf1, &mut buf2, out)?
-        // };
         if let Some((cigar, div)) = res {
             let dir_cigar = DirectedCigar::new(cigar, j, i);
-            // log::debug!("    Save CIGAR {:?} r{} q{}  {}",
-            //     dir_cigar.cigar, dir_cigar.cigar.ref_len(), dir_cigar.cigar.query_len(), dir_cigar.ref_smaller);
             if div <= params.transitive_div {
                 let prev_closest = &mut transitive_aligner.closest[j.ix()];
                 if let Some((_, _, prev_div)) = prev_closest && *prev_div < div {} else {
-                    // log::debug!("Save closest [{}] = ({}, dv {})", entry2.id.ix(), entry1.id.ix(), div);
                     *prev_closest = Some((i, dir_cigar.clone(), div));
                 }
             }
