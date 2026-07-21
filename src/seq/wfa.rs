@@ -287,8 +287,7 @@ impl Aligner {
         j2: u32,
         max_gap: impl Threshold,
         cigar: &mut Cigar,
-    ) -> i32
-    {
+    ) -> i32 {
         debug_assert!(i1 <= i2 && j1 <= j2);
         let jump1 = i2 - i1;
         let jump2 = j2 - j1;

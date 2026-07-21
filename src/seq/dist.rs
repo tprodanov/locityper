@@ -38,6 +38,7 @@ pub struct Params {
     /// For all-v-all alignments, transfer alignments
     /// if one of the two constructed alignments has divergence <= this value.
     pub transitive_div: f64,
+    pub transitive_anchor: u32,
 }
 
 impl Default for Params {
@@ -52,7 +53,8 @@ impl Default for Params {
             backbone_ks: vec![25, 51, 101],
             accuracy: 9,
             max_gap: 500,
-            transitive_div: 0.0,
+            transitive_div: 0.02,
+            transitive_anchor: 51,
         }
     }
 }
@@ -395,23 +397,23 @@ impl<'a> AlignerWrapper<'a> for TransitiveAligner<'a> {
     ) -> crate::Result<(Cigar, i32)> {
         let k = entry_k.id;
         let i = entry_i.id;
-        let opt_cigar = if let Some((j, cigar_jk, _)) = &self.closest[k.ix()]
+        let transitive_edge = if let Some((j, cigar_jk, _)) = &self.closest[k.ix()]
             && let Some(cigar_ij) = &self.cigars.get_symmetric(i.ix(), j.ix())
         {
-            Some(Cigar::find_transitive_alignment(
-                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j), &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
-                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner, self.direct_aligner.params.max_gap))
+            Some((cigar_ij, *j, cigar_jk))
         } else if let Some((j, cigar_ij, _)) = &self.closest[i.ix()]
             && let Some(cigar_jk) = &self.cigars.get_symmetric(k.ix(), j.ix())
         {
-            Some(Cigar::find_transitive_alignment(
-                &cigar_ij.cigar, cigar_ij.second_is_ref(i, *j), &cigar_jk.cigar, cigar_jk.second_is_ref(*j, k),
-                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner, self.direct_aligner.params.max_gap))
+            Some((cigar_ij, *j, cigar_jk))
         } else {
             None
         };
 
-        if let Some(cigar_ik) = opt_cigar {
+        if let Some((cigar_ij, j, cigar_jk)) = transitive_edge {
+            let cigar_ik = Cigar::find_transitive_alignment(
+                &cigar_ij.cigar, cigar_ij.second_is_ref(i, j), &cigar_jk.cigar, cigar_jk.second_is_ref(j, k),
+                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner,
+                self.direct_aligner.params.max_gap, self.direct_aligner.params.transitive_anchor);
             let score = self.direct_aligner.aligner.penalties().calculate_score(&cigar_ik);
             self.counts.borrow_mut().0 += 1;
             Ok((cigar_ik, score))
@@ -574,10 +576,9 @@ fn transitive_align_pairs_singlethread(
     const LOG_FREQ: usize = 255;
     let mult = 100.0 / pairs.len() as f64;
     for (ix, &(i, j)) in pairs.iter().enumerate() {
-        let entry1 = RefEntry::from_set(contig_set, i);
-        let entry2 = RefEntry::from_set(contig_set, j);
-        let res = process_pair(&transitive_aligner, entry1, entry2, against_contig, minimizers,
-            params, &mut buf1, &mut buf2, out)?;
+        let res = process_pair(&transitive_aligner,
+            RefEntry::from_set(contig_set, i), RefEntry::from_set(contig_set, j),
+            against_contig, minimizers, params, &mut buf1, &mut buf2, out)?;
         if let Some((cigar, div)) = res {
             let dir_cigar = DirectedCigar::new(cigar, j, i);
             if div <= params.transitive_div {
