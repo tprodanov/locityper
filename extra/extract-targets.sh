@@ -352,7 +352,10 @@ function combine_panels {
         combine_locus "$target"
     done
 
-    [[ ! -f "${output2}/targets.bed" || ! -f "${output2}/warnings.csv" ]] || return 0
+    # Test will return false if the files don't exist
+    if [[ "${output2}/targets.bed" -nt "$latest_ok_file" && "${output2}/warnings.csv" -nt "$latest_ok_file" ]]; then
+        return 0
+    fi
     local lock_file="${output2}/targets.lock"
     ( set -C; 2>/dev/null > "$lock_file" ) || return 0
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
