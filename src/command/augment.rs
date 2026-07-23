@@ -139,8 +139,8 @@ fn print_help() {
         "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.aln_params.penalties.gap_extend));
 
     println!("\n{}", "Basis haplotypes selection:".bold());
-    println!("    Each original haplotype will be similar ({}) to one of the basis haplotypes", "-x".green());
-    println!("    at each moving window ({}, {}). Basis haplotypes will be used for faster read mapping.",
+    println!("│ Each original haplotype will be similar ({}) to one of the basis haplotypes", "-x".green());
+    println!("│ at each moving window ({}, {}). Basis haplotypes will be used for faster read mapping.",
         "-w".green(), "-s".green());
     println!("    {:KEY$} {:VAL$}  Maximum seq. divergence from the basis haplotypes [{}].",
         "-x, --divergence".green(), "NUM".yellow(), super::fmt_def_f64(defaults.divergence));

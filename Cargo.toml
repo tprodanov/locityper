@@ -43,7 +43,7 @@ glob = { version = "0.3", default-features = false }
 ruint = { version = "1.17", default-features = false, features = ["alloc", "num-traits"] }
 itertools = { version = "0.14", default-features = false, features = ["use_std"] }
 kodama = { version = "0.3" }
-russcip = { version = "0.10", default-features = false, features = ["from-source"] }
+russcip = { version = "0.10.0", default-features = false }
 arc-swap = { version = "1.9" }
 
 [build-dependencies]
@@ -53,6 +53,8 @@ bindgen = { version = "0.72", default-features = false, features = ["runtime"] }
 # debug = 1  # Needed for profiling.
 
 [features]
-default = []
+default = ["libscip"]
 gurobi = ["dep:grb"]
 highs = ["dep:highs", "dep:highs-sys"]
+libscip = ["russcip/bindgen"]
+scip-from-source = ["russcip/from-source"]
