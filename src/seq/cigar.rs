@@ -1357,6 +1357,9 @@ impl Cigar {
             const OPTIMIZATION_ANCHOR: u32 = 51;
             new_cigar.optimize(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
         } else {
+            const MAX_OPTIMIZATION_GAP: u32 = 20;
+            const OPTIMIZATION_ANCHOR: u32 = 5;
+            new_cigar.optimize(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
             new_cigar.boundary_ins_to_soft();
         }
         (start_k, new_cigar)
