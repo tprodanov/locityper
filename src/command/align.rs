@@ -16,7 +16,7 @@ use crate::{
         fmt::PrettyU32,
     },
     seq::{
-        dist, wfa,
+        self, wfa,
         contigs::{ContigId, ContigNames, ContigSet},
         kmers::Kmer,
     },
@@ -35,7 +35,7 @@ struct Args {
     threads: u16,
     ignore_missing: bool,
 
-    params: dist::Params,
+    params: seq::align::Params,
 }
 
 impl Default for Args {
@@ -369,7 +369,7 @@ pub(super) fn align(
     output: &Path,
     prefix: &Option<PathBuf>,
     threads: u16,
-    params: &dist::Params,
+    params: &seq::align::Params,
 ) -> crate::Result<()> {
     let threads = usize::from(threads).min(pairs.len()) as u16;
     let mut files = Vec::with_capacity(usize::from(threads));
@@ -384,7 +384,7 @@ pub(super) fn align(
         files.push(ext::sys::create(filename)?);
     }
 
-    dist::align_sequences(contig_set, pairs, against_contig, params, threads, files)?;
+    seq::align::align_sequences(contig_set, pairs, against_contig, params, threads, files)?;
     ext::sys::merge_files(output, &temp_filenames.0)?;
     temp_filenames.disarm();
     Ok(())

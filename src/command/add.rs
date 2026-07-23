@@ -24,7 +24,7 @@ use crate::{
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        panvcf, fastx, div,
+        panvcf, fastx, minim_div,
         contigs::{self, GenomeVersion},
         kmers::{self, Kmer},
         counts::{JfKmerGetter, KmerCount},
@@ -600,12 +600,12 @@ fn process_alleles(
 
     log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
     let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
-    let divergences = div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
+    let divergences = minim_div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
     let divergences = TriangleMatrix::from_linear_data(n_entries, divergences);
     check_divergencies(locus, &entries, &divergences, args.variants.is_some());
     let dist_filename = locus_dir.join(paths::DISTANCES);
     let dist_file = ext::sys::create_file(&dist_filename)?;
-    div::write_divergences(dist_file, args.div_k, args.div_w, &divergences, |(int_div, _fl_div)| *int_div)
+    minim_div::write_divergences(dist_file, args.div_k, args.div_w, &divergences, |(int_div, _fl_div)| *int_div)
         .map_err(add_path!(dist_filename))?;
 
     log::info!("    Counting k-mers");

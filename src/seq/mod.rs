@@ -9,8 +9,8 @@ pub mod recruit;
 pub mod compl;
 pub mod counts;
 pub mod wfa;
-pub mod dist;
-pub mod div;
+pub mod minim_div;
+pub mod align;
 pub mod paf;
 pub mod transfer;
 

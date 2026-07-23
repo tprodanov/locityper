@@ -1,14 +1,16 @@
 use std::{
     thread, io,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     cmp::Ordering,
     fmt::Write as FmtWrite,
+    ops::Deref,
 };
+use arc_swap::ArcSwapOption;
 use ruint::aliases::U256;
 use smallvec::SmallVec;
 use crate::{
     seq::{
-        wfa, div,
+        wfa, minim_div,
         contigs::{ContigId, ContigSet},
         kmers::{self, Kmer},
         wfa::{Aligner, Penalties},
@@ -18,6 +20,8 @@ use crate::{
     math::RoundDiv,
     ext::TriangleMatrix,
 };
+
+// ========== Parameters ==========
 
 /// Alignment/divergence calculation parameters.
 #[derive(Clone)]
@@ -89,46 +93,7 @@ impl Params {
     }
 }
 
-/// Aligns sequences to each other.
-pub fn align_sequences(
-    contig_set: Arc<ContigSet>,
-    pairs: Vec<(ContigId, ContigId)>,
-    against_contig: Vec<bool>,
-    params: &Params,
-    threads: u16,
-    mut outputs: Vec<impl io::Write + Send + 'static>,
-) -> crate::Result<()>
-{
-    let n_contigs = contig_set.len();
-    // Find sequences that actually appear.
-    let mut in_use = vec![false; n_contigs];
-    let mut n_rem = n_contigs;
-    for &(i, j) in &pairs {
-        // Will do -1 if old value was false.
-        n_rem -= usize::from(std::mem::replace(&mut in_use[i.ix()], true));
-        n_rem -= usize::from(std::mem::replace(&mut in_use[j.ix()], true));
-        if n_rem == 0 {
-            break;
-        }
-    }
-    let (minimizers, kmers) = fill_kmers_singlethread(&contig_set, &in_use, params);
-    let kmers = Arc::new(kmers);
-
-    // Assume that pairs do not repeat.
-    let use_transitivity = params.transitive_div > 0.0
-        && pairs.len() * 10 >= TriangleMatrix::calc_linear_len(contig_set.len());
-    if threads == 1 {
-        if use_transitivity {
-            transitive_align_pairs_singlethread(
-                &contig_set, &pairs, &against_contig, &minimizers, kmers, params, &mut outputs[0])
-        } else {
-            align_pairs_singlethread(
-                &contig_set, &pairs, &against_contig, &minimizers, kmers, params, &mut outputs[0], true)
-        }
-    } else {
-        align_pairs_parallel(contig_set, pairs, against_contig, minimizers, kmers, params, threads, outputs)
-    }
-}
+// ========== Backbone k-mers ==========
 
 const CAPACITY: usize = 4;
 type SeqKmers = Vec<(U256, SmallVec<[u32; CAPACITY]>)>;
@@ -210,6 +175,8 @@ fn get_kmer_matches(kmers1: &SeqKmers, kmers2: &SeqKmers, buf: &mut Vec<(u32, u3
     buf.sort_unstable();
 }
 
+// ========== Direct alignment from k-mer backbones ==========
+
 #[derive(Clone, Copy)]
 struct RefEntry<'a> {
     id: ContigId,
@@ -218,11 +185,6 @@ struct RefEntry<'a> {
 }
 
 impl<'a> RefEntry<'a> {
-    // #[inline]
-    // fn new(id: ContigId, name: &'a str, seq: &'a [u8]) -> Self {
-    //     Self { id, name, seq}
-    // }
-
     #[inline]
     fn from_set(contig_set: &'a ContigSet, id: ContigId) -> Self {
         Self {
@@ -233,7 +195,7 @@ impl<'a> RefEntry<'a> {
     }
 }
 
-fn align(
+fn align_from_backbone(
     aligner: &Aligner,
     entry1: RefEntry<'_>,
     entry2: RefEntry<'_>,
@@ -297,7 +259,7 @@ fn align_multik(
             &params.backbone_ks, &kmers[n_backbones * entry1.id.ix()..], &kmers[n_backbones * entry2.id.ix()..])
     {
         get_kmer_matches(kmers1, kmers2, buf);
-        let (cigar, score) = align(aligner, entry1, entry2, buf, u32::from(k), params.max_gap)?;
+        let (cigar, score) = align_from_backbone(aligner, entry1, entry2, buf, u32::from(k), params.max_gap)?;
         if score > best_score {
             best_score = score;
             best_cigar = Some(cigar);
@@ -307,41 +269,113 @@ fn align_multik(
         .map(|cigar| (cigar, best_score))
 }
 
-trait AlignerWrapper {
+// ========== Alignment strategy: backbone/transitive alignment ==========
+
+#[derive(Default, Clone)]
+struct Counts {
+    aligned: u32,
+    accelerated: u32,
+    skipped: u32,
+}
+
+impl Counts {
+    fn add(&mut self, oth: &Counts) {
+        self.aligned += oth.aligned;
+        self.accelerated += oth.accelerated;
+        self.skipped += oth.skipped;
+    }
+
+    fn summarize(&self) {
+        let mut s = format!("Constructed {} alignments", self.aligned);
+        if self.accelerated > 0 {
+            write!(s, ", of them {} accelerated ({:.1}%)",
+                self.accelerated, 100.0 * f64::from(self.accelerated) / f64::from(self.aligned)).unwrap();
+        }
+        if self.skipped > 0 {
+            write!(s, ", skipped {} pairs due to high minimizer divergence", self.skipped).unwrap();
+        }
+        log::debug!("{}", s);
+    }
+}
+
+trait Strategy {
+    /// Aligns two sequences (entry1 = reference, entry2 = query).
+    /// Returns CIGAR, its score, and flag indicating whether an alignment was accelerated (e.g. transitive alignment).
     fn align<'a>(
         &mut self,
+        aligner: &Aligner,
         entry1: RefEntry<'a>,
         entry2: RefEntry<'a>,
         params: &Params,
-    ) -> crate::Result<(Cigar, i32)>;
+    ) -> crate::Result<(Cigar, i32, bool)>;
+
+    fn save_cigar(
+        &mut self,
+        _ref_id: ContigId,
+        _query_id: ContigId,
+        _cigar: &Cigar,
+        _div: f64,
+        _params: &Params,
+    ) {}
 }
 
-struct DirectAligner {
-    aligner: Aligner,
+trait StrategyFactory {
+    type Strategy: Strategy + Send + 'static;
+
+    fn new_strategy(&self) -> Self::Strategy;
+}
+
+// ========== Backbone-based alignment strategy ==========
+
+struct BackboneStrategy {
     kmers: Arc<Vec<SeqKmers>>,
     buf: Vec<(u32, u32)>,
 }
 
-impl DirectAligner {
-    fn new(aligner: Aligner, kmers: Arc<Vec<SeqKmers>>) -> Self {
+impl BackboneStrategy {
+    fn new(kmers: Arc<Vec<SeqKmers>>) -> Self {
         Self {
-            aligner, kmers,
+            kmers,
             buf: Vec::new(),
         }
     }
 }
 
-impl AlignerWrapper for DirectAligner {
+impl Strategy for BackboneStrategy {
     #[inline(always)]
     fn align<'a>(
         &mut self,
+        aligner: &Aligner,
         entry1: RefEntry<'a>,
         entry2: RefEntry<'a>,
         params: &Params,
-    ) -> crate::Result<(Cigar, i32)> {
-        align_multik(&self.aligner, entry1, entry2, &self.kmers, params, &mut self.buf)
+    ) -> crate::Result<(Cigar, i32, bool)> {
+        align_multik(aligner, entry1, entry2, &self.kmers, params, &mut self.buf)
+            .map(|(cigar, score)| (cigar, score, false))
     }
 }
+
+struct BackboneStrategyFactory {
+    kmers: Arc<Vec<SeqKmers>>,
+}
+
+impl BackboneStrategyFactory {
+    #[inline]
+    fn new(kmers: Arc<Vec<SeqKmers>>) -> Self {
+        Self { kmers }
+    }
+}
+
+impl StrategyFactory for BackboneStrategyFactory {
+    type Strategy = BackboneStrategy;
+
+    #[inline]
+    fn new_strategy(&self) -> Self::Strategy {
+        BackboneStrategy::new(Arc::clone(&self.kmers))
+    }
+}
+
+// ========== Transitive alignment strategy (single thread) ==========
 
 /// CIGAR for contigs a < b (indices not stored).
 /// `ref_smaller` is true when `a` is reference and `b` is query.
@@ -353,7 +387,7 @@ struct DirectedCigar {
 
 impl DirectedCigar {
     #[inline(always)]
-    fn new(cigar: Cigar, query_id: ContigId, ref_id: ContigId) -> Self {
+    fn new(cigar: Cigar, ref_id: ContigId, query_id: ContigId) -> Self {
         Self {
             cigar,
             ref_smaller: ref_id < query_id,
@@ -367,37 +401,33 @@ impl DirectedCigar {
     }
 }
 
-struct TransitiveAligner {
-    direct_aligner: DirectAligner,
+struct TransitiveStrategy {
+    backbone_strategy: BackboneStrategy,
     /// For each contig, store its closest other contig, corresponding CIGAR and diversity.
     /// Value is only stored if diversity is not greater than params.transitive_div
     /// Closest other contig will always have smaller index than i.
     closest: Vec<Option<(ContigId, DirectedCigar, f64)>>,
     cigars: TriangleMatrix<Option<DirectedCigar>>,
-    /// Number of transitive and the total number of constructed alignments.
-    n_transitive: u32,
-    total: u32,
 }
 
-impl TransitiveAligner {
-    fn new(direct_aligner: DirectAligner, n_contigs: usize) -> Self {
+impl TransitiveStrategy {
+    fn new(kmers: Arc<Vec<SeqKmers>>, n_contigs: usize) -> Self {
         Self {
-            direct_aligner,
+            backbone_strategy: BackboneStrategy::new(kmers),
             closest: vec![None; n_contigs],
             cigars: TriangleMatrix::new(n_contigs, None),
-            n_transitive: 0,
-            total: 0,
         }
     }
 }
 
-impl AlignerWrapper for TransitiveAligner {
+impl Strategy for TransitiveStrategy {
     fn align<'a>(
         &mut self,
+        aligner: &Aligner,
         entry_k: RefEntry<'a>,
         entry_i: RefEntry<'a>,
         params: &Params,
-    ) -> crate::Result<(Cigar, i32)> {
+    ) -> crate::Result<(Cigar, i32, bool)> {
         let k = entry_k.id;
         let i = entry_i.id;
         let transitive_edge = if let Some((j, cigar_jk, _)) = &self.closest[k.ix()]
@@ -412,19 +442,132 @@ impl AlignerWrapper for TransitiveAligner {
             None
         };
 
-        self.total += 1;
         if let Some((cigar_ij, j, cigar_jk)) = transitive_edge {
             let cigar_ik = Cigar::find_transitive_alignment(
                 &cigar_ij.cigar, cigar_ij.second_is_ref(i, j), &cigar_jk.cigar, cigar_jk.second_is_ref(j, k),
-                entry_i.seq, entry_k.seq, &self.direct_aligner.aligner, params.max_gap, params.transitive_anchor);
-            let score = self.direct_aligner.aligner.penalties().calculate_score(&cigar_ik);
-            self.n_transitive += 1;
-            Ok((cigar_ik, score))
+                entry_i.seq, entry_k.seq, aligner, params.max_gap, params.transitive_anchor);
+            let score = aligner.penalties().calculate_score(&cigar_ik);
+            Ok((cigar_ik, score, true))
         } else {
-            self.direct_aligner.align(entry_k, entry_i, params)
+            self.backbone_strategy.align(aligner, entry_k, entry_i, params)
+        }
+    }
+
+    fn save_cigar(&mut self, ref_id: ContigId, query_id: ContigId, cigar: &Cigar, div: f64, params: &Params) {
+        let dir_cigar = DirectedCigar::new(cigar.to_owned(), ref_id, query_id);
+        if div <= params.transitive_div {
+            let prev_closest = &mut self.closest[query_id.ix()];
+            if let Some((_, _, prev_div)) = prev_closest && *prev_div <= div { /* Do nothing */ } else {
+                *prev_closest = Some((ref_id, dir_cigar.clone(), div));
+            }
+        }
+        *self.cigars.get_symmetric_mut(ref_id.ix(), query_id.ix()) = Some(dir_cigar);
+    }
+}
+
+// ========== Transitive alignment strategy (parallel) ==========
+
+struct ParallelTransitiveStrategy {
+    backbone_strategy: BackboneStrategy,
+    /// For each contig, store its closest other contig, corresponding CIGAR and diversity.
+    /// Value is only stored if diversity is not greater than params.transitive_div
+    /// Closest other contig will always have smaller index than i.
+    closest: Arc<Vec<ArcSwapOption<(ContigId, DirectedCigar, f64)>>>,
+    cigars: Arc<TriangleMatrix<OnceLock<DirectedCigar>>>,
+}
+
+impl ParallelTransitiveStrategy {
+    fn new(
+        kmers: Arc<Vec<SeqKmers>>,
+        closest: Arc<Vec<ArcSwapOption<(ContigId, DirectedCigar, f64)>>>,
+        cigars: Arc<TriangleMatrix<OnceLock<DirectedCigar>>>,
+    ) -> Self {
+        Self {
+            backbone_strategy: BackboneStrategy::new(kmers),
+            closest, cigars,
         }
     }
 }
+
+impl Strategy for ParallelTransitiveStrategy {
+    fn align<'a>(
+        &mut self,
+        aligner: &Aligner,
+        entry_k: RefEntry<'a>,
+        entry_i: RefEntry<'a>,
+        params: &Params,
+    ) -> crate::Result<(Cigar, i32, bool)> {
+        let k = entry_k.id;
+        let i = entry_i.id;
+        let closest_k = self.closest[k.ix()].load();
+        let closest_i = self.closest[i.ix()].load();
+
+        let transitive_edge = if let Some((j, cigar_jk, _)) = closest_k.as_ref().map(Deref::deref)
+            && let Some(cigar_ij) = &self.cigars.get_symmetric(i.ix(), j.ix()).get()
+        {
+            Some((*cigar_ij, *j, cigar_jk))
+        } else if let Some((j, cigar_ij, _)) = closest_i.as_ref().map(Deref::deref)
+            && let Some(cigar_jk) = &self.cigars.get_symmetric(k.ix(), j.ix()).get()
+        {
+            Some((cigar_ij, *j, *cigar_jk))
+        } else {
+            None
+        };
+
+        if let Some((cigar_ij, j, cigar_jk)) = transitive_edge {
+            let cigar_ik = Cigar::find_transitive_alignment(
+                &cigar_ij.cigar, cigar_ij.second_is_ref(i, j), &cigar_jk.cigar, cigar_jk.second_is_ref(j, k),
+                entry_i.seq, entry_k.seq, aligner, params.max_gap, params.transitive_anchor);
+            let score = aligner.penalties().calculate_score(&cigar_ik);
+            Ok((cigar_ik, score, true))
+        } else {
+            self.backbone_strategy.align(aligner, entry_k, entry_i, params)
+        }
+    }
+
+    fn save_cigar(&mut self, ref_id: ContigId, query_id: ContigId, cigar: &Cigar, div: f64, params: &Params) {
+        let dir_cigar = DirectedCigar::new(cigar.to_owned(), ref_id, query_id);
+        if div <= params.transitive_div {
+            let query_closest = &self.closest[query_id.ix()];
+            if query_closest.load().as_ref().map(|arc_tuple| div < arc_tuple.deref().2).unwrap_or(true) {
+                // It is possible that there are two concurrent threads that check divergence and
+                // write after that. So, we could end up with suboptimal closest alignment.
+                // However, that should not happen too often and is not the end of the world.
+                query_closest.store(Some(Arc::new((ref_id, dir_cigar.clone(), div))));
+            }
+        }
+        let _old_val = self.cigars.get_symmetric(ref_id.ix(), query_id.ix()).set(dir_cigar);
+    }
+}
+
+struct TransitiveStrategyFactory {
+    kmers: Arc<Vec<SeqKmers>>,
+    /// For each contig, store its closest other contig, corresponding CIGAR and diversity.
+    /// Value is only stored if diversity is not greater than params.transitive_div
+    /// Closest other contig will always have smaller index than i.
+    closest: Arc<Vec<ArcSwapOption<(ContigId, DirectedCigar, f64)>>>,
+    cigars: Arc<TriangleMatrix<OnceLock<DirectedCigar>>>,
+}
+
+impl TransitiveStrategyFactory {
+    fn new(kmers: Arc<Vec<SeqKmers>>, n_contigs: usize) -> Self {
+        Self {
+            kmers,
+            closest: Arc::new((0..n_contigs).map(|_| ArcSwapOption::const_empty()).collect()),
+            cigars: Arc::new(TriangleMatrix::new(n_contigs, OnceLock::new())),
+        }
+    }
+}
+
+impl StrategyFactory for TransitiveStrategyFactory {
+    type Strategy = ParallelTransitiveStrategy;
+
+    fn new_strategy(&self) -> Self::Strategy {
+        ParallelTransitiveStrategy::new(Arc::clone(&self.kmers), Arc::clone(&self.closest), Arc::clone(&self.cigars))
+    }
+}
+
+// ========== Single-thread/parallel processing logic ==========
 
 /// If necessary, calculates minimizer-based sequence divergence;
 /// if necessary, constructs actual alignment using `aligner`;
@@ -433,31 +576,31 @@ impl AlignerWrapper for TransitiveAligner {
 /// In the alignment, `entry1` is reference and `entry2` is query.
 ///
 /// Close `construct_alignment` takes two entries and returns CIGAR and its score.
-///
-/// If CIGAR was constructed, returns pair (CIGAR, sequence divergence).
 fn process_pair<'a>(
-    aligner: &mut impl AlignerWrapper,
+    strategy: &mut impl Strategy,
+    aligner: &Aligner,
     entry1: RefEntry<'a>,
     entry2: RefEntry<'a>,
     against_contig: &[bool],
     minimizers: &[Vec<u64>],
     params: &Params,
-    buf_cigar: &mut String,
     out: &mut impl io::Write,
-) -> crate::Result<Option<(Cigar, f64)>>
+    counts: &mut Counts,
+) -> crate::Result<()>
 {
     write!(out, "{}\t{len}\t0\t{len}\t+\t", entry2.name, len = entry2.seq.len()).map_err(add_path!(!))?;
     write!(out, "{}\t{len}\t0\t{len}\t", entry1.name, len = entry1.seq.len()).map_err(add_path!(!))?;
 
     let opt_div = if params.skip_div { None } else {
-        Some(div::jaccard_distance(&minimizers[entry1.id.ix()], &minimizers[entry2.id.ix()]))
+        Some(minim_div::jaccard_distance(&minimizers[entry1.id.ix()], &minimizers[entry2.id.ix()]))
     };
-    buf_cigar.clear();
-    let mut ret_val = None;
+    let mut opt_cigar = None::<Cigar>;
     let thresh_div = if against_contig[entry1.id.ix()] || against_contig[entry2.id.ix()]
         { params.against_div } else { params.thresh_div };
     if opt_div.map(|(_, dv)| dv <= thresh_div).unwrap_or(true) {
-        let (cigar, score) = aligner.align(entry1, entry2, params)?;
+        let (cigar, score, accelerated) = strategy.align(aligner, entry1, entry2, params)?;
+        counts.aligned += 1;
+        counts.accelerated += u32::from(accelerated);
         let mut nmatches = 0;
         let mut nerrs = 0;
         for item in cigar.iter() {
@@ -471,59 +614,58 @@ fn process_pair<'a>(
         let dv = f64::from(nerrs) / f64::from(aln_len);
         let qv = if dv.is_finite() { -10.0 * dv.log10() } else { f64::INFINITY };
         write!(out, "\tNM:i:{}\tAS:i:{}\tdv:f:{:.9}\tqv:f:{:.6}", nerrs, score, dv, qv).map_err(add_path!(!))?;
-        write!(buf_cigar, "{}", cigar).unwrap();
-        ret_val = Some((cigar, dv));
+        strategy.save_cigar(entry1.id, entry2.id, &cigar, dv, params);
+        opt_cigar = Some(cigar);
     } else {
-        // Skip alignment.
+        counts.skipped += 1;
         write!(out, "0\t0\t255").map_err(add_path!(!))?;
     }
     if let Some((uniq_minims, minim_dv)) = opt_div {
         write!(out, "\tum:i:{}\tmd:f:{:.9}", uniq_minims, minim_dv).map_err(add_path!(!))?;
     }
-    if !buf_cigar.is_empty() {
-        write!(out, "\tcg:Z:{}", buf_cigar).map_err(add_path!(!))?;
+    if let Some(cigar) = opt_cigar {
+        write!(out, "\tcg:Z:{}", cigar).map_err(add_path!(!))?;
     }
     writeln!(out).map_err(add_path!(!))?;
-    Ok(ret_val)
+    Ok(())
 }
 
 fn align_pairs_singlethread(
+    mut strategy: impl Strategy,
     contig_set: &ContigSet,
     pairs: &[(ContigId, ContigId)],
     against_contig: &[bool],
     minimizers: &[Vec<u64>],
-    kmers: Arc<Vec<SeqKmers>>,
     params: &Params,
     out: &mut impl io::Write,
     verbose: bool,
-) -> crate::Result<()>
+) -> crate::Result<Counts>
 {
-    let mut buf = Default::default();
     let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
-    let mut aligner_wrapper = DirectAligner::new(aligner, kmers);
+    let mut counts = Counts::default();
     let mult = 100.0 / pairs.len() as f64;
     // Power of 2 minus 1.
-    const LOG_FREQ: usize = 255;
+    const LOG_FREQ: usize = 511;
     for (ix, &(i, j)) in pairs.iter().enumerate() {
-        process_pair(&mut aligner_wrapper, RefEntry::from_set(contig_set, i), RefEntry::from_set(contig_set, j),
-            against_contig, minimizers, params, &mut buf, out)?;
+        process_pair(&mut strategy, &aligner, RefEntry::from_set(contig_set, i), RefEntry::from_set(contig_set, j),
+            against_contig, minimizers, params, out, &mut counts)?;
         if verbose && (ix & LOG_FREQ) == LOG_FREQ {
             log::debug!("    Aligned ≈{:5.1}% pairs", mult * ix as f64);
         }
     }
-    Ok(())
+    Ok(counts)
 }
 
 fn align_pairs_parallel(
+    factory: impl StrategyFactory,
     contig_set: Arc<ContigSet>,
     pairs: Vec<(ContigId, ContigId)>,
     against_contig: Vec<bool>,
     minimizers: Vec<Vec<u64>>,
-    kmers: Arc<Vec<SeqKmers>>,
     params: &Params,
     threads: u16,
     outputs: Vec<impl io::Write + Send + 'static>,
-) -> crate::Result<()> {
+) -> crate::Result<Counts> {
     let pairs = Arc::new(pairs);
     let minimizers = Arc::new(minimizers);
 
@@ -543,57 +685,76 @@ fn align_pairs_parallel(
             let pairs = Arc::clone(&pairs);
             let against_contig = against_contig.clone();
             let minimizers = Arc::clone(&minimizers);
-            let kmers = Arc::clone(&kmers);
             let params = params.clone();
             let verbose = worker_ix == 0;
+            let strategy = factory.new_strategy();
             handles.push(thread::spawn(move || {
-                align_pairs_singlethread(&contig_set, &pairs[start..end],
-                    &against_contig, &minimizers, kmers, &params, &mut out, verbose)
+                align_pairs_singlethread(strategy, &contig_set, &pairs[start..end],
+                    &against_contig, &minimizers, &params, &mut out, verbose)
             }));
         }
         start = end;
     }
     assert_eq!(start, n_pairs);
-    handles.into_iter().map(|handle| handle.join().expect("Worker process failed")).collect()
+    let mut counts = Counts::default();
+    for handle in handles {
+        let curr_counts = handle.join().expect("Worker process failed")?;
+        counts.add(&curr_counts);
+    }
+    Ok(counts)
 }
 
-/// Align all sequence pairs to each other, speeding up things using transitive
-fn transitive_align_pairs_singlethread(
-    contig_set: &ContigSet,
-    pairs: &[(ContigId, ContigId)],
-    against_contig: &[bool],
-    minimizers: &[Vec<u64>],
-    kmers: Arc<Vec<SeqKmers>>,
-    params: &Params,
-    out: &mut impl io::Write,
-) -> crate::Result<()> {
-    let aligner = Aligner::new(params.penalties.clone(), params.accuracy, None, false);
-    let mut transitive_aligner = TransitiveAligner::new(DirectAligner::new(aligner, kmers), contig_set.len());
-    let mut buf = Default::default();
+// ========== Main public function ==========
 
-    const LOG_FREQ: usize = 255;
-    let mult = 100.0 / pairs.len() as f64;
-    for (ix, &(i, j)) in pairs.iter().enumerate() {
-        let res = process_pair(&mut transitive_aligner,
-            RefEntry::from_set(contig_set, i), RefEntry::from_set(contig_set, j),
-            against_contig, minimizers, params, &mut buf, out)?;
-        if let Some((cigar, div)) = res {
-            let dir_cigar = DirectedCigar::new(cigar, j, i);
-            if div <= params.transitive_div {
-                let prev_closest = &mut transitive_aligner.closest[j.ix()];
-                if let Some((_, _, prev_div)) = prev_closest && *prev_div < div {} else {
-                    *prev_closest = Some((i, dir_cigar.clone(), div));
-                }
-            }
-            transitive_aligner.cigars[(i.ix(), j.ix())] = Some(dir_cigar);
-        }
-        if (ix & LOG_FREQ) == LOG_FREQ {
-            log::debug!("    Aligned ≈{:5.1}% pairs ({:.1}% transitive)", mult * ix as f64,
-                100.0 * f64::from(transitive_aligner.n_transitive) / f64::from(transitive_aligner.total));
+/// Aligns sequences to each other.
+pub fn align_sequences(
+    contig_set: Arc<ContigSet>,
+    pairs: Vec<(ContigId, ContigId)>,
+    against_contig: Vec<bool>,
+    params: &Params,
+    threads: u16,
+    mut outputs: Vec<impl io::Write + Send + 'static>,
+) -> crate::Result<()>
+{
+    let n_contigs = contig_set.len();
+    // Find sequences that actually appear.
+    let mut in_use = vec![false; n_contigs];
+    let mut n_rem = n_contigs;
+    for &(i, j) in &pairs {
+        // Will do -1 if old value was false.
+        n_rem -= usize::from(std::mem::replace(&mut in_use[i.ix()], true));
+        n_rem -= usize::from(std::mem::replace(&mut in_use[j.ix()], true));
+        if n_rem == 0 {
+            break;
         }
     }
-    log::debug!("    Sped up alignment for {}/{} pairs ({:.1}%)",
-        transitive_aligner.n_transitive, transitive_aligner.total,
-        100.0 * f64::from(transitive_aligner.n_transitive) / f64::from(transitive_aligner.total));
+    let (minimizers, kmers) = fill_kmers_singlethread(&contig_set, &in_use, params);
+    let kmers = Arc::new(kmers);
+
+    // Assume that pairs do not repeat.
+    let use_transitivity = params.transitive_div > 0.0
+        && pairs.len() * 10 >= TriangleMatrix::calc_linear_len(contig_set.len());
+    let counts = if threads == 1 {
+        if use_transitivity {
+            align_pairs_singlethread(
+                TransitiveStrategy::new(kmers, n_contigs),
+                &contig_set, &pairs, &against_contig, &minimizers, params, &mut outputs[0], true)?
+        } else {
+            align_pairs_singlethread(
+                BackboneStrategy::new(kmers),
+                &contig_set, &pairs, &against_contig, &minimizers, params, &mut outputs[0], true)?
+        }
+    } else {
+        if use_transitivity {
+            align_pairs_parallel(
+                TransitiveStrategyFactory::new(kmers, n_contigs),
+                contig_set, pairs, against_contig, minimizers, params, threads, outputs)?
+        } else {
+            align_pairs_parallel(
+                BackboneStrategyFactory::new(kmers),
+                contig_set, pairs, against_contig, minimizers, params, threads, outputs)?
+        }
+    };
+    counts.summarize();
     Ok(())
 }

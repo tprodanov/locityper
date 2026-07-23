@@ -44,6 +44,7 @@ ruint = { version = "1.17", default-features = false, features = ["alloc", "num-
 itertools = { version = "0.14", default-features = false, features = ["use_std"] }
 kodama = { version = "0.3" }
 russcip = { version = "0.10", default-features = false, features = ["from-source"] }
+arc-swap = { version = "1.9" }
 
 [build-dependencies]
 bindgen = { version = "0.72", default-features = false, features = ["runtime"] }

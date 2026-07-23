@@ -19,7 +19,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        self, interv, recruit, div, Interval,
+        self, interv, recruit, minim_div, Interval,
         fastx::{self, FastxRead, SingleRecord},
         contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
         kmers::Kmer,
@@ -1190,7 +1190,7 @@ fn analyze_locus(
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
         let contig_distances = if dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
-            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, locus.init_nhaps)?;
+            let (_k, _w, dists) = minim_div::load_divergences(dist_file, &dist_filename, locus.init_nhaps)?;
             match &locus.keep_ixs {
                 Some(ixs) if ixs.len() != dists.side() => Some(dists.thin_out(ixs)),
                 _ => Some(dists),

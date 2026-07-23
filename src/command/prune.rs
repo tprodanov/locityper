@@ -10,7 +10,7 @@ use crate::{
     ext::{self, TriangleMatrix},
     algo::{HashSet},
     seq::{
-        fastx, div,
+        fastx, minim_div,
         contigs::{ContigId, ContigNames, DiscardedHaplotypes},
         counts::KmerCounts,
     },
@@ -511,11 +511,11 @@ fn prune_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<b
     let dist_filename = locus_data.db_dir().join(paths::DISTANCES);
     if dist_filename.exists() {
         let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
-        let (k, w, dists) = div::load_divergences(dist_file, &dist_filename, contigs.len())?;
+        let (k, w, dists) = minim_div::load_divergences(dist_file, &dist_filename, contigs.len())?;
         let subdists = dists.thin_out(keep_ids);
         let new_dist_filename = locus_data.out_dir().join(paths::DISTANCES);
         let new_dist_file = ext::sys::create(&new_dist_filename)?;
-        div::write_divergences(new_dist_file, k, w, &subdists, |&d| d).map_err(add_path!(new_dist_filename))?;
+        minim_div::write_divergences(new_dist_file, k, w, &subdists, |&d| d).map_err(add_path!(new_dist_filename))?;
     }
     Ok(all_files_present)
 }

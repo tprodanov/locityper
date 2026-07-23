@@ -17,7 +17,7 @@ use crate::{
         vec::BitArray,
     },
     seq::{
-        dist, wfa, fastx,
+        self, wfa, fastx,
         paf::{PafFile, PafParseResult},
         cigar::Cigar,
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
@@ -43,7 +43,7 @@ struct Args {
 
     skip_vcf: bool,
     threads: u16,
-    aln_params: dist::Params,
+    aln_params: seq::align::Params,
     rerun: Rerun,
 }
 
