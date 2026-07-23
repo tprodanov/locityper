@@ -215,7 +215,7 @@ function process_assembly {
 
     local genome_fasta
     if [[ -n "$agc_file" ]]; then
-        msg "    Extracting genome sequence"
+        msg "    Extracting assembly from AGC file"
         genome_fasta="${prefix}.fa"
         agc getset "$agc_file" "$genome_name" > "${genome_fasta}"
         samtools faidx "${genome_fasta}"
@@ -225,13 +225,13 @@ function process_assembly {
 
     local paf_filename="${prefix}.paf.gz"
     if [[ ! -f "$paf_filename" ]]; then
-        msg "    Mapping targets to assembly"
+        msg "    Mapping targets to the assembly"
         minimap2 "${minimap2_args[@]}" "$genome_fasta" "$targets_fa" 2> /dev/null | \
             gzip > "${paf_filename}.tmp" \
             && mv "${paf_filename}"{.tmp,}
     fi
 
-    msg "    Extracting subsequences"
+    msg "    Extracting target subsequences"
     "$SCRIPT_DIR/inner/merge_hits.py" "$paf_filename" \
         -g "${short_name}" -o "${prefix}.bed.gz" \
         -d "$distance" -l "$min_len" -s "$min_simil" \
@@ -315,10 +315,10 @@ function combine_locus {
     touch "${todo_file}"
 
     # ===== START ======
-    msg "[${target}] Combining haplotypes"
+    msg "Combining haplotypes for ${target}"
     # Use `find` so that we don't exceed the max number of arguments.
     find "$output1" -mindepth 2 -maxdepth 2 -name "${target}.fa.gz" | \
-        xargs -P 1 -n 50 cat > "${output1}/${target}.fa.gz"
+        xargs -P 1 -n 50 cat > "${output2}/${target}.fa.gz"
     # ===== END ======
 
     touch "${ok_file}"
