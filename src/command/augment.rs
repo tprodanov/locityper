@@ -121,6 +121,12 @@ fn print_help() {
         {EMPTY}  separated by comma [{}].",
         "-k, --backbone".green(), "INT".yellow(), ruint::aliases::U256::MAX_KMER_SIZE,
         super::fmt_def(defaults.aln_params.backbone_str()));
+    println!("    {:KEY$} {:VAL$}  Transitively speed up alignment by using existing alignments with\n\
+        {EMPTY}  divergence under this value (use 0 to disable) [{}].",
+        "    --tr-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.aln_params.transitive_div));
+    println!("    {:KEY$} {:VAL$}  Anchor size during transitive alignment construction [{}].\n\
+        {EMPTY}  Larger values increase accuracy but decrease speed.",
+        "    --tr-anchor".green(), "NUM".yellow(), super::fmt_def(defaults.aln_params.transitive_anchor));
     println!("    {:KEY$} {:VAL$}  Do not complete gaps over this size [{}].",
         "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.aln_params.max_gap)));
     println!("    {:KEY$} {:VAL$}  Alignment accuracy level (1-{}) [{}].",
@@ -201,6 +207,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     .map_err(|_| error!(InvalidInput,
                     "Cannot parse `-k {}`: must be list of integers separated by comma", backbone_str))?;
             }
+            Long("tr-div") => args.aln_params.transitive_div = parser.value()?.parse()?,
+            Long("tr-anchor") => args.aln_params.transitive_anchor = parser.value()?.parse()?,
             Short('g') | Long("max-gap") => args.aln_params.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('a') | Long("accuracy") => args.aln_params.accuracy = parser.value()?.parse()?,
             Short('M') | Long("mismatch") => args.aln_params.penalties.mismatch = parser.value()?.parse()?,
