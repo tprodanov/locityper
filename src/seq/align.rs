@@ -120,23 +120,16 @@ fn precompute_kmers(seq: &[u8], k: u8, buf: &mut Vec<(u32, U256)>) -> SeqKmers {
 
 fn fill_kmers_singlethread(
     contig_set: &ContigSet,
-    in_use: &[bool],
+    indices: Vec<usize>,
     params: &Params,
-) -> (Vec<Vec<u64>>, Vec<SeqKmers>)
-{
-    let mut minimizers = Vec::with_capacity(if params.skip_div { 0 } else { contig_set.len() });
+) -> (Vec<usize>, Vec<Vec<u64>>, Vec<SeqKmers>) {
+    let mut minimizers = Vec::with_capacity(if params.skip_div { 0 } else { indices.len() });
     // Backbone ks will be empty if no alignments need to be calculated.
-    let mut kmers = Vec::with_capacity(contig_set.len() * params.backbone_ks.len());
+    let mut kmers = Vec::with_capacity(indices.len() * params.backbone_ks.len());
 
     let mut kmer_buf = Vec::new();
-    for (seq, &in_use) in contig_set.seqs().iter().zip(in_use) {
-        if !in_use {
-            minimizers.push(Vec::new());
-            for _ in 0..params.backbone_ks.len() {
-                kmers.push(Vec::new());
-            }
-            continue;
-        }
+    for &i in &indices {
+        let seq = contig_set.get_seq(ContigId::new(i));
         if !params.skip_div {
             // Expected num of minimizers = 2L / (w + 1), here we take 5/2 * ... more to be safe.
             let mut buf = Vec::with_capacity((5 * seq.len()).fast_round_div(2 * usize::from(params.div_w) + 2));
@@ -146,6 +139,49 @@ fn fill_kmers_singlethread(
         }
         for &k in &params.backbone_ks {
             kmers.push(precompute_kmers(seq, k, &mut kmer_buf));
+        }
+    }
+    (indices, minimizers, kmers)
+}
+
+fn fill_kmers(
+    contig_set: &Arc<ContigSet>,
+    in_use: &[bool],
+    params: &Params,
+    threads: usize,
+) -> (Vec<Vec<u64>>, Vec<SeqKmers>) {
+    let mut indices_by_thread = vec![Vec::new(); threads];
+    let mut counter = 0..;
+    for (i, &use_i) in in_use.iter().enumerate() {
+        if use_i {
+            indices_by_thread[counter.next().unwrap() % threads].push(i);
+        }
+    }
+
+    let mut handles = Vec::with_capacity(threads - 1);
+    for _ in 1..threads {
+        let indices = indices_by_thread.pop().unwrap();
+        if !indices.is_empty() {
+            let contig_set = Arc::clone(contig_set);
+            let params = params.clone();
+            handles.push(thread::spawn(move || fill_kmers_singlethread(&contig_set, indices, &params)));
+        }
+    }
+    let res0 = fill_kmers_singlethread(&contig_set, indices_by_thread.pop().unwrap(), &params);
+
+    let handles_iter = handles.into_iter().map(|handle| handle.join().expect("Thread unexpectedly terminated"));
+    let n_contigs = contig_set.len();
+    let n_ks = params.backbone_ks.len();
+    let mut minimizers = vec![Vec::new(); if params.skip_div { 0 } else { n_contigs }];
+    let mut kmers = vec![Vec::new(); n_contigs * n_ks];
+    for (indices, mut curr_minimizers, mut curr_kmers) in itertools::chain!(std::iter::once(res0), handles_iter) {
+        for (i, j) in indices.into_iter().enumerate() {
+            if !params.skip_div {
+                std::mem::swap(&mut minimizers[j], &mut curr_minimizers[i]);
+            }
+            for k in 0..n_ks {
+                std::mem::swap(&mut kmers[j * n_ks + k], &mut curr_kmers[i * n_ks + k]);
+            }
         }
     }
     (minimizers, kmers)
@@ -288,8 +324,8 @@ impl Counts {
     fn summarize(&self) {
         let mut s = format!("Constructed {} alignments", self.aligned);
         if self.accelerated > 0 {
-            write!(s, ", of them {} accelerated ({:.1}%)",
-                self.accelerated, 100.0 * f64::from(self.accelerated) / f64::from(self.aligned)).unwrap();
+            write!(s, ", accelerated {:.1}% of them",
+                100.0 * f64::from(self.accelerated) / f64::from(self.aligned)).unwrap();
         }
         if self.skipped > 0 {
             write!(s, ", skipped {} pairs due to high minimizer divergence", self.skipped).unwrap();
@@ -663,13 +699,11 @@ fn align_pairs_parallel(
     against_contig: Vec<bool>,
     minimizers: Vec<Vec<u64>>,
     params: &Params,
-    threads: u16,
+    threads: usize,
     outputs: Vec<impl io::Write + Send + 'static>,
 ) -> crate::Result<Counts> {
     let pairs = Arc::new(pairs);
     let minimizers = Arc::new(minimizers);
-
-    let threads = usize::from(threads);
     let mut handles = Vec::with_capacity(threads);
     let n_pairs = pairs.len();
     let mut start = 0;
@@ -716,6 +750,7 @@ pub fn align_sequences(
     mut outputs: Vec<impl io::Write + Send + 'static>,
 ) -> crate::Result<()>
 {
+    let threads = usize::from(threads);
     let n_contigs = contig_set.len();
     // Find sequences that actually appear.
     let mut in_use = vec![false; n_contigs];
@@ -728,9 +763,11 @@ pub fn align_sequences(
             break;
         }
     }
-    let (minimizers, kmers) = fill_kmers_singlethread(&contig_set, &in_use, params);
+    log::debug!("    Preprocessing k-mers and minimizers");
+    let (minimizers, kmers) = fill_kmers(&contig_set, &in_use, params, threads);
     let kmers = Arc::new(kmers);
 
+    log::debug!("    Started alignment");
     // Assume that pairs do not repeat.
     let use_transitivity = params.transitive_div > 0.0
         && pairs.len() * 10 >= TriangleMatrix::calc_linear_len(contig_set.len());
