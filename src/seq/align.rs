@@ -120,16 +120,26 @@ fn precompute_kmers(seq: &[u8], k: u8, buf: &mut Vec<(u32, U256)>) -> SeqKmers {
 
 fn fill_kmers_singlethread(
     contig_set: &ContigSet,
-    indices: Vec<usize>,
+    in_use: &[bool],
+    start: usize,
+    end: usize,
     params: &Params,
-) -> (Vec<usize>, Vec<Vec<u64>>, Vec<SeqKmers>) {
-    let mut minimizers = Vec::with_capacity(if params.skip_div { 0 } else { indices.len() });
+) -> (Vec<Vec<u64>>, Vec<SeqKmers>) {
+    let n = end - start;
+    let m = params.backbone_ks.len();
+    let mut minimizers = Vec::with_capacity(if params.skip_div { 0 } else { n });
     // Backbone ks will be empty if no alignments need to be calculated.
-    let mut kmers = Vec::with_capacity(indices.len() * params.backbone_ks.len());
+    let mut kmers = Vec::with_capacity(n * m);
 
     let mut kmer_buf = Vec::new();
-    for &i in &indices {
-        let seq = contig_set.get_seq(ContigId::new(i));
+    for (use_seq, seq) in itertools::izip!(&in_use[start..end], &contig_set.seqs()[start..end]) {
+        if !use_seq {
+            if !params.skip_div {
+                minimizers.push(Vec::new());
+            }
+            kmers.extend((0..m).map(|_| Vec::new()));
+            continue;
+        }
         if !params.skip_div {
             // Expected num of minimizers = 2L / (w + 1), here we take 5/2 * ... more to be safe.
             let mut buf = Vec::with_capacity((5 * seq.len()).fast_round_div(2 * usize::from(params.div_w) + 2));
@@ -141,7 +151,7 @@ fn fill_kmers_singlethread(
             kmers.push(precompute_kmers(seq, k, &mut kmer_buf));
         }
     }
-    (indices, minimizers, kmers)
+    (minimizers, kmers)
 }
 
 fn fill_kmers(
@@ -150,39 +160,40 @@ fn fill_kmers(
     params: &Params,
     threads: usize,
 ) -> (Vec<Vec<u64>>, Vec<SeqKmers>) {
-    let mut indices_by_thread = vec![Vec::new(); threads];
-    let mut counter = 0..;
-    for (i, &use_i) in in_use.iter().enumerate() {
-        if use_i {
-            indices_by_thread[counter.next().unwrap() % threads].push(i);
-        }
-    }
-
-    let mut handles = Vec::with_capacity(threads - 1);
-    for _ in 1..threads {
-        let indices = indices_by_thread.pop().unwrap();
-        if !indices.is_empty() {
-            let contig_set = Arc::clone(contig_set);
-            let params = params.clone();
-            handles.push(thread::spawn(move || fill_kmers_singlethread(&contig_set, indices, &params)));
-        }
-    }
-    let res0 = fill_kmers_singlethread(&contig_set, indices_by_thread.pop().unwrap(), &params);
-
-    let handles_iter = handles.into_iter().map(|handle| handle.join().expect("Thread unexpectedly terminated"));
+    let total = in_use.iter().copied().map(u32::from).sum::<u32>();
     let n_contigs = contig_set.len();
-    let n_ks = params.backbone_ks.len();
-    let mut minimizers = vec![Vec::new(); if params.skip_div { 0 } else { n_contigs }];
-    let mut kmers = vec![Vec::new(); n_contigs * n_ks];
-    for (indices, mut curr_minimizers, mut curr_kmers) in itertools::chain!(std::iter::once(res0), handles_iter) {
-        for (i, j) in indices.into_iter().enumerate() {
-            if !params.skip_div {
-                std::mem::swap(&mut minimizers[j], &mut curr_minimizers[i]);
+    let mut end0 = n_contigs;
+    let mut thread_ranges = Vec::with_capacity(threads - 1);
+    if threads != 1 && total >= 16 {
+        let mut start = 0;
+        for worker_ix in 0..threads {
+            if start == n_contigs {
+                break;
             }
-            for k in 0..n_ks {
-                std::mem::swap(&mut kmers[j * n_ks + k], &mut curr_kmers[i * n_ks + k]);
+            let end = start + (n_contigs - start).fast_ceil_div(threads - worker_ix);
+            assert!(start < end);
+            if worker_ix == 0 {
+                end0 = end;
+            } else {
+                thread_ranges.push((start, end));
             }
+            start = end;
         }
+        assert!(start == n_contigs);
+    }
+    let mut handles = Vec::with_capacity(thread_ranges.len());
+    for (start, end) in thread_ranges {
+        let contig_set = Arc::clone(contig_set);
+        let params = params.clone();
+        let in_use = in_use.to_vec();
+        handles.push(thread::spawn(move || fill_kmers_singlethread(&contig_set, &in_use, start, end, &params)));
+    }
+    let (mut minimizers, mut kmers) = fill_kmers_singlethread(&contig_set, &in_use, 0, end0, &params);
+
+    for handle in handles {
+        let (curr_minimizers, curr_kmers) = handle.join().expect("Thread unexpectedly terminated");
+        minimizers.extend(curr_minimizers.into_iter());
+        kmers.extend(curr_kmers.into_iter());
     }
     (minimizers, kmers)
 }
