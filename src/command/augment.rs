@@ -124,8 +124,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Transitively speed up alignment by using existing alignments with\n\
         {EMPTY}  divergence under this value (use 0 to disable) [{}].",
         "    --tr-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.aln_params.transitive_div));
-    println!("    {:KEY$} {:VAL$}  Anchor size during transitive alignment construction [{}].\n\
-        {EMPTY}  Larger values increase accuracy but decrease speed.",
+    println!("    {:KEY$} {:VAL$}  Anchor size during transitive alignment construction [{}].",
         "    --tr-anchor".green(), "NUM".yellow(), super::fmt_def(defaults.aln_params.transitive_anchor));
     println!("    {:KEY$} {:VAL$}  Do not complete gaps over this size [{}].",
         "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.aln_params.max_gap)));

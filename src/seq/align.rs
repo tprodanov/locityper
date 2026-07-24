@@ -41,6 +41,7 @@ pub struct Params {
     /// For all-v-all alignments, transfer alignments
     /// if one of the two constructed alignments has divergence <= this value.
     pub transitive_div: f64,
+    /// When transferring alignments, use regions of this or larger size where one or both of the CIGARs have "=".
     pub transitive_anchor: u32,
 }
 
