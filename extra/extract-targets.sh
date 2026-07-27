@@ -348,7 +348,11 @@ function combine_panels {
     done
 
     # Test will return false if the files don't exist
-    if [[ "${output2}/targets.bed" -nt "$latest_ok_file" && "${output2}/warnings.csv" -nt "$latest_ok_file" ]]; then
+    if [[ "${output2}/targets.bed" -nt "$latest_ok_file"
+        && "${output2}/warnings.csv" -nt "$latest_ok_file"
+        && "${output2}/copy_num.csv.gz" -nt "$latest_ok_file"
+        ]]
+    then
         return 0
     fi
     local lock_file="${output2}/targets.lock"
