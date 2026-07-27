@@ -233,8 +233,9 @@ function process_assembly {
 
     msg "    Extracting target subsequences"
     "$SCRIPT_DIR/inner/merge_hits.py" "$paf_filename" \
-        -g "${short_name}" -o "${prefix}.bed.gz" \
+        -b "$targets_bed" -g "$short_name" \
         -d "$distance" -l "$min_len" -s "$min_simil" \
+        -o "${prefix}.bed.gz" -c "${prefix}.copy_num.csv.gz"
         2> "${prefix}.warnings.csv"
     # At this point, $prefix.bed.gz will have columns
     # chrom, start, end, strand (+/-), target name, length fraction, similarity.
@@ -245,21 +246,15 @@ function process_assembly {
     # Then, fetch regions from the current assembly.
     zcat "${prefix}.bed.gz" | \
         awk -F$'\t' -v name="$short_name" -v max_count="$count" \
-            -v warnings_file="${prefix}.warnings.csv" \
+            -v cn_csv="${prefix}.copy_num.csv" \
             'BEGIN{OFS=";"} {
                 target = $5;
-                ind = ++target_count[target];
+                ind = ++target_cn[target];
                 if (ind <= max_count) {
                     region = $1 ":" ($2+1) "-" $3;
                     strand_arg = $4 == "+" ? "" : "-i";
                     suffix = ind == 1 ? "" : ("-" ind);
                     print target, region, strand_arg, suffix
-                }
-            } END {
-                for (target in target_count) {
-                    if (target_count[target] > max_count) {
-                        printf("%s\t%s\tFound too many hits (%d)\n", target, name, target_count[target]) >> warnings_file
-                    }
                 }
             }' | \
         while IFS=";" read target region strand_arg suffix; do
@@ -291,7 +286,8 @@ function process_assemblies {
                 process_assembly "$assembly" "$curr"
             done
         else
-            panic "Unexpected value --input $curr, expected either a directory, FASTA or AGC file (with lowercase extension)."
+            panic "Unexpected value --input $curr, expected either a directory, `
+                `FASTA or AGC file (with lowercase extension)."
         fi
     done
 }
@@ -315,10 +311,10 @@ function combine_locus {
     touch "${todo_file}"
 
     # ===== START ======
-    msg "Combining haplotypes for ${target}"
+    msg "    Combining haplotypes for ${target}"
     # Use `find` so that we don't exceed the max number of arguments.
     find "$output1" -mindepth 2 -maxdepth 2 -name "${target}.fa.gz" | \
-        xargs -P 1 -n 50 cat > "${output2}/${target}.fa.gz"
+        xargs -P1 -n 50 cat > "${output2}/${target}.fa.gz"
     # ===== END ======
 
     touch "${ok_file}"
@@ -346,6 +342,7 @@ function combine_panels {
     [[ "$ready" == y ]] || \
         panic "Cannot combine reference panels: exceeded timeout (-T) and there are unfinished jobs"
 
+    msg "Combining reference panels"
     latest_ok_file="$(find "${output1}" -mindepth 1 -maxdepth 1 -name "*.ok" -printf "%T@\t%p\n" | sort -k1,1gr | \
         head -n1 | cut -f2)"
     cut -f4 "$targets_bed" | while read target; do
@@ -361,10 +358,13 @@ function combine_panels {
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
 
     cut -f-4 "$targets_bed" | awk -F$'\t' 'BEGIN{OFS=FS} { print $0, ($4 ".fa.gz") }' > "${output2}/targets.bed.tmp"
-    find "$output1" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
-        xargs -P 1 -n 50 cat > "${output2}/warnings.csv.tmp"
     mv "${output2}/targets.bed"{.tmp,}
+    find "$output1" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
+        xargs -P1 -n 50 cat | sort > "${output2}/warnings.csv.tmp"
     mv "${output2}/warnings.csv"{.tmp,}
+    find "$output1" -mindepth 1 -maxdepth 1 -name "*.copy_num.csv.gz" | \
+        xargs -P1 -n 50 cat | sort > "${output2}/copy_num.csv.gz.tmp"
+    mv "${output2}/copy_num.csv.gz"{.tmp,}
 
     rm -f "${lock_file}"
     trap - INT TERM ERR EXIT
@@ -376,7 +376,8 @@ function check_completion {
         msg "All jobs completed"
         touch "${output2}/ok"
     else
-        msg "Some jobs incomplete, please wait for other instances to complete, run additional instances, or check for error messages"
+        msg "Some jobs incomplete, please wait for other instances to complete, `
+            `run additional instances, or check for error messages"
     fi
 }
 
