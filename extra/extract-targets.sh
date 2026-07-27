@@ -365,7 +365,26 @@ function combine_panels {
         xargs -P1 -n 50 cat | sort > "${output2}/warnings.csv.tmp"
     mv "${output2}/warnings.csv"{.tmp,}
     find "$output1" -mindepth 1 -maxdepth 1 -name "*.copy_num.csv.gz" | \
-        xargs -P1 -n 50 cat > "${output2}/copy_num.csv.gz.tmp"
+        xargs -P1 -n 50 zcat | \
+        awk -F$'\t' 'BEGIN{ OFS = FS; N = 5 } {
+            locus = $1;
+            cn = $3 < N ? $3 : N;
+            ++total[locus];
+            ++counts[locus, cn];
+        } END {
+            printf("locus");
+            for (i = 0; i < N; ++i) {
+                printf("\t%d", i);
+            }
+            printf("\t>%d\n", N);
+            for (locus in total) {
+                printf("%s", locus);
+                for (i = 0; i <= N; ++i) {
+                    printf("\t%.2f", 100.0 * counts[locus, i] / total[locus]);
+                }
+                printf("\n");
+            }
+        }' | gzip > "${output2}/copy_num.csv.gz.tmp"
     mv "${output2}/copy_num.csv.gz"{.tmp,}
 
     rm -f "${lock_file}"
