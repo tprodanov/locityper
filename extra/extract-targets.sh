@@ -365,7 +365,7 @@ function combine_panels {
         xargs -P1 -n 50 cat | sort > "${output2}/warnings.csv.tmp"
     mv "${output2}/warnings.csv"{.tmp,}
     find "$output1" -mindepth 1 -maxdepth 1 -name "*.copy_num.csv.gz" | \
-        xargs -P1 -n 50 cat | sort > "${output2}/copy_num.csv.gz.tmp"
+        xargs -P1 -n 50 cat > "${output2}/copy_num.csv.gz.tmp"
     mv "${output2}/copy_num.csv.gz"{.tmp,}
 
     rm -f "${lock_file}"
