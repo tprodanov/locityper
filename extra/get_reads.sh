@@ -106,15 +106,15 @@ function process_dir {
                     }
                 }
                 keep_this = 0;
-                if (edit == UNDEF) {
+                if ($6 != "*" && edit == UNDEF) {
                     printf("Read mapping for %s does not have edit distance (NM)\n", $1) > "/dev/stderr";
                 } else if (frac_thresh != "" && $10 == "*") {
-                    printf("Primary read mapping for %s does not have sequence\n", $1) > "/dev/stderr";
+                    printf("Sequence missing for read %s\n", $1) > "/dev/stderr";
                 } else {
                     keep_this = frac_thresh == "" ? (edit <= edit_thresh) : (edit / length($10) <= frac_thresh);
                 }
 
-                if (first_name != "" && first_name != $1) {
+                if (first != "" && first_name != $1) {
                     if (keep_first) {
                         print first;
                     }
@@ -130,7 +130,7 @@ function process_dir {
                     $2 = or($2, 64);
                     if ((keep_this && keep_first) || (!both && keep_this) || (!both && keep_first)) {
                         print first;
-                        print;
+                        print $0;
                     }
                     first = "";
                 }
@@ -139,16 +139,16 @@ function process_dir {
             if (first != "" && keep_first) {
                 print first;
             }
-        }' > "${prefix}.keep.sam"
-        samtools view -bo "${prefix}.keep.bam" "${prefix}.keep.sam"
+        }' | \
+        samtools view -bo "${prefix}.keep.bam"
     samtools fastq -1 "${prefix}1.fq" -2 "${prefix}2.fq" "${prefix}.keep.bam"
     rm "${prefix}.keep.bam"
 
     [[ -s "${prefix}2.fq" ]] || rm "${prefix}2.fq"
 
     if [[ "$compress" = y ]]; then
-        gzip "${prefix}1.fq"
-        [[ ! -f "${prefix}2.fq" ]] || gzip "${prefix}2.fq"
+        gzip -f "${prefix}1.fq"
+        [[ ! -f "${prefix}2.fq" ]] || gzip -f "${prefix}2.fq"
     fi
 }
 
