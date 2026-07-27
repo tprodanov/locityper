@@ -169,6 +169,12 @@ pub enum YesNo {
     Yes,
 }
 
+impl From<bool> for YesNo {
+    fn from(val: bool) -> Self {
+        if val { Self::Yes } else { Self::No }
+    }
+}
+
 impl Into<bool> for YesNo {
     fn into(self) -> bool {
         self == Self::Yes
@@ -183,6 +189,15 @@ impl std::str::FromStr for YesNo {
             "y" | "yes" => Ok(Self::Yes),
             "n" | "no" => Ok(Self::No),
             _ => Err(format!("Could not parse yes/no from `{}`", s)),
+        }
+    }
+}
+
+impl Display for YesNo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Yes => write!(f, "yes"),
+            Self::No => write!(f, "no"),
         }
     }
 }

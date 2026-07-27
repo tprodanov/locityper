@@ -150,7 +150,7 @@ fn print_help() {
         "-s, --step".green(), "INT".yellow(), "-w".green());
     println!("    {:KEY$} {:VAL$}  Custom tag for the basis haplotypes (haplotypes-basis.{}.fa.gz).",
         "-t, --tag".green(), "STR".yellow(), "STR".yellow());
-    println!("    {:KEY$} {:VAL$}  Make these basis haplotypes default (yes/no).\n\
+    println!("    {:KEY$} {:VAL$}  Make new basis haplotypes default in subsequent genotyping.\n\
         {EMPTY}  Default: {}, unless {} is used.",
         "    --default".green(), "y|n".yellow(), super::fmt_def("yes"), "--basis-lo".green());
     println!("    {:KEY$} {:VAL$}  Remove sample(s) from the basis haplotypes.\n\

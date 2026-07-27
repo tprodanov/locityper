@@ -20,7 +20,7 @@ use crate::{
         self,
         TriangleMatrix,
         vec::IterExt,
-        fmt::PrettyU32,
+        fmt::{PrettyU32, YesNo},
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
@@ -46,6 +46,7 @@ struct Args {
     moving_window: u32,
     ignore_overlaps: bool,
 
+    calculate_div: bool,
     div_k: u8,
     div_w: u8,
     unknown_frac: f64,
@@ -72,6 +73,7 @@ impl Default for Args {
             moving_window: 500,
             ignore_overlaps: false,
 
+            calculate_div: false,
             div_k: 15,
             div_w: 15,
             unknown_frac: 0.0001,
@@ -162,6 +164,8 @@ fn print_help() {
         "-u, --unknown".green(), "NUM".yellow(), super::fmt_def_f64(defaults.unknown_frac));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
+    println!("    {:KEY$} {:VAL$}  Calculate minimizer divergence between haplotypes [{}].",
+        "    --calc-div".green(), "y|n".yellow(), super::fmt_def(YesNo::from(defaults.calculate_div)));
     println!("    {}   {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
         "-m, --minimizer".green(), "INT INT".yellow(),
         super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
@@ -228,6 +232,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
+            Long("calc-div") => args.calculate_div = parser.value()?.parse::<YesNo>()?.into(),
             Short('m') | Long("minimizer") | Long("minimizers") =>
             {
                 args.div_k = parser.value()?.parse()?;
@@ -598,15 +603,19 @@ fn process_alleles(
         return Ok(());
     }
 
-    log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
-    let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
-    let divergences = minim_div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
-    let divergences = TriangleMatrix::from_linear_data(n_entries, divergences);
-    check_divergencies(locus, &entries, &divergences, args.variants.is_some());
-    let dist_filename = locus_dir.join(paths::DISTANCES);
-    let dist_file = ext::sys::create_file(&dist_filename)?;
-    minim_div::write_divergences(dist_file, args.div_k, args.div_w, &divergences, |(int_div, _fl_div)| *int_div)
-        .map_err(add_path!(dist_filename))?;
+    if args.calculate_div {
+        log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
+        let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
+        let divergences = minim_div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
+        let divergences = TriangleMatrix::from_linear_data(n_entries, divergences);
+        check_divergencies(locus, &entries, &divergences, args.variants.is_some());
+        let dist_filename = locus_dir.join(paths::DISTANCES);
+        let dist_file = ext::sys::create_file(&dist_filename)?;
+        minim_div::write_divergences(dist_file, args.div_k, args.div_w, &divergences, |(int_div, _fl_div)| *int_div)
+            .map_err(add_path!(dist_filename))?;
+    } else {
+        log::debug!("    Skipping sequence divergence");
+    }
 
     log::info!("    Counting k-mers");
     // Replace Ns with As in the reference sequence.
