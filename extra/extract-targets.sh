@@ -53,8 +53,6 @@ Other arguments:
 HELP
 }
 
-# [TODO] Separate provide minimap arguments.
-
 function setup_colors {
     readonly RED="\e[31m"
     readonly ENDCOLOR="\e[0m"
@@ -73,7 +71,7 @@ function panic {
     exit "${2-1}" # Return 1 by default.
 }
 
-function parse_params {
+function parse_args {
     input=()
 
     min_len=0.5
@@ -382,7 +380,7 @@ function check_completion {
 }
 
 setup_colors
-parse_params "$@"
+parse_args "$@"
 output1="$output/by_assembly"
 output2="$output/panels"
 mkdir -p "$output1" "$output2"

@@ -25,8 +25,6 @@ Other arguments:
 HELP
 }
 
-# [TODO] Separate provide minimap arguments.
-
 function setup_colors {
     readonly RED="\e[31m"
     readonly ENDCOLOR="\e[0m"
@@ -45,7 +43,7 @@ function panic {
     exit "${2-1}" # Return 1 by default.
 }
 
-function parse_params {
+function parse_args {
     edit=4
     frac=
     both=y
@@ -60,12 +58,14 @@ function parse_params {
                 edit="$2"; shift 2 ;;
             -f | --frac )
                 frac="$2"; shift 2 ;;
-            -both | --both )
+            -b | --both )
                 both="$2"; shift 2 ;;
             -z | --gzip )
                 compress="$2"; shift 2 ;;
             -o | --output )
                 output="$2"; shift 2 ;;
+            -h | --help)
+                 help_message; exit 0 ;;
             -- ) shift; break ;;
             * )  panic "Unexpected argument $1" ;;
         esac
@@ -107,9 +107,9 @@ function process_dir {
                 }
                 keep_this = 0;
                 if (edit == UNDEF) {
-                    printf("Read mapping for %s does not have edit distance (NM)", $1) > "/dev/stderr";
+                    printf("Read mapping for %s does not have edit distance (NM)\n", $1) > "/dev/stderr";
                 } else if (frac_thresh != "" && $10 == "*") {
-                    printf("Primary read mapping for %s does not have sequence", $1) > "/dev/stderr";
+                    printf("Primary read mapping for %s does not have sequence\n", $1) > "/dev/stderr";
                 } else {
                     keep_this = frac_thresh == "" ? (edit <= edit_thresh) : (edit / length($10) <= frac_thresh);
                 }
@@ -128,7 +128,7 @@ function process_dir {
                     first = $0;
                 } else {
                     $2 = or($2, 64);
-                    if (keep_this && keep_first) || (!both && keep_this) || (!both && keep_first)) {
+                    if ((keep_this && keep_first) || (!both && keep_this) || (!both && keep_first)) {
                         print first;
                         print;
                     }
@@ -139,8 +139,8 @@ function process_dir {
             if (first != "" && keep_first) {
                 print first;
             }
-        }' | \
-        samtools view -bo "${prefix}.keep.bam"
+        }' > "${prefix}.keep.sam"
+        samtools view -bo "${prefix}.keep.bam" "${prefix}.keep.sam"
     samtools fastq -1 "${prefix}1.fq" -2 "${prefix}2.fq" "${prefix}.keep.bam"
     rm "${prefix}.keep.bam"
 
@@ -148,11 +148,13 @@ function process_dir {
 
     if [[ "$compress" = y ]]; then
         gzip "${prefix}1.fq"
-        [[ ! -f "${prefix}2.fq"]] || gzip "${prefix}2.fq"
+        [[ ! -f "${prefix}2.fq" ]] || gzip "${prefix}2.fq"
     fi
 }
 
+setup_colors
+parse_args "$@"
 [[ -z "$output" ]] || mkdir -p "$output"
-find "$input/loci" -type d -maxdepth 1 -maxdepth 1 | while read d;
+find "$input/loci" -mindepth 1 -maxdepth 1 -type d | while read d; do
     process_dir "$d"
 done
