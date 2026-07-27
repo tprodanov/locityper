@@ -17,7 +17,7 @@ Input/output arguments:
     -f, --frac    NUM  Instead of edit distance, filter by edit distance / read length.
     -b, --both    y|n  Should both (y) or only one (n) of the reads pass the filter [$both].
     -z, --gzip    y|n  Should the output files be gzipped? [$compress].
-    -o, --output  DIR  Optional: output directory.
+    -o, --output  DIR  Optional: output directory or prefix.
                        If not specified, read files are placed in the same output directory.
 
 Other arguments:
@@ -83,10 +83,12 @@ function process_dir {
     in_dir="$1"
 
     local prefix
-    if [[ -n "$output" ]]; then
+    if [[ -z "$output" ]]; then
+        prefix="${in_dir}/reads"
+    elif [[ -d "$output" ]]; then
         prefix="${output}/$(basename "$in_dir").reads"
     else
-        prefix="${in_dir}/reads"
+        prefix="${output}.$(basename "$in_dir").reads"
     fi
 
     echo "Extracting reads $in_dir -> ${prefix}*.fq"
@@ -154,7 +156,6 @@ function process_dir {
 
 setup_colors
 parse_args "$@"
-[[ -z "$output" ]] || mkdir -p "$output"
 find "$input/loci" -mindepth 1 -maxdepth 1 -type d | while read d; do
     process_dir "$d"
 done
