@@ -233,7 +233,7 @@ function process_assembly {
     "$SCRIPT_DIR/inner/merge_hits.py" "$paf_filename" \
         -b "$targets_bed" -g "$short_name" \
         -d "$distance" -l "$min_len" -s "$min_simil" \
-        -o "${prefix}.bed.gz" -c "${prefix}.copy_num.csv.gz"
+        -o "${prefix}.bed.gz" -c "${prefix}.copy_num.csv.gz" \
         2> "${prefix}.warnings.csv"
     [[ -s "${prefix}.warnings.csv" ]] || rm "${prefix}.warnings.csv"
     # At this point, $prefix.bed.gz will have columns
