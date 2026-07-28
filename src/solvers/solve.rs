@@ -255,7 +255,8 @@ pub struct Data {
     /// Solving scheme.
     pub scheme: Arc<Scheme>,
     pub contigs: Arc<ContigNames>,
-    pub contig_distances: Option<TriangleMatrix<u32>>,
+    pub contig_distances: Option<TriangleMatrix<Option<u32>>>,
+    pub true_edit_distances: bool,
     /// All read alignments, groupped by contigs.
     pub all_alns: AllAlignments,
     pub contig_infos: Arc<ContigInfos>,
@@ -335,15 +336,24 @@ fn compare_two_likelihoods(pred1: &Prediction, pred2: &Prediction) -> f64 {
 }
 
 /// Calculates distance between two genotypes as minimum sum distance between permutations of contigs within genotypes.
-pub fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMatrix<u32>) -> u32 {
+fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMatrix<Option<u32>>) -> Option<u32> {
     let mut min_dist = u32::MAX;
     ext::vec::gen_permutations(gt1.ids(), |perm_ids1| {
-        let dist: u32 = perm_ids1.iter().zip(gt2.ids())
-            .map(|(i, j)| if i == j { 0 } else { *distances.get_symmetric(i.ix(), j.ix()) })
-            .sum();
+        let mut dist = 0;
+        for (i, j) in itertools::izip!(perm_ids1, gt2.ids()) {
+            if i != j {
+                match *distances.get_symmetric(i.ix(), j.ix()) {
+                    Some(d) => dist += d,
+                    None => {
+                        dist = u32::MAX;
+                        break;
+                    }
+                }
+            }
+        }
         min_dist = min(min_dist, dist);
     });
-    min_dist
+    if min_dist == u32::MAX { None } else { Some(min_dist) }
 }
 
 /// Prediction for a single genotype.
@@ -517,6 +527,7 @@ impl Predictions {
             weighted_dist: None,
             total_reads: data.all_alns.reads().len() as u32,
             distances: None,
+            true_edit_distances: data.true_edit_distances,
             unexpl_reads: None,
             tag: data.contigs.tag().to_owned(),
             predictions, ln_probs, quality,
@@ -567,7 +578,8 @@ pub struct Genotyping {
     /// Weighted distance from the best to all other genotypes.
     weighted_dist: Option<f64>,
     /// Distance from the secondary to the primary genotype prediction.
-    distances: Option<Vec<u32>>,
+    distances: Option<Vec<Option<u32>>>,
+    true_edit_distances: bool,
     total_reads: u32,
     /// Fraction of unexplained reads.
     unexpl_reads: Option<u32>,
@@ -587,6 +599,7 @@ impl Genotyping {
             ln_probs: Vec::new(),
             weighted_dist: None,
             distances: None,
+            true_edit_distances: false,
             total_reads: 0,
             unexpl_reads: None,
             quality: 0.0,
@@ -605,19 +618,19 @@ impl Genotyping {
     }
 
     /// Calculate weighted distance to all other genotypes.
-    pub fn find_weighted_dist(&mut self, dist_matrix: &TriangleMatrix<u32>) {
+    pub fn find_weighted_dist(&mut self, dist_matrix: &TriangleMatrix<Option<u32>>) {
         let Some(gt0) = self.genotypes.first() else { return };
         let mut sum_prob = 0.0;
-        let mut sum_dist = 0.0;
+        let mut sum_dist = Some(0.0);
         let mut distances = Vec::with_capacity(self.genotypes.len());
         for (i, (gt, &ln_prob)) in self.genotypes.iter().zip(&self.ln_probs).enumerate() {
             let prob = ln_prob.exp();
             sum_prob += prob;
-            let dist = if i > 0 { genotype_distance(gt0, gt, dist_matrix) } else { 0 };
-            sum_dist += prob * f64::from(dist);
+            let dist = if i > 0 { genotype_distance(gt0, gt, dist_matrix) } else { Some(0) };
+            sum_dist = sum_dist.zip(dist).map(|(s, d)| s + prob * f64::from(d));
             distances.push(dist);
         }
-        self.weighted_dist = Some(sum_dist / sum_prob);
+        self.weighted_dist = sum_dist.map(|s| s / sum_prob);
         self.distances = Some(distances);
     }
 
@@ -721,6 +734,9 @@ impl Genotyping {
             total_reads: self.total_reads,
             quality: self.quality,
         };
+        if self.distances.is_some() {
+            res.insert("dist_type", if self.true_edit_distances { "edit" } else { "minimizer" }).unwrap();
+        }
         if let Some(dist) = self.weighted_dist {
             res.insert("weight_dist", dist).unwrap();
         }
@@ -741,7 +757,10 @@ impl Genotyping {
                     log10_prob: Ln::to_log10(ln_prob),
                 };
                 if let Some(distances) = &self.distances {
-                    obj.insert("dist_to_primary", distances[i]).unwrap();
+                    match distances[i] {
+                        Some(d) => obj.insert("dist_to_primary", d).unwrap(),
+                        None => obj.insert("dist_to_primary", "unknown").unwrap(),
+                    }
                 }
                 obj
             }).collect();

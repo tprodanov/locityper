@@ -127,13 +127,12 @@ where W: VarintWriter<Error = io::Error>,
 }
 
 /// Loads minimizer sizes k and w, and the number of non-shared minimizers for each pair of contigs.
-pub fn load_divergences<R>(
-    mut f: R,
+pub fn load_divergences_and_convert<T>(
+    mut f: impl VarintReader<Error = io::Error>,
     filename: &Path,
     n: usize,
-) -> crate::Result<(u8, u8, TriangleMatrix<u32>)>
-where R: VarintReader<Error = io::Error>,
-{
+    convert: impl Fn(u32) -> T,
+) -> crate::Result<(u8, u8, TriangleMatrix<T>)> {
     let k = f.read().map_err(add_path!(filename))?;
     let w = f.read().map_err(add_path!(filename))?;
     let m = f.read_u32_varint().map_err(add_path!(filename))?;
@@ -147,7 +146,16 @@ where R: VarintReader<Error = io::Error>,
     let mut divs = Vec::with_capacity(total);
     for _ in 0..total {
         let d = f.read_u32_varint().map_err(add_path!(filename))?;
-        divs.push(d);
+        divs.push(convert(d));
     }
     Ok((k, w, TriangleMatrix::from_linear_data(n, divs)))
+}
+
+#[inline]
+pub fn load_divergences(
+    f: impl VarintReader<Error = io::Error>,
+    filename: &Path,
+    n: usize,
+) -> crate::Result<(u8, u8, TriangleMatrix<u32>)> {
+    load_divergences_and_convert(f, filename, n, |x| x)
 }

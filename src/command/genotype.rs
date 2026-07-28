@@ -33,7 +33,7 @@ use crate::{
     ext::{
         self,
         rand::XoshiroRng,
-        fmt::{PrettyU32, PrettyU64, PrettyUsize},
+        fmt::{PrettyU32, PrettyU64, PrettyUsize, YesNo},
     },
     model::{
         self,
@@ -102,6 +102,7 @@ struct Args {
     edit_thresh: Option<EditThresh>,
     assgn_params: AssgnParams,
     solvers: Vec<String>,
+    use_paf: bool,
 
     hap_div: f64,
     transfer_fails: u32,
@@ -142,6 +143,7 @@ impl Default for Args {
             edit_thresh: None,
             assgn_params: Default::default(),
             solvers: Vec::new(),
+            use_paf: true,
 
             hap_div: 1.0,
             transfer_fails: 5000,
@@ -364,6 +366,9 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
             "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), super::fmt_def("auto"));
+        println!("    {:KEY$} {:VAL$}  Use pairwise haplotype alignments (db/loci/*/haplotypes.paf.gz)\n\
+            {EMPTY}  to identify potentially incorrect predictions [{}].",
+            "    --use-paf".green(), "y|n".yellow(), super::fmt_def(YesNo::from(defaults.use_paf)));
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -524,7 +529,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
-
+            Long("use-paf") => args.use_paf = parser.value()?.parse::<YesNo>()?.into(),
             Long("hap-div") => args.hap_div = parser.value()?.parse()?,
             Long("transf-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
 
@@ -1186,23 +1191,26 @@ fn analyze_locus(
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
 
-        // [TODO] Do not use distances since they are not that useful.
+        let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
-        let contig_distances = if dist_filename.exists() {
+        let (mut contig_distances, true_edit_distances) = if args.use_paf && paf_filename.exists() {
+            todo!()
+        } else if dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
-            let (_k, _w, dists) = minim_div::load_divergences(dist_file, &dist_filename, locus.init_nhaps)?;
-            match &locus.keep_ixs {
-                Some(ixs) if ixs.len() != dists.side() => Some(dists.thin_out(ixs)),
-                _ => Some(dists),
-            }
+            let (_k, _w, dists) = minim_div::load_divergences_and_convert(
+                dist_file, &dist_filename, locus.init_nhaps, Some)?;
+            (Some(dists), false)
         } else {
-            None
+            (None, false)
         };
+        if let Some(dists) = &mut contig_distances && let Some(ixs) = &locus.keep_ixs {
+            *dists = dists.thin_out(ixs);
+        }
 
         let data = Arc::new(solve::Data {
             scheme: Arc::clone(scheme),
             contigs: Arc::clone(contigs),
-            contig_distances,
+            contig_distances, true_edit_distances,
             distr_cache: Arc::clone(distr_cache),
             assgn_params: args.assgn_params.clone(),
             debug: args.debug,
