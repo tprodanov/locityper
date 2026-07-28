@@ -413,7 +413,7 @@ fn process_locus(
 ) -> crate::Result<bool> {
     let lock_filename = dir.join("augment.lock");
     let Some(lock_file) = ext::sys::LockFile::try_create(lock_filename.clone())? else {
-        log::debug!("Skipping locus {} (lock exists {})", locus, ext::fmt::path(&lock_filename));
+        log::debug!("Skipping locus {} (locked by {})", locus, ext::fmt::path(&lock_filename));
         return Ok(false)
     };
     log::info!("Processing locus {}", locus);

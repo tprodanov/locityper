@@ -643,7 +643,6 @@ fn process_alleles(
     // Consecutively save off-target counts and regular counts (if they will sometimes be useful later).
     off_target_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
     kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
-    super::write_success_file(locus_dir.join(paths::SUCCESS))?;
     Ok(())
 }
 
@@ -717,8 +716,13 @@ fn add_locus(
     vcf_data: &mut Option<(bcf::IndexedReader, panvcf::HaplotypeNames)>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
-) -> crate::Result<()>
+) -> crate::Result<bool>
 {
+    let lock_filename = locus_dir.join("lock");
+    let Some(lock_file) = ext::sys::LockFile::try_create(lock_filename.clone())? else {
+        log::debug!("Skipping locus {} (locked by {})", locus, ext::fmt::path(&lock_filename));
+        return Ok(false)
+    };
     log::info!("Analyzing {} ({})", locus.name().bold(), locus.interval());
     // VCF file was provided.
     if let Some((vcf_file, hap_names)) = vcf_data {
@@ -770,7 +774,10 @@ fn add_locus(
         log::warn!("    Removed {}/{} haplotypes with Ns", obtained_count - without_ns, obtained_count);
     }
     check_sequences(&allele_seqs, &locus, if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
-    process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)
+    process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)?;
+    lock_file.release()?;
+    super::write_success_file(locus_dir.join(paths::SUCCESS))?;
+    Ok(true)
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
@@ -801,26 +808,30 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let total = loci.len();
     let mut failed = 0;
+    let mut skipped = 0;
     for (locus, alleles_fasta) in loci.into_iter() {
         let locus_dir = loci_dir.join(locus.name());
         if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
+            skipped += 1;
             continue;
         }
-        let res = add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader,
-            &mut vcf_data, &kmer_getter, &args);
-        if let Err(e) = res {
-            log::error!("Error while analyzing locus {}:\n        {}", locus, e.display());
-            failed += 1;
+        match add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader,
+            &mut vcf_data, &kmer_getter, &args)
+        {
+            Ok(true) => {}
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                log::error!("Error while analyzing locus {}:\n        {}", locus, e.display());
+                failed += 1;
+            }
         }
     }
 
     let succeed = total - failed;
-    if succeed == 0 {
-        log::error!("Failed to add all {} loci", failed);
-    } else if failed > 0 {
-        log::warn!("Successfully added {} loci, failed to add {} loci", succeed, failed);
+    if succeed == 0 && failed > 0 {
+        log::error!("Failed to add all {} loci (skipped {} loci)", failed, skipped);
     } else {
-        log::info!("Successfully added {} loci", succeed);
+        log::info!("Completed {} loci, skipped {}, errors in {} loci", succeed, skipped, failed);
     }
     log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())
