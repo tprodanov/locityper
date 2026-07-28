@@ -51,7 +51,7 @@ RUN apt-get update \
     #
     # Building Locityper
     &&  cd /repos \
-    &&  git clone https://github.com/tprodanov/locityper \
+    &&  git clone --single-branch --branch https://github.com/tprodanov/locityper \
     &&  git clone https://github.com/smarco/WFA2-lib locityper/WFA2 \
     &&  cargo install --no-track --verbose --root "${PREFIX}" --path locityper \
     #
