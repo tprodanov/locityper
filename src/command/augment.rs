@@ -324,7 +324,7 @@ fn inner_construct_dominant_set(
         let j = entry.target_id().ix();
         if i == j { continue };
         let Some(cigar) = entry.cigar() else { continue };
-        let global_div = entry.divergence();
+        let global_div = entry.divergence().unwrap_or(1.0);
         update_bitarray::<true >(&cigar, global_div, &mut bitarrays[i], j, &mut indices, step, max_window_edit, args);
         update_bitarray::<false>(&cigar, global_div, &mut bitarrays[j], i, &mut indices, step, max_window_edit, args);
     }

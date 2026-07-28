@@ -186,8 +186,8 @@ impl std::str::FromStr for YesNo {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match &s.to_lowercase() as &str {
-            "y" | "yes" => Ok(Self::Yes),
-            "n" | "no" => Ok(Self::No),
+            "y" | "yes" | "true" => Ok(Self::Yes),
+            "n" | "no" | "false" => Ok(Self::No),
             _ => Err(format!("Could not parse yes/no from `{}`", s)),
         }
     }

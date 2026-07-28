@@ -735,7 +735,7 @@ impl Genotyping {
             quality: self.quality,
         };
         if self.distances.is_some() {
-            res.insert("dist_type", if self.true_edit_distances { "edit" } else { "minimizer" }).unwrap();
+            res.insert("dist_type", if self.true_edit_distances { "edit" } else { "minim-div" }).unwrap();
         }
         if let Some(dist) = self.weighted_dist {
             res.insert("weight_dist", dist).unwrap();

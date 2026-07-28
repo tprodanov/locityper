@@ -19,7 +19,7 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        self, interv, recruit, minim_div, Interval,
+        self, interv, recruit, minim_div, paf, Interval,
         fastx::{self, FastxRead, SingleRecord},
         contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
         kmers::Kmer,
@@ -1194,7 +1194,8 @@ fn analyze_locus(
         let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
         let (mut contig_distances, true_edit_distances) = if args.use_paf && paf_filename.exists() {
-            todo!()
+            let paf_file = ext::sys::open(paf_filename).map(paf::PafFile::new)?;
+            (Some(paf::load_distance_matrix(paf_file, contigs)?), true)
         } else if dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
             let (_k, _w, dists) = minim_div::load_divergences_and_convert(
