@@ -56,8 +56,8 @@ impl Default for Params {
             penalties: Default::default(),
             backbone_ks: vec![25, 51, 101],
             accuracy: 9,
-            max_gap: 500,
-            transitive_div: 0.02,
+            max_gap: 10000,
+            transitive_div: 0.01,
             transitive_anchor: 101,
         }
     }

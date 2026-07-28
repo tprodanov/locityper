@@ -63,7 +63,7 @@ impl Default for Args {
             basis_leaveout: Vec::new(),
 
             skip_vcf: false,
-            threads: 8,
+            threads: 1,
             aln_params: Default::default(),
             rerun: Rerun::None,
         }
