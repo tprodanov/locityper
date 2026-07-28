@@ -235,6 +235,7 @@ function process_assembly {
         -d "$distance" -l "$min_len" -s "$min_simil" \
         -o "${prefix}.bed.gz" -c "${prefix}.copy_num.csv.gz"
         2> "${prefix}.warnings.csv"
+    [[ -s "${prefix}.warnings.csv" ]] || rm "${prefix}.warnings.csv"
     # At this point, $prefix.bed.gz will have columns
     # chrom, start, end, strand (+/-), target name, length fraction, similarity.
 
@@ -374,7 +375,6 @@ function combine_panels {
 
     # Test will return false if the files don't exist
     if [[ "${output}/targets.bed" -nt "$latest_ok_file"
-        && "${output}/warnings.csv" -nt "$latest_ok_file"
         && "${output}/copy_num.csv.gz" -nt "$latest_ok_file"
         ]]
     then
@@ -388,6 +388,7 @@ function combine_panels {
     find "$output1" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
         xargs -P1 -n 50 cat | sort > "${output}/warnings.csv.tmp"
     mv "${output}/warnings.csv"{.tmp,}
+    [[ -s "${output}/warnings.csv" ]] || rm "${output}/warnings.csv"
     cut -f-4 "$targets_bed" | awk -F$'\t' 'BEGIN{OFS=FS} { print $0, ("panels/" $4 ".fa.gz") }' \
         > "${output}/targets.bed.tmp"
     mv "${output}/targets.bed"{.tmp,}
