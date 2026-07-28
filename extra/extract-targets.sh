@@ -320,6 +320,31 @@ function combine_locus {
     trap - INT TERM ERR EXIT
 }
 
+function summarize_copy_num {
+    find "$output1" -mindepth 1 -maxdepth 1 -name "*.copy_num.csv.gz" | \
+        xargs -P1 -n 50 zcat | \
+        awk -F$'\t' 'BEGIN{ OFS = FS; N = 5 } {
+            locus = $1;
+            cn = $3 < N ? $3 : N;
+            ++total[locus];
+            ++counts[locus, cn];
+        } END {
+            printf("locus");
+            for (i = 0; i < N; ++i) {
+                printf("\t%d", i);
+            }
+            printf("\t>%d\n", N);
+            for (locus in total) {
+                printf("%s", locus);
+                for (i = 0; i <= N; ++i) {
+                    printf("\t%.2f", 100.0 * counts[locus, i] / total[locus]);
+                }
+                printf("\n");
+            }
+        }' | gzip > "${output}/copy_num.csv.gz.tmp"
+    mv "${output}/copy_num.csv.gz"{.tmp,}
+}
+
 function combine_panels {
     local timeout_sec
     timeout_sec=$((timeout * 60))
@@ -348,54 +373,33 @@ function combine_panels {
     done
 
     # Test will return false if the files don't exist
-    if [[ "${output2}/targets.bed" -nt "$latest_ok_file"
-        && "${output2}/warnings.csv" -nt "$latest_ok_file"
-        && "${output2}/copy_num.csv.gz" -nt "$latest_ok_file"
+    if [[ "${output}/targets.bed" -nt "$latest_ok_file"
+        && "${output}/warnings.csv" -nt "$latest_ok_file"
+        && "${output}/copy_num.csv.gz" -nt "$latest_ok_file"
         ]]
     then
         return 0
     fi
-    local lock_file="${output2}/targets.lock"
+    local lock_file="${output}/targets.lock"
     ( set -C; 2>/dev/null > "$lock_file" ) || return 0
     trap 'rm -f "${lock_file}"; exit 1' INT TERM ERR EXIT
 
-    cut -f-4 "$targets_bed" | awk -F$'\t' 'BEGIN{OFS=FS} { print $0, ($4 ".fa.gz") }' > "${output2}/targets.bed.tmp"
-    mv "${output2}/targets.bed"{.tmp,}
+    summarize_copy_num
     find "$output1" -mindepth 1 -maxdepth 1 -name "*.warnings.csv" | \
-        xargs -P1 -n 50 cat | sort > "${output2}/warnings.csv.tmp"
-    mv "${output2}/warnings.csv"{.tmp,}
-    find "$output1" -mindepth 1 -maxdepth 1 -name "*.copy_num.csv.gz" | \
-        xargs -P1 -n 50 zcat | \
-        awk -F$'\t' 'BEGIN{ OFS = FS; N = 5 } {
-            locus = $1;
-            cn = $3 < N ? $3 : N;
-            ++total[locus];
-            ++counts[locus, cn];
-        } END {
-            printf("locus");
-            for (i = 0; i < N; ++i) {
-                printf("\t%d", i);
-            }
-            printf("\t>%d\n", N);
-            for (locus in total) {
-                printf("%s", locus);
-                for (i = 0; i <= N; ++i) {
-                    printf("\t%.2f", 100.0 * counts[locus, i] / total[locus]);
-                }
-                printf("\n");
-            }
-        }' | gzip > "${output2}/copy_num.csv.gz.tmp"
-    mv "${output2}/copy_num.csv.gz"{.tmp,}
+        xargs -P1 -n 50 cat | sort > "${output}/warnings.csv.tmp"
+    mv "${output}/warnings.csv"{.tmp,}
+    cut -f-4 "$targets_bed" | awk -F$'\t' 'BEGIN{OFS=FS} { print $0, ("panels/" $4 ".fa.gz") }' \
+        > "${output}/targets.bed.tmp"
+    mv "${output}/targets.bed"{.tmp,}
 
     rm -f "${lock_file}"
     trap - INT TERM ERR EXIT
 }
 
 function check_completion {
-    if [[ -f "${output2}/targets.bed"
+    if [[ -f "${output}/targets.bed"
             && -z "$(find "$output1" "$output2" -mindepth 1 -maxdepth 1 -name "*.todo" -print -quit)" ]]; then
         msg "All jobs completed"
-        touch "${output2}/ok"
     else
         msg "Some jobs incomplete, please wait for other instances to complete, `
             `run additional instances, or check for error messages"
