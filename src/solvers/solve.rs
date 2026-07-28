@@ -852,9 +852,9 @@ fn solve_single_thread(
 /// Creates `threads` filenames, one for each thread.
 fn csv_filenames(prefix: &Path, threads: usize) -> Vec<PathBuf> {
     (0..threads).map(|i| if i == 0 {
-        ext::sys::path_append(prefix, ".csv.gz")
+        prefix.with_added_extension(".csv.gz")
     } else {
-        ext::sys::path_append(prefix, format!(".{}.csv.gz", i))
+        prefix.with_added_extension(format!(".{}.csv.gz", i))
     }).collect()
 }
 

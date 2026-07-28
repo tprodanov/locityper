@@ -434,24 +434,23 @@ fn cluster_haplotypes(
 
 /// In case where no haplotypes are discarded, simply copy all files from input to output directory.
 fn copy_output_files(locus_data: &LocusData) -> crate::Result<bool> {
-    let mut all_present = true;
-    for &(basename, must_have) in &[
-        (paths::LOCUS_FASTA, true),
-        (paths::KMERS, true),
-        (paths::DISTANCES, false),
-        ]
-    {
+    let mut present = Vec::new();
+    for &basename in &[paths::LOCUS_FASTA, paths::KMERS_BR, paths::KMERS_LZ4, paths::DISTANCES] {
         let in_filename = locus_data.db_dir().join(basename);
         let out_filename = locus_data.out_dir().join(basename);
         if Path::new(&in_filename).exists() {
             std::fs::copy(&in_filename, &out_filename).map_err(add_path!(in_filename, out_filename))?;
-        } else if must_have {
-            log::error!("[{}] File {} is missing, output will be incomplete",
-                locus_data.contig_set().tag(), in_filename.display());
-            all_present = false;
+            present.push(true);
+        } else {
+            present.push(false);
         }
     }
-    Ok(all_present)
+    if present[0] && (present[1] || present[2]) {
+        Ok(true)
+    } else {
+        log::error!("[{}] Key files are missing, output will be incomplete", locus_data.contig_set().tag());
+        Ok(false)
+    }
 }
 
 fn copy_bed_files(locus_data: &LocusData) -> crate::Result<bool> {
@@ -488,14 +487,13 @@ fn prune_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<b
             .map_err(add_path!(fasta_filename))?;
     }
 
-    // NOTE, that kmers are also read in ContigSet::load, but this is difficult to remove.
-    let in_kmers_filename = locus_data.db_dir().join(paths::KMERS);
-    let out_kmers_filename = locus_data.out_dir().join(paths::KMERS);
-    let mut kmers_reader = ext::sys::open(&in_kmers_filename)?;
+    let db_dir = locus_data.db_dir();
+    let mut kmers_reader = ext::sys::open_first_of(&[db_dir.join(paths::KMERS_BR), db_dir.join(paths::KMERS_LZ4)])?;
+    let out_kmers_filename = locus_data.out_dir().join(paths::KMERS_BR);
     // Read twice because there are k-mer counts in the KMERS file (off-target & on-target).
     // Currently, only off-target counts are used, but we still need to thin out both.
-    let kmer_counts1 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(in_kmers_filename))?;
-    let kmer_counts2 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(in_kmers_filename))?;
+    let kmer_counts1 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(!))?;
+    let kmer_counts2 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(!))?;
     if kmer_counts1.validate(contigs).is_ok() && kmer_counts2.validate(contigs).is_ok() {
         let mut kmers_writer = ext::sys::create_lz4_slow(&out_kmers_filename)?;
         for counts in [kmer_counts1, kmer_counts2] {
@@ -503,12 +501,11 @@ fn prune_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<b
                 .save(&mut kmers_writer).map_err(add_path!(out_kmers_filename))?;
         }
     } else {
-        log::warn!("[{}] k-mer counts in {} do not match input haplotypes, output will be incomplete",
-            contigs.tag(), in_kmers_filename.display());
+        log::warn!("[{}] k-mer counts do not match input haplotypes, output will be incomplete", contigs.tag());
         all_files_present = false;
     }
 
-    let dist_filename = locus_data.db_dir().join(paths::DISTANCES);
+    let dist_filename = db_dir.join(paths::DISTANCES);
     if dist_filename.exists() {
         let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
         let (k, w, dists) = minim_div::load_divergences(dist_file, &dist_filename, contigs.len())?;

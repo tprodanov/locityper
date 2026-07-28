@@ -728,10 +728,6 @@ pub(super) fn load_loci(
                 log::trace!("Skipping locus {} (not in the subset loci)", name);
                 continue;
             }
-            if !db_locus_dir.join(paths::SUCCESS).exists() {
-                log::error!("Skipping database directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
-                continue;
-            }
             if !loci_names.insert(name.to_owned()) {
                 log::error!("Duplicate locus {} in the database, ignoring the second instance", name);
                 continue;
@@ -742,8 +738,8 @@ pub(super) fn load_loci(
             }
 
             let fasta_fname = db_locus_dir.join(paths::LOCUS_FASTA);
-            let kmers_fname = db_locus_dir.join(paths::KMERS);
-            let mut locus_data = match ContigSet::load_with_kmer_counts(&name, &fasta_fname, &kmers_fname) {
+            let kmers_fnames = [db_locus_dir.join(paths::KMERS_BR), db_locus_dir.join(paths::KMERS_LZ4)];
+            let mut locus_data = match ContigSet::load_with_kmer_counts(&name, &fasta_fname, &kmers_fnames) {
                 Ok((set, kmer_counts)) => LocusData::new(set, kmer_counts, &db_locus_dir, &out_locus_dir),
                 Err(e) => {
                     log::error!("Could not load locus information from {}: {}",

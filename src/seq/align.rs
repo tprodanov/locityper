@@ -164,7 +164,7 @@ fn fill_kmers(
     let total = in_use.iter().copied().map(u32::from).sum::<u32>();
     let n_contigs = contig_set.len();
     let mut end0 = n_contigs;
-    let mut thread_ranges = Vec::with_capacity(threads - 1);
+    let mut thread_ranges = Vec::with_capacity(threads.saturating_sub(1));
     if threads != 1 && total >= 16 {
         let mut start = 0;
         for worker_ix in 0..threads {

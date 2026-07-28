@@ -295,13 +295,12 @@ impl ContigSet {
     pub fn load_with_kmer_counts(
         tag: impl Into<String>,
         fasta_filename: &Path,
-        kmers_filename: &Path,
+        kmer_filenames: &[impl AsRef<Path>],
     ) -> crate::Result<(Self, KmerCounts)> {
         let set = Self::load(tag, fasta_filename)?;
         // k-mer counts file contains both off-target and regular k-mer counts.
         // For now, we only need off-target counts, so we only read k-mer counts once.
-        let mut kmers_file = ext::sys::open(kmers_filename)?;
-        let kmer_counts = KmerCounts::load(&mut kmers_file).map_err(add_path!(kmers_filename))?;
+        let kmer_counts = KmerCounts::load_from_filenames(kmer_filenames)?;
         kmer_counts.validate(&set.contigs)?;
         Ok((set, kmer_counts))
     }

@@ -78,16 +78,6 @@ fn check_filename(
     Ok(())
 }
 
-// fn identify_aln_index(path: &Path) -> crate::Result<PathBuf> {
-//     match path.extension() {
-//         Some("bam") => Ok(ext::sys::path_append(path, ".bai")),
-//         Some("BAM") => Ok(ext::sys::path_append(path, ".BAI")),
-//         Some("cram") => Ok(ext::sys::path_append(path, ".crai")),
-//         Some("CRAM") => Ok(ext::sys::path_append(path, ".CRAI")),
-//         Some("_") | None => Err(),
-//     }
-// }
-
 /// Collection of input files, same as for `genotype`.
 pub struct InputFiles {
     pub reads1: Vec<PathBuf>,

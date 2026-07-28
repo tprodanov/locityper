@@ -280,6 +280,10 @@ pub fn load_loci_subdirs(db_dir: &Path) -> crate::Result<Vec<(String, PathBuf)>>
             log::error!("Skipping directory {:?} - filename is not a valid UTF-8", db_locus_dir);
             continue
         };
+        if !db_locus_dir.join(paths::SUCCESS).exists() {
+            log::error!("Skipping database directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
+            continue;
+        }
         let name = name.to_owned();
         if name.starts_with(".") {
             log::trace!("Skipping hidden directory {}", name);
@@ -638,8 +642,9 @@ fn process_alleles(
     }
     let off_target_counts = kmer_counts.off_target_counts(&seqs, &ref_seq, &ref_counts, ref_n_runs.is_empty());
 
-    let kmers_filename = locus_dir.join(paths::KMERS);
-    let mut kmers_writer = ext::sys::create_lz4_slow(&kmers_filename)?;
+    const COMPRESSION: u8 = 5;
+    let kmers_filename = locus_dir.join(paths::KMERS_BR);
+    let mut kmers_writer = ext::sys::create_brotli(&kmers_filename, COMPRESSION)?;
     // Consecutively save off-target counts and regular counts (if they will sometimes be useful later).
     off_target_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
     kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
@@ -762,7 +767,7 @@ fn add_locus(
     } else if let Some(fasta_filename) = alleles_fasta {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let alleles = fasta_reader.read_named_seqs()?;
-        log::info!("FASTA file contains {} haplotypes", alleles.len());
+        log::info!("    FASTA file contains {} haplotypes", alleles.len());
         discard_leave_out_alleles(alleles, &args.leave_out)
     } else {
         unreachable!("Either VCF file or haplotypes FASTA must be specified")
