@@ -2,7 +2,6 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
     io::{Write, BufRead},
-    ffi::OsStr,
     cmp::{min, max},
     sync::Arc,
 };
@@ -300,49 +299,6 @@ fn load_pairs(contigs: &ContigNames, args: &Args) -> crate::Result<(Vec<(ContigI
 struct TempFilenames(Vec<PathBuf>);
 
 impl TempFilenames {
-    fn new(
-        output: &Path,
-        prefix_arg: &Option<PathBuf>,
-        threads: u16,
-    ) -> crate::Result<Self>
-    {
-        if threads <= 1 {
-            return Ok(Self(Vec::new()));
-        }
-
-        let (mut prefix, middle, extension) = if ext::sys::is_tty(output) {
-            let prefix = match prefix_arg.as_ref() {
-                Some(prefix) => prefix,
-                None => {
-                    log::warn!("Storing temporary files using `tmp.*` prefix");
-                    Path::new("tmp")
-                }
-            };
-            // Generate random hex suffix.
-            // No need to initialize new XoshiroRng since we only need one integer, not a sequence of numbers.
-            let mut bytes = [0; 4];
-            getrandom::fill(&mut bytes).unwrap();
-            let rand_suffix = u32::from_le_bytes(bytes);
-            (prefix.to_path_buf(), format!("{:X}.", rand_suffix), "paf")
-        } else {
-            let prefix = match prefix_arg {
-                Some(val) => val.to_path_buf(),
-                None => output.with_extension(""),
-            };
-            let extension = match output.extension().and_then(OsStr::to_str) {
-                Some("gz") => "paf.gz",
-                Some("lz4") => "paf.lz4",
-                _ => "paf",
-            };
-            (prefix, String::new(), extension)
-        };
-
-        if prefix.is_dir() {
-            prefix.push("locityper-align");
-        }
-        Ok(Self((1..threads).map(|i| prefix.with_added_extension(format!("{}{}.{}", middle, i, extension))).collect()))
-    }
-
     /// Skip file deletion.
     fn disarm(&mut self) {
         self.0.clear();
@@ -361,6 +317,53 @@ impl Drop for TempFilenames {
     }
 }
 
+/// Define temporary filenames (first thread, other threads).
+fn define_temporary_filenames(
+    out_filename: &Path,
+    opt_prefix: &Option<PathBuf>,
+    threads: u16
+) -> crate::Result<(PathBuf, Vec<PathBuf>)> {
+    let (first_filename, mut prefix, middle, extension) = if ext::sys::is_tty(out_filename) {
+        let prefix = match opt_prefix {
+            Some(prefix) => prefix,
+            None => {
+                log::warn!("Storing temporary files using `tmp.*` prefix");
+                Path::new("tmp")
+            }
+        };
+        // Generate random hex suffix.
+        // No need to initialize new XoshiroRng since we only need one integer, not a sequence of numbers.
+        let mut bytes = [0; 4];
+        getrandom::fill(&mut bytes).unwrap();
+        let rand_suffix = u32::from_le_bytes(bytes);
+        (out_filename.to_path_buf(), prefix.to_path_buf(), format!("{:X}.", rand_suffix), "paf.tmp".to_string())
+    } else {
+        let prefix = match opt_prefix {
+            Some(val) => val.to_path_buf(),
+            None => out_filename.with_extension(""),
+        };
+        let extension = match out_filename.extension() {
+            None => "paf.tmp".to_string(),
+            Some(e) => {
+                match e.to_str() {
+                    Some("paf") => "paf.tmp".to_string(),
+                    Some(s) => format!("tmp.{}", s),
+                    None => return Err(crate::Error::Utf8("output filename",
+                        out_filename.as_os_str().as_encoded_bytes().to_vec())),
+                }
+            }
+        };
+        (out_filename.with_added_extension(&extension), prefix, String::new(), extension)
+    };
+
+    if prefix.is_dir() {
+        prefix.push("locityper-align");
+    }
+    let oth_filenames = (2..=threads).map(|i| prefix.with_added_extension(format!("{}{}.{}", middle, i, extension)))
+        .collect();
+    Ok((first_filename, oth_filenames))
+}
+
 pub(super) fn align(
     contig_set: Arc<ContigSet>,
     pairs: Vec<(ContigId, ContigId)>,
@@ -370,22 +373,29 @@ pub(super) fn align(
     threads: u16,
     params: &seq::align::Params,
 ) -> crate::Result<()> {
+    if !ext::sys::is_tty(output) && output.exists() {
+        std::fs::remove_file(output).map_err(add_path!(output))?;
+    }
     let threads = usize::from(threads).min(pairs.len()) as u16;
+    let (first_filename, oth_filenames) = define_temporary_filenames(output, prefix, threads)?;
     let mut files = Vec::with_capacity(usize::from(threads));
-    files.push(ext::sys::create(output)?);
+    files.push(ext::sys::create(&first_filename)?);
     writeln!(files[0], "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
         params.div_k, params.div_w, params.thresh_div,
         params.backbone_str(), params.accuracy, params.max_gap).map_err(add_path!(output))?;
 
     // Create output file now, this way we are sure it can be opened.
-    let mut temp_filenames = TempFilenames::new(output, prefix, threads)?;
+    let mut temp_filenames = TempFilenames(oth_filenames);
     for filename in &temp_filenames.0 {
         files.push(ext::sys::create(filename)?);
     }
 
     seq::align::align_sequences(contig_set, pairs, against_contig, params, threads, files)?;
-    ext::sys::merge_files(output, &temp_filenames.0)?;
+    ext::sys::merge_files(&first_filename, &temp_filenames.0)?;
     temp_filenames.disarm();
+    if first_filename != output {
+        std::fs::rename(&first_filename, output).map_err(add_path!(first_filename, output))?;
+    }
     Ok(())
 }
 
