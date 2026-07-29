@@ -297,6 +297,16 @@ pub fn merge_files(mut fname1: &Path, filenames: &[PathBuf]) -> crate::Result<()
     Ok(())
 }
 
+/// Appends `tmp` to between extensions n-1 and n.
+pub fn temp_filename(filename: &Path) -> PathBuf {
+    let mut new_filename = filename.to_path_buf();
+    new_filename.set_extension("tmp");
+    if let Some(old_extension) = filename.extension() {
+        new_filename.add_extension(old_extension);
+    }
+    new_filename
+}
+
 /// Returns UTF-8 path basename.
 fn utf8_basename(path: &Path) -> Cow<'_, str> {
     path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()

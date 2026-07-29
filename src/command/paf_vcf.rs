@@ -587,15 +587,6 @@ fn group_haplotypes(
     Ok(groupped)
 }
 
-fn temp_filename(filename: &Path) -> PathBuf {
-    let mut new_filename = filename.to_path_buf();
-    new_filename.set_extension("tmp");
-    if let Some(old_extension) = filename.extension() {
-        new_filename.add_extension(old_extension);
-    }
-    new_filename
-}
-
 pub(super) fn convert_to_vcf(
     paf_filename: &Path,
     contig_set: &ContigSet,
@@ -611,8 +602,8 @@ pub(super) fn convert_to_vcf(
     }
     let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
     let vars = process_paf(paf_filename, &contig_set, ref_id)?;
-    let tmp_merged = temp_filename(out_merged);
-    let tmp_separate = out_separate.map(|p| temp_filename(p));
+    let tmp_merged = ext::sys::temp_filename(out_merged);
+    let tmp_separate = out_separate.map(|p| ext::sys::temp_filename(p));
     combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps, &tmp_merged, &tmp_separate)?;
     std::fs::rename(&tmp_merged, out_merged).map_err(add_path!(tmp_merged, out_merged))?;
     if let Some(tmp_sep) = tmp_separate {
