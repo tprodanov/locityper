@@ -253,7 +253,7 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Recover alignments from haplotypes with pairwise divergence under\n\
             {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}*\n\
             {EMPTY}  (see {}). Use zero to disable alignment recovery.",
-            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAFS[2],
+            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAF_PREF,
             "locityper align".underline());
         println!("    {:KEY$} {:VAL$}  Skip to next alignment whenever alignment tranfer produces high edit\n\
             {EMPTY}  distance {} times [{}]. Use \"inf\" to continue indefinitely.",

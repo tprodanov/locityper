@@ -54,7 +54,7 @@ bindgen = { version = "0.72", default-features = false, features = ["runtime"] }
 # debug = 1  # Needed for profiling.
 
 [features]
-default = ["libscip"]
+default = ["scip-from-source"]
 gurobi = ["dep:grb"]
 highs = ["dep:highs", "dep:highs-sys"]
 libscip = ["russcip/bindgen"]

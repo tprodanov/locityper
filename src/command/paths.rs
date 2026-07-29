@@ -14,7 +14,8 @@ pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
 pub(super) const DEFAULT_BASIS_FASTA: &'static str = "haplotypes-basis.fa.gz";
 
 /// Alignments between haplotypes, checked in this order.
-pub(super) const LOCUS_PAFS: [&'static str; 3] = ["haplotypes.paf.br", "haplotypes.paf.gz", "haplotypes.paf"];
+pub(super) const LOCUS_PAF_PREF: &'static str = "haplotypes.paf";
+pub(super) const LOCUS_PAFS: [&'static str; 3] = ["haplotypes.paf.br", "haplotypes.paf.gz", LOCUS_PAF_PREF];
 /// Path to pairwise distances between haplotypes.
 pub(super) const DISTANCES: &'static str = "distances.bin";
 /// Path to file with discarded haplotypes.

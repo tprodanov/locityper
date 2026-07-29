@@ -33,6 +33,7 @@ struct Args {
     subset_loci: HashSet<String>,
     ref_name: Option<String>,
 
+    aln_compression: String,
     divergence: f64,
     window: u32,
     step: Option<u32>,
@@ -54,6 +55,7 @@ impl Default for Args {
             subset_loci: Default::default(),
             ref_name: None,
 
+            aln_compression: "br".to_string(),
             divergence: 0.01,
             window: 250,
             step: None,
@@ -136,6 +138,9 @@ fn print_help() {
         "-O, --gap-open".green(), "INT".yellow(), super::fmt_def(defaults.aln_params.penalties.gap_open));
     println!("    {:KEY$} {:VAL$}  Gap extend penalty [{}].",
         "-E, --gap-extend".green(), "INT".yellow(), super::fmt_def(defaults.aln_params.penalties.gap_extend));
+    println!("    {:KEY$} {:VAL$}  Compression method for the PAF alignment file [{}].\n\
+        {EMPTY}  Possible values: br/brotli, gz/gzip, none.",
+        "    --compression".green(), "STR".yellow(), super::fmt_def(defaults.aln_compression));
 
     println!("\n{}", "Basis haplotypes selection:".bold());
     println!("│ Each original haplotype will be similar ({}) to one of the basis haplotypes", "-x".green());
@@ -215,6 +220,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 args.aln_params.penalties.gap_open = parser.value()?.parse()?,
             Short('E') | Long("gap-extend") | Long("gap-extension") =>
                 args.aln_params.penalties.gap_extend = parser.value()?.parse()?,
+            Long("compression") => args.aln_compression = parser.value()?.parse()?,
 
             Short('x') | Long("divergence") => args.divergence = parser.value()?.parse()?,
             Short('w') | Long("window") => args.window = parser.value()?.parse::<PrettyU32>()?.get(),
@@ -434,7 +440,14 @@ fn process_locus(
         log::debug!("    Skipping alignments (already constructed)");
         aln_filename
     } else {
-        let aln_filename = dir.join(paths::LOCUS_PAFS[0]);
+        let mut aln_filename = dir.join(paths::LOCUS_PAF_PREF);
+        let extension = match &args.aln_compression as &str {
+            "br" | "brotli" => ".br",
+            "gz" | "gzip" => ".gz",
+            "none" => "",
+            _ => return Err(error!(InvalidInput, "Unknown --compression value {}", args.aln_compression)),
+        };
+        aln_filename.add_extension(extension);
         let (contig_set, _, ref_id) = lazy_data.get()?;
         let pairs = TriangleMatrix::indices(contig_set.len())
             .map(|(i, j)| (ContigId::new(i), ContigId::new(j))).collect();
