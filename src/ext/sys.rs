@@ -21,8 +21,8 @@ pub fn find_exe(p: impl AsRef<Path>) -> crate::Result<PathBuf> {
     which::which(p.as_ref()).map_err(|_| Error::NoExec(p.as_ref().to_owned()))
 }
 
-/// 128kb buffer.
-const BUFFER_SIZE_128KB: usize = 131_072;
+/// 4Mb buffer.
+const BUFFER_SIZE_4MB: usize = 4_194_304;
 
 // #[inline]
 // pub fn open_gzip(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
@@ -37,7 +37,7 @@ const BUFFER_SIZE_128KB: usize = 131_072;
 /// Opens compressed brotli file. Cannot operate on a stream because there are no magic bytes at the start.
 pub fn open_brotli(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
     let f = File::open(filename).map_err(add_path!(filename))?;
-    Ok(BufReader::new(brotli::Decompressor::new(f, BUFFER_SIZE_128KB)))
+    Ok(BufReader::new(brotli::Decompressor::new(f, BUFFER_SIZE_4MB)))
 }
 
 /// Guesses compression type (gzip | lz4 | nothing) and returns decompressed stream.
@@ -206,9 +206,11 @@ pub fn create_brotli_with_lvl(filename: &Path, compression: u8) -> crate::Result
         large_window: true,
         catable: true,
         appendable: true,
+        lgwin: 24,
+        size_hint: 0x40000000, // 1 Gb
         ..Default::default()
     };
-    Ok(brotli::CompressorWriter::with_params(file, BUFFER_SIZE_128KB, &params))
+    Ok(brotli::CompressorWriter::with_params(file, BUFFER_SIZE_4MB, &params))
 }
 
 #[inline]
@@ -219,7 +221,7 @@ pub fn create_brotli(filename: &Path) -> crate::Result<BrFile> {
 /// Creates buffered output file.
 pub fn create_file(filename: &Path) -> crate::Result<BufWriter<File>> {
     File::create(filename).map_err(add_path!(filename))
-        .map(|w| BufWriter::with_capacity(BUFFER_SIZE_128KB, w))
+        .map(|w| BufWriter::with_capacity(BUFFER_SIZE_4MB, w))
 }
 
 /// Based on extension, create file.
