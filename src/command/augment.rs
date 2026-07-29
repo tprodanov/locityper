@@ -339,6 +339,7 @@ fn inner_construct_dominant_set(
 }
 
 fn construct_dominant_set(
+    aln_filename: &Path,
     dir: &Path,
     contig_set: &ContigSet,
     disc_haps: &DiscardedHaplotypes,
@@ -365,8 +366,7 @@ fn construct_dominant_set(
         false => Cow::Owned(contig_set.extract_subset(&args.basis_leaveout.iter().cloned().collect(), disc_haps)?.1),
     };
     let contigs = contig_set.contigs();
-    let paf_filename = dir.join(paths::LOCUS_PAF);
-    let paf_file = ext::sys::open(paf_filename).map(PafFile::new)?;
+    let paf_file = ext::sys::open(aln_filename).map(PafFile::new)?;
     let dominant_set = inner_construct_dominant_set(paf_file, contigs, args)?;
 
     log::info!("        Identified a basis set of {}/{} haplotypes ({:.1}% reduction)",
@@ -428,8 +428,13 @@ fn process_locus(
         Ok((contig_set, disc_haps, ref_id))
     });
 
-    let aln_filename = dir.join(paths::LOCUS_PAF);
-    if !aln_filename.exists() || args.rerun == Rerun::All {
+    let prev_aln_fname = paths::LOCUS_PAFS.iter()
+        .map(|path| dir.join(path)).filter(|path| path.exists()).next();
+    let aln_filename = if let Some(aln_filename) = prev_aln_fname && args.rerun != Rerun::All {
+        log::debug!("    Skipping alignments (already constructed)");
+        aln_filename
+    } else {
+        let aln_filename = dir.join(paths::LOCUS_PAFS[0]);
         let (contig_set, _, ref_id) = lazy_data.get()?;
         let pairs = TriangleMatrix::indices(contig_set.len())
             .map(|(i, j)| (ContigId::new(i), ContigId::new(j))).collect();
@@ -441,9 +446,8 @@ fn process_locus(
         super::align::align(Arc::clone(contig_set), pairs, against_contig,
             &aln_filename, &None, args.threads, &args.aln_params)?;
         did_anything = true;
-    } else {
-        log::debug!("    Skipping alignments (already constructed)");
-    }
+        aln_filename
+    };
 
     let vcf_filename = dir.join("haplotypes.vcf.gz");
     if args.skip_vcf || (vcf_filename.exists() && args.rerun == Rerun::None) {
@@ -468,7 +472,7 @@ fn process_locus(
         log::debug!("    Skipping basis construction");
     } else {
         let (contig_set, disc_haps, _) = lazy_data.get()?;
-        did_anything |= construct_dominant_set(dir, contig_set, disc_haps, args, tag)?;
+        did_anything |= construct_dominant_set(&aln_filename, dir, contig_set, disc_haps, args, tag)?;
     }
 
     lock_file.release()?;

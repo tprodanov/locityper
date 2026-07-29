@@ -13,8 +13,8 @@ pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
 /// Symlink with default basis haplotypes, used for read mapping.
 pub(super) const DEFAULT_BASIS_FASTA: &'static str = "haplotypes-basis.fa.gz";
 
-/// Alignments between haplotypes.
-pub(super) const LOCUS_PAF: &'static str = "haplotypes.paf.gz";
+/// Alignments between haplotypes, checked in this order.
+pub(super) const LOCUS_PAFS: [&'static str; 3] = ["haplotypes.paf.br", "haplotypes.paf.gz", "haplotypes.paf"];
 /// Path to pairwise distances between haplotypes.
 pub(super) const DISTANCES: &'static str = "distances.bin";
 /// Path to file with discarded haplotypes.

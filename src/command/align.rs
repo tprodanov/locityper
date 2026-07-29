@@ -61,6 +61,8 @@ impl Args {
         validate_param!(self.input.is_some(), "Input FASTA file is not provided (see -i/--input)");
         validate_param!(self.output.is_some(), "Output PAF path is not provided (see -o/--output)");
 
+        validate_param!(self.all_pairs || !self.pairs.is_empty() || self.pairs_file.is_some()
+            || !self.against.is_empty(), "At least one of the arguments -A/-p/-P/--against is required");
         if self.all_pairs && (!self.pairs.is_empty() || self.pairs_file.is_some()) {
             log::warn!("It is redundant to provide both -A and -p/-P");
         }

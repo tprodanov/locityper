@@ -210,8 +210,8 @@ pub fn create_brotli(filename: &Path, compression: u8) -> crate::Result<impl Wri
 }
 
 #[inline]
-pub fn create_brotli_fast(filename: &Path) -> crate::Result<impl Write + use<>> {
-    create_brotli(filename, 2)
+pub fn create_brotli_mid(filename: &Path) -> crate::Result<impl Write + use<>> {
+    create_brotli(filename, 5)
 }
 
 /// Creates buffered output file.
@@ -229,7 +229,7 @@ pub fn create(filename: &Path) -> crate::Result<Box<dyn Write + Send>> {
         match filename.extension().and_then(OsStr::to_str) {
             Some("gz") => Ok(Box::new(create_gzip(filename)?)),
             Some("lz4") => Ok(Box::new(create_lz4_slow(filename)?)),
-            Some("br") => Ok(Box::new(create_brotli_fast(filename)?)),
+            Some("br") => Ok(Box::new(create_brotli_mid(filename)?)),
             _ => Ok(Box::new(create_file(filename)?)),
         }
     }

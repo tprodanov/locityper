@@ -251,9 +251,9 @@ fn print_help(extended: bool) {
 
         println!("\n{}", "Alignment recovery:".bold());
         println!("    {:KEY$} {:VAL$}  Recover alignments from haplotypes with pairwise divergence under\n\
-            {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}\n\
+            {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}*\n\
             {EMPTY}  (see {}). Use zero to disable alignment recovery.",
-            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAF,
+            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAFS[2],
             "locityper align".underline());
         println!("    {:KEY$} {:VAL$}  Skip to next alignment whenever alignment tranfer produces high edit\n\
             {EMPTY}  distance {} times [{}]. Use \"inf\" to continue indefinitely.",
@@ -1152,8 +1152,10 @@ fn analyze_locus(
     let contig_infos = ContigInfos::new(&locus.set, &locus.kmer_counts, explicit_weights,
         bg_distr.depth(), &args.assgn_params, windows_writer).map(Arc::new)?;
 
-    let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
-    let hap_alns = if args.hap_div > 0.0 && paf_filename.exists() {
+    // [TODO] Read distances at the same time.
+    let opt_paf_fname = paths::LOCUS_PAFS.iter()
+        .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
+    let hap_alns = if args.hap_div > 0.0 && let Some(paf_filename) = &opt_paf_fname {
         HapAlns::load(&paf_filename, &locus.set.contigs(), args.hap_div, args.transfer_fails)?.map(Arc::new)
     } else { None };
 
@@ -1187,9 +1189,8 @@ fn analyze_locus(
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
 
-        let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
-        let (mut contig_distances, true_edit_distances) = if args.use_paf && paf_filename.exists() {
+        let (mut contig_distances, true_edit_distances) = if args.use_paf && let Some(paf_filename) = &opt_paf_fname {
             let paf_file = ext::sys::open(paf_filename).map(paf::PafFile::new)?;
             (Some(paf::load_distance_matrix(paf_file, contigs)?), true)
         } else if dist_filename.exists() {
