@@ -513,7 +513,7 @@ fn combine_variants(
     ref_id: ContigId,
     groupped_haps: &[(String, Vec<Option<usize>>)],
     merged_vcf_filename: &Path,
-    separate_vcf_filename: Option<&Path>,
+    separate_vcf_filename: &Option<PathBuf>,
 ) -> crate::Result<()>
 {
     let mut unique_ranges: Vec<_> = vars.iter()
@@ -587,6 +587,15 @@ fn group_haplotypes(
     Ok(groupped)
 }
 
+fn temp_filename(filename: &Path) -> PathBuf {
+    let mut new_filename = filename.to_path_buf();
+    new_filename.set_extension("tmp");
+    if let Some(old_extension) = filename.extension() {
+        new_filename.add_extension(old_extension);
+    }
+    new_filename
+}
+
 pub(super) fn convert_to_vcf(
     paf_filename: &Path,
     contig_set: &ContigSet,
@@ -602,7 +611,15 @@ pub(super) fn convert_to_vcf(
     }
     let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
     let vars = process_paf(paf_filename, &contig_set, ref_id)?;
-    combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps, out_merged, out_separate)
+    let tmp_merged = temp_filename(out_merged);
+    let tmp_separate = out_separate.map(|p| temp_filename(p));
+    combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps, &tmp_merged, &tmp_separate)?;
+    std::fs::rename(&tmp_merged, out_merged).map_err(add_path!(tmp_merged, out_merged))?;
+    if let Some(tmp_sep) = tmp_separate {
+        let out_sep = out_separate.unwrap();
+        std::fs::rename(&tmp_sep, out_sep).map_err(add_path!(tmp_sep, out_sep))?;
+    }
+    Ok(())
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {

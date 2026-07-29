@@ -442,8 +442,8 @@ fn process_locus(
     } else {
         let mut aln_filename = dir.join(paths::LOCUS_PAF_PREF);
         let extension = match &args.aln_compression as &str {
-            "br" | "brotli" => ".br",
-            "gz" | "gzip" => ".gz",
+            "br" | "brotli" => "br",
+            "gz" | "gzip" => "gz",
             "none" => "",
             _ => return Err(error!(InvalidInput, "Unknown --compression value {}", args.aln_compression)),
         };
