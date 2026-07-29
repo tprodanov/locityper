@@ -781,8 +781,7 @@ pub fn align_sequences(
 
     log::debug!("    Started alignment");
     // Assume that pairs do not repeat.
-    let use_transitivity = params.transitive_div > 0.0
-        && pairs.len() * 10 >= TriangleMatrix::calc_linear_len(contig_set.len());
+    let use_transitivity = params.transitive_div > 0.0 && pairs.len() >= 16;
     let counts = if threads == 1 {
         if use_transitivity {
             align_pairs_singlethread(

@@ -1343,7 +1343,7 @@ impl Cigar {
             }
         }
         let len_i = seq_i.len() as u32;
-        if last1 != len_i {
+        if last1 != len_i || (GLOBAL_ALN && last2 != len_k) {
             if GLOBAL_ALN {
                 aligner.smart_align(seq_k, last2, len_k, seq_i, last1, len_i, max_gap, &mut new_cigar);
             } else {

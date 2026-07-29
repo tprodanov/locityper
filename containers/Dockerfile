@@ -21,7 +21,7 @@ RUN apt-get update \
         # To use built-in time command, which can measure memory usage
         zsh \
         # Locityper dependency
-        jellyfish clang libclang-dev libscip-dev \
+        jellyfish clang libclang-dev \
     #
     # Building Minimap2
     &&  mkdir /repos \
