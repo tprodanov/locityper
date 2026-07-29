@@ -42,7 +42,7 @@ impl Default for Args {
         Self {
             database: None,
             output: None,
-            alignments: "haplotypes.paf.gz".to_string(),
+            alignments: "haplotypes.paf.gz".to_string(), // [TODO] Could also be .br
             subset_loci: HashSet::default(),
 
             only_tree: false,
@@ -100,7 +100,7 @@ fn print_help() {
         "-d, --database".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output pruned database directory.",
         "-o, --output".green(), "DIR".yellow());
-    println!("    {:KEY$} {:VAL$}  Path to alignment .paf[.gz] files [{}].\n\
+    println!("    {:KEY$} {:VAL$}  Path to alignment .paf[.br|.gz] files [{}].\n\
         {EMPTY}  Should either contain {{}}, which are then replaced with locus names,\n\
         {EMPTY}  or direct to files located in {}/loci/<locus>/{}.\n\
         {EMPTY}  Alignments can be constructed using {}.",

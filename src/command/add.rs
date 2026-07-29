@@ -643,7 +643,7 @@ fn process_alleles(
     let off_target_counts = kmer_counts.off_target_counts(&seqs, &ref_seq, &ref_counts, ref_n_runs.is_empty());
 
     let kmers_filename = locus_dir.join(paths::KMERS_BR);
-    let mut kmers_writer = ext::sys::create_brotli_mid(&kmers_filename)?;
+    let mut kmers_writer = ext::sys::create_brotli(&kmers_filename)?;
     // Consecutively save off-target counts and regular counts (if they will sometimes be useful later).
     off_target_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
     kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;

@@ -29,7 +29,7 @@ use crate::{
         windows::ContigInfos,
     },
     ext::{
-        sys::{GzFile, create_gzip},
+        sys::{BrFile, create_brotli},
     },
 };
 
@@ -1053,15 +1053,15 @@ impl ReadCounts {
 
 #[derive(Default)]
 pub struct DbgWriters {
-    reads: Option<GzFile>,
-    read_kmers: Option<GzFile>,
+    reads: Option<BrFile>,
+    read_kmers: Option<BrFile>,
 }
 
 impl DbgWriters {
     pub fn new(dir: &Path) -> crate::Result<Self> {
-        let mut reads = create_gzip(&dir.join("reads.csv.gz"))?;
+        let mut reads = create_brotli(&dir.join("reads.csv.br"))?;
         writeln!(reads, "read_hash\tread_end\tinterval\tedit_dist\tlik\tread_name").map_err(add_path!(!))?;
-        let mut read_kmers = create_gzip(&dir.join("read_kmers.csv.gz"))?;
+        let mut read_kmers = create_brotli(&dir.join("read_kmers.csv.br"))?;
         writeln!(read_kmers, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
         Ok(Self { reads: Some(reads), read_kmers: Some(read_kmers) })
     }

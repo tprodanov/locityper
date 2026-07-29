@@ -21,7 +21,7 @@ use crate::{
     ext::{
         self,
         TriangleMatrix,
-        sys::GzFile,
+        sys::BrFile,
         vec::{F64Ext, IterExt},
         rand::XoshiroRng,
         fmt::PrettyUsize,
@@ -790,7 +790,7 @@ fn solve_single_thread(
     data: &Data,
     rng: &mut XoshiroRng,
     predictions: &mut Predictions,
-    sol_writer: &mut GzFile,
+    sol_writer: &mut BrFile,
     mut files: ThreadDebugFiles,
 ) -> crate::Result<()>
 {
@@ -808,7 +808,7 @@ fn solve_single_thread(
             continue;
         }
 
-        let mut curr_sol_writer: Option<&mut GzFile> =
+        let mut curr_sol_writer: Option<&mut BrFile> =
             if data.debug == DebugLvl::None && out_size.is_some() { None } else { Some(sol_writer) };
 
         logger.reset(n_gts);
@@ -852,28 +852,28 @@ fn solve_single_thread(
 /// Creates `threads` filenames, one for each thread.
 fn csv_filenames(prefix: &Path, threads: usize) -> Vec<PathBuf> {
     (0..threads).map(|i| if i == 0 {
-        prefix.with_added_extension(".csv.gz")
+        prefix.with_added_extension(".csv.br")
     } else {
-        prefix.with_added_extension(format!(".{}.csv.gz", i))
+        prefix.with_added_extension(format!(".{}.csv.br", i))
     }).collect()
 }
 
 /// Opens one gzip file for each filename.
-fn open_gzips(filenames: &[PathBuf]) -> crate::Result<Vec<GzFile>> {
-    filenames.iter().map(|path| ext::sys::create_gzip(path)).collect()
+fn open_files(filenames: &[PathBuf]) -> crate::Result<Vec<BrFile>> {
+    filenames.iter().map(|path| ext::sys::create_brotli(path)).collect()
 }
 
 struct ThreadDebugFiles {
-    depth_writer: Option<GzFile>,
-    ext_sol_writer: Option<GzFile>,
+    depth_writer: Option<BrFile>,
+    ext_sol_writer: Option<BrFile>,
 }
 
 struct DebugFiles {
     depth_filenames: Option<Vec<PathBuf>>,
-    depth_writers: Option<Vec<GzFile>>,
+    depth_writers: Option<Vec<BrFile>>,
 
     ext_sol_filenames: Option<Vec<PathBuf>>,
-    ext_sol_writers: Option<Vec<GzFile>>,
+    ext_sol_writers: Option<Vec<BrFile>>,
 }
 
 impl DebugFiles {
@@ -882,7 +882,7 @@ impl DebugFiles {
         let mut depth_writers = None;
         if debug == DebugLvl::Full {
             depth_filenames = Some(csv_filenames(&locus_dir.join("depth"), threads));
-            depth_writers = depth_filenames.as_ref().map(|filenames| open_gzips(filenames)).transpose()?;
+            depth_writers = depth_filenames.as_ref().map(|filenames| open_files(filenames)).transpose()?;
             writeln!(depth_writers.as_mut().unwrap()[0],
                 "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER).map_err(add_path!(!))?;
         }
@@ -891,7 +891,7 @@ impl DebugFiles {
         let mut ext_sol_writers = None;
         if debug >= DebugLvl::Some {
             ext_sol_filenames = Some(csv_filenames(&locus_dir.join("sol_ext"), threads));
-            ext_sol_writers = ext_sol_filenames.as_ref().map(|filenames| open_gzips(filenames)).transpose()?;
+            ext_sol_writers = ext_sol_filenames.as_ref().map(|filenames| open_files(filenames)).transpose()?;
             writeln!(ext_sol_writers.as_mut().unwrap()[0],
                 "stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER).map_err(add_path!(!))?;
         }
@@ -934,7 +934,7 @@ pub fn solve(
     assert!(n_gts > 0);
     log::info!("    Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);
 
-    let mut sol_writer = ext::sys::create_gzip(&locus_dir.join("sol.csv.gz"))?;
+    let mut sol_writer = ext::sys::create_brotli(&locus_dir.join("sol.csv.br"))?;
     writeln!(sol_writer, "stage\tgenotype\tscore").map_err(add_path!(!))?;
     let mut predictions = Predictions::new(n_gts);
     let out_size0 = data.scheme.stages[0].in_size;
@@ -1023,7 +1023,7 @@ impl MainWorker {
     }
 
     fn run(self,
-        sol_writer: &mut GzFile,
+        sol_writer: &mut BrFile,
         rng: &mut impl Rng,
         predictions: &mut Predictions,
     ) -> crate::Result<()>
@@ -1062,7 +1062,7 @@ impl MainWorker {
             }
             assert_eq!(start, n_gts);
 
-            let mut curr_sol_writer: Option<&mut GzFile> =
+            let mut curr_sol_writer: Option<&mut BrFile> =
                 if data.debug == DebugLvl::None && out_size.is_some() { None } else { Some(sol_writer) };
             while logger.solved_genotypes < n_gts {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {

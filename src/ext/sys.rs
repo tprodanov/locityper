@@ -197,7 +197,9 @@ pub fn create_lz4_slow(filename: &Path) -> crate::Result<AutoFinishLz4<BufWriter
     create_lz4(filename, 7)
 }
 
-pub fn create_brotli(filename: &Path, compression: u8) -> crate::Result<impl Write + use<>> {
+pub type BrFile = brotli::CompressorWriter<File>;
+
+pub fn create_brotli_with_lvl(filename: &Path, compression: u8) -> crate::Result<BrFile> {
     let file = File::create(filename).map_err(add_path!(filename))?;
     let params = brotli::enc::BrotliEncoderParams {
         quality: i32::from(compression),
@@ -210,8 +212,8 @@ pub fn create_brotli(filename: &Path, compression: u8) -> crate::Result<impl Wri
 }
 
 #[inline]
-pub fn create_brotli_mid(filename: &Path) -> crate::Result<impl Write + use<>> {
-    create_brotli(filename, 5)
+pub fn create_brotli(filename: &Path) -> crate::Result<BrFile> {
+    create_brotli_with_lvl(filename, 5)
 }
 
 /// Creates buffered output file.
@@ -229,7 +231,7 @@ pub fn create(filename: &Path) -> crate::Result<Box<dyn Write + Send>> {
         match filename.extension().and_then(OsStr::to_str) {
             Some("gz") => Ok(Box::new(create_gzip(filename)?)),
             Some("lz4") => Ok(Box::new(create_lz4_slow(filename)?)),
-            Some("br") => Ok(Box::new(create_brotli_mid(filename)?)),
+            Some("br") => Ok(Box::new(create_brotli(filename)?)),
             _ => Ok(Box::new(create_file(filename)?)),
         }
     }

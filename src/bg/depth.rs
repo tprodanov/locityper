@@ -308,8 +308,8 @@ impl ReadDepth {
     {
         let depth = count_reads(alignments.iter().copied(), windows.len(), windows.window_getter());
         let (depth, gc_contents) = if let Some(dir) = out_dir {
-            let dbg_filename1 = dir.join("window_depth.csv.gz");
-            let mut dbg_writer1 = ext::sys::create_gzip(&dbg_filename1)?;
+            let dbg_filename1 = dir.join("window_depth.csv.br");
+            let mut dbg_writer1 = ext::sys::create_brotli(&dbg_filename1)?;
             writeln!(dbg_writer1, "window_ix\tdepth1\tdepth2").map_err(add_path!(dbg_filename1))?;
             get_depth_and_gc(&depth, windows, dbg_writer1).map_err(add_path!(dbg_filename1))?
         } else {
@@ -318,8 +318,8 @@ impl ReadDepth {
 
         let gc_bins = find_gc_bins(&gc_contents);
         let ploidy = f64::from(params.ploidy);
-        let dbg_filename2 = out_dir.map(|dirname| dirname.join("depth.csv.gz"));
-        let dbg_writer2 = dbg_filename2.as_ref().map(|filename| ext::sys::create_gzip(filename)).transpose()?;
+        let dbg_filename2 = out_dir.map(|dirname| dirname.join("depth.csv.br"));
+        let dbg_writer2 = dbg_filename2.as_ref().map(|filename| ext::sys::create_brotli(filename)).transpose()?;
         let distributions: Vec<NBinom>;
         if seq_info.technology().has_gc_bias() {
             let (loess_means, loess_vars) = predict_mean_var(&gc_contents, &gc_bins, &depth, params.frac_windows);

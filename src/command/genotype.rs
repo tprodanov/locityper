@@ -1178,8 +1178,8 @@ fn analyze_locus(
         solve::Genotyping::empty_result(locus.set.tag().to_string(), vec![solve::GenotypingWarning::NoReads])
     } else {
         if bg_distr.insert_distr().is_paired_end() && args.debug >= DebugLvl::Full {
-            let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
-            let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
+            let read_pairs_filename = locus.out_dir.join("read_pairs.csv.br");
+            let pairs_writer = ext::sys::create_brotli(&read_pairs_filename)?;
             all_alns.write_read_pair_info::<false>(pairs_writer, contigs).map_err(add_path!(read_pairs_filename))?;
         }
 
