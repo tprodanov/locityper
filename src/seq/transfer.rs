@@ -1,7 +1,6 @@
 //! Transfer alignments from one haplotype to another.
 
 use std::{
-    path::Path,
     sync::Arc,
 };
 use crate::{
@@ -9,16 +8,13 @@ use crate::{
         Interval,
         contigs::{ContigId, ContigNames, ContigSet},
         cigar::{Cigar, CigarIndex, QueryToRef, RefToQuery},
-        paf::{PafParseResult, PafFile},
+        paf::{PafEntry},
         aln::Alignment,
         wfa::Aligner,
     },
     bg::ErrorProfile,
     model::locs::{ReadData, PrelimAlignments},
-    ext::{
-        self,
-        TriangleMatrix,
-    },
+    ext::TriangleMatrix,
 };
 
 /// Haplotype-haplotype alignments.
@@ -30,56 +26,43 @@ pub struct HapAlns {
     /// Inner lists are ordered by decreasing edit distance.
     best_ixs: Vec<Vec<(ContigId, u32)>>,
     transfer_fails: u32,
+    max_div: f64,
 }
 
 impl HapAlns {
-    /// Loads alignments from a PAF file, keep <= `n_alns` best alignments per haplotype.
-    /// Returns `None` if no alignments were loaded.
-    pub fn load(
-        filename: &Path,
-        contigs: &ContigNames,
-        max_div: f64,
-        transfer_fails: u32,
-    ) -> crate::Result<Option<Self>> {
-        let mut aln_matrix = TriangleMatrix::new(contigs.len(), None);
-        let mut best_ixs = vec![Vec::new(); contigs.len()];
-        let min_simil = 1.0 - max_div;
-        let mut file = ext::sys::open(filename).map(PafFile::new)?;
-        let mut added_any = false;
-        while let Some(entry) = file.next(contigs)? {
-            let PafParseResult::Entry(mut entry) = entry else { continue };
-            let id1 = entry.query_id();
-            let id2 = entry.target_id();
-            if id1 == id2 { continue };
-            let matrix_cell = aln_matrix.get_symmetric_mut(id1.ix(), id2.ix());
-            if matrix_cell.is_some() { continue };
-
-            if !entry.full_positive_alignment() {
-                log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
-                    contigs.get_name(id1), contigs.get_name(id2));
-                continue
-            }
-            let n_matches = entry.n_matches();
-            let simil = f64::from(n_matches) / f64::from(entry.aln_len());
-            if simil < min_simil { continue };
-            let Some(mut cigar) = entry.take_cigar() else { continue };
-            if id1 > id2 {
-                cigar = cigar.invert();
-            }
-            let cigar_index = CigarIndex::new(&cigar);
-            *matrix_cell = Some((cigar, cigar_index));
-            best_ixs[id1.ix()].push((id2, n_matches));
-            best_ixs[id2.ix()].push((id1, n_matches));
-            added_any = true;
+    pub fn new(n_contigs: usize, transfer_fails: u32, max_div: f64) -> Self {
+        Self {
+            aln_matrix: TriangleMatrix::new(n_contigs, None),
+            best_ixs: vec![Vec::new(); n_contigs],
+            transfer_fails, max_div,
         }
+    }
 
-        if !added_any {
-            log::warn!("All pairwise haplotype alignments were skipped");
-            return Ok(None);
+    pub fn add(&mut self, entry: &mut PafEntry, contigs: &ContigNames) {
+        let id1 = entry.query_id();
+        let id2 = entry.target_id();
+        let matrix_cell = self.aln_matrix.get_symmetric_mut(id1.ix(), id2.ix());
+        if matrix_cell.is_some() { return };
+
+        if !entry.full_positive_alignment() {
+            log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
+                contigs.get_name(id1), contigs.get_name(id2));
+            return;
         }
+        if entry.divergence().unwrap_or(f64::INFINITY) > self.max_div { return };
+        let Some(mut cigar) = entry.take_cigar() else { return };
+        if id1 > id2 {
+            cigar = cigar.invert();
+        }
+        let cigar_index = CigarIndex::new(&cigar);
+        *matrix_cell = Some((cigar, cigar_index));
+        let n_matches = entry.n_matches();
+        self.best_ixs[id1.ix()].push((id2, n_matches));
+        self.best_ixs[id2.ix()].push((id1, n_matches));
+    }
 
-        best_ixs.iter_mut().for_each(|v| v.sort_by(|a, b| b.1.cmp(&a.1)));
-        Ok(Some(Self { aln_matrix, best_ixs, transfer_fails }))
+    pub fn sort_best_ixs(&mut self) {
+        self.best_ixs.iter_mut().for_each(|v| v.sort_by(|a, b| b.1.cmp(&a.1)));
     }
 
     /// Try to identify any new alignments for a given read/read pair.

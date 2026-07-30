@@ -19,7 +19,8 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        self, interv, recruit, minim_div, paf, Interval,
+        self, interv, recruit, minim_div, Interval,
+        paf::{PafFile, PafParseResult},
         fastx::{self, FastxRead, SingleRecord},
         contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
         kmers::Kmer,
@@ -31,7 +32,7 @@ use crate::{
         err_prof::{EditThresh, EditDistCache},
     },
     ext::{
-        self,
+        self, TriangleMatrix,
         rand::XoshiroRng,
         fmt::{PrettyU32, PrettyU64, PrettyUsize, YesNo},
     },
@@ -1123,6 +1124,37 @@ fn generate_genotypes(
     }
 }
 
+/// Go through the haplotype-haplotype alignments, and store `HapAlns` and matrix of edit distances, when needed.
+fn process_paf(
+    paf_filename: &Path,
+    contigs: &ContigNames,
+    args: &Args,
+) -> crate::Result<(Option<Arc<HapAlns>>, Option<TriangleMatrix<Option<u32>>>)> {
+    let mut opt_hap_alns = if args.hap_div > 0.0 {
+        Some(HapAlns::new(contigs.len(), args.transfer_fails, args.hap_div))
+    } else { None };
+    let mut contig_distances = if args.use_paf { Some(TriangleMatrix::new(contigs.len(), None)) } else { None };
+    if opt_hap_alns.is_none() && contig_distances.is_none() {
+        return Ok((None, None));
+    }
+
+    let mut paf_file = ext::sys::open(paf_filename).map(PafFile::new)?;
+    while let Some(entry) = paf_file.next(contigs)? {
+        let PafParseResult::Entry(mut entry) = entry else { continue };
+        if entry.query_id() != entry.target_id() || entry.cigar().is_none() { continue };
+        if let Some(dists) = &mut contig_distances && let Some(d) = entry.edit_distance() {
+            *dists.get_symmetric_mut(entry.query_id().ix(), entry.target_id().ix()) = Some(d);
+        }
+        if let Some(hap_alns) = &mut opt_hap_alns {
+            hap_alns.add(&mut entry, contigs);
+        }
+    }
+    if let Some(hap_alns) = &mut opt_hap_alns {
+        hap_alns.sort_best_ixs();
+    }
+    Ok((opt_hap_alns.map(Arc::new), contig_distances))
+}
+
 fn analyze_locus(
     locus: &LocusData,
     filenames: &Filenames,
@@ -1152,12 +1184,14 @@ fn analyze_locus(
     let contig_infos = ContigInfos::new(&locus.set, &locus.kmer_counts, explicit_weights,
         bg_distr.depth(), &args.assgn_params, windows_writer).map(Arc::new)?;
 
-    // [TODO] Read distances at the same time.
     let opt_paf_fname = paths::LOCUS_PAFS.iter()
         .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
-    let hap_alns = if args.hap_div > 0.0 && let Some(paf_filename) = &opt_paf_fname {
-        HapAlns::load(&paf_filename, &locus.set.contigs(), args.hap_div, args.transfer_fails)?.map(Arc::new)
-    } else { None };
+    let (hap_alns, mut contig_distances) = if let Some(paf_fname) = opt_paf_fname {
+        process_paf(&paf_fname, contigs, args)?
+    } else {
+        (None, None)
+    };
+    let true_edit_distances = contig_distances.is_some();
 
     let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
     let dbg_writers = if args.debug >= DebugLvl::Full {
@@ -1190,17 +1224,12 @@ fn analyze_locus(
         }
 
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
-        let (mut contig_distances, true_edit_distances) = if args.use_paf && let Some(paf_filename) = &opt_paf_fname {
-            let paf_file = ext::sys::open(paf_filename).map(paf::PafFile::new)?;
-            (Some(paf::load_distance_matrix(paf_file, contigs)?), true)
-        } else if dist_filename.exists() {
+        if contig_distances.is_none() && dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
             let (_k, _w, dists) = minim_div::load_divergences_and_convert(
                 dist_file, &dist_filename, locus.init_nhaps, Some)?;
-            (Some(dists), false)
-        } else {
-            (None, false)
-        };
+            contig_distances = Some(dists);
+        }
         if let Some(dists) = &mut contig_distances && let Some(ixs) = &locus.keep_ixs {
             *dists = dists.thin_out(ixs);
         }

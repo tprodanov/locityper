@@ -9,7 +9,6 @@ use crate::{
         aln::Strand,
     },
     err::error,
-    ext::TriangleMatrix,
 };
 
 /// PAF file reader.
@@ -214,22 +213,4 @@ impl PafEntry {
     //     }
     //     self.oth_tags.push_str(tag);
     // }
-}
-
-/// Based on the PAF file, returns a triangle matrix with edit distances.
-pub fn load_distance_matrix(
-    mut paf_file: PafFile<impl BufRead>,
-    contigs: &ContigNames,
-) -> crate::Result<TriangleMatrix<Option<u32>>> {
-    let mut mat = TriangleMatrix::new(contigs.len(), None);
-    while let Some(entry) = paf_file.next(contigs)? {
-        let PafParseResult::Entry(entry) = entry else { continue };
-        let i = entry.query_id().ix();
-        let j = entry.target_id().ix();
-        if i == j { continue };
-        if let Some(d) = entry.edit_distance() {
-            *mat.get_symmetric_mut(i, j) = Some(d);
-        }
-    }
-    Ok(mat)
 }
