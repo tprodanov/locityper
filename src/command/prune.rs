@@ -495,7 +495,7 @@ fn prune_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<b
     let kmer_counts1 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(!))?;
     let kmer_counts2 = KmerCounts::load(&mut kmers_reader).map_err(add_path!(!))?;
     if kmer_counts1.validate(contigs).is_ok() && kmer_counts2.validate(contigs).is_ok() {
-        let mut kmers_writer = ext::sys::create_lz4_slow(&out_kmers_filename)?;
+        let mut kmers_writer = ext::sys::create_brotli(&out_kmers_filename)?;
         for counts in [kmer_counts1, kmer_counts2] {
             counts.thin_out(keep_ids.iter().copied().map(ContigId::ix))
                 .save(&mut kmers_writer).map_err(add_path!(out_kmers_filename))?;
