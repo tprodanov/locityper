@@ -105,7 +105,7 @@ struct Args {
     solvers: Vec<String>,
     use_paf: bool,
 
-    hap_div: f64,
+    transfer_div: f64,
     transfer_fails: u32,
 }
 
@@ -146,7 +146,7 @@ impl Default for Args {
             solvers: Vec::new(),
             use_paf: true,
 
-            hap_div: 1.0,
+            transfer_div: 1.0,
             transfer_fails: 5000,
         }
     }
@@ -251,14 +251,14 @@ fn print_help(extended: bool) {
             "--lo, --leave-out".green(), "STR+".yellow());
 
         println!("\n{}", "Alignment recovery:".bold());
-        println!("    {:KEY$} {:VAL$}  Recover alignments from haplotypes with pairwise divergence under\n\
+        println!("    {:KEY$} {:VAL$}  Transfer alignments from haplotypes with pairwise divergence under\n\
             {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}*\n\
             {EMPTY}  (see {}). Use zero to disable alignment recovery.",
-            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAF_PREF,
+            "    --tr-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.transfer_div), paths::LOCUS_PAF_PREF,
             "locityper align".underline());
         println!("    {:KEY$} {:VAL$}  Skip to next alignment whenever alignment tranfer produces high edit\n\
             {EMPTY}  distance {} times [{}]. Use \"inf\" to continue indefinitely.",
-            "    --transf-fails".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.transfer_fails));
+            "    --tr-fails".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.transfer_fails));
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -531,8 +531,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
             Long("use-paf") => args.use_paf = parser.value()?.parse::<YesNo>()?.into(),
-            Long("hap-div") => args.hap_div = parser.value()?.parse()?,
-            Long("transf-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
+            Long("tr-div") => args.transfer_div = parser.value()?.parse()?,
+            Long("tr-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -1130,8 +1130,8 @@ fn process_paf(
     contigs: &ContigNames,
     args: &Args,
 ) -> crate::Result<(Option<Arc<HapAlns>>, Option<TriangleMatrix<Option<u32>>>)> {
-    let mut opt_hap_alns = if args.hap_div > 0.0 {
-        Some(HapAlns::new(contigs.len(), args.transfer_fails, args.hap_div))
+    let mut opt_hap_alns = if args.transfer_div > 0.0 {
+        Some(HapAlns::new(contigs.len(), args.transfer_fails, args.transfer_div))
     } else { None };
     let mut contig_distances = if args.use_paf { Some(TriangleMatrix::new(contigs.len(), None)) } else { None };
     if opt_hap_alns.is_none() && contig_distances.is_none() {
