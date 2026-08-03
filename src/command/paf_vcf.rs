@@ -19,6 +19,7 @@ use crate::{
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
     },
     algo::{bisect, HashMap},
+    math::ifelse0,
 };
 
 struct Args {
@@ -56,7 +57,7 @@ impl Args {
 }
 
 fn print_help() {
-    const KEY: usize = 16;
+    const KEY: usize = 15;
     const VAL: usize = 4;
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
@@ -74,11 +75,13 @@ fn print_help() {
         "-f, --fasta".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference haplotypes name.",
         "-r, --ref-hap".green(), "STR".yellow());
-    println!("    {:KEY$} {}  Text file with discarded haplotypes [{}].\n\
-        {EMPTY}  {} = (DIRNAME of {})/discarded_haplotypes.txt.",
+    println!("    {:KEY$} {}\n\
+        {EMPTY}  Text file with discarded haplotypes [{}].\n\
+        {EMPTY}  {} = <Directory of {}>/discarded_haplotypes.txt.",
         "-d, --discarded".green(), "FILE|auto|none".yellow(), super::fmt_def("auto"),
         "auto".yellow(), "-f".green());
-    println!("    {:KEY$} {:VAL$}  Two output VCF[.gz] files, first with merged variants\n\
+    println!("    {:KEY$} {:VAL$}\n\
+        {EMPTY}  Two output VCF[.gz] files, first with merged variants\n\
         {EMPTY}  and second (optional) with unmerged variants.",
         "-o, --output".green(), "FILE [FILE]".yellow());
 
@@ -160,7 +163,7 @@ pub(super) fn load_region(s: &str, fasta_filename: &Path, ref_len: u32) -> crate
     };
 
     if !fname.exists() {
-        log::error!("Cannot find BED file {}, using relative locus coordinates", fname.display());
+        log::warn!("Cannot find BED file {}, using relative locus coordinates", fname.display());
         return Ok(None);
     }
 
@@ -280,18 +283,18 @@ fn process_haplotype(
             return Err(error!(RuntimeError, "Unexpected operation (M/H) in CIGAR {}", cigar));
         }
         let (cons_query, cons_ref) = op.consumes_query_ref();
-        let qdiff = u32::from(cons_query) * item.len();
-        let rdiff = u32::from(cons_ref) * item.len();
+        let qdiff = ifelse0(cons_query, item.len());
+        let rdiff = ifelse0(cons_ref, item.len());
 
         let mut need_new = true;
         if let Some(last_var) = vars.last_mut() {
-            if last_var.ref_end == rpos && last_var.hap_end == qpos {
-                // Current indel is preceded by a mismatch.
-                last_var.ref_end = rpos + rdiff;
-                last_var.hap_end = qpos + qdiff;
+            if rpos <= last_var.ref_end && qpos <= last_var.hap_end {
+                last_var.ref_end = last_var.ref_end.max(rpos + rdiff);
+                last_var.hap_end = last_var.hap_end.max(qpos + qdiff);
                 need_new = false;
             } else {
-                assert!(last_var.ref_end < rpos && last_var.hap_end < qpos);
+                // Need to check that the new variant does not overlap the previous one on both haplotypes.
+                assert!(rpos > last_var.ref_end && qpos > last_var.hap_end);
             }
         }
 
