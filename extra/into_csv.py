@@ -82,7 +82,6 @@ def process_sample(sample, sample_dir):
             except json.decoder.JSONDecodeError:
                 sys.stderr.write(f'Cannot parse json from {json_filename}\n')
                 raise
-            s += f'{sample}\t{locus}\t'
             if 'genotype' not in res:
                 s += '*\n'
                 continue

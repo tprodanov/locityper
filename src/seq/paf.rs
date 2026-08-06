@@ -52,7 +52,7 @@ impl<R: BufRead> PafFile<R> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PafEntry {
     query_id: ContigId,
     query_len: u32,
@@ -71,6 +71,7 @@ pub struct PafEntry {
     // oth_tags: String,
 }
 
+#[derive(Debug)]
 pub enum PafParseResult<'a> {
     Entry(PafEntry),
     UnknownContig(&'a str),
