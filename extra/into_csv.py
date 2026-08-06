@@ -15,6 +15,7 @@ import common
 
 def load_input(args):
     paths = []
+    warned_dot = False
     if args.input is not None:
         in_dirs = args.input
         if len(in_dirs) == 1 and '*' in in_dirs[0]:
@@ -23,7 +24,10 @@ def load_input(args):
             components = path.split('/')
             ixs = [i for i, comp in enumerate(components) if comp == '.']
             if not ixs:
-                common.error(f'Path `{path}` does not contain "." component')
+                if not warned_dot:
+                    sys.stderr.write(f'WARN: Path `{path}` does not contain "." component, using dirname')
+                    warned_dot = True
+                i = len(components) - 2
             elif len(ixs) > 1:
                 common.error(f'Path `{path}` contains "." component {len(ixs)} times')
             elif not os.path.isdir(os.path.join(path, 'loci')):
@@ -65,7 +69,13 @@ def process_sample(sample, sample_dir):
             continue
         locus = entry.name
 
+        s += f'{sample}\t{locus}\t'
         json_filename = os.path.join(entry.path, 'res.json.gz')
+        if not os.path.exists(json_filename):
+            sys.stderr.write(f'WARN: File {json_filename} does not exist\n')
+            s += '?\n'
+            continue
+
         with gzip.open(json_filename, 'rt') as inp:
             try:
                 res = json.load(inp)
@@ -97,7 +107,8 @@ def main():
     in_group = parser.add_mutually_exclusive_group(required=True)
     in_group.add_argument('-i', '--input', metavar='DIR', nargs='+',
         help='Path(s) to Locityper analyses. Each directory must contain a `loci` subdir.\n'
-            'Please include "." before the sample name (..././<sample>/...).')
+            'Sample name must be either last (path/to/SAMPLE),\n'
+            'or must be preceded by "." (path/to/./SAMPLE/subdir/subdir).')
     in_group.add_argument('-I', '--input-list', metavar='FILE',
         help='File with two columns: path to Locityper analysis and sample name.\n'
             'Mutually exclusive with `-i/--input`.')
