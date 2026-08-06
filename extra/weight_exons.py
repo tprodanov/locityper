@@ -94,7 +94,7 @@ def main():
     elif args.discarded:
         sys.stderr.write(f'WARN: {args.discarded} does not exist\n')
 
-    with common.open(args.output, 'w') as out:
+    with common.open(args.output, 'wt') as out:
         for name, curr_entries in entries.items():
             for start, end, ix in curr_entries:
                 out.write(f'{name}\t{start}\t{end}\t{weights[ix]:.8g}\n')

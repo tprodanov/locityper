@@ -125,7 +125,7 @@ def main():
         trios = load_pedigree(f)
     with common.open(args.input) as f:
         preds = load_predictions(f)
-    with common.open(args.output, 'w') as out:
+    with common.open(args.output, 'wt') as out:
         out.write(f'# {" ".join(sys.argv)}\n')
         out.write('locus\tindiv\tmother\tfather\tquery_type\tedit\tsize\tdiv\tqv\texpl\n')
         process(preds, trios, args.alns, out)

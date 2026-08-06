@@ -88,7 +88,7 @@ fn print_help() {
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Adjust variant positions relative to this region [{}].\n\
         {EMPTY}  Should be either {} (take from ref.bed), {},\n\
-        {EMPTY}  `chrom:start`, `chrom:start-end` or a BED file with one entry.",
+        {EMPTY}  `chrom:start-end` or a BED file with one entry.",
         "-R, --region".green(), "STR".yellow(), super::fmt_def("auto"), "auto".yellow(), "none".yellow());
 
     println!("\n{}", "Other arguments:".bold());

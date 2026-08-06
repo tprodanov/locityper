@@ -54,7 +54,7 @@ def process_locus(locus, samples, preds, haplotypes, out_dir, compress):
 
     processed = 0
     ignored = 0
-    with common.open(f'{out_dir}/{locus}.{extension}', 'w') as out:
+    with common.open(f'{out_dir}/{locus}.{extension}', 'wt') as out:
         for sample in samples:
             gt = preds[sample][0] if sample in preds else None
             if gt is None:

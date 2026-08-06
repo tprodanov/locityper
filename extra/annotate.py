@@ -41,7 +41,7 @@ def main():
 
     format_tag = (lambda tag: f'\t{tag}') if explicit_tags else (lambda tag: '')
 
-    with common.open(args.input) as inp, common.open(args.output, 'w') as out:
+    with common.open(args.input) as inp, common.open(args.output, 'wt') as out:
         out.write(f'# {" ".join(sys.argv)}\n')
         out.write(f'sample\tlocus{format_tag("tag")}\thap1\thap2\n')
         for row in common.read_csv(inp):

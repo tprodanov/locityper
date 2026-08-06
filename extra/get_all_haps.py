@@ -22,7 +22,7 @@ def main():
         args.output = os.path.join(args.input, 'all_haplotypes.fa.gz')
 
     in_fa = gzip.open(os.path.join(args.input, 'haplotypes.fa.gz'), 'rt')
-    out_fa = open(args.output, 'w')
+    out_fa = open(args.output, 'wt')
     discarded_filename = os.path.join(args.input, 'discarded_haplotypes.txt')
     if not os.path.exists(discarded_filename):
         shutil.copyfileobj(in_fa, out_fa)

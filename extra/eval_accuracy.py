@@ -101,7 +101,7 @@ def main():
         sys.stderr.write(f'Exclude {len(excluded_samples)} samples\n')
 
     cached_dists = {}
-    with common.open(args.input) as inp, common.open(args.output, 'w') as out:
+    with common.open(args.input) as inp, common.open(args.output, 'wt') as out:
         header = None
         for line in inp:
             if not line.startswith('#'):

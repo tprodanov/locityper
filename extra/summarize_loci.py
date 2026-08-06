@@ -228,13 +228,13 @@ def main():
 
     indir = os.path.join(args.database, 'loci')
 
-    with common.open(args.output, 'w') as out:
+    with common.open(args.output, 'wt') as out:
         out.write(f'# {" ".join(sys.argv)}\n')
         out.write('locus\tn_seqs\tunique_seqs\tmean_len\tmean_multiplicity\tmean_complexity\tn_low_complex\tsegdup_frac'
             '\tmean_edit\tmean_div\tsat_k\tsat_alpha\tkmer_sat_k\tkmer_sat_alpha\n')
 
         if args.sat_out and max(args.saturation) > 0:
-            sat_out = common.open(args.sat_out, 'w')
+            sat_out = common.open(args.sat_out, 'wt')
             sat_out.write('locus\ttype\titeration\tn_haps\tsize\n')
         else:
             sat_out = None
