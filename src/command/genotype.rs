@@ -1139,7 +1139,7 @@ fn process_paf(
     }
 
     let mut paf_file = ext::sys::open(paf_filename).map(PafFile::new)?;
-    while let Some(entry) = paf_file.next(contigs)? {
+    while let Some(entry) = paf_file.next_wo_tags(contigs)? {
         let PafParseResult::Entry(mut entry) = entry else { continue };
         if entry.query_id() == entry.target_id() || entry.cigar().is_none() { continue };
         if let Some(dists) = &mut contig_distances && let Some(d) = entry.edit_distance() {

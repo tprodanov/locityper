@@ -10,7 +10,7 @@ use crate::{
     ext::{self, TriangleMatrix},
     algo::{HashSet},
     seq::{
-        fastx, minim_div,
+        fastx, minim_div, paf,
         contigs::{ContigId, ContigNames, DiscardedHaplotypes},
         counts::KmerCounts,
     },
@@ -25,7 +25,6 @@ use super::{
 struct Args {
     database: Option<PathBuf>,
     output: Option<PathBuf>,
-    alignments: String,
     subset_loci: HashSet<String>,
 
     only_tree: bool,
@@ -42,7 +41,6 @@ impl Default for Args {
         Self {
             database: None,
             output: None,
-            alignments: "haplotypes.paf.gz".to_string(), // [TODO] Could also be .br
             subset_loci: HashSet::default(),
 
             only_tree: false,
@@ -57,7 +55,7 @@ impl Default for Args {
 }
 
 impl Args {
-    fn validate(mut self) -> crate::Result<Self> {
+    fn validate(self) -> crate::Result<Self> {
         validate_param!(self.database.is_some(), "Input database is not provided (see -i/--input)");
         validate_param!(self.only_tree || self.output.is_some(), "Output database is not provided (see -o/--output)");
         validate_param!(!self.only_tree || !self.skip_tree, "--skip-tree and --only-tree cannot be used together");
@@ -68,17 +66,6 @@ impl Args {
             self.threshold);
         validate_param!(self.n_clusters.unwrap_or(usize::MAX) > 0,
             "Number of clusters (--n-clusters) must be positive");
-
-        if !self.alignments.contains("{}") {
-            // Make path to alignments INPUT/loci/{}/ALIGNMENTS
-            let mut new_alignments = self.database.clone().unwrap();
-            new_alignments.push(paths::LOCI_DIR);
-            new_alignments.push("{}");
-            new_alignments.push(&self.alignments);
-            self.alignments = new_alignments.to_str().ok_or_else(|| error!(InvalidInput,
-                "Input database has invalid UTF-8 name `{}`", self.database.as_ref().unwrap().display()))?
-                .to_owned();
-        }
         Ok(self)
     }
 }
@@ -93,19 +80,13 @@ fn print_help() {
 
     print!("\n{}", "Usage:".bold());
     println!(" {} -d db -o pruned_db [args]", super::PROGRAM);
-    println!(" {} -d db --only-tree [args]", super::PROGRAM);
+    println!("       {} -d db --only-tree [args]", super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Input database directory.",
         "-d, --database".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output pruned database directory.",
         "-o, --output".green(), "DIR".yellow());
-    println!("    {:KEY$} {:VAL$}  Path to alignment .paf[.br|.gz] files [{}].\n\
-        {EMPTY}  Should either contain {{}}, which are then replaced with locus names,\n\
-        {EMPTY}  or direct to files located in {}/loci/<locus>/{}.\n\
-        {EMPTY}  Alignments can be constructed using {}.",
-        "-a, --alignments".green(), "PATH".yellow(), super::fmt_def(&defaults.alignments),
-        "INPUT".yellow(), "PATH".yellow(), const_format::concatcp!(super::PROGRAM, " align").underline());
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Write tree in the input directory and stop.",
@@ -117,7 +98,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Divergence threshold for pruning [{}].",
         "-t, --threshold".green(), "NUM".yellow(), super::fmt_def_f64(defaults.threshold));
     println!("    {:KEY$} {:VAL$}  Use dynamic threshold to get approximately {} clusters.",
-        "    --n-clusters".green(), "INT".yellow(), "INT".yellow());
+        "-n, --n-clusters".green(), "INT".yellow(), "INT".yellow());
     println!("    {:KEY$} {:VAL$}  Select cluster representative with the smallest\n\
         {EMPTY}  generalized mean of this power [{}].",
         "    --power".green(), "NUM".yellow(), super::fmt_def(&defaults.power));
@@ -144,7 +125,9 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
         match arg {
             Short('d') | Long("database") | Short('i') | Long("input") => args.database = Some(parser.value()?.parse()?),
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
-            Short('a') | Long("aln") | Long("alignments") => args.alignments = parser.value()?.parse()?,
+            Short('a') | Long("aln") | Long("alignments") =>
+                log::warn!("-a/--alignments argument was deprecated. \
+                    Locityper will search for files `db/loci/*/haplotypes.paf(.br|.gz)`"),
 
             Long("subset-loci") | Long("loci-subset") => {
                 for val in parser.values()? {
@@ -155,7 +138,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             Long("skip-tree") => args.skip_tree = true,
             Short('f') | Long("field") => args.field = parser.value()?.parse()?,
             Short('t') | Long("thresh") | Long("threshold") => args.threshold = parser.value()?.parse()?,
-            Long("n-clusters") => args.n_clusters = Some(parser.value()?.parse()?),
+            Short('n') | Long("n-clusters") => args.n_clusters = Some(parser.value()?.parse()?),
             Long("power") => args.power = parser.value()?.parse()?,
             Short('F') | Long("force") => args.force = true,
 
@@ -375,6 +358,7 @@ fn cluster_haplotypes(
     mut disc_haps_writer: impl Write,
 ) -> crate::Result<Vec<ContigId>>
 {
+    assert!(contigs.len() != 0);
     let min_val = divergences.iter().copied().reduce(f64::min).expect("Empty divergence matrix");
     if min_val > thresh {
         log::warn!("[{}] Minimal observed divergence ({}) is larger than the threshold ({}), \
@@ -398,9 +382,23 @@ fn cluster_haplotypes(
         clusters[id.ix()].add_identical(haps.iter().map(|(name, _)| name as &str));
     }
 
-    let steps = dendrogram.steps();
     let mut buf = Vec::new();
     let mut keep_ids = Vec::new();
+    let mut process_cluster = |cluster: &Cluster| -> crate::Result<bool> {
+        match cluster.haps.len() {
+            0 => return Ok(false), // Divergence exceeded the threshold on one the previous iterations.
+            1 => keep_ids.push(cluster.haps[0].0),
+            _ => {
+                let repres = cluster.select_representative(&divergences, epsilon, power, &mut buf);
+                keep_ids.push(repres);
+                cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs, repres)
+                    .map_err(add_path!(!))?;
+            }
+        }
+        Ok(true)
+    };
+
+    let steps = dendrogram.steps();
     for step in steps {
         let mut curr_clusters = clusters.get_disjoint_mut([step.cluster1, step.cluster2])
             .expect("Two merged clusters must differ");
@@ -408,34 +406,33 @@ fn cluster_haplotypes(
             // If this is the first time we exceed divergence threshold,
             // write down discarded haplotypes and clear haplotypes.
             for cluster in curr_clusters.iter_mut() {
-                match cluster.haps.len() {
-                    0 => continue, // Divergence exceeded the threshold on one the previous iterations.
-                    1 => keep_ids.push(cluster.haps[0].0),
-                    _ => {
-                        let repres = cluster.select_representative(&divergences, epsilon, power, &mut buf);
-                        keep_ids.push(repres);
-                        cluster.write_discarded_haplotypes(&mut disc_haps_writer, contigs, repres)
-                            .map_err(add_path!(!))?;
-                    }
+                if process_cluster(cluster)? {
+                    cluster.haps.clear();
                 }
-                cluster.haps.clear();
             }
         }
         let [cluster1, cluster2] = curr_clusters;
         let new_cluster = Cluster::merge_and_clear(cluster1, cluster2, step.dissimilarity);
         clusters.push(new_cluster);
     }
+    for cluster in &clusters {
+        process_cluster(cluster)?;
+    }
 
     assert_eq!(clusters.len(), total_clusters);
     writeln!(nwk_writer, "{};", clusters.last().unwrap().newick).map_err(add_path!(!))?;
     keep_ids.sort_unstable();
+    assert!(!keep_ids.is_empty());
     Ok(keep_ids)
 }
 
 /// In case where no haplotypes are discarded, simply copy all files from input to output directory.
 fn copy_output_files(locus_data: &LocusData) -> crate::Result<bool> {
     let mut present = Vec::new();
-    for &basename in &[paths::LOCUS_FASTA, paths::KMERS_BR, paths::KMERS_LZ4, paths::DISTANCES] {
+    for &basename in itertools::chain!(
+        &[paths::LOCUS_FASTA, paths::KMERS_BR, paths::KMERS_LZ4, paths::DISTANCES],
+        &paths::LOCUS_PAFS)
+    {
         let in_filename = locus_data.db_dir().join(basename);
         let out_filename = locus_data.out_dir().join(basename);
         if Path::new(&in_filename).exists() {
@@ -471,7 +468,7 @@ fn copy_bed_files(locus_data: &LocusData) -> crate::Result<bool> {
 
 /// Thins out files from the input locus directory.
 /// Returns true if all necessary input files are present.
-fn prune_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<bool> {
+fn prune_files(locus_data: &LocusData, paf_filename: &Path, keep_ids: &[ContigId]) -> crate::Result<bool> {
     let mut all_files_present = copy_bed_files(locus_data)?;
     let contig_set = locus_data.contig_set();
     let contigs = contig_set.contigs();
@@ -514,6 +511,9 @@ fn prune_files(locus_data: &LocusData, keep_ids: &[ContigId]) -> crate::Result<b
         let new_dist_file = ext::sys::create(&new_dist_filename)?;
         minim_div::write_divergences(new_dist_file, k, w, &subdists, |&d| d).map_err(add_path!(new_dist_filename))?;
     }
+
+    let out_paf_filename = locus_data.out_dir().join(paths::LOCUS_PAFS[0]);
+    paf::prune_paf(&paf_filename, &out_paf_filename, contigs, keep_ids)?;
     Ok(all_files_present)
 }
 
@@ -528,7 +528,12 @@ fn process_locus(
     if contigs.is_empty() {
         return Err(error!(InvalidData, "No haplotypes found"));
     }
-    let paf_filename = args.alignments.replace("{}", contig_set.tag());
+    let Some(paf_filename) = paths::LOCUS_PAFS.iter()
+        .map(|path| locus_data.db_dir().join(path)).filter(|path| path.exists()).next() else
+    {
+        return Err(error!(InvalidData, "Could not find haplotype alignments at {}/{}*",
+            locus_data.db_dir().display(), paths::LOCUS_PAF_PREF));
+    };
     let repl_missing = if args.n_clusters.is_some() { f64::INFINITY } else { 10.0 * args.threshold };
     let divergences = load_divergences(ext::sys::open(&paf_filename)?, contigs, &args.field, repl_missing)?;
 
@@ -568,7 +573,7 @@ fn process_locus(
         log::info!("[{}] Retained all {} haplotypes", contigs.tag(), contigs.len());
     }
 
-    if prune_files(locus_data, &keep_ids)? {
+    if prune_files(locus_data, &paf_filename, &keep_ids)? {
         super::write_success_file(locus_data.out_dir().join(paths::SUCCESS))?;
         Ok(true)
     } else {
@@ -599,6 +604,11 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         return Ok(());
     }
 
+    if let Some(n) = args.n_clusters {
+        log::info!("Started pruning (keep ~{} haplotypes)", n);
+    } else {
+        log::info!("Started pruning (cut at {} divergence)", args.threshold);
+    }
     let total = loci.len();
     let mut failed = 0;
     let mut incomplete = 0;

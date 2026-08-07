@@ -361,7 +361,7 @@ fn process_paf(
     var_ranges[ref_id.ix()] = Some(Vec::new());
 
     let mut file = ext::sys::open(paf_filename).map(PafFile::new)?;
-    while let Some(entry) = file.next(contigs)? {
+    while let Some(entry) = file.next_wo_tags(contigs)? {
         let mut entry = match entry {
             PafParseResult::Entry(entry) => entry,
             PafParseResult::UnknownContig(name) => {

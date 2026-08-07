@@ -324,7 +324,7 @@ fn inner_construct_dominant_set(
     }).collect();
 
     let mut indices = Vec::new();
-    while let Some(entry) = paf_file.next(contigs)? {
+    while let Some(entry) = paf_file.next_wo_tags(contigs)? {
         let PafParseResult::Entry(entry) = entry else { continue };
         let i = entry.query_id().ix();
         let j = entry.target_id().ix();

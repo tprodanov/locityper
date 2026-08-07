@@ -35,7 +35,7 @@ pub fn run(argv: &[String]) -> crate::Result<()> {
         "r" | "recruit" => recruit::run(&argv[2..])?,
 
         "prune" => prune::run(&argv[2..])?,
-        "augment" => augment::run(&argv[2..])?,
+        "aug" | "augment" => augment::run(&argv[2..])?,
         "aln" | "align" => align::run(&argv[2..])?,
         "paf-vcf" | "paf-to-vcf" => paf_vcf::run(&argv[2..])?,
 

@@ -1,5 +1,6 @@
 use std::{
     io::BufRead,
+    path::Path,
 };
 use smallvec::SmallVec;
 use crate::{
@@ -8,7 +9,8 @@ use crate::{
         cigar::Cigar,
         aln::Strand,
     },
-    err::error,
+    err::{error, add_path},
+    ext,
 };
 
 /// PAF file reader.
@@ -29,6 +31,7 @@ impl<R: BufRead> PafFile<R> {
     pub fn next<'a>(
         &'a mut self,
         contigs: &ContigNames,
+        save_tags: bool,
     ) -> crate::Result<Option<PafParseResult<'a>>> {
         loop {
             self.line.clear();
@@ -44,12 +47,28 @@ impl<R: BufRead> PafFile<R> {
                             self.line.pop();
                         }
                     }
-                    Some(PafEntry::parse(&self.line, contigs)).transpose()
+                    Some(PafEntry::parse(&self.line, contigs, save_tags)).transpose()
                 }
                 Err(e) => Err(crate::Error::Io(e, Vec::new())),
             }
         }
     }
+
+    #[inline(always)]
+    pub fn next_wo_tags<'a>(
+        &'a mut self,
+        contigs: &ContigNames,
+    ) -> crate::Result<Option<PafParseResult<'a>>> {
+        self.next(contigs, false)
+    }
+
+    // #[inline(always)]
+    // pub fn next_with_tags<'a>(
+    //     &'a mut self,
+    //     contigs: &ContigNames,
+    // ) -> crate::Result<Option<PafParseResult<'a>>> {
+    //     self.next(contigs, true)
+    // }
 }
 
 #[derive(Clone, Debug)]
@@ -84,9 +103,9 @@ impl PafEntry {
     pub fn parse<'a>(
         line: &'a str,
         contigs: &ContigNames,
-        // save_tags: bool,
+        _save_tags: bool,
     ) -> crate::Result<PafParseResult<'a>> {
-        let parse_error = || error!(ParsingError, "Could not parse PAF line `{}`", line);
+        let parse_error = || error!(ParsingError, "Could not parse PAF line `{}`", line.trim());
 
         use PafParseResult::*;
         let split: SmallVec<[&'a str; 32]> = line.split('\t').collect();
@@ -117,7 +136,7 @@ impl PafEntry {
             if tag.starts_with("cg:Z:") {
                 entry.cigar = Some(Cigar::from_str(&tag.as_bytes()[5..])?);
             } // else if save_tags {
-            //    entry.push_tag(tag);
+            //     entry.push_tag(tag);
             // }
         }
         Ok(Entry(entry))
@@ -209,9 +228,40 @@ impl PafEntry {
     // }
 
     // pub fn push_tag(&mut self, tag: &str) {
-    //     if self.oth_tags.is_empty() {
-    //         self.oth_tags.push('\t');
-    //     }
+    //     self.oth_tags.push('\t');
     //     self.oth_tags.push_str(tag);
     // }
+}
+
+/// Prune PAF file to only keep given contig IDs.
+pub fn prune_paf(
+    in_filename: &Path,
+    out_filename: &Path,
+    contigs: &ContigNames,
+    keep_ids: &[ContigId],
+) -> crate::Result<()> {
+    let mut keep = vec![false; contigs.len()];
+    for &id in keep_ids {
+        keep[id.ix()] = true;
+    }
+    let in_paf = ext::sys::open(in_filename)?;
+    let mut out_paf = ext::sys::create(out_filename)?;
+
+    for line in in_paf.lines() {
+        let line = line.map_err(add_path!(in_filename))?;
+        if line.starts_with('#') {
+            writeln!(out_paf, "{}", line).map_err(add_path!(out_filename))?;
+            continue;
+        }
+        let split: SmallVec<[&str; 7]> = line.splitn(7, '\t').collect();
+        if split.len() < 7 {
+            return Err(error!(ParsingError, "Could not parse PAF line `{}`", line.trim()));
+        }
+        let keep1 = contigs.try_get_id(&split[0]).map(|i| keep[i.ix()]).unwrap_or(false);
+        let keep2 = contigs.try_get_id(&split[5]).map(|i| keep[i.ix()]).unwrap_or(false);
+        if keep1 && keep2 {
+            writeln!(out_paf, "{}", line).map_err(add_path!(out_filename))?;
+        }
+    }
+    Ok(())
 }
