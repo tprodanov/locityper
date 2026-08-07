@@ -1351,7 +1351,9 @@ impl Cigar {
                     seq_i, last1, len_i, &mut new_cigar);
             }
         }
-        assert_eq!(len_i, new_cigar.qlen);
+        assert_eq!(len_i, new_cigar.qlen,
+            "Please check that your WFA2 dependency is up to date. \
+            If that does not help, please contact Locityper developers.");
         if GLOBAL_ALN {
             const MAX_OPTIMIZATION_GAP: u32 = 1000;
             const OPTIMIZATION_ANCHOR: u32 = 51;
@@ -1408,7 +1410,6 @@ impl Cigar {
         };
         assert_eq!(pos, 0);
         assert_eq!(cigar.rlen, seq_k.len() as u32);
-        assert!(cigar.validate(seq_i, seq_k)); // [TODO] REMOVE
         cigar
     }
 }

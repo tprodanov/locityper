@@ -355,7 +355,7 @@ impl PrelimAlignments {
         Ok(())
     }
 
-    fn finalize(&mut self) {
+    fn normalize_probs(&mut self) {
         self.alns.iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - self.best_lik[aln.read_end().ix()]));
     }
 
@@ -1151,6 +1151,8 @@ impl AllAlignments {
 
         if opt_hap_alns.as_ref().is_none() {
             log::debug!("    Alignment recovery is disabled (pairwise haplotype alignments required)");
+        } else {
+            log::debug!("    Recovering and groupping alignments");
         }
         let (all_alns, counts2) = if threads == 1 {
             recover_and_group_alignments(ungroupped_reads.pop().unwrap(), bg_distr, &opt_hap_alns, &contig_infos,
@@ -1253,7 +1255,7 @@ fn recover_and_group_alignments(
     for (read_data, mut read_alignments) in prelim_alignments {
         let original_alns = read_alignments.len();
         let mut recovered_alns = 0;
-        if let Some(hap_alns) = opt_hap_alns {
+        if read_data.weight >= params.min_weight && let Some(hap_alns) = opt_hap_alns {
             recovered_alns += hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
                 bg_distr.error_profile());
         }
@@ -1261,7 +1263,7 @@ fn recover_and_group_alignments(
             counts.poorly_mapped += 1;
             continue;
         }
-        read_alignments.finalize();
+        read_alignments.normalize_probs();
 
         let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
         let groupped_alns = if is_paired_end {

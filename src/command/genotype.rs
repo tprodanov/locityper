@@ -146,8 +146,8 @@ impl Default for Args {
             solvers: Vec::new(),
             use_paf: true,
 
-            transfer_div: 1.0,
-            transfer_fails: 5000,
+            transfer_div: 0.1,
+            transfer_fails: 100,
         }
     }
 }
