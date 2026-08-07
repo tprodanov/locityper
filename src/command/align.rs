@@ -72,7 +72,7 @@ impl Args {
 }
 
 fn print_help() {
-    const KEY: usize = 16;
+    const KEY: usize = 17;
     const VAL: usize = 5;
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 

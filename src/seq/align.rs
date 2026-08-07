@@ -51,7 +51,7 @@ impl Default for Params {
             skip_div: false,
             div_k: 15,
             div_w: 15,
-            thresh_div: 0.5,
+            thresh_div: 1.0,
             against_div: 1.0,
             penalties: Default::default(),
             backbone_ks: vec![25, 51, 101],
