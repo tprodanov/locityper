@@ -116,7 +116,7 @@ impl Default for Args {
             preproc: None,
             databases: Vec::new(),
             output: None,
-            basis: "auto".to_string(),
+            basis: "none".to_string(),
 
             subset_loci: HashSet::default(),
             ploidy: 2,
@@ -223,11 +223,10 @@ fn print_help(extended: bool) {
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
         "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " target").underline());
     println!("    {:KEY$} {:VAL$}  Haplotype basis to speed up read mapping (see {}).\n\
-        {EMPTY}  Default ({}): use haplotypes-basis.fa.gz if exists in the database,\n\
-        {EMPTY}  otherwise haplotypes.fa.gz (use {} to skip basis haplotypes).\n\
+        {EMPTY}  Use {} for haplotypes-basis.fa.gz from the database locus dirs;
         {EMPTY}  For all other values, use haplotypes-basis.{}.fa.gz.",
         "    --basis".green(), "STR".yellow(), concatcp!(super::PROGRAM, " augment").underline(),
-        "auto".yellow(), "none".yellow(), "STR".yellow());
+        "default".yellow(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",
@@ -1011,12 +1010,15 @@ fn get_mapping_fasta_filename(
     args: &Args,
 ) -> crate::Result<(PathBuf, bool)> {
     let full_fname = locus.db_dir.join(paths::LOCUS_FASTA);
-    let def_basis_fname = locus.db_dir.join(paths::DEFAULT_BASIS_FASTA);
-    let (filename, is_full) = match &args.basis as &str {
-        "auto" => if def_basis_fname.exists() { (def_basis_fname, false) } else { (full_fname, true) },
-        "none" => (full_fname, true),
+    let (mut filename, is_full) = match &args.basis as &str {
+        "none" => (full_fname.clone(), true),
+        "default" => (locus.db_dir.join(paths::DEFAULT_BASIS_FASTA), false),
         s => (locus.db_dir.join(format!("haplotypes-basis.{}.fa.gz", s)), false),
     };
+    if !is_full && !filename.exists() {
+        log::warn!("Cannot find basis haplotypes {}, using full file", ext::fmt::path(filename));
+        filename = full_fname;
+    }
     if !filename.exists() {
         return Err(error!(InvalidInput, "Haplotypes file {} does not exist", ext::fmt::path(filename)));
     }

@@ -67,7 +67,7 @@ def process_line(line, distances, excl_haps, sample, locus, genotype, loo, out):
 def main():
     parser = argparse.ArgumentParser(
         description='Evaluating genotyping accuracy',
-        usage='%(prog)s -i summary.csv -a paf_path -d discarded_path -o out.csv [--loo]')
+        usage='%(prog)s -i summary.csv -o out.csv [args]')
     parser.add_argument('-i', '--input', metavar='FILE', required=True,
         help='CSV summary file with Locityper genotyping results.')
     parser.add_argument('-d', '--database', metavar='DIR',

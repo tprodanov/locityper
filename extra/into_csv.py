@@ -25,9 +25,9 @@ def load_input(args):
             ixs = [i for i, comp in enumerate(components) if comp == '.']
             if not ixs:
                 if not warned_dot:
-                    sys.stderr.write(f'WARN: Path `{path}` does not contain "." component, using dirname')
+                    sys.stderr.write(f'WARN: Path `{path}` does not contain "." component, using dirname\n')
                     warned_dot = True
-                i = len(components) - 2
+                ixs = [len(components) - 2]
             elif len(ixs) > 1:
                 common.error(f'Path `{path}` contains "." component {len(ixs)} times')
             elif not os.path.isdir(os.path.join(path, 'loci')):

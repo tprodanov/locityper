@@ -42,7 +42,7 @@ struct Args {
     make_default: Option<bool>,
     basis_leaveout: Vec<String>,
 
-    skip_vcf: bool,
+    // skip_vcf: bool,
     threads: u16,
     aln_params: seq::align::Params,
     rerun: Rerun,
@@ -64,7 +64,7 @@ impl Default for Args {
             make_default: None,
             basis_leaveout: Vec::new(),
 
-            skip_vcf: false,
+            // skip_vcf: false,
             threads: 1,
             aln_params: Default::default(),
             rerun: Rerun::None,
@@ -75,7 +75,9 @@ impl Default for Args {
 impl Args {
     fn validate(self) -> crate::Result<Self> {
         validate_param!(self.database.is_some(), "Input database is not provided (see -i/--input)");
-        validate_param!(self.ref_name.is_some(), "Reference haplotype name must be provided");
+        if self.aln_params.thresh_div < 1.0 && self.ref_name.is_none() {
+            log::warn!("It is recommended to provide reference haplotype name (-n) with -D < 1");
+        }
         validate_param!(self.divergence >= 0.0 && self.divergence <= 1.0,
             "Basis divergence ({}) must be between 0 and 1", self.divergence);
         if let Some(step) = self.step {
@@ -100,7 +102,7 @@ fn print_help() {
     println!("unless --rerun is used.");
 
     print!("\n{}", "Usage:".bold());
-    println!(" {} augment -d db -n ref_name", super::PROGRAM);
+    println!(" {} augment -d db", super::PROGRAM);
 
     println!("\n{}", "Input/output arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Database with loci haplotypes.",
@@ -109,9 +111,10 @@ fn print_help() {
         "    --subset-loci".green(), "STR+".yellow());
 
     println!("\n{}", "Alignment parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Reference haplotype name.\n\
-        {EMPTY}  Alignments to this haplotype will be constructed in any case.",
-        "-n, --ref-name".green(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Reference haplotype name, alignments to which\n\
+        {EMPTY}  will be constructed irrespective of minimizer divergence.\n\
+        {EMPTY}  Recommended with {} < 1.",
+        "-n, --ref-name".green(), "STR".yellow(), "-D".green());
     println!("    {}  {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
         "-m, --minimizer".green(), "INT INT".yellow(),
         super::fmt_def(defaults.aln_params.div_k), super::fmt_def(defaults.aln_params.div_w));
@@ -166,8 +169,8 @@ fn print_help() {
         "    --skip-basis".green(), super::flag());
 
     println!("\n{}", "Optional arguments:".bold());
-    println!("    {:KEY$} {:VAL$}  Do not construct local VCF files.",
-        "    --skip-vcf".green(), super::flag());
+    // println!("    {:KEY$} {:VAL$}  Do not construct local VCF files.",
+    //     "    --skip-vcf".green(), super::flag());
     println!("    {:KEY$} {:VAL$}  Rerun everything ({}); do not rerun haplotype alignment ({});\n\
         {EMPTY}  or do not rerun completed loci ({}, default).",
         "    --rerun".green(), "STR".yellow(), "all".yellow(), "part".yellow(), "none".yellow());
@@ -234,7 +237,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
 
-            Long("skip-vcf") => args.skip_vcf = true,
+            Long("skip-vcf") => log::warn!("Option --skip-vcf is not used at the moment"),
             Long("rerun") => args.rerun = parser.value()?.parse()?,
             Short('@') | Long("threads") => args.threads = parser.value()?.parse()?,
 
@@ -429,8 +432,9 @@ fn process_locus(
     let mut lazy_data = LazyResult::new(|| -> crate::Result<_> {
         let contig_set = ContigSet::load(locus, &fasta_filename).map(Arc::new)?;
         let disc_haps = DiscardedHaplotypes::load_if_present(&dir.join(paths::DISCARDED_HAPS), contig_set.contigs())?;
-        let ref_id = find_ref_haplotype(contig_set.contigs(), &disc_haps,
-            args.ref_name.as_ref().expect("Reference name must be provided"))?;
+        let ref_id: Option<ContigId> = if let Some(name) = &args.ref_name {
+            find_ref_haplotype(contig_set.contigs(), &disc_haps, name)?
+        } else { None };
         Ok((contig_set, disc_haps, ref_id))
     });
 
@@ -453,8 +457,8 @@ fn process_locus(
             .map(|(i, j)| (ContigId::new(i), ContigId::new(j))).collect();
         log::info!("    Running pairwise haplotype alignment");
         let mut against_contig = vec![false; contig_set.len()];
-        if let Some(ref_id) = ref_id {
-            against_contig[ref_id.ix()] = true;
+        if let Some(id) = ref_id {
+            against_contig[id.ix()] = true;
         }
         super::align::align(Arc::clone(contig_set), pairs, against_contig,
             &aln_filename, &None, args.threads, &args.aln_params)?;
@@ -462,24 +466,24 @@ fn process_locus(
         aln_filename
     };
 
-    let vcf_filename = dir.join("haplotypes.vcf.gz");
-    if args.skip_vcf || (vcf_filename.exists() && args.rerun == Rerun::None) {
-        log::debug!("    Skipping local VCF file");
-    } else {
-        log::info!("    Constructing a local VCF file");
-        let (contig_set, disc_haps, ref_id) = lazy_data.get()?;
-        let contigs = contig_set.contigs();
-        if let &Some(ref_id) = ref_id
-            && let Some((chrom, shift)) = super::paf_vcf::load_region("auto", &fasta_filename, contigs.get_len(ref_id))?
-        {
-            super::paf_vcf::convert_to_vcf(
-                &aln_filename, contig_set, disc_haps, ref_id, &chrom, shift, &vcf_filename, None)?;
-            did_anything = true;
-        } else {
-            log::error!("Cannot construct local VCF: reference contig not found or \
-                could not identify reference coordinates");
-        }
-    }
+    // let vcf_filename = dir.join("haplotypes.vcf.gz");
+    // if args.skip_vcf || (vcf_filename.exists() && args.rerun == Rerun::None) {
+    //     log::debug!("    Skipping local VCF file");
+    // } else {
+    //     log::info!("    Constructing a local VCF file");
+    //     let (contig_set, disc_haps, ref_id) = lazy_data.get()?;
+    //     let contigs = contig_set.contigs();
+    //     if let &Some(ref_id) = ref_id
+    //         && let Some((chrom, shift)) = super::paf_vcf::load_region("auto", &fasta_filename, contigs.get_len(ref_id))?
+    //     {
+    //         super::paf_vcf::convert_to_vcf(
+    //             &aln_filename, contig_set, disc_haps, ref_id, &chrom, shift, &vcf_filename, None)?;
+    //         did_anything = true;
+    //     } else {
+    //         log::error!("Cannot construct local VCF: reference contig not found or \
+    //             could not identify reference coordinates");
+    //     }
+    // }
 
     if args.skip_basis {
         log::debug!("    Skipping basis construction");
