@@ -1,6 +1,7 @@
 use std::{
     fmt,
     ops::AddAssign,
+    hash::{Hash, Hasher},
 };
 
 /// Static methods extending slices.
@@ -386,4 +387,85 @@ pub fn join_up_to(strings: &[impl AsRef<str>], max: usize) -> String {
         res.push_str(s.as_ref());
     }
     res
+}
+
+type Block = u64;
+const BUCKET_BITS: usize = Block::BITS as usize;
+const BUCKET_PWR: u32 = 6;
+const BUCKET_MOD: usize = (1 << BUCKET_PWR) - 1;
+
+/// Non-growable bit array.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BitArray {
+    storage: Vec<Block>,
+    n_bits: usize,
+}
+
+impl BitArray {
+    /// Creates a new bit array with all falses.
+    pub fn new(n_bits: usize) -> Self {
+        let storage_len = (n_bits + BUCKET_BITS - 1) >> BUCKET_PWR;
+        Self {
+            storage: vec![0; storage_len],
+            n_bits
+        }
+    }
+
+    #[allow(unused)]
+    pub fn len(&self) -> usize {
+        self.n_bits
+    }
+
+    #[inline(always)]
+    fn offset_and_mask(&self, i: usize) -> (usize, Block) {
+        assert!(i < self.n_bits, "Out of bounds {} >= {}", i, self.n_bits);
+        (i >> BUCKET_PWR, 1 << (i & BUCKET_MOD))
+    }
+
+    #[inline]
+    pub fn set_generic<const VAL: bool>(&mut self, i: usize) {
+        assert!(i < self.n_bits, "Out of bounds {} >= {}", i, self.n_bits);
+        let (offset, mask) = self.offset_and_mask(i);
+        if VAL {
+            self.storage[offset] |= mask;
+        } else {
+            self.storage[offset] &= !mask;
+        }
+    }
+
+    #[inline(always)]
+    pub fn set_true(&mut self, i: usize) {
+        self.set_generic::<true>(i)
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> bool {
+        let (offset, mask) = self.offset_and_mask(i);
+        (self.storage[offset] & mask) != 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = bool> {
+        (0..self.n_bits).map(|i| self.get(i))
+    }
+
+    /// Returns iterator over indices, for which one is stored.
+    pub fn true_indices(&self) -> impl Iterator<Item = usize> {
+        (0..self.n_bits).filter(|&i| self.get(i))
+    }
+}
+
+impl Hash for BitArray {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.n_bits.hash(state);
+        for block in &self.storage {
+            block.hash(state);
+        }
+    }
+}
+
+impl fmt::Debug for BitArray {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.iter().map(|v| write!(f, "{}", u8::from(v))).collect()
+    }
 }

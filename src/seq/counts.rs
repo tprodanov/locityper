@@ -1,6 +1,6 @@
 use std::{
     io::{self, BufRead},
-    path::PathBuf,
+    path::{Path, PathBuf},
     cmp::{min, max, Ord},
     process::{Stdio, Command},
 };
@@ -14,7 +14,7 @@ use crate::{
     algo::HashMap,
     err::{Error, error, add_path},
     bg::ser::json_get,
-    ext::sys::PipeGuard,
+    ext,
 };
 
 /// Store k-mer counts as u16.
@@ -124,7 +124,7 @@ impl KmerCounts {
     }
 
     /// Loads k-mer counts from a binary file.
-    pub fn load<R>(f: &mut R) -> io::Result<Self>
+    pub fn load<R>(mut f: R) -> io::Result<Self>
     where R: VarintReader<Error = io::Error>,
     {
         let k = u32::from(f.read()?);
@@ -147,6 +147,12 @@ impl KmerCounts {
             k, counts,
             max_value: max_value as KmerCount,
         })
+    }
+
+    /// Tries different extensions (.br, .lz4) and reads corresponding k-mer counts.
+    pub fn load_from_filenames(filenames: &[impl AsRef<Path>]) -> crate::Result<Self> {
+        let reader = ext::sys::open_first_of(filenames)?;
+        Self::load(reader).map_err(add_path!(!))
     }
 
     /// Checks the number of and sizes of contigs.
@@ -312,7 +318,7 @@ impl JfKmerGetter {
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().map_err(add_path!(self.jf_exe))?;
         let mut child_stdin = io::BufWriter::new(child.stdin.take().unwrap());
-        let pipe_guard = PipeGuard::new(self.jf_exe.clone(), child);
+        let pipe_guard = ext::sys::PipeGuard::new(self.jf_exe.clone(), child);
         let k_usize = self.k as usize;
         let handle = std::thread::spawn(move || -> crate::Result<Vec<usize>> {
             let mut n_kmers = Vec::new();

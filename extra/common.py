@@ -4,16 +4,57 @@ import lzma
 import os
 import builtins
 import csv
+from contextlib import contextmanager
+import subprocess
 
 
-def open(filename, mode='r'):
-    assert mode == 'r' or mode == 'w'
+@contextmanager
+def read_brotli(filename, mode='rt'):
+    proc = subprocess.Popen(
+        ['brotli', '-Kdc', filename],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text='b' not in mode,
+    )
+    try:
+        yield proc.stdout
+    finally:
+        proc.stdout.close()
+        stderr = proc.stderr.read()
+        proc.stderr.close()
+        ret = proc.wait()
+        if ret:
+            raise subprocess.CalledProcessError(ret, proc.args, stderr=stderr)
+
+
+@contextmanager
+def write_brotli(filename, mode='wt'):
+    proc = subprocess.Popen(
+        ['brotli', '-5', '-f', '-w', '24', '-o', filename],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text='b' not in mode,
+    )
+    try:
+        yield proc.stdin
+    finally:
+        proc.stdin.close()
+        stderr = proc.stderr.read()
+        proc.stderr.close()
+        ret = proc.wait()
+        if ret:
+            raise subprocess.CalledProcessError(ret, proc.args, stderr=stderr)
+
+
+def open(filename, mode='rt'):
     if filename is None or filename == '-':
-        return sys.stdin if mode == 'r' else sys.stdout
+        return sys.stdin if 'r' in mode else sys.stdout
     elif filename.endswith('.gz'):
-        return gzip.open(filename, mode + 't')
+        return gzip.open(filename, mode)
     elif filename.endswith('.xz'):
-        return lzma.open(filename, mode + 't')
+        return lzma.open(filename, mode)
+    elif filename.endswith('.br'):
+        return read_brotli(filename, mode) if 'r' in mode else write_brotli(filename, mode)
     else:
         return builtins.open(filename, mode)
 

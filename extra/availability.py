@@ -81,7 +81,7 @@ def main():
     else:
         excl_haplotypes = ()
 
-    with common.open(args.output, 'w') as out:
+    with common.open(args.output, 'wt') as out:
         out.write('target\tclosest\tedit\tsize\tdiv\tqv\n')
         find_closest(target_genotypes, distances, excl_haplotypes, out)
 

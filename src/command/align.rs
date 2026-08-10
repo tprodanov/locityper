@@ -2,7 +2,8 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
     io::{Write, BufRead},
-    ffi::OsStr,
+    cmp::{min, max},
+    sync::Arc,
 };
 use colored::Colorize;
 use smallvec::SmallVec;
@@ -14,11 +15,11 @@ use crate::{
         fmt::PrettyU32,
     },
     seq::{
-        fastx, dist, wfa,
-        NamedSeq,
+        self, wfa,
+        contigs::{ContigId, ContigNames, ContigSet},
         kmers::Kmer,
     },
-    algo::{HashMap, Hasher},
+    algo::{IntSet, TwoU32},
 };
 
 struct Args {
@@ -29,11 +30,11 @@ struct Args {
     all_pairs: bool,
     pairs: Vec<String>,
     pairs_file: Option<PathBuf>,
-    against: Option<String>,
+    against: Vec<String>,
     threads: u16,
     ignore_missing: bool,
 
-    params: dist::Params,
+    params: seq::align::Params,
 }
 
 impl Default for Args {
@@ -46,7 +47,7 @@ impl Default for Args {
             all_pairs: false,
             pairs: Vec::new(),
             pairs_file: None,
-            against: None,
+            against: Vec::new(),
             threads: 8,
             ignore_missing: false,
 
@@ -60,17 +61,18 @@ impl Args {
         validate_param!(self.input.is_some(), "Input FASTA file is not provided (see -i/--input)");
         validate_param!(self.output.is_some(), "Output PAF path is not provided (see -o/--output)");
 
-        validate_param!(u8::from(self.all_pairs) + u8::from(!self.pairs.is_empty())
-            + u8::from(self.pairs_file.is_some()) + u8::from(self.against.is_some()) == 1,
-            "Exactly one argument -p/-P/-A/--against is required");
-
+        validate_param!(self.all_pairs || !self.pairs.is_empty() || self.pairs_file.is_some()
+            || !self.against.is_empty(), "At least one of the arguments -A/-p/-P/--against is required");
+        if self.all_pairs && (!self.pairs.is_empty() || self.pairs_file.is_some()) {
+            log::warn!("It is redundant to provide both -A and -p/-P");
+        }
         self.params.validate()?;
         Ok(self)
     }
 }
 
 fn print_help() {
-    const KEY: usize = 16;
+    const KEY: usize = 17;
     const VAL: usize = 5;
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
@@ -88,7 +90,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Prefix for temporary files (for multiple threads).",
         "    --prefix".green(), "PATH".yellow());
 
-    println!("\n{} (mutually exclusive):", "Alignment pairs".bold());
+    println!("\n{}:", "Alignment pairs".bold());
     println!("    {:KEY$} {:VAL$}  Find alignments for these pairs (two names separated by comma),\n\
         {EMPTY}  many pairs allowed.",
         "-p, --pairs".green(), "STR+".yellow());
@@ -96,8 +98,10 @@ fn print_help() {
         "-P, --pairs-file".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Find alignments for all pairs.",
         "-A, --all".green(), super::flag());
-    println!("    {:KEY$} {:VAL$}  Align all sequence against {}.",
-        "    --against".green(), "STR".yellow(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Align all sequence against the given haplotype(s).\n\
+        {EMPTY}  Maximum divergence is controlled by {}, not {}.",
+        "    --against".green(), "STR+".yellow(),
+        "--against-div".green(), "-D".green());
 
     println!("\n{}", "Alignment arguments:".bold());
     println!("    {} {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
@@ -109,10 +113,19 @@ fn print_help() {
         {EMPTY}  Use {} to align everything.",
         "-D, --thresh-div".green(), "NUM".yellow(), "NUM".yellow(), super::fmt_def_f64(defaults.params.thresh_div),
         "-D 1".green());
+    println!("    {:KEY$} {:VAL$}  For alignments against specific target ({}), do not align\n\
+        {EMPTY}  sequences with minimizer divergence >= {} [{}].",
+        "    --against-div".green(), "NUM".yellow(),
+        "--against".green(), "NUM".yellow(), super::fmt_def_f64(defaults.params.against_div));
     println!("    {:KEY$} {:VAL$}  One or more k-mer sizes (5 <= k <= {}) for backbone alignment,\n\
         {EMPTY}  separated by comma [{}].",
         "-k, --backbone".green(), "INT".yellow(), ruint::aliases::U256::MAX_KMER_SIZE,
         super::fmt_def(defaults.params.backbone_str()));
+    println!("    {:KEY$} {:VAL$}  Transitively speed up alignment by using existing alignments with\n\
+        {EMPTY}  divergence under this value (use 0 to disable) [{}].",
+        "    --tr-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.params.transitive_div));
+    println!("    {:KEY$} {:VAL$}  Anchor size during transitive alignment construction [{}].",
+        "    --tr-anchor".green(), "NUM".yellow(), super::fmt_def(defaults.params.transitive_anchor));
     println!("    {:KEY$} {:VAL$}  Do not complete gaps over this size [{}].",
         "-g, --max-gap".green(), "INT".yellow(), super::fmt_def(PrettyU32(defaults.params.max_gap)));
     println!("    {:KEY$} {:VAL$}  Alignment accuracy level (1-{}) [{}].",
@@ -157,7 +170,11 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             }
             Short('P') | Long("pairs-file") => args.pairs_file = Some(parser.value()?.parse()?),
             Short('A') | Long("all") | Long("all-pairs") => args.all_pairs = true,
-            Long("against") => args.against = Some(parser.value()?.parse()?),
+            Long("against") => {
+                for val in parser.values()? {
+                    args.against.push(val.parse()?);
+                }
+            }
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
             {
@@ -173,6 +190,8 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     .map_err(|_| error!(InvalidInput,
                     "Cannot parse `-k {}`: must be list of integers separated by comma", backbone_str))?;
             }
+            Long("tr-div") => args.params.transitive_div = parser.value()?.parse()?,
+            Long("tr-anchor") => args.params.transitive_anchor = parser.value()?.parse()?,
             Short('g') | Long("max-gap") => args.params.max_gap = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('a') | Long("accuracy") => args.params.accuracy = parser.value()?.parse()?,
             Short('M') | Long("mismatch") => args.params.penalties.mismatch = parser.value()?.parse()?,
@@ -199,10 +218,9 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 fn parse_pair(
     split_pair: &[&str],
-    name2id: &HashMap<&str, u32>,
-    pairs: &mut Vec<(u32, u32)>,
+    contigs: &ContigNames,
     warn: bool,
-) -> crate::Result<()>
+) -> crate::Result<Option<(ContigId, ContigId)>>
 {
     if split_pair.len() != 2 {
         return Err(error!(InvalidInput, "Cannot parse pair `{:?}`: exactly two names required", split_pair));
@@ -210,42 +228,47 @@ fn parse_pair(
     let name1 = split_pair[0];
     let name2 = split_pair[1];
 
-    let Some(&id1) = name2id.get(name1) else {
+    let Some(id1) = contigs.try_get_id(name1) else {
         if warn {
             log::warn!("Cannot find sequence `{}`", name1);
         }
-        return Ok(())
+        return Ok(None)
     };
-    let Some(&id2) = name2id.get(name2) else {
+    let Some(id2) = contigs.try_get_id(name2) else {
         if warn {
             log::warn!("Cannot find sequence `{}`", name2);
         }
-        return Ok(())
+        return Ok(None)
     };
     if id1 == id2 {
         log::error!("Cannot align sequence to itself ({})", name1);
+        Ok(None)
     } else {
-        pairs.push((id2, id1));
+        Ok(Some((id2, id1)))
     }
-    Ok(())
 }
 
-fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> {
-    if args.all_pairs {
-        return Ok(TriangleMatrix::indices(seqs.len()).map(|(i, j)| (i as u32, j as u32)).collect())
-    }
-
-    let mut name2id = HashMap::<&str, u32>::with_capacity_and_hasher(seqs.len(), Hasher::default());
-    for (i, entry) in seqs.iter().enumerate() {
-        if name2id.insert(entry.name(), i as u32).is_some() {
-            return Err(error!(InvalidInput, "Duplicate sequence {} in the input FASTA file", entry.name()));
-        }
-    }
-
+/// Loads all pairs from -a/-p/-P/--against arguments.
+/// Duplicate pairs are discarded (even if indices are switched), first one used.
+/// Returns
+/// - vector of pairs,
+/// - vector of bools, indicating whether the contig was used in the --against argument.
+fn load_pairs(contigs: &ContigNames, args: &Args) -> crate::Result<(Vec<(ContigId, ContigId)>, Vec<bool>)> {
     let mut pairs = Vec::new();
+    let mut pairs_set = IntSet::default();
+    let mut push_pair = |i: ContigId, j: ContigId| {
+        if pairs_set.insert(TwoU32(min(i, j).get(), max(i, j).get())) {
+            pairs.push((i, j));
+        }
+    };
+    if args.all_pairs {
+        TriangleMatrix::indices_u32(contigs.len()).for_each(|(i, j)| push_pair(ContigId::new(i), ContigId::new(j)));
+    }
     for pair in args.pairs.iter() {
         let split: SmallVec<[&str; 2]> = pair.split(',').collect();
-        parse_pair(&split, &name2id, &mut pairs, !args.ignore_missing)?;
+        if let Some((i, j)) = parse_pair(&split, contigs, !args.ignore_missing)? {
+            push_pair(i, j);
+        }
     }
 
     if let Some(path) = &args.pairs_file {
@@ -256,64 +279,28 @@ fn load_pairs(args: &Args, seqs: &[NamedSeq]) -> crate::Result<Vec<(u32, u32)>> 
                 continue;
             }
             let split: SmallVec<[&str; 2]> = line.split_whitespace().collect();
-            parse_pair(&split, &name2id, &mut pairs, !args.ignore_missing)?;
+            if let Some((i, j)) = parse_pair(&split, contigs, !args.ignore_missing)? {
+                push_pair(i, j);
+            }
         }
     }
 
-    if let Some(against) = &args.against {
-        let i = *name2id.get(against as &str)
-            .ok_or_else(|| error!(InvalidInput, "Cannot find sequence `{}`", against))?;
-        pairs.extend((0..seqs.len() as u32).filter(|&j| i != j).map(|j| (i, j)));
+    let mut against_contig = vec![false; contigs.len()];
+    for name in &args.against {
+        match contigs.try_get_id(name as &str) {
+            Some(i) => {
+                (0..contigs.len() as u32).map(ContigId::new).filter(|&j| i != j).for_each(|j| push_pair(i, j));
+                against_contig[i.ix()] = true;
+            }
+            None => log::warn!("Cannot find sequence `{}` (--against)", name),
+        }
     }
-    Ok(pairs)
+    Ok((pairs, against_contig))
 }
 
 struct TempFilenames(Vec<PathBuf>);
 
 impl TempFilenames {
-    fn new(
-        output: &Path,
-        prefix_arg: &Option<PathBuf>,
-        threads: u16,
-    ) -> crate::Result<Self>
-    {
-        if threads <= 1 {
-            return Ok(Self(Vec::new()));
-        }
-
-        let (mut prefix, middle, extension) = if ext::sys::is_tty(output) {
-            let prefix = match prefix_arg.as_ref() {
-                Some(prefix) => prefix,
-                None => {
-                    log::warn!("Storing temporary files using `tmp.*` prefix");
-                    Path::new("tmp")
-                }
-            };
-            // Generate random hex suffix.
-            // No need to initialize new XoshiroRng since we only need one integer, not a sequence of numbers.
-            let mut bytes = [0; 4];
-            getrandom::fill(&mut bytes).unwrap();
-            let rand_suffix = u32::from_le_bytes(bytes);
-            (prefix.to_path_buf(), format!("{:X}.", rand_suffix), "paf")
-        } else {
-            let prefix = match prefix_arg {
-                Some(val) => val.to_path_buf(),
-                None => output.with_extension(""),
-            };
-            let extension = match output.extension().and_then(OsStr::to_str) {
-                Some("gz") => "paf.gz",
-                Some("lz4") => "paf.lz4",
-                _ => "paf",
-            };
-            (prefix, String::new(), extension)
-        };
-
-        if prefix.is_dir() {
-            prefix.push("locityper-align");
-        }
-        Ok(Self((1..threads).map(|i| prefix.with_added_extension(format!("{}{}.{}", middle, i, extension))).collect()))
-    }
-
     /// Skip file deletion.
     fn disarm(&mut self) {
         self.0.clear();
@@ -332,36 +319,104 @@ impl Drop for TempFilenames {
     }
 }
 
+/// Define temporary filenames (first thread, other threads).
+fn define_temporary_filenames(
+    out_filename: &Path,
+    opt_prefix: &Option<PathBuf>,
+    threads: u16
+) -> crate::Result<(PathBuf, Vec<PathBuf>)> {
+    let (first_filename, mut prefix, middle, extension) = if ext::sys::is_tty(out_filename) {
+        let prefix = match opt_prefix {
+            Some(prefix) => prefix,
+            None => {
+                log::warn!("Storing temporary files using `tmp.*` prefix");
+                Path::new("tmp")
+            }
+        };
+        // Generate random hex suffix.
+        // No need to initialize new XoshiroRng since we only need one integer, not a sequence of numbers.
+        let mut bytes = [0; 4];
+        getrandom::fill(&mut bytes).unwrap();
+        let rand_suffix = u32::from_le_bytes(bytes);
+        (out_filename.to_path_buf(), prefix.to_path_buf(), format!("{:X}.", rand_suffix), "paf.tmp".to_string())
+    } else {
+        let prefix = match opt_prefix {
+            Some(val) => val.to_path_buf(),
+            None => out_filename.with_extension(""),
+        };
+        let extension = match out_filename.extension() {
+            None => "paf.tmp".to_string(),
+            Some(e) => {
+                match e.to_str() {
+                    Some("paf") => "paf.tmp".to_string(),
+                    Some(s) => format!("tmp.{}", s),
+                    None => return Err(crate::Error::Utf8("output filename",
+                        out_filename.as_os_str().as_encoded_bytes().to_vec())),
+                }
+            }
+        };
+        (out_filename.with_added_extension(&extension), prefix, String::new(), extension)
+    };
+
+    if prefix.is_dir() {
+        prefix.push("locityper-align");
+    }
+    let oth_filenames = (2..=threads).map(|i| prefix.with_added_extension(format!("{}{}.{}", middle, i, extension)))
+        .collect();
+    Ok((first_filename, oth_filenames))
+}
+
+pub(super) fn align(
+    contig_set: Arc<ContigSet>,
+    pairs: Vec<(ContigId, ContigId)>,
+    against_contig: Vec<bool>,
+    output: &Path,
+    prefix: &Option<PathBuf>,
+    threads: u16,
+    params: &seq::align::Params,
+) -> crate::Result<()> {
+    if !ext::sys::is_tty(output) && output.exists() {
+        std::fs::remove_file(output).map_err(add_path!(output))?;
+    }
+    let threads = usize::from(threads).min(pairs.len()) as u16;
+    let (first_filename, oth_filenames) = define_temporary_filenames(output, prefix, threads)?;
+    let mut files = Vec::with_capacity(usize::from(threads));
+    files.push(ext::sys::create(&first_filename)?);
+    writeln!(files[0], "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
+        params.div_k, params.div_w, params.thresh_div,
+        params.backbone_str(), params.accuracy, params.max_gap).map_err(add_path!(output))?;
+
+    // Create output file now, this way we are sure it can be opened.
+    let mut temp_filenames = TempFilenames(oth_filenames);
+    for filename in &temp_filenames.0 {
+        files.push(ext::sys::create(filename)?);
+    }
+
+    seq::align::align_sequences(contig_set, pairs, against_contig, params, threads, files)?;
+    ext::sys::merge_files(&first_filename, &temp_filenames.0)?;
+    temp_filenames.disarm();
+    if first_filename != output {
+        std::fs::rename(&first_filename, output).map_err(add_path!(first_filename, output))?;
+    }
+    Ok(())
+}
+
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let args = parse_args(argv)?.validate()?;
     super::greet();
     let timer = Instant::now();
 
-    let mut fasta_reader = fastx::Reader::from_path(args.input.as_ref().unwrap())?;
-    let entries = fasta_reader.read_named_seqs()?;
-    let pairs = load_pairs(&args, &entries)?;
+    let contig_set = ContigSet::load("Align-set", args.input.as_ref().expect("Input filename must be Some"))
+        .map(Arc::new)?;
+    let (pairs, against_contig) = load_pairs(contig_set.contigs(), &args)?;
     if pairs.is_empty() {
         return Err(error!(InvalidInput, "No alignments to compute"));
     }
-    log::info!("Align {} pairs across {} sequences", pairs.len(), entries.len());
-    let threads = usize::from(args.threads).min(pairs.len()) as u16;
 
-    let mut files = Vec::with_capacity(usize::from(threads));
-    let out_filename = args.output.as_ref().unwrap();
-    files.push(ext::sys::create(out_filename)?);
-    writeln!(files[0], "# minimizers={},{}; max_divergence={:.5}; backbone-ks={}; accuracy={}; max-gap={}",
-        args.params.div_k, args.params.div_w, args.params.thresh_div,
-        args.params.backbone_str(), args.params.accuracy, args.params.max_gap).map_err(add_path!(out_filename))?;
-
-    // Create output file now, this way we are sure it can be opened.
-    let mut temp_filenames = TempFilenames::new(out_filename, &args.prefix, threads)?;
-    for filename in &temp_filenames.0 {
-        files.push(ext::sys::create(filename)?);
-    }
-
-    dist::align_sequences(entries, pairs, &args.params, threads, files)?;
-    ext::sys::merge_files(out_filename, &temp_filenames.0)?;
-    temp_filenames.disarm();
+    log::info!("Align {} pairs across {} sequences", pairs.len(), contig_set.len());
+    align(contig_set, pairs, against_contig,
+        args.output.as_ref().expect("Output path must be defined"), &args.prefix,
+        args.threads, &args.params)?;
 
     log::info!("Success! Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())

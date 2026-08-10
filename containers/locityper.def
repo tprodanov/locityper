@@ -3,7 +3,7 @@ From: rust:1.92-slim-trixie
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v1.6.5
+    Version v1.7.0
 
 %post
     PREFIX=/usr/local
@@ -51,6 +51,7 @@ From: rust:1.92-slim-trixie
     cp target/release/strobealign "${PREFIX}/bin"
 
     cd /repos
+    # git clone --single-branch --branch beta https://github.com/tprodanov/locityper
     git clone https://github.com/tprodanov/locityper
     cd locityper
     git clone https://github.com/smarco/WFA2-lib WFA2

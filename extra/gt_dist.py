@@ -309,7 +309,7 @@ def main():
     distances = Distances(args.discarded, args.input)
 
     max_entries = args.max_entries or sys.maxsize
-    with common.open(args.output, 'w') as out:
+    with common.open(args.output, 'wt') as out:
         out.write(f'# {" ".join(sys.argv)}\n')
         out.write('target\tquery\tloo\tedit_dist\taln_size\tdivergence\tqv\n')
         calc_gt_distances(genotypes, distances, out, max_entries)

@@ -161,3 +161,43 @@ macro_rules! impl_pretty_int {
 impl_pretty_int!(PrettyU32, u32);
 impl_pretty_int!(PrettyU64, u64);
 impl_pretty_int!(PrettyUsize, usize);
+
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum YesNo {
+    No,
+    Yes,
+}
+
+impl From<bool> for YesNo {
+    fn from(val: bool) -> Self {
+        if val { Self::Yes } else { Self::No }
+    }
+}
+
+impl Into<bool> for YesNo {
+    fn into(self) -> bool {
+        self == Self::Yes
+    }
+}
+
+impl std::str::FromStr for YesNo {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match &s.to_lowercase() as &str {
+            "y" | "yes" | "true" => Ok(Self::Yes),
+            "n" | "no" | "false" => Ok(Self::No),
+            _ => Err(format!("Could not parse yes/no from `{}`", s)),
+        }
+    }
+}
+
+impl Display for YesNo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Yes => write!(f, "yes"),
+            Self::No => write!(f, "no"),
+        }
+    }
+}

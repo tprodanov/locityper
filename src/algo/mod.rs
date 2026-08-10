@@ -1,5 +1,6 @@
 pub mod loess;
 pub mod bisect;
+pub mod dom_set;
 
 // Use these types instead of the default Hash Map.
 

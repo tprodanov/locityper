@@ -98,7 +98,7 @@ def main():
         common.mkdir(args.output)
 
     if args.out_csv:
-        out_csv = common.open(args.out_csv, 'w')
+        out_csv = common.open(args.out_csv, 'wt')
         out_csv.write('locus1\tlocus2\toverlap\tfrac_of1\tfrac_of2\n')
     else:
         out_csv = None

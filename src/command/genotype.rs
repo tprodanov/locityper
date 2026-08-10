@@ -19,8 +19,10 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        self, interv, recruit, fastx, div, Interval,
-        contigs::{ContigId, ContigNames, ContigSet, Genotype},
+        self, interv, recruit, minim_div, Interval,
+        paf::{PafFile, PafParseResult},
+        fastx::{self, FastxRead, SingleRecord},
+        contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
         transfer::HapAlns,
@@ -30,9 +32,9 @@ use crate::{
         err_prof::{EditThresh, EditDistCache},
     },
     ext::{
-        self,
+        self, TriangleMatrix,
         rand::XoshiroRng,
-        fmt::{PrettyU32, PrettyU64, PrettyUsize},
+        fmt::{PrettyU32, PrettyU64, PrettyUsize, YesNo},
     },
     model::{
         self,
@@ -73,6 +75,7 @@ struct Args {
     preproc: Option<PathBuf>,
     databases: Vec<PathBuf>,
     output: Option<PathBuf>,
+    basis: String,
 
     subset_loci: HashSet<String>,
     ploidy: u8,
@@ -100,8 +103,9 @@ struct Args {
     edit_thresh: Option<EditThresh>,
     assgn_params: AssgnParams,
     solvers: Vec<String>,
+    use_paf: bool,
 
-    hap_div: f64,
+    transfer_div: f64,
     transfer_fails: u32,
 }
 
@@ -112,6 +116,7 @@ impl Default for Args {
             preproc: None,
             databases: Vec::new(),
             output: None,
+            basis: "none".to_string(),
 
             subset_loci: HashSet::default(),
             ploidy: 2,
@@ -139,8 +144,9 @@ impl Default for Args {
             edit_thresh: None,
             assgn_params: Default::default(),
             solvers: Vec::new(),
+            use_paf: true,
 
-            hap_div: 0.1,
+            transfer_div: 0.1,
             transfer_fails: 100,
         }
     }
@@ -157,7 +163,8 @@ impl Args {
         validate_param!(self.output.is_some(), "Output directory is not provided (see -o/--output)");
 
         validate_param!(!self.recr_bed.starts_with("~~"),
-            "--recr-bed ~~STR.bed was replaced with --recr-bed @@STR (extension needs to be included as well)");
+            "--recr-bed ~~FILENAME was deprecated in favor of \
+             --recr-bed @@FILENAME.bed (extension needs to be included as well)");
         if self.alt_contig_len > 0 && !self.recr_bed.is_empty() && !self.recr_bed.starts_with("@@") {
             log::debug!("Recruitment BED file (--recr-bed) provided \
                 with non-zero alternative contig len (--recr-alt-len)");
@@ -215,6 +222,12 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Database directory (see {}).\n\
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
         "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " target").underline());
+    println!("    {:KEY$} {:VAL$}  Haplotype basis to speed up read mapping (see {}):\n\
+    {EMPTY}  - {} =  `<database>/loci/*/haplotypes-basis.fa.gz`,\n\
+    {EMPTY}  - {} = all haplotypes `.../haplotypes.fa.gz`  (default),\n\
+        {EMPTY}  - otherwise, use custom `.../haplotypes-basis.{}.fa.gz`.",
+        "-b, --basis".green(), "STR".yellow(), concatcp!(super::PROGRAM, " augment").underline(),
+        "none".yellow(), "auto".yellow(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",
@@ -238,14 +251,14 @@ fn print_help(extended: bool) {
             "--lo, --leave-out".green(), "STR+".yellow());
 
         println!("\n{}", "Alignment recovery:".bold());
-        println!("    {:KEY$} {:VAL$}  Recover alignments from haplotypes with pairwise divergence under\n\
-            {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}\n\
+        println!("    {:KEY$} {:VAL$}  Transfer alignments from haplotypes with pairwise divergence under\n\
+            {EMPTY}  this value [{}]. Requires files <db>/loci/<locus>/{}*\n\
             {EMPTY}  (see {}). Use zero to disable alignment recovery.",
-            "    --hap-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hap_div), paths::LOCUS_PAF,
+            "    --tr-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.transfer_div), paths::LOCUS_PAF_PREF,
             "locityper align".underline());
         println!("    {:KEY$} {:VAL$}  Skip to next alignment whenever alignment tranfer produces high edit\n\
             {EMPTY}  distance {} times [{}]. Use \"inf\" to continue indefinitely.",
-            "    --transf-fails".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.transfer_fails));
+            "    --tr-fails".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.transfer_fails));
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -354,15 +367,17 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(Ln::to_log10(defaults.assgn_params.prob_thresh)));
         println!("    {:KEY$} {:VAL$}  Randomly move read coordinates by at most {} bp [{}].",
             "-t, --tweak".green(), "INT".yellow(), "INT".yellow(), super::fmt_def("auto"));
+        println!("    {:KEY$} {:VAL$}  Use pairwise haplotype alignments (db/loci/*/haplotypes.paf.gz)\n\
+            {EMPTY}  to identify potentially incorrect predictions [{}].",
+            "    --use-paf".green(), "y|n".yellow(), super::fmt_def(YesNo::from(defaults.use_paf)));
     }
 
     println!("\n{}", "Execution arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Number of threads [{}].",
         "-@, --threads".green(), "INT".yellow(), super::fmt_def(defaults.threads));
-    println!("    {:KEY$} {:VAL$}  Rerun mode [{}]. Rerun all loci ({}); do not rerun\n\
-        {EMPTY}  read recruitment ({}); do not rerun completed loci ({}).",
-        "    --rerun".green(), "STR".yellow(), super::fmt_def(defaults.rerun),
-        "all".yellow(), "part".yellow(), "none".yellow());
+    println!("    {:KEY$} {:VAL$}  Rerun everything ({}); do not rerun read recruitment ({});\n\
+        {EMPTY}  or do not rerun completed loci ({}, default).",
+        "    --rerun".green(), "STR".yellow(), "all".yellow(), "part".yellow(), "none".yellow());
     println!("    {:KEY$} {:VAL$}  Stop after one of the steps: {}, {} or {} (default).",
         "    --stop-after".green(), "STR".yellow(),
         "recruit".yellow(), "map".yellow(), "all".yellow());
@@ -418,6 +433,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     args.databases.push(val.parse()?);
                 }
             }
+            Short('b') | Long("basis") => args.basis = parser.value()?.parse()?,
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Long("subset-loci") | Long("loci-subset") => {
                 for val in parser.values()? {
@@ -514,9 +530,9 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("strobealign") => args.strobealign = parser.value()?.parse()?,
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
-
-            Long("hap-div") => args.hap_div = parser.value()?.parse()?,
-            Long("transf-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
+            Long("use-paf") => args.use_paf = parser.value()?.parse::<YesNo>()?.into(),
+            Long("tr-div") => args.transfer_div = parser.value()?.parse()?,
+            Long("tr-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -534,26 +550,6 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
         }
     }
     Ok(args)
-}
-
-fn locus_name_matches<'a>(path: &'a Path, subset_loci: &HashSet<String>) -> Option<&'a str> {
-    match path.file_name().unwrap().to_str() {
-        None => {
-            log::error!("Skipping directory {:?} - filename is not a valid UTF-8", path);
-            None
-        }
-        Some(name) => {
-            if !subset_loci.is_empty() && !subset_loci.contains(name) {
-                log::trace!("Skipping locus {} (not in the subset loci)", name);
-                None
-            } else if name.starts_with(".") {
-                log::trace!("Skipping hidden directory {}", name);
-                None
-            } else {
-                Some(name)
-            }
-        }
-    }
 }
 
 /// Loads priors from a file with three columns: <locus> <genotype> <log10-prior>.
@@ -726,38 +722,25 @@ pub(super) fn load_loci(
     let mut loci_names = HashSet::default();
 
     for db_path in databases {
-        let db_path = db_path.as_ref().join(paths::LOCI_DIR);
-        if !db_path.exists() {
-            log::error!("Database directory {} does not exist", ext::fmt::path(&db_path));
-            continue;
-        }
-
-        for entry in fs::read_dir(&db_path).map_err(add_path!(db_path))? {
-            let entry = entry.map_err(add_path!(!))?;
-            let file_type = entry.file_type().map_err(add_path!(entry.path()))?;
-            if !(file_type.is_dir() || file_type.is_symlink()) {
-                continue;
-            }
-
-            total_entries += 1;
-            let db_locus_dir = entry.path();
-            let Some(name) = locus_name_matches(&db_locus_dir, subset_loci) else { continue };
-            if !db_locus_dir.join(paths::SUCCESS).exists() {
-                log::error!("Skipping directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
+        let loci_subdirs = super::add::load_loci_subdirs(db_path.as_ref())?;
+        total_entries += loci_subdirs.len();
+        for (name, db_locus_dir) in loci_subdirs {
+            if !subset_loci.is_empty() && !subset_loci.contains(&name) {
+                log::trace!("Skipping locus {} (not in the subset loci)", name);
                 continue;
             }
             if !loci_names.insert(name.to_owned()) {
-                log::error!("Duplicate locus {} in the database, ignoring second instance", name);
+                log::error!("Duplicate locus {} in the database, ignoring the second instance", name);
                 continue;
             }
-            let out_locus_dir = out_loci_dir.join(name);
+            let out_locus_dir = out_loci_dir.join(&name);
             if !rerun.prepare_and_clean_dir(&out_locus_dir, |path| clean_dir(path, &mut n_warnings))? {
                 continue;
             }
 
             let fasta_fname = db_locus_dir.join(paths::LOCUS_FASTA);
-            let kmers_fname = db_locus_dir.join(paths::KMERS);
-            let mut locus_data = match ContigSet::load_with_kmer_counts(name, &fasta_fname, &kmers_fname) {
+            let kmers_fnames = [db_locus_dir.join(paths::KMERS_BR), db_locus_dir.join(paths::KMERS_LZ4)];
+            let mut locus_data = match ContigSet::load_with_kmer_counts(&name, &fasta_fname, &kmers_fnames) {
                 Ok((set, kmer_counts)) => LocusData::new(set, kmer_counts, &db_locus_dir, &out_locus_dir),
                 Err(e) => {
                     log::error!("Could not load locus information from {}: {}",
@@ -766,8 +749,9 @@ pub(super) fn load_loci(
                 }
             };
             if !leave_out.is_empty() {
-                let (ixs, new_set) = locus_data.set.extract_subset(leave_out,
-                    &db_locus_dir.join(paths::DISCARDED_HAPS))?;
+                let disc_haps = DiscardedHaplotypes::load_if_present(&db_locus_dir.join(paths::DISCARDED_HAPS),
+                    locus_data.set.contigs())?;
+                let (ixs, new_set) = locus_data.set.extract_subset(leave_out, &disc_haps)?;
                 locus_data.set = Arc::new(new_set);
                 if ixs.len() != locus_data.init_nhaps {
                     locus_data.kmer_counts = locus_data.kmer_counts.thin_out(ixs.iter().copied());
@@ -1020,25 +1004,61 @@ fn create_mapping_command(
     cmd
 }
 
+/// Based on the basis/leave-out arguments returns a path to the fasta file, as well as a flag
+/// indicating whether the file needs to be deleted later.
+fn get_mapping_fasta_filename(
+    locus: &LocusData,
+    args: &Args,
+) -> crate::Result<(PathBuf, bool)> {
+    let full_fname = locus.db_dir.join(paths::LOCUS_FASTA);
+    let (mut filename, is_full) = match &args.basis as &str {
+        "none" => (full_fname.clone(), true),
+        "auto" => (locus.db_dir.join(paths::DEFAULT_BASIS_FASTA), false),
+        s => (locus.db_dir.join(format!("haplotypes-basis.{}.fa.gz", s)), false),
+    };
+    if !is_full && !filename.exists() {
+        log::warn!("Cannot find basis haplotypes {}, using full file", ext::fmt::path(filename));
+        filename = full_fname;
+    }
+    if !filename.exists() {
+        return Err(error!(InvalidInput, "Haplotypes file {} does not exist", ext::fmt::path(filename)));
+    }
+
+    if !args.leave_out.is_empty() {
+        if is_full {
+            // Create a new FASTA without left-out haplotypes.
+            let new_fasta_filename = locus.out_dir.join("haplotypes.fa");
+            log::info!("    Copying non-left-out haplotypes to {}", ext::fmt::path(&new_fasta_filename));
+            let mut fasta_writer = ext::sys::create_file(&new_fasta_filename)?;
+            for (name, seq) in izip!(locus.set.contigs().names(), locus.set.seqs()) {
+                seq::write_multiline_fasta(&mut fasta_writer, name.as_bytes(), seq)
+                    .map_err(add_path!(new_fasta_filename))?;
+            }
+            return Ok((new_fasta_filename, true));
+        } else {
+            // Validate that only relevant haplotypes are in the basis.
+            let mut fasta_reader = fastx::Reader::from_path(&filename)?;
+            let mut record = Default::default();
+            while fasta_reader.read_next(&mut record)? {
+                let name = record.name_str()?;
+                if !locus.set.contigs().contains(name) {
+                    return Err(error!(InvalidInput, "Basis haplotypes file {} contains left-out haplotypes. \
+                        Please, either use --basis none, or leave out haplotypes during basis construction",
+                        ext::fmt::path(&filename)));
+                }
+            }
+        }
+    }
+    Ok((filename, false))
+}
+
 fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args: &Args) -> crate::Result<()> {
     if filenames.aln_filename.exists() {
         log::info!("    Skipping read mapping");
         return Ok(());
     }
 
-    let in_fasta: PathBuf = if args.leave_out.is_empty() {
-        locus.db_dir.join(paths::LOCUS_FASTA)
-    } else {
-        let fasta_filename = locus.out_dir.join("haplotypes.fa");
-        log::info!("    Copying left-out haplotypes to {}", ext::fmt::path(&fasta_filename));
-        let mut fasta_writer = ext::sys::create_file(&fasta_filename)?;
-        for (name, seq) in izip!(locus.set.contigs().names(), locus.set.seqs()) {
-            seq::write_multiline_fasta(&mut fasta_writer, name.as_bytes(), seq)
-                .map_err(add_path!(fasta_filename))?;
-        }
-        fasta_filename
-    };
-
+    let (in_fasta, delete_after) = get_mapping_fasta_filename(locus, args)?;
     log::info!("    Mapping reads to {}", ext::fmt::path(&in_fasta));
     let start = Instant::now();
     let mut mapping_cmd = create_mapping_command(&in_fasta, &filenames.reads_filename, bg_distr.seq_info(),
@@ -1067,7 +1087,7 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
     log::debug!("    Finished in {}", ext::fmt::Duration(start.elapsed()));
     fs::rename(&filenames.tmp_aln_filename, &filenames.aln_filename)
         .map_err(add_path!(filenames.tmp_aln_filename, filenames.aln_filename))?;
-    if !args.leave_out.is_empty() {
+    if delete_after {
         fs::remove_file(&in_fasta).map_err(add_path!(in_fasta))?;
     }
     Ok(())
@@ -1107,6 +1127,37 @@ fn generate_genotypes(
     }
 }
 
+/// Go through the haplotype-haplotype alignments, and store `HapAlns` and matrix of edit distances, when needed.
+fn process_paf(
+    paf_filename: &Path,
+    contigs: &ContigNames,
+    args: &Args,
+) -> crate::Result<(Option<Arc<HapAlns>>, Option<TriangleMatrix<Option<u32>>>)> {
+    let mut opt_hap_alns = if args.transfer_div > 0.0 {
+        Some(HapAlns::new(contigs.len(), args.transfer_fails, args.transfer_div))
+    } else { None };
+    let mut contig_distances = if args.use_paf { Some(TriangleMatrix::new(contigs.len(), None)) } else { None };
+    if opt_hap_alns.is_none() && contig_distances.is_none() {
+        return Ok((None, None));
+    }
+
+    let mut paf_file = ext::sys::open(paf_filename).map(PafFile::new)?;
+    while let Some(entry) = paf_file.next_wo_tags(contigs)? {
+        let PafParseResult::Entry(mut entry) = entry else { continue };
+        if entry.query_id() == entry.target_id() || entry.cigar().is_none() { continue };
+        if let Some(dists) = &mut contig_distances && let Some(d) = entry.edit_distance() {
+            *dists.get_symmetric_mut(entry.query_id().ix(), entry.target_id().ix()) = Some(d);
+        }
+        if let Some(hap_alns) = &mut opt_hap_alns {
+            hap_alns.add(&mut entry, contigs);
+        }
+    }
+    if let Some(hap_alns) = &mut opt_hap_alns {
+        hap_alns.sort_best_ixs();
+    }
+    Ok((opt_hap_alns.map(Arc::new), contig_distances))
+}
+
 fn analyze_locus(
     locus: &LocusData,
     filenames: &Filenames,
@@ -1136,10 +1187,14 @@ fn analyze_locus(
     let contig_infos = ContigInfos::new(&locus.set, &locus.kmer_counts, explicit_weights,
         bg_distr.depth(), &args.assgn_params, windows_writer).map(Arc::new)?;
 
-    let paf_filename = locus.db_dir.join(paths::LOCUS_PAF);
-    let hap_alns = if args.hap_div > 0.0 && paf_filename.exists() {
-        HapAlns::load(&paf_filename, &locus.set.contigs(), args.hap_div, args.transfer_fails)?.map(Arc::new)
-    } else { None };
+    let opt_paf_fname = paths::LOCUS_PAFS.iter()
+        .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
+    let (hap_alns, mut contig_distances) = if let Some(paf_fname) = opt_paf_fname {
+        process_paf(&paf_fname, contigs, args)?
+    } else {
+        (None, None)
+    };
+    let true_edit_distances = contig_distances.is_some();
 
     let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
     let dbg_writers = if args.debug >= DebugLvl::Full {
@@ -1160,8 +1215,8 @@ fn analyze_locus(
         solve::Genotyping::empty_result(locus.set.tag().to_string(), vec![solve::GenotypingWarning::NoReads])
     } else {
         if bg_distr.insert_distr().is_paired_end() && args.debug >= DebugLvl::Full {
-            let read_pairs_filename = locus.out_dir.join("read_pairs.csv.gz");
-            let pairs_writer = ext::sys::create_gzip(&read_pairs_filename)?;
+            let read_pairs_filename = locus.out_dir.join("read_pairs.csv.br");
+            let pairs_writer = ext::sys::create_brotli(&read_pairs_filename)?;
             all_alns.write_read_pair_info::<false>(pairs_writer, contigs).map_err(add_path!(read_pairs_filename))?;
         }
 
@@ -1171,23 +1226,21 @@ fn analyze_locus(
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
 
-        // [TODO] Do not use distances since they are not that useful.
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
-        let contig_distances = if dist_filename.exists() {
+        if contig_distances.is_none() && dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
-            let (_k, _w, dists) = div::load_divergences(dist_file, &dist_filename, locus.init_nhaps)?;
-            match &locus.keep_ixs {
-                Some(ixs) if ixs.len() != dists.side() => Some(dists.thin_out(ixs)),
-                _ => Some(dists),
-            }
-        } else {
-            None
-        };
+            let (_k, _w, dists) = minim_div::load_divergences_and_convert(
+                dist_file, &dist_filename, locus.init_nhaps, Some)?;
+            contig_distances = Some(dists);
+        }
+        if let Some(dists) = &mut contig_distances && let Some(ixs) = &locus.keep_ixs {
+            *dists = dists.thin_out(ixs);
+        }
 
         let data = Arc::new(solve::Data {
             scheme: Arc::clone(scheme),
             contigs: Arc::clone(contigs),
-            contig_distances,
+            contig_distances, true_edit_distances,
             distr_cache: Arc::clone(distr_cache),
             assgn_params: args.assgn_params.clone(),
             debug: args.debug,

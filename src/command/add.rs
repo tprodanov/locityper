@@ -20,11 +20,11 @@ use crate::{
         self,
         TriangleMatrix,
         vec::IterExt,
-        fmt::PrettyU32,
+        fmt::{PrettyU32, YesNo},
     },
     seq::{
         self, NamedInterval, Interval, ContigNames, NamedSeq,
-        panvcf, fastx, div,
+        panvcf, fastx, minim_div,
         contigs::{self, GenomeVersion},
         kmers::{self, Kmer},
         counts::{JfKmerGetter, KmerCount},
@@ -46,6 +46,7 @@ struct Args {
     moving_window: u32,
     ignore_overlaps: bool,
 
+    calculate_div: bool,
     div_k: u8,
     div_w: u8,
     unknown_frac: f64,
@@ -72,6 +73,7 @@ impl Default for Args {
             moving_window: 500,
             ignore_overlaps: false,
 
+            calculate_div: false,
             div_k: 15,
             div_w: 15,
             unknown_frac: 0.0001,
@@ -162,6 +164,8 @@ fn print_help() {
         "-u, --unknown".green(), "NUM".yellow(), super::fmt_def_f64(defaults.unknown_frac));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
+    println!("    {:KEY$} {:VAL$}  Calculate minimizer divergence between haplotypes [{}].",
+        "    --calc-div".green(), "y|n".yellow(), super::fmt_def(YesNo::from(defaults.calculate_div)));
     println!("    {}   {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
         "-m, --minimizer".green(), "INT INT".yellow(),
         super::fmt_def(defaults.div_k), super::fmt_def(defaults.div_w));
@@ -228,6 +232,7 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
             }
             Short('w') | Long("window") => args.moving_window = parser.value()?.parse::<PrettyU32>()?.get(),
             Short('u') | Long("unknown") => args.unknown_frac = parser.value()?.parse()?,
+            Long("calc-div") => args.calculate_div = parser.value()?.parse::<YesNo>()?.into(),
             Short('m') | Long("minimizer") | Long("minimizers") =>
             {
                 args.div_k = parser.value()?.parse()?;
@@ -254,9 +259,44 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
     Ok(args)
 }
 
+/// For a database directory, iterates over all `loci/*` subdirs, checks with `subset_loci` (if not empty)
+/// and returns a vector of subdirectory + locus name.
+pub fn load_loci_subdirs(db_dir: &Path) -> crate::Result<Vec<(String, PathBuf)>> {
+    let loci_dir = db_dir.join(paths::LOCI_DIR);
+    if !loci_dir.exists() {
+        return Err(error!(InvalidInput, "Database directory {} does not exist", ext::fmt::path(&loci_dir)));
+    }
+
+    let mut res = Vec::new();
+    for entry in std::fs::read_dir(&loci_dir).map_err(add_path!(loci_dir))? {
+        let entry = entry.map_err(add_path!(!))?;
+        let file_type = entry.file_type().map_err(add_path!(entry.path()))?;
+        if !(file_type.is_dir() || file_type.is_symlink()) {
+            continue;
+        }
+
+        let db_locus_dir = entry.path();
+        let Some(name) = db_locus_dir.file_name().unwrap().to_str() else {
+            log::error!("Skipping directory {:?} - filename is not a valid UTF-8", db_locus_dir);
+            continue
+        };
+        if !db_locus_dir.join(paths::SUCCESS).exists() {
+            log::error!("Skipping database directory {} (success file missing)", ext::fmt::path(&db_locus_dir));
+            continue;
+        }
+        let name = name.to_owned();
+        if name.starts_with(".") {
+            log::trace!("Skipping hidden directory {}", name);
+            continue;
+        }
+        res.push((name, db_locus_dir));
+    }
+    Ok(res)
+}
+
 /// Loads named intervals from a list of loci and a list of BED files. Names must not repeat.
 /// Additionally, returns optional FASTA filename for each locus.
-fn load_loci(
+fn parse_loci(
     contigs: &Arc<ContigNames>,
     loci: &[(String, String, Option<PathBuf>)],
     bed_files: &[PathBuf],
@@ -567,15 +607,19 @@ fn process_alleles(
         return Ok(());
     }
 
-    log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
-    let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
-    let divergences = div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
-    let divergences = TriangleMatrix::from_linear_data(n_entries, divergences);
-    check_divergencies(locus, &entries, &divergences, args.variants.is_some());
-    let dist_filename = locus_dir.join(paths::DISTANCES);
-    let dist_file = ext::sys::create_file(&dist_filename)?;
-    div::write_divergences(dist_file, args.div_k, args.div_w, &divergences, |(int_div, _fl_div)| *int_div)
-        .map_err(add_path!(dist_filename))?;
+    if args.calculate_div {
+        log::info!("    Calculating sequence divergence for {} haplotypes", n_entries);
+        let all_pairs: Vec<_> = TriangleMatrix::indices_u32(n_entries).collect();
+        let divergences = minim_div::minimizer_divergences(&entries, &all_pairs, args.div_k, args.div_w, args.threads);
+        let divergences = TriangleMatrix::from_linear_data(n_entries, divergences);
+        check_divergencies(locus, &entries, &divergences, args.variants.is_some());
+        let dist_filename = locus_dir.join(paths::DISTANCES);
+        let dist_file = ext::sys::create_file(&dist_filename)?;
+        minim_div::write_divergences(dist_file, args.div_k, args.div_w, &divergences, |(int_div, _fl_div)| *int_div)
+            .map_err(add_path!(dist_filename))?;
+    } else {
+        log::debug!("    Skipping sequence divergence");
+    }
 
     log::info!("    Counting k-mers");
     // Replace Ns with As in the reference sequence.
@@ -598,12 +642,11 @@ fn process_alleles(
     }
     let off_target_counts = kmer_counts.off_target_counts(&seqs, &ref_seq, &ref_counts, ref_n_runs.is_empty());
 
-    let kmers_filename = locus_dir.join(paths::KMERS);
-    let mut kmers_writer = ext::sys::create_lz4_slow(&kmers_filename)?;
+    let kmers_filename = locus_dir.join(paths::KMERS_BR);
+    let mut kmers_writer = ext::sys::create_brotli(&kmers_filename)?;
     // Consecutively save off-target counts and regular counts (if they will sometimes be useful later).
     off_target_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
     kmer_counts.save(&mut kmers_writer).map_err(add_path!(kmers_filename))?;
-    super::write_success_file(locus_dir.join(paths::SUCCESS))?;
     Ok(())
 }
 
@@ -677,8 +720,13 @@ fn add_locus(
     vcf_data: &mut Option<(bcf::IndexedReader, panvcf::HaplotypeNames)>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
-) -> crate::Result<()>
+) -> crate::Result<bool>
 {
+    let lock_filename = locus_dir.join("lock");
+    let Some(lock_file) = ext::sys::LockFile::try_create(lock_filename.clone())? else {
+        log::debug!("Skipping locus {} (locked by {})", locus, ext::fmt::path(&lock_filename));
+        return Ok(false)
+    };
     log::info!("Analyzing {} ({})", locus.name().bold(), locus.interval());
     // VCF file was provided.
     if let Some((vcf_file, hap_names)) = vcf_data {
@@ -718,7 +766,7 @@ fn add_locus(
     } else if let Some(fasta_filename) = alleles_fasta {
         let mut fasta_reader = fastx::Reader::from_path(fasta_filename)?;
         let alleles = fasta_reader.read_named_seqs()?;
-        log::info!("FASTA file contains {} haplotypes", alleles.len());
+        log::info!("    FASTA file contains {} haplotypes", alleles.len());
         discard_leave_out_alleles(alleles, &args.leave_out)
     } else {
         unreachable!("Either VCF file or haplotypes FASTA must be specified")
@@ -730,7 +778,10 @@ fn add_locus(
         log::warn!("    Removed {}/{} haplotypes with Ns", obtained_count - without_ns, obtained_count);
     }
     check_sequences(&allele_seqs, &locus, if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
-    process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)
+    process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)?;
+    lock_file.release()?;
+    super::write_success_file(locus_dir.join(paths::SUCCESS))?;
+    Ok(true)
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
@@ -745,7 +796,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let (contigs, mut fasta_reader) = ContigNames::load_indexed_fasta("REF", args.reference.as_ref().unwrap())?;
     let contigs = Arc::new(contigs);
-    let loci = load_loci(&contigs, &args.loci, &args.bed_files, args.variants.is_none())?;
+    let loci = parse_loci(&contigs, &args.loci, &args.bed_files, args.variants.is_none())?;
     let mut vcf_data = if let Some(vcf_filename) = &args.variants {
         let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
         let ref_name = args.ref_name.as_ref().map(String::clone)
@@ -761,26 +812,30 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let total = loci.len();
     let mut failed = 0;
+    let mut skipped = 0;
     for (locus, alleles_fasta) in loci.into_iter() {
         let locus_dir = loci_dir.join(locus.name());
         if !super::Rerun::from_force(args.force).prepare_dir(&locus_dir)? {
+            skipped += 1;
             continue;
         }
-        let res = add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader,
-            &mut vcf_data, &kmer_getter, &args);
-        if let Err(e) = res {
-            log::error!("Error while analyzing locus {}:\n        {}", locus, e.display());
-            failed += 1;
+        match add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader,
+            &mut vcf_data, &kmer_getter, &args)
+        {
+            Ok(true) => {}
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                log::error!("Error while analyzing locus {}:\n        {}", locus, e.display());
+                failed += 1;
+            }
         }
     }
 
     let succeed = total - failed;
-    if succeed == 0 {
-        log::error!("Failed to add all {} loci", failed);
-    } else if failed > 0 {
-        log::warn!("Successfully added {} loci, failed to add {} loci", succeed, failed);
+    if succeed == 0 && failed > 0 {
+        log::error!("Failed to add all {} loci (skipped {} loci)", failed, skipped);
     } else {
-        log::info!("Successfully added {} loci", succeed);
+        log::info!("Completed {} loci, skipped {}, errors in {} loci", succeed, skipped, failed);
     }
     log::info!("Total time: {}", ext::fmt::Duration(timer.elapsed()));
     Ok(())

@@ -4,6 +4,7 @@ use std::{
 };
 
 /// Upper triangle matrix (i < j), diagonal is excluded.
+#[derive(Clone)]
 pub struct TriangleMatrix<T> {
     side: usize,
     data: Vec<T>,

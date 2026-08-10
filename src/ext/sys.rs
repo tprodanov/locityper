@@ -21,6 +21,25 @@ pub fn find_exe(p: impl AsRef<Path>) -> crate::Result<PathBuf> {
     which::which(p.as_ref()).map_err(|_| Error::NoExec(p.as_ref().to_owned()))
 }
 
+/// 4Mb buffer.
+const BUFFER_SIZE_4MB: usize = 4_194_304;
+
+// #[inline]
+// pub fn open_gzip(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
+//     BufReader::new(MultiGzDecoder::new(stream))
+// }
+
+// #[inline]
+// pub fn open_lz4(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
+//     lz4::Decoder::new(stream).map_err(add_path!(filename)).map(BufReader::new)
+// }
+
+/// Opens compressed brotli file. Cannot operate on a stream because there are no magic bytes at the start.
+pub fn open_brotli(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
+    let f = File::open(filename).map_err(add_path!(filename))?;
+    Ok(BufReader::new(brotli::Decompressor::new(f, BUFFER_SIZE_4MB)))
+}
+
 /// Guesses compression type (gzip | lz4 | nothing) and returns decompressed stream.
 fn decompress_stream(
     mut stream: BufReader<impl Read + Send + 'static>,
@@ -48,9 +67,23 @@ pub fn open(filename: impl AsRef<Path>) -> crate::Result<Box<dyn BufRead + Send>
     let filename = filename.as_ref();
     if filename == OsStr::new("-") || filename == OsStr::new("/dev/stdin") {
         decompress_stream(BufReader::new(stdin()), filename)
+    } else if filename.extension() == Some(OsStr::new("br")) {
+        open_brotli(filename).map(|stream| Box::new(stream) as Box<dyn BufRead + Send>)
     } else {
         decompress_stream(BufReader::new(File::open(filename).map_err(add_path!(filename))?), filename)
     }
+}
+
+/// Opens first of the filenames that exists.
+/// Returns io::NotFound when all filenames fail.
+pub fn open_first_of(filenames: &[impl AsRef<Path>]) -> crate::Result<Box<dyn BufRead + Send>> {
+    for filename in filenames {
+        if filename.as_ref().exists() {
+            return open(filename);
+        }
+    }
+    Err(crate::Error::Io(io::Error::new(io::ErrorKind::NotFound, "None of the files exist"),
+        filenames.iter().map(|filename| filename.as_ref().to_path_buf()).collect()))
 }
 
 /// Opens file that is not compressed. It also should not be - (synonym for /dev/stdin).
@@ -164,15 +197,31 @@ pub fn create_lz4_slow(filename: &Path) -> crate::Result<AutoFinishLz4<BufWriter
     create_lz4(filename, 7)
 }
 
-// fn create_xz(filename: &Path, level: u32) -> crate::Result<liblzma::AutoFinishXzEncoder<File>> {
-//     let file = create_file(filename)?;
-//     Ok(liblzma::write::XzEncoder::new(create_file(filename)?, level).auto_finish())
-// }
+pub type BrFile = brotli::CompressorWriter<File>;
+
+pub fn create_brotli_with_lvl(filename: &Path, compression: u8) -> crate::Result<BrFile> {
+    let file = File::create(filename).map_err(add_path!(filename))?;
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: i32::from(compression),
+        large_window: true,
+        catable: true,
+        appendable: true,
+        lgwin: 24,
+        size_hint: 0x40000000, // 1 Gb
+        ..Default::default()
+    };
+    Ok(brotli::CompressorWriter::with_params(file, BUFFER_SIZE_4MB, &params))
+}
+
+#[inline]
+pub fn create_brotli(filename: &Path) -> crate::Result<BrFile> {
+    create_brotli_with_lvl(filename, 5)
+}
 
 /// Creates buffered output file.
 pub fn create_file(filename: &Path) -> crate::Result<BufWriter<File>> {
     File::create(filename).map_err(add_path!(filename))
-        .map(|w| BufWriter::with_capacity(131_072, w)) // Set buffer capacity to 128 kb.
+        .map(|w| BufWriter::with_capacity(BUFFER_SIZE_4MB, w))
 }
 
 /// Based on extension, create file.
@@ -184,6 +233,7 @@ pub fn create(filename: &Path) -> crate::Result<Box<dyn Write + Send>> {
         match filename.extension().and_then(OsStr::to_str) {
             Some("gz") => Ok(Box::new(create_gzip(filename)?)),
             Some("lz4") => Ok(Box::new(create_lz4_slow(filename)?)),
+            Some("br") => Ok(Box::new(create_brotli(filename)?)),
             _ => Ok(Box::new(create_file(filename)?)),
         }
     }
@@ -203,14 +253,6 @@ pub fn filenames_with_ext(dir: &Path, ext: impl AsRef<OsStr>) -> crate::Result<V
         }
     }
     Ok(res)
-}
-
-/// Returns a path with a new suffix appended to the end.
-pub fn path_append(path: &Path, suffix: impl AsRef<OsStr>) -> PathBuf {
-    // NOTE: see future function PathBuf::add_extension
-    let mut os_string = path.as_os_str().to_owned();
-    os_string.push(suffix.as_ref());
-    os_string.into()
 }
 
 /// Returns true if the path is -, starts with /dev/ or starts with proc.
@@ -257,6 +299,16 @@ pub fn merge_files(mut fname1: &Path, filenames: &[PathBuf]) -> crate::Result<()
             .collect::<crate::Result<()>>()?;
     }
     Ok(())
+}
+
+/// Appends `tmp` to between extensions n-1 and n.
+pub fn temp_filename(filename: &Path) -> PathBuf {
+    let mut new_filename = filename.to_path_buf();
+    new_filename.set_extension("tmp");
+    if let Some(old_extension) = filename.extension() {
+        new_filename.add_extension(old_extension);
+    }
+    new_filename
 }
 
 /// Returns UTF-8 path basename.
@@ -389,6 +441,51 @@ impl Drop for PipeGuard {
     fn drop(&mut self) {
         if !self.finished {
             log::error!("Subprocess killed:\n{}", self.fail());
+        }
+    }
+}
+
+pub struct LockFile {
+    path: PathBuf,
+    active: bool,
+}
+
+impl LockFile {
+    /// Tries to create a lock file at a given location.
+    /// Returns `None` if file already exists.
+    pub fn try_create(path: PathBuf) -> crate::Result<Option<Self>> {
+        // `create_new` will return an error if file already exists.
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => Ok(Some(Self { path, active: true })),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+            Err(e) => Err(crate::Error::Io(e, vec![path])),
+        }
+    }
+
+    // /// Returns path to the lock file.
+    // pub fn path(&self) -> &Path {
+    //     &self.path
+    // }
+
+    fn release_inner(&mut self) -> crate::Result<()> {
+        if self.active {
+            self.active = false;
+            fs::remove_file(&self.path).map_err(add_path!(&self.path))?;
+        }
+        Ok(())
+    }
+
+    /// Deletes the lock file.
+    pub fn release(mut self) -> crate::Result<()> {
+        assert!(self.active, "Lock file was already released");
+        self.release_inner()
+    }
+}
+
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        if let Err(e) = self.release_inner() {
+            log::warn!("Could not delete lock file {}: {:?}", self.path.display(), e);
         }
     }
 }

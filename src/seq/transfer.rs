@@ -1,86 +1,68 @@
 //! Transfer alignments from one haplotype to another.
 
 use std::{
-    path::Path,
     sync::Arc,
 };
 use crate::{
     seq::{
         Interval,
         contigs::{ContigId, ContigNames, ContigSet},
-        cigar::SearchableCigar,
-        dist::PafFile,
+        cigar::{Cigar, CigarIndex, QueryToRef, RefToQuery},
+        paf::{PafEntry},
         aln::Alignment,
         wfa::Aligner,
     },
     bg::ErrorProfile,
     model::locs::{ReadData, PrelimAlignments},
-    ext::{
-        self,
-        TriangleMatrix,
-    },
+    ext::TriangleMatrix,
 };
 
 /// Haplotype-haplotype alignments.
 pub struct HapAlns {
     /// Alignments from each contig to other contigs.
     /// matrix[i, j] contains alignment where contig i is query, j is reference.
-    aln_matrix: TriangleMatrix<Option<SearchableCigar>>,
-
+    aln_matrix: TriangleMatrix<Option<(Cigar, CigarIndex)>>,
     /// For each contig, contains list of other indices and number of matches.
     /// Inner lists are ordered by decreasing edit distance.
     best_ixs: Vec<Vec<(ContigId, u32)>>,
-
     transfer_fails: u32,
+    max_div: f64,
 }
 
 impl HapAlns {
-    /// Loads alignments from a PAF file, keep <= `n_alns` best alignments per haplotype.
-    /// Returns `None` if no alignments were loaded.
-    pub fn load(
-        filename: &Path,
-        contigs: &ContigNames,
-        max_div: f64,
-        transfer_fails: u32,
-    ) -> crate::Result<Option<Self>> {
-        let mut aln_matrix = TriangleMatrix::new(contigs.len(), None);
-        let mut best_ixs = vec![Vec::new(); contigs.len()];
-        let min_simil = 1.0 - max_div;
-        let mut file = ext::sys::open(filename).map(PafFile::new)?;
-        let mut added_any = false;
-        while let Some(entry) = file.next() {
-            let entry = entry?;
-            let hap1: &str = entry.query_name();
-            let hap2: &str = entry.target_name();
-            let Some(id1) = contigs.try_get_id(hap1) else { continue };
-            let Some(id2) = contigs.try_get_id(hap2) else { continue };
-            if id1 == id2 { continue };
-            // if std::cmp::min(id1, id2).get() != 270 || std::cmp::max(id1, id2).get() != 356 { continue };
-            let matrix_cell = aln_matrix.get_symmetric_mut(id1.ix(), id2.ix());
-            if matrix_cell.is_some() { continue };
-
-            if !entry.full_positive_alignment()? {
-                log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
-                hap1, hap2);
-                continue
-            }
-            let n_matches = entry.n_matches()?;
-            let simil = f64::from(n_matches) / f64::from(entry.aln_len()?);
-            if simil < min_simil { continue };
-            let Some(cigar) = entry.cigar().transpose()? else { continue };
-            *matrix_cell = Some(SearchableCigar::new(&cigar, id1 > id2));
-            best_ixs[id1.ix()].push((id2, n_matches));
-            best_ixs[id2.ix()].push((id1, n_matches));
-            added_any = true;
+    pub fn new(n_contigs: usize, transfer_fails: u32, max_div: f64) -> Self {
+        Self {
+            aln_matrix: TriangleMatrix::new(n_contigs, None),
+            best_ixs: vec![Vec::new(); n_contigs],
+            transfer_fails, max_div,
         }
+    }
 
-        if !added_any {
-            log::warn!("All pairwise haplotype alignments were skipped");
-            return Ok(None);
+    pub fn add(&mut self, entry: &mut PafEntry, contigs: &ContigNames) {
+        let id1 = entry.query_id();
+        let id2 = entry.target_id();
+        let matrix_cell = self.aln_matrix.get_symmetric_mut(id1.ix(), id2.ix());
+        if matrix_cell.is_some() { return };
+
+        if !entry.full_positive_alignment() {
+            log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
+                contigs.get_name(id1), contigs.get_name(id2));
+            return;
         }
+        if entry.divergence().unwrap_or(f64::INFINITY) > self.max_div { return };
+        let Some(mut cigar) = entry.take_cigar() else { return };
+        if id1 > id2 {
+            cigar = cigar.invert();
+        }
+        let cigar_index = CigarIndex::new(&cigar);
+        *matrix_cell = Some((cigar, cigar_index));
+        let n_matches = entry.n_matches();
+        self.best_ixs[id1.ix()].push((id2, n_matches));
+        self.best_ixs[id2.ix()].push((id1, n_matches));
+    }
 
-        best_ixs.iter_mut().for_each(|v| v.sort_by(|a, b| b.1.cmp(&a.1)));
-        Ok(Some(Self { aln_matrix, best_ixs, transfer_fails }))
+    pub fn sort_best_ixs(&mut self) {
+        self.best_ixs.iter_mut().for_each(|v| v.sort_by(|a, b| b.1.cmp(&a.1)));
     }
 
     /// Try to identify any new alignments for a given read/read pair.
@@ -111,16 +93,19 @@ impl HapAlns {
 
             for &(target_contig_id, _) in &self.best_ixs[source_contig_id.ix()] {
                 let target_seq = contig_set.get_seq(target_contig_id);
-                let haps_cigar = self.aln_matrix.get_symmetric(source_contig_id.ix(), target_contig_id.ix())
+                let (haps_cigar, cigar_index) = self.aln_matrix
+                    .get_symmetric(source_contig_id.ix(), target_contig_id.ix())
                     .as_ref().expect("Alignment between haplotypes must exist");
                 let query_to_ref = source_contig_id < target_contig_id;
 
-                let (min_cigar_ix, max_cigar_ix, approx_start) = if query_to_ref {
-                    haps_cigar.find_approx_position::<true>(source_aln_start)
+                let approx_pos = if query_to_ref {
+                    cigar_index.find_approx_position(source_aln_start, QueryToRef)
                 } else {
-                    haps_cigar.find_approx_position::<false>(source_aln_start)
+                    cigar_index.find_approx_position(source_aln_start, RefToQuery)
                 };
-                if let Some(ix) = prelim_alignments.pos_collection().get(read_end, target_contig_id, approx_start) {
+                if let Some(ix) = prelim_alignments.pos_collection()
+                    .get(read_end, target_contig_id, approx_pos.approx_pos)
+                {
                     // Similar position is observed in alignment `ix`. Do not transfer it later.
                     if let Some(v) = seen.get_mut(ix as usize) {
                         *v = true;
@@ -129,11 +114,13 @@ impl HapAlns {
                 }
 
                 let (new_start, new_cigar) = if query_to_ref {
-                    haps_cigar.transfer_alignment::<true>(
-                        source_aln_start, min_cigar_ix, max_cigar_ix, &source_cigar, read_seq, target_seq, aligner)
+                    let offset = cigar_index.find_cigar_offset(source_aln_start, approx_pos, QueryToRef);
+                    haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
+                        aligner, QueryToRef)
                 } else {
-                    haps_cigar.transfer_alignment::<false>(
-                        source_aln_start, min_cigar_ix, max_cigar_ix, &source_cigar, read_seq, target_seq, aligner)
+                    let offset = cigar_index.find_cigar_offset(source_aln_start, approx_pos, RefToQuery);
+                    haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
+                        aligner, RefToQuery)
                 };
                 const MIN_ALN_SIZE: u32 = 50;
                 let cigar_ref_len = new_cigar.ref_len();

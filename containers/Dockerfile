@@ -1,7 +1,7 @@
 FROM rust:1.92-slim-trixie
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.6.5"
+LABEL version="1.7.0"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local
@@ -51,6 +51,7 @@ RUN apt-get update \
     #
     # Building Locityper
     &&  cd /repos \
+    # &&  git clone --single-branch --branch beta https://github.com/tprodanov/locityper \
     &&  git clone https://github.com/tprodanov/locityper \
     &&  git clone https://github.com/smarco/WFA2-lib locityper/WFA2 \
     &&  cargo install --no-track --verbose --root "${PREFIX}" --path locityper \

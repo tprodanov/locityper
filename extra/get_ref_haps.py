@@ -56,7 +56,7 @@ def main():
     args = parser.parse_args()
 
     indir = os.path.join(args.database, 'loci')
-    with common.open(args.output, 'w') as out:
+    with common.open(args.output, 'wt') as out:
         out.write('locus\tsample\thaplotypes\n')
         for locus in os.listdir(indir):
             subdir = os.path.join(indir, locus)

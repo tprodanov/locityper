@@ -29,7 +29,7 @@ use crate::{
         windows::ContigInfos,
     },
     ext::{
-        sys::{GzFile, create_gzip},
+        sys::{BrFile, create_brotli},
     },
 };
 
@@ -267,6 +267,7 @@ impl PosCollection {
 pub(crate) struct PrelimAlignments {
     alns: Vec<Alignment>,
     pos_collection: PosCollection,
+    good_dist: [u32; 2],
     passable_dist: [u32; 2],
     best_edit: [u32; 2],
     best_lik: [f64; 2],
@@ -277,15 +278,20 @@ impl PrelimAlignments {
         Self {
             alns: Vec::new(),
             pos_collection: Default::default(),
+            good_dist: [u32::MAX; 2],
             passable_dist: [u32::MAX; 2],
             best_edit: [u32::MAX; 2],
             best_lik: [f64::NEG_INFINITY; 2],
         }
     }
 
-    #[inline]
-    fn set_passable_dist(&mut self, read_end: ReadEnd, dist: u32) {
-        self.passable_dist[read_end.ix()] = dist;
+    fn set_thresholds(&mut self, read_end: ReadEnd, good_dist: u32, passable_dist: u32) {
+        self.good_dist[read_end.ix()] = good_dist;
+        self.passable_dist[read_end.ix()] = passable_dist;
+    }
+
+    fn best_edit_is_good(&self) -> bool {
+        self.best_edit[0] <= self.good_dist[0] && self.best_edit[1] <= self.good_dist[1]
     }
 
     /// Adds new alignment. Returns false if edit distance is under `passable_dist`.
@@ -349,7 +355,7 @@ impl PrelimAlignments {
         Ok(())
     }
 
-    fn finalize(&mut self) {
+    fn normalize_probs(&mut self) {
         self.alns.iter_mut().for_each(|aln| aln.set_ln_prob(aln.ln_prob() - self.best_lik[aln.read_end().ix()]));
     }
 
@@ -459,6 +465,8 @@ impl<R: bam::Read> LaggedReader<R> {
 /// until the next primary alignment.
 struct Data<'a> {
     tid2contig: Vec<ContigId>,
+    /// Stores true if haplotypes in the BAM files represent a strict subset of the contig set.
+    strict_subset: bool,
     contig_set: &'a ContigSet,
     contig_infos: &'a ContigInfos,
     err_prof: &'a ErrorProfile,
@@ -479,6 +487,7 @@ impl<'a> Data<'a> {
         Ok(Self {
             are_short_reads: bg_distr.seq_info().technology().are_short_reads(),
             err_prof: bg_distr.error_profile(),
+            strict_subset: tid2contig.len() < contig_set.len(),
             contig_set, contig_infos, tid2contig, edit_dist_cache, params,
         })
     }
@@ -526,7 +535,7 @@ fn read_next_alns<'a>(
         passable_dist += threshold_dist - good_dist;
     }
 
-    prelim_alignments.set_passable_dist(read_end, passable_dist);
+    prelim_alignments.set_thresholds(read_end, threshold_dist, passable_dist);
     if !prelim_alignments.push(aln, data.contig_set.contigs(), data.err_prof) {
         // Primary alignment is not good enough.
         reader.skip_until_primary()?;
@@ -549,7 +558,8 @@ fn read_next_alns<'a>(
     }
 
     let best_edit = prelim_alignments.best_edit[read_end.ix()];
-    if best_edit > threshold_dist {
+    let req_edit = if data.strict_subset { passable_dist } else { threshold_dist };
+    if best_edit > req_edit {
         return Ok(false);
     }
     read_data.weight *= if best_edit <= good_dist { 1.0 } else { (f64::from(good_dist) / f64::from(best_edit)).sqrt() };
@@ -1005,31 +1015,53 @@ fn in_bounds(alns: &[Alignment], boundary: u32, contigs: &ContigNames) -> bool {
 
 #[derive(Default)]
 struct ReadCounts {
-    total: u32,
+    good_reads: u32,
     poorly_mapped: u32,
     out_of_bounds: u32,
     few_kmers: u32,
+
+    original_alns: usize,
+    recovered_alns: usize,
 }
 
 impl ReadCounts {
-    fn to_string(&self, use_reads: usize, is_paired_end: bool) -> String {
-        format!("Use {} read{}s. Discard {} poorly mapped, {} out of bounds and {} with few unique k-mers",
-            use_reads, if is_paired_end { " pair" } else { "" },
-            self.poorly_mapped, self.out_of_bounds, self.few_kmers)
+    fn add(&mut self, oth: &Self) {
+        self.good_reads += oth.good_reads;
+        self.poorly_mapped += oth.poorly_mapped;
+        self.out_of_bounds += oth.out_of_bounds;
+        self.few_kmers += oth.few_kmers;
+
+        self.original_alns += oth.original_alns;
+        self.recovered_alns += oth.recovered_alns;
+    }
+
+    fn total_reads(&self) -> u32 {
+        self.good_reads + self.poorly_mapped + self.out_of_bounds + self.few_kmers
+    }
+
+    fn print_log(&self, is_paired_end: bool, n_contigs: usize) {
+        log::debug!("    Use {} read{}s. Discard {} poorly mapped, {} out of bounds and {} with few unique k-mers",
+            self.good_reads, if is_paired_end { " pair" } else { "" },
+            self.poorly_mapped, self.out_of_bounds, self.few_kmers);
+        let divisor = ((1 + usize::from(is_paired_end)) * n_contigs * self.good_reads as usize) as f64;
+        log::debug!("    Found {:.3} alignments / read / haplotype (loaded {:.3} + recovered {:.3})",
+            (self.original_alns + self.recovered_alns) as f64 / divisor,
+            self.original_alns as f64 / divisor, self.recovered_alns as f64 / divisor,
+        );
     }
 }
 
 #[derive(Default)]
 pub struct DbgWriters {
-    reads: Option<GzFile>,
-    read_kmers: Option<GzFile>,
+    reads: Option<BrFile>,
+    read_kmers: Option<BrFile>,
 }
 
 impl DbgWriters {
     pub fn new(dir: &Path) -> crate::Result<Self> {
-        let mut reads = create_gzip(&dir.join("reads.csv.gz"))?;
+        let mut reads = create_brotli(&dir.join("reads.csv.br"))?;
         writeln!(reads, "read_hash\tread_end\tinterval\tedit_dist\tlik\tread_name").map_err(add_path!(!))?;
-        let mut read_kmers = create_gzip(&dir.join("read_kmers.csv.gz"))?;
+        let mut read_kmers = create_brotli(&dir.join("read_kmers.csv.br"))?;
         writeln!(read_kmers, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
         Ok(Self { reads: Some(reads), read_kmers: Some(read_kmers) })
     }
@@ -1080,10 +1112,8 @@ impl AllAlignments {
 
         let mut counts = ReadCounts::default();
         let mut ungroupped_reads = vec![Vec::new(); usize::from(threads)];
-        let mut n_orig_alns = 0;
         let mut total_index = 0..;
         while reader.has_more() {
-            counts.total += 1;
             let mut read_data = ReadData::default();
             let mut prelim_alignments = PrelimAlignments::new();
             let mut well_mapped = read_next_alns(&data, &mut reader, ReadEnd::First,
@@ -1116,16 +1146,15 @@ impl AllAlignments {
             } else {
                 unique_kmers.calculate_read_weight(&mut read_data, &mut io::sink()).expect("No errors expected");
             }
-            n_orig_alns += prelim_alignments.len();
             ungroupped_reads[total_index.next().unwrap() % threads].push((read_data, prelim_alignments));
         }
-        let divisor = ((1 + usize::from(is_paired_end)) * contig_set.len() * total_index.next().unwrap()) as f64;
-        log::debug!("    Loaded     {:.3} alignments / read / haplotype", n_orig_alns as f64 / divisor);
 
         if opt_hap_alns.as_ref().is_none() {
             log::debug!("    Alignment recovery is disabled (pairwise haplotype alignments required)");
+        } else {
+            log::debug!("    Recovering and groupping alignments");
         }
-        let (all_alns, n_rec_alns) = if threads == 1 {
+        let (all_alns, counts2) = if threads == 1 {
             recover_and_group_alignments(ungroupped_reads.pop().unwrap(), bg_distr, &opt_hap_alns, &contig_infos,
                 &contig_set, params)
         } else {
@@ -1135,23 +1164,20 @@ impl AllAlignments {
                         &contig_infos, &contig_set, &params)))
                     .collect();
                 let mut all_alns = AllAlignments::default();
-                let mut n_rec_alns = 0;
+                let mut counts2 = ReadCounts::default();
                 for handle in handles {
                     let tup = handle.join().expect("Thread failed for unknown reason");
                     all_alns.extend(tup.0);
-                    n_rec_alns += tup.1;
+                    counts2.add(&tup.1);
                 }
-                (all_alns, n_rec_alns)
+                (all_alns, counts2)
             })
         };
+        counts.add(&counts2);
 
-        if opt_hap_alns.is_some() {
-            log::debug!("    Recovered +{:.3} alignments / read / haplotype ({:.3} total)",
-            n_rec_alns as f64 / divisor, (n_rec_alns + n_orig_alns) as f64 / divisor);
-        }
         counts.few_kmers = all_alns.unused_reads.len() as u32;
-        log::debug!("    {}", counts.to_string(all_alns.reads.len(), is_paired_end));
-        if collisions > 2 && collisions * 100 > counts.total {
+        counts.print_log(is_paired_end, contig_set.len());
+        if collisions > 2 && collisions * 100 > counts.total_reads() {
             return Err(error!(RuntimeError, "Too many read name collisions ({}). \
                 Possibly, paired-end reads are processed as single-end reads.", collisions))
         }
@@ -1207,7 +1233,7 @@ impl AllAlignments {
 
 /// If possible, recover additional read alignments; then group read pairs together.
 /// - Returns AllAlignments (that can be combined from different threads),
-/// - number of new recovered alignments.
+/// - Updated read counts.
 fn recover_and_group_alignments(
     prelim_alignments: Vec<(ReadData, PrelimAlignments)>,
     bg_distr: &BgDistr,
@@ -1215,7 +1241,7 @@ fn recover_and_group_alignments(
     contig_infos: &ContigInfos,
     contig_set: &ContigSet,
     params: &super::Params,
-) -> (AllAlignments, usize) {
+) -> (AllAlignments, ReadCounts) {
     // Accuracy under 6 produces CIGARs without =/X.
     const ALIGNER_ACCURACY: u8 = 6;
     // For read alignment, use 10 bp band
@@ -1223,15 +1249,21 @@ fn recover_and_group_alignments(
     let aligner = Aligner::new(Default::default(), ALIGNER_ACCURACY, ALIGNER_BAND, true);
     let is_paired_end = bg_distr.insert_distr().is_paired_end();
     let mut buffer = Vec::with_capacity(16);
+    let mut counts = ReadCounts::default();
 
     let mut all_alns = AllAlignments::default();
-    let mut rec_alns = 0;
     for (read_data, mut read_alignments) in prelim_alignments {
-        if let Some(hap_alns) = opt_hap_alns {
-            rec_alns += hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
+        let original_alns = read_alignments.len();
+        let mut recovered_alns = 0;
+        if read_data.weight >= params.min_weight && let Some(hap_alns) = opt_hap_alns {
+            recovered_alns += hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
                 bg_distr.error_profile());
         }
-        read_alignments.finalize();
+        if !read_alignments.best_edit_is_good() {
+            counts.poorly_mapped += 1;
+            continue;
+        }
+        read_alignments.normalize_probs();
 
         let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
         let groupped_alns = if is_paired_end {
@@ -1243,10 +1275,14 @@ fn recover_and_group_alignments(
         };
         // TODO: Rethink this, reads may be needed for read depth!
         if groupped_alns.weight() >= params.min_weight {
+            counts.good_reads += 1;
+            counts.original_alns += original_alns;
+            counts.recovered_alns += recovered_alns;
             all_alns.reads.push(groupped_alns);
         } else {
+            counts.few_kmers += 1;
             all_alns.unused_reads.push(groupped_alns);
         }
     }
-    (all_alns, rec_alns)
+    (all_alns, counts)
 }

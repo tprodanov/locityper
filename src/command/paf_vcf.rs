@@ -14,14 +14,12 @@ use crate::{
     },
     seq::{
         interv,
-        dist::PafFile,
+        paf::{PafParseResult, PafFile},
         cigar::{Cigar, Operation},
-        contigs::{self, ContigId, ContigNames, ContigSet},
+        contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
     },
-    algo::{
-        bisect,
-        HashMap, IntMap,
-    },
+    algo::{bisect, HashMap},
+    math::ifelse0,
 };
 
 struct Args {
@@ -59,7 +57,7 @@ impl Args {
 }
 
 fn print_help() {
-    const KEY: usize = 16;
+    const KEY: usize = 15;
     const VAL: usize = 4;
     const EMPTY: &'static str = const_format::str_repeat!(" ", KEY + VAL + 5);
 
@@ -77,18 +75,20 @@ fn print_help() {
         "-f, --fasta".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference haplotypes name.",
         "-r, --ref-hap".green(), "STR".yellow());
-    println!("    {:KEY$} {}  Text file with discarded haplotypes [{}].\n\
-        {EMPTY}  {} = (DIRNAME of {})/discarded_haplotypes.txt.",
+    println!("    {:KEY$} {}\n\
+        {EMPTY}  Text file with discarded haplotypes [{}].\n\
+        {EMPTY}  {} = <Directory of {}>/discarded_haplotypes.txt.",
         "-d, --discarded".green(), "FILE|auto|none".yellow(), super::fmt_def("auto"),
         "auto".yellow(), "-f".green());
-    println!("    {:KEY$} {:VAL$}  Two output VCF[.gz] files, first with merged variants\n\
+    println!("    {:KEY$} {:VAL$}\n\
+        {EMPTY}  Two output VCF[.gz] files, first with merged variants\n\
         {EMPTY}  and second (optional) with unmerged variants.",
         "-o, --output".green(), "FILE [FILE]".yellow());
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Adjust variant positions relative to this region [{}].\n\
         {EMPTY}  Should be either {} (take from ref.bed), {},\n\
-        {EMPTY}  `chrom:start`, `chrom:start-end` or a BED file with one entry.",
+        {EMPTY}  `chrom:start-end` or a BED file with one entry.",
         "-R, --region".green(), "STR".yellow(), super::fmt_def("auto"), "auto".yellow(), "none".yellow());
 
     println!("\n{}", "Other arguments:".bold());
@@ -136,10 +136,10 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
 /// Returns chromosome name and 0-based start position.
-fn load_region(s: &str, fasta_filename: &Path) -> crate::Result<Option<(String, u32)>> {
+pub(super) fn load_region(s: &str, fasta_filename: &Path, ref_len: u32) -> crate::Result<Option<(String, u32)>> {
     if s == "none" { return Ok(None) };
 
-    let filename = if s == "auto" {
+    let fname = if s == "auto" {
         Path::new(fasta_filename).parent()
             .ok_or_else(|| error!(RuntimeError, "Cannot get parent directory for {}", s))?
             .join(super::paths::LOCUS_BED)
@@ -148,31 +148,44 @@ fn load_region(s: &str, fasta_filename: &Path) -> crate::Result<Option<(String, 
         let interval_re = Regex::new(interv::INTERVAL_PATTERN).unwrap();
         if let Some(captures) = pos_re.captures(s).or_else(|| interval_re.captures(s)) {
             let chrom = captures[1].to_string();
-            let pos: PrettyU32 = captures[2].parse()
-                .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?;
-            return Ok(Some((chrom, pos.get().strict_sub(1))));
+            let start = captures[2].parse::<PrettyU32>()
+                .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get().strict_sub(1);
+            let end = captures[3].parse::<PrettyU32>()
+                .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get();
+            if end - start != ref_len {
+                return Err(error!(InvalidData,
+                    "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
+                    chrom, start + 1, end, end - start, ref_len));
+            }
+            return Ok(Some((chrom, start)));
         }
         PathBuf::from(s)
     };
 
-    if !filename.exists() {
-        log::error!("Cannot find BED file {}, using relative locus coordinates", filename.display());
+    if !fname.exists() {
+        log::warn!("Cannot find BED file {}, using relative locus coordinates", fname.display());
         return Ok(None);
     }
 
-    let mut lines = ext::sys::open(&filename)?.lines();
-    let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
-        .map_err(add_path!(filename))?;
-    let trimmed_line = line.trim();
-    let mut split = trimmed_line.split('\t');
-    let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+    let mut lines = ext::sys::open(&fname)?.lines();
+    let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
+        .map_err(add_path!(fname))?;
+    let trimmed = line.trim();
+    let mut split = trimmed.split('\t');
+    let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
         .to_string();
-    let pos: u32 = split.next()
-        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})",
-            filename.display(), trimmed_line))?
-        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}",
-            trimmed_line, filename.display()))?;
-    Ok(Some((chrom, pos)))
+    let start: u32 = split.next()
+        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
+        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
+    let end: u32 = split.next()
+        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
+        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
+    if end - start != ref_len {
+        return Err(error!(InvalidData,
+            "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
+            chrom, start + 1, end, end - start, ref_len));
+    }
+    Ok(Some((chrom, start)))
 }
 
 #[derive(Clone, Debug)]
@@ -270,18 +283,18 @@ fn process_haplotype(
             return Err(error!(RuntimeError, "Unexpected operation (M/H) in CIGAR {}", cigar));
         }
         let (cons_query, cons_ref) = op.consumes_query_ref();
-        let qdiff = u32::from(cons_query) * item.len();
-        let rdiff = u32::from(cons_ref) * item.len();
+        let qdiff = ifelse0(cons_query, item.len());
+        let rdiff = ifelse0(cons_ref, item.len());
 
         let mut need_new = true;
         if let Some(last_var) = vars.last_mut() {
-            if last_var.ref_end == rpos && last_var.hap_end == qpos {
-                // Current indel is preceded by a mismatch.
-                last_var.ref_end = rpos + rdiff;
-                last_var.hap_end = qpos + qdiff;
+            if rpos <= last_var.ref_end && qpos <= last_var.hap_end {
+                last_var.ref_end = last_var.ref_end.max(rpos + rdiff);
+                last_var.hap_end = last_var.hap_end.max(qpos + qdiff);
                 need_new = false;
             } else {
-                assert!(last_var.ref_end < rpos && last_var.hap_end < qpos);
+                // Need to check that the new variant does not overlap the previous one on both haplotypes.
+                assert!(rpos > last_var.ref_end && qpos > last_var.hap_end);
             }
         }
 
@@ -348,29 +361,29 @@ fn process_paf(
     var_ranges[ref_id.ix()] = Some(Vec::new());
 
     let mut file = ext::sys::open(paf_filename).map(PafFile::new)?;
-    while let Some(entry) = file.next() {
-        let entry = entry?;
-        let hap1: &str = entry.query_name();
-        let hap2: &str = entry.target_name();
-        let (hap, invert) = if ref_hap == hap1 {
-            (hap2, true)
-        } else if ref_hap == hap2 {
-            (hap1, false)
+    while let Some(entry) = file.next_wo_tags(contigs)? {
+        let mut entry = match entry {
+            PafParseResult::Entry(entry) => entry,
+            PafParseResult::UnknownContig(name) => {
+                log::warn!("Cannot find sequence for haplotype {}", name);
+                continue
+            }
+        };
+        let (hap_id, invert) = if ref_id == entry.query_id() {
+            (entry.target_id(), true)
+        } else if ref_id == entry.target_id() {
+            (entry.query_id(), false)
         } else {
             continue
         };
-        let Some(hap_id) = contigs.try_get_id(hap) else {
-            log::warn!("Cannot find sequence for haplotype {}", hap);
-            continue
-        };
-        if !entry.full_positive_alignment()? {
+        if !entry.full_positive_alignment() {
             log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
-                hap1, hap2);
+                contigs.get_name(hap_id), ref_hap);
             continue
         }
 
-        let Some(mut cigar) = entry.cigar().transpose()? else {
-            log::warn!("CIGAR missing for {} and {}", ref_hap, hap);
+        let Some(mut cigar) = entry.take_cigar() else {
+            log::warn!("CIGAR missing for {} and {}", ref_hap, contigs.get_name(hap_id));
             continue
         };
         if invert {
@@ -378,8 +391,8 @@ fn process_paf(
         }
         let hap_seq = contig_set.get_seq(hap_id);
         if cigar.query_len() != hap_seq.len() as u32 || cigar.ref_len() != ref_seq.len() as u32 {
-            log::error!("Incorrect CIGAR for {} and {} (expected lengths {},{}, got {},{})", ref_hap, hap,
-                cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
+            log::error!("Incorrect CIGAR for {} and {} (expected lengths {},{}, got {},{})",
+                ref_hap, contigs.get_name(hap_id), cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
             continue;
         }
         var_ranges[hap_id.ix()] = Some(process_haplotype(ref_seq, hap_seq, &cigar)?);
@@ -503,7 +516,7 @@ fn combine_variants(
     ref_id: ContigId,
     groupped_haps: &[(String, Vec<Option<usize>>)],
     merged_vcf_filename: &Path,
-    separate_vcf_filename: Option<&Path>,
+    separate_vcf_filename: &Option<PathBuf>,
 ) -> crate::Result<()>
 {
     let mut unique_ranges: Vec<_> = vars.iter()
@@ -541,7 +554,7 @@ fn combine_variants(
 fn group_haplotypes(
     contigs: &ContigNames,
     ref_id: ContigId,
-    disc_haps: &IntMap<ContigId, Vec<(String, bool)>>,
+    disc_haps: &DiscardedHaplotypes,
 ) -> crate::Result<Vec<(String, Vec<Option<usize>>)>>
 {
     // First, regular contig name, with lazy *? specifier.
@@ -568,13 +581,39 @@ fn group_haplotypes(
         if i != ref_id.ix() {
             add(i, contig)?;
         }
-        for (hap, _) in disc_haps.get(&ContigId::new(i)).into_iter().flat_map(|vec| vec.iter()) {
+        for (hap, _) in disc_haps.identical_to(ContigId::new(i)).into_iter().flat_map(|vec| vec.iter()) {
             add(i, hap)?;
         }
     }
     let mut groupped: Vec<_> = map.into_iter().collect();
     groupped.sort_unstable();
     Ok(groupped)
+}
+
+pub(super) fn convert_to_vcf(
+    paf_filename: &Path,
+    contig_set: &ContigSet,
+    disc_haps: &DiscardedHaplotypes,
+    ref_id: ContigId,
+    chrom: &str, shift: u32,
+    out_merged: &Path,
+    out_separate: Option<&Path>,
+) -> crate::Result<()>
+{
+    if !disc_haps.all_identical() {
+        log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
+    }
+    let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
+    let vars = process_paf(paf_filename, &contig_set, ref_id)?;
+    let tmp_merged = ext::sys::temp_filename(out_merged);
+    let tmp_separate = out_separate.map(|p| ext::sys::temp_filename(p));
+    combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps, &tmp_merged, &tmp_separate)?;
+    std::fs::rename(&tmp_merged, out_merged).map_err(add_path!(tmp_merged, out_merged))?;
+    if let Some(tmp_sep) = tmp_separate {
+        let out_sep = out_separate.unwrap();
+        std::fs::rename(&tmp_sep, out_sep).map_err(add_path!(tmp_sep, out_sep))?;
+    }
+    Ok(())
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
@@ -587,6 +626,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let ref_hap = args.ref_hap.clone().expect("Reference haplotype must be provided");
     let ref_id = contig_set.contigs().try_get_id(&ref_hap)
         .ok_or_else(|| error!(InvalidInput, "Reference haplotype {} not found in the fasta file", ref_hap))?;
+    let ref_len = contig_set.contigs().get_len(ref_id);
 
     let disc_filename = match &args.disc_filename as &str {
         "auto" => Some(Path::new(fasta_filename).parent()
@@ -597,21 +637,17 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     };
     let disc_haps = match disc_filename {
         Some(fname) if fname.exists() =>
-            contigs::load_discarded_haplotypes(ext::sys::open(fname)?, contig_set.contigs())?,
+            DiscardedHaplotypes::load(ext::sys::open(fname)?, contig_set.contigs())?,
         Some(fname) if args.disc_filename != "auto" => {
             log::debug!("Skip discarded haplotypes, file {} does not exist", fname.display());
             Default::default()
         }
-        _ => Default::default()
+        _ => Default::default(),
     };
-    if !contigs::discarded_all_identical(&disc_haps) {
-        log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
-    }
-    let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
 
-    let (chrom, shift) = load_region(&args.region, fasta_filename)?.unwrap_or((ref_hap.clone(), 0));
-    let vars = process_paf(args.paf.as_ref().expect("PAF filename must be provided"), &contig_set, ref_id)?;
-    combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps,
+    let (chrom, shift) = load_region(&args.region, fasta_filename, ref_len)?.unwrap_or((ref_hap.clone(), 0));
+    convert_to_vcf(args.paf.as_ref().expect("PAF filename must be provided"),
+        &contig_set, &disc_haps, ref_id, &chrom, shift,
         args.out_merged.as_ref().expect("Merged output VCF must be present"),
         args.out_separate.as_ref().map(|fname| fname as &Path))?;
 

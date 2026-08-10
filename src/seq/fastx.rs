@@ -128,8 +128,12 @@ pub trait SingleRecord: WritableRecord {
     fn name(&self) -> &[u8];
 
     /// Safely converts record name to UTF-8.
-    fn name_str(&self) -> Cow<'_, str> {
+    fn lossy_name_str(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(self.name())
+    }
+
+    fn name_str(&self) -> crate::Result<&str> {
+        std::str::from_utf8(self.name()).map_err(|_| Error::Utf8("record name", self.name().to_vec()))
     }
 
     /// Read sequence.
@@ -320,7 +324,7 @@ impl<R: BufRead> Reader<R> {
             if n == 0 {
                 // File ended.
                 if seq_len == 0 {
-                    return Err(error!(InvalidData, "Fasta record {} has an empty sequence.", record.name_str()));
+                    return Err(error!(InvalidData, "Fasta record {} has an empty sequence.", record.lossy_name_str()));
                 }
                 return Ok(true);
             } else if record.seq[seq_len] == b'>' || record.seq[seq_len] == b'@' {
@@ -341,16 +345,16 @@ impl<R: BufRead> Reader<R> {
         // +
         let n = read_line(&mut self.stream, &mut self.buffer).map_err(|e| Error::Io(e, self.filenames.clone()))?;
         if n == 0 {
-            return Err(error!(InvalidData, "Fastq record {} is incomplete", record.name_str()));
+            return Err(error!(InvalidData, "Fastq record {} is incomplete", record.lossy_name_str()));
         } else if self.buffer[prev_buf_len] != b'+' {
-            return Err(error!(InvalidData, "Fastq record {} has incorrect format", record.name_str()));
+            return Err(error!(InvalidData, "Fastq record {} has incorrect format", record.lossy_name_str()));
         }
 
         // Qualities
         let qual_len = read_line(&mut self.stream, &mut record.qual).map_err(|e| Error::Io(e, self.filenames.clone()))?;
         if seq_len != qual_len {
             return Err(error!(InvalidData,
-                "Fastq record {} has non-matching sequence and qualities", record.name_str()));
+                "Fastq record {} has non-matching sequence and qualities", record.lossy_name_str()));
         }
 
         // Next record name.
@@ -373,25 +377,14 @@ impl<R: BufRead + Send> Reader<R> {
         }
     }
 
-    /// Reads all sequences into memory.
-    /// Each sequence is standardized and checked for invalid nucleotides.
-    pub fn read_all(
-        &mut self,
-        mut callback: impl FnMut(String, Vec<u8>) -> crate::Result<()>,
-    ) -> crate::Result<()>
-    {
-        let mut record = FastxRecord::default();
-        while self.read_next_standardized(&mut record)? {
-            let name = std::str::from_utf8(record.name())
-                .map_err(|_| Error::Utf8("read name", record.name().to_vec()))?;
-            callback(name.to_owned(), record.seq().to_vec())?;
-        }
-        Ok(())
-    }
-
+    /// Reads FASTA file into named sequences.
+    /// Names are checked for UTF-8, sequences are uppercased and checked for invalid nucleotides.
     pub fn read_named_seqs(&mut self) -> crate::Result<Vec<NamedSeq>> {
         let mut res = Vec::new();
-        self.read_all(|name, seq| { res.push(NamedSeq::new(name, seq)); Ok(()) })?;
+        let mut record = FastxRecord::default();
+        while self.read_next_standardized(&mut record)? {
+            res.push(NamedSeq::new(record.name_str()?.to_owned(), record.seq().to_vec()));
+        }
         Ok(res)
     }
 }
@@ -452,7 +445,7 @@ impl<T: SingleRecord, R: FastxRead<Record = T>> FastxRead for PairedEndInterleav
             if !equal_names_fast(record1.name(), record2.name()) {
                 Err(error!(InvalidData,
                     "Interleaved input file(s) {} contains non matching first and second mate ({} and {})",
-                    ext::fmt::paths(self.reader.filenames()), record1.name_str(), record2.name_str()))
+                    ext::fmt::paths(self.reader.filenames()), record1.lossy_name_str(), record2.lossy_name_str()))
             } else {
                 Ok(true)
             }
@@ -494,7 +487,7 @@ impl<T: SingleRecord, R: FastxRead<Record = T>, S: FastxRead<Record = T>> FastxR
                     Err(error!(InvalidData,
                         "Paired-end input files {} and {} have non matching first and second mates ({} and {})",
                         ext::fmt::paths(self.reader1.filenames()), ext::fmt::paths(self.reader2.filenames()),
-                        record1.name_str(), record2.name_str()))
+                        record1.lossy_name_str(), record2.lossy_name_str()))
                 } else {
                     Ok(true)
                 }
@@ -589,10 +582,6 @@ pub struct BamRecord {
 }
 
 impl BamRecord {
-    fn name_str(&self) -> Cow<'_, str> {
-        String::from_utf8_lossy(&self.inner.qname())
-    }
-
     /// Read until the next primary alignment is encountered, which is then saved and its sequence decoded.
     /// Returns false if no alignments are available.
     fn read_from(&mut self, reader: &mut impl bam::Read, min_start: i64) -> crate::Result<bool> {
@@ -609,7 +598,7 @@ impl BamRecord {
                 let l = seq.len();
                 if l == 0 {
                     return Err(error!(InvalidData,
-                        "Primary alignment for read {} has no sequence", self.name_str()));
+                        "Primary alignment for read {} has no sequence", self.lossy_name_str()));
                 }
                 if self.inner.is_reverse() {
                     self.seq.extend((0..l).rev().map(|i| seq::complement_nt(seq[i])));
@@ -849,7 +838,7 @@ impl FastxRead for PairedBamReader {
 
             if (rec1.flag() & 0xC0) == 0 {
                 return Err(error!(InvalidData,
-                    "Expected paired-end reads, but read {} is unpaired", rec1.name_str()));
+                    "Expected paired-end reads, but read {} is unpaired", rec1.lossy_name_str()));
             }
 
             if let Some(mate) = self.read_pairs.take(rec1) {
@@ -857,7 +846,7 @@ impl FastxRead for PairedBamReader {
                 let rec_first = rec1.inner.is_first_in_template();
                 if rec_first == mate.inner.is_first_in_template() {
                     return Err(error!(InvalidData,
-                        "Found two primary alignments for {} for the same read end", rec1.name_str()));
+                        "Found two primary alignments for {} for the same read end", rec1.lossy_name_str()));
                 }
                 *rec2 = mate;
                 if !rec_first {

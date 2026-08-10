@@ -1,7 +1,8 @@
 //! Paths to various directories and files within the database and output directories.
 
-/// k-mer counts are stored in this file.
-pub(super) const KMERS: &'static str = "kmers.bin.lz4";
+/// k-mer counts are stored in either of these files file.
+pub(super) const KMERS_BR: &'static str = "kmers.bin.br";
+pub(super) const KMERS_LZ4: &'static str = "kmers.bin.lz4";
 
 /// Information about a locus is stored in `database/LOCI_DIR/<locus_name>`.
 pub(super) const LOCI_DIR: &'static str = "loci";
@@ -9,8 +10,12 @@ pub(super) const LOCI_DIR: &'static str = "loci";
 pub(super) const LOCUS_BED: &'static str = "ref.bed";
 /// Path to all non-identical locus haplotypes.
 pub(super) const LOCUS_FASTA: &'static str = "haplotypes.fa.gz";
-/// Path to all non-identical locus haplotypes.
-pub(super) const LOCUS_PAF: &'static str = "haplotypes.paf.gz";
+/// Symlink with default basis haplotypes, used for read mapping.
+pub(super) const DEFAULT_BASIS_FASTA: &'static str = "haplotypes-basis.fa.gz";
+
+/// Alignments between haplotypes, checked in this order.
+pub(super) const LOCUS_PAF_PREF: &'static str = "haplotypes.paf";
+pub(super) const LOCUS_PAFS: [&'static str; 3] = ["haplotypes.paf.br", "haplotypes.paf.gz", LOCUS_PAF_PREF];
 /// Path to pairwise distances between haplotypes.
 pub(super) const DISTANCES: &'static str = "distances.bin";
 /// Path to file with discarded haplotypes.

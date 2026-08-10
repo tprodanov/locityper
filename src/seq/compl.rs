@@ -1,7 +1,7 @@
 use std::cmp::min;
 use crate::{
     seq::kmers::{self, Kmer, NON_CANONICAL},
-    algo::{IntMap},
+    algo::IntMap,
 };
 
 trait Counts<K> {
@@ -46,60 +46,60 @@ where K: PartialEq,
     }
 }
 
-#[inline]
-fn encode_nt(nt: &u8) -> u8 {
-    match nt {
-        b'A' => 0b00,
-        b'C' => 0b01,
-        b'G' => 0b10,
-        b'T' => 0b11,
-        _ => panic!("Cannot calculate linguistic complexity in the presence of unknown nucleotides"),
-    }
-}
+// #[inline]
+// fn encode_nt(nt: &u8) -> u8 {
+//     match nt {
+//         b'A' => 0b00,
+//         b'C' => 0b01,
+//         b'G' => 0b10,
+//         b'T' => 0b11,
+//         _ => panic!("Cannot calculate linguistic complexity in the presence of unknown nucleotides"),
+//     }
+// }
 
-/// Linguistic complexity of a sequence = U1 × U2 × U3, where Uk is the fraction of unique k-mers out of max available.
-/// Sequence must not contain Ns.
-#[allow(dead_code)]
-pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
-    const MASK1: u8 = 0b000011;
-    const MASK2: u8 = 0b001111;
-    const MASK3: u8 = 0b111111;
+// /// Linguistic complexity of a sequence = U1 × U2 × U3, where Uk is the fraction of unique k-mers out of max available.
+// /// Sequence must not contain Ns.
+// #[allow(dead_code)]
+// pub fn linguistic_complexity_123(seq: &[u8], w: usize) -> Vec<f64> {
+//     const MASK1: u8 = 0b000011;
+//     const MASK2: u8 = 0b001111;
+//     const MASK3: u8 = 0b111111;
 
-    let n = seq.len();
-    assert!(3 <= w, "Window size ({}) must be over 3", w);
-    assert!(w <= n, "Window size ({}) must not be greater than the sequence length ({})", w, n);
-    let w_u16 = u16::try_from(w).expect("Window size must fit in two bytes");
+//     let n = seq.len();
+//     assert!(3 <= w, "Window size ({}) must be over 3", w);
+//     assert!(w <= n, "Window size ({}) must not be greater than the sequence length ({})", w, n);
+//     let w_u16 = u16::try_from(w).expect("Window size must fit in two bytes");
 
-    let mut counts1 = [0; 4];
-    let mut counts2 = [0; 16];
-    let mut counts3 = [0; 64];
-    // Fill counts to account for corresponding numbers of lagging 0 values.
-    counts1[0] = w_u16;
-    counts2[0] = w_u16 - 1;
-    counts3[0] = w_u16 - 2;
-    let mut uniq1 = 1;
-    let mut uniq2 = 1;
-    let mut uniq3 = 1;
-    let mut complexities = Vec::with_capacity(n - w + 1);
+//     let mut counts1 = [0; 4];
+//     let mut counts2 = [0; 16];
+//     let mut counts3 = [0; 64];
+//     // Fill counts to account for corresponding numbers of lagging 0 values.
+//     counts1[0] = w_u16;
+//     counts2[0] = w_u16 - 1;
+//     counts3[0] = w_u16 - 2;
+//     let mut uniq1 = 1;
+//     let mut uniq2 = 1;
+//     let mut uniq3 = 1;
+//     let mut complexities = Vec::with_capacity(n - w + 1);
 
-    let mult = 1.0 / (min(4, w) * min(16, w - 1) * min(64, w - 2)) as f64;
-    let mut lagging_kmer = 0;
-    let mut current_kmer = 0;
-    let lagging_iter = std::iter::repeat(0).take(w - 2).chain(seq.iter().map(encode_nt));
-    let current_iter = seq.iter().map(encode_nt);
-    for (i, (lagging_enc, current_enc)) in lagging_iter.zip(current_iter).enumerate() {
-        lagging_kmer = (lagging_kmer << 2) | lagging_enc;
-        current_kmer = (current_kmer << 2) | current_enc;
-        remove_add_kmer(&mut counts1, (lagging_kmer >> 4) & MASK1, current_kmer & MASK1, &mut uniq1);
-        remove_add_kmer(&mut counts2, (lagging_kmer >> 2) & MASK2, current_kmer & MASK2, &mut uniq2);
-        remove_add_kmer(&mut counts3, lagging_kmer & MASK3, current_kmer & MASK3, &mut uniq3);
-        if i >= w - 1 {
-            complexities.push(mult * f64::from(uniq1 * uniq2 * uniq3));
-        }
-    }
-    assert_eq!(complexities.len(), n - w + 1);
-    complexities
-}
+//     let mult = 1.0 / (min(4, w) * min(16, w - 1) * min(64, w - 2)) as f64;
+//     let mut lagging_kmer = 0;
+//     let mut current_kmer = 0;
+//     let lagging_iter = std::iter::repeat(0).take(w - 2).chain(seq.iter().map(encode_nt));
+//     let current_iter = seq.iter().map(encode_nt);
+//     for (i, (lagging_enc, current_enc)) in lagging_iter.zip(current_iter).enumerate() {
+//         lagging_kmer = (lagging_kmer << 2) | lagging_enc;
+//         current_kmer = (current_kmer << 2) | current_enc;
+//         remove_add_kmer(&mut counts1, (lagging_kmer >> 4) & MASK1, current_kmer & MASK1, &mut uniq1);
+//         remove_add_kmer(&mut counts2, (lagging_kmer >> 2) & MASK2, current_kmer & MASK2, &mut uniq2);
+//         remove_add_kmer(&mut counts3, lagging_kmer & MASK3, current_kmer & MASK3, &mut uniq3);
+//         if i >= w - 1 {
+//             complexities.push(mult * f64::from(uniq1 * uniq2 * uniq3));
+//         }
+//     }
+//     assert_eq!(complexities.len(), n - w + 1);
+//     complexities
+// }
 
 // /// Counts the fraction of unique k-mers in a sequence out of the total possible.
 // /// k should be small enough that k-mer fits into u16 (<= 15), but large enough
@@ -138,3 +138,15 @@ pub fn linguistic_complexity(seq: &[u8], k: u8, w: usize) -> Vec<f64> {
     }
     res
 }
+
+// /// Linguistic complexity of the full sequence.
+// pub fn full_linguistic_complexity(seq: &[u8], k: u8) -> f64 {
+//     let n = seq.len();
+//     debug_assert!(k <= u32::MAX_KMER_SIZE);
+
+//     let mut unique_kmers: IntSet<u32> = IntSet::default();
+//     kmers::kmers::<u32, _, NON_CANONICAL>(seq, k, &mut unique_kmers);
+//     let k = usize::from(k);
+//     let max_kmers = min(n + 1 - k, 1 << (2 * k));
+//     unique_kmers.len() as f64 / max_kmers as f64
+// }

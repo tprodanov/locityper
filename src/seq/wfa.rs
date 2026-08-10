@@ -82,6 +82,21 @@ impl Penalties {
         score -= if curr_match { 0 } else { self.mismatch * curr_len as i32 };
         score
     }
+
+    /// Calculates score of an extended CIGAR (does not include M symbol).
+    pub fn calculate_score(&self, cigar: &Cigar) -> i32 {
+        let mut score = 0;
+        for item in cigar.iter() {
+            let len = item.len() as i32;
+            score -= match item.operation() {
+                Operation::Equal => 0,
+                Operation::Diff => self.mismatch * len,
+                Operation::Soft | Operation::Ins | Operation::Del => self.gap_open + self.gap_extend * len,
+                _ => panic!("`calculate_score`: Not supported operation {}", item.operation()),
+            }
+        }
+        score
+    }
 }
 
 /// Number of alignment steps based on the accuracy level (0-9).
@@ -148,7 +163,7 @@ impl Aligner {
         penalties: Penalties,
         accuracy: u8,
         band: Option<i32>,
-        enable_semiglobal: bool,
+        add_semiglobal: bool,
     ) -> Self {
         assert!(1 <= accuracy && accuracy <= MAX_ACCURACY, "Cannot construct WFA aligner for accuracy {}", accuracy);
         let mut attributes = unsafe { cwfa::wavefront_aligner_attr_default }.clone();
@@ -177,12 +192,14 @@ impl Aligner {
         attributes.affine_penalties.gap_opening = penalties.gap_open;
         attributes.affine_penalties.gap_extension = penalties.gap_extend;
 
-        let semiglobal_aligner = if enable_semiglobal {
+        let semiglobal_aligner = if add_semiglobal {
             // Need positive match score for alignment to work.
             attributes.affine_penalties.match_ = -max(1, attributes.affine_penalties.mismatch / 2);
             attributes.alignment_form.span = cwfa::alignment_span_t_alignment_endsfree;
             Some(unsafe { cwfa::wavefront_aligner_new(&mut attributes.clone()) })
-        } else { None };
+        } else {
+            None
+        };
 
         attributes.affine_penalties.match_ = 0;
         attributes.alignment_form.span = cwfa::alignment_span_t_alignment_end2end;
@@ -193,9 +210,10 @@ impl Aligner {
         Self { global_aligner, semiglobal_aligner, safe_mismatch_size, penalties }
     }
 
-    // pub fn penalties(&self) -> &Penalties {
-    //     &self.penalties
-    // }
+    #[inline(always)]
+    pub fn penalties(&self) -> &Penalties {
+        &self.penalties
+    }
 
     /// Aligns two sequences (first: ref, second: query), extends `cigar`, and returns alignment score.
     /// If the alignment is dropped, returns VERY approximate alignment.
@@ -262,15 +280,14 @@ impl Aligner {
     pub fn smart_align(
         &self,
         seq1: &[u8], // ref sequence
-        seq2: &[u8], // query sequence
         i1: u32,
         i2: u32,
+        seq2: &[u8], // query sequence
         j1: u32,
         j2: u32,
         max_gap: impl Threshold,
         cigar: &mut Cigar,
-    ) -> i32
-    {
+    ) -> i32 {
         debug_assert!(i1 <= i2 && j1 <= j2);
         let jump1 = i2 - i1;
         let jump2 = j2 - j1;
@@ -303,12 +320,14 @@ impl Aligner {
         }
     }
 
-    pub fn align_clipping<const LEFT: bool>(
+    /// Use semi-global alignment to align sequences in either left-free or right-free mode.
+    /// If `CLIPPING`, replace all relevant non-matches with soft clipping.
+    pub fn align_ends<const LEFT: bool>(
         &self,
         seq1: &[u8], // ref sequence
-        seq2: &[u8], // query sequence
         i1: u32,
         i2: u32,
+        seq2: &[u8], // query sequence
         j1: u32,
         j2: u32,
         cigar: &mut Cigar,
@@ -321,8 +340,8 @@ impl Aligner {
         }
         let subseq1 = &seq1[i1 as usize..i2 as usize];
         let subseq2 = &seq2[j1 as usize..j2 as usize];
-
         let aligner = self.semiglobal_aligner.expect("Semi-global aligner undefined");
+
         if LEFT {
             unsafe { cwfa::wavefront_aligner_set_alignment_free_ends(
                 aligner, subseq1.len() as i32, 0, subseq2.len() as i32, 0) };

@@ -2,6 +2,7 @@
 /logs
 *.log
 /vendor
+/vendor.tar*
 Cargo.lock
 /src/test.rs
 __pycache__
