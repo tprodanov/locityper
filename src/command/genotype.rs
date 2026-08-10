@@ -222,11 +222,12 @@ fn print_help(extended: bool) {
     println!("    {:KEY$} {:VAL$}  Database directory (see {}).\n\
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
         "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " target").underline());
-    println!("    {:KEY$} {:VAL$}  Haplotype basis to speed up read mapping (see {}).\n\
-        {EMPTY}  Use {} for haplotypes-basis.fa.gz from the database locus dirs;
-        {EMPTY}  For all other values, use haplotypes-basis.{}.fa.gz.",
-        "    --basis".green(), "STR".yellow(), concatcp!(super::PROGRAM, " augment").underline(),
-        "default".yellow(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Haplotype basis to speed up read mapping (see {}):\n\
+    {EMPTY}  - {} =  `<database>/loci/*/haplotypes-basis.fa.gz`,\n\
+    {EMPTY}  - {} = all haplotypes `.../haplotypes.fa.gz`  (default),\n\
+        {EMPTY}  - otherwise, use custom `.../haplotypes-basis.{}.fa.gz`.",
+        "-b, --basis".green(), "STR".yellow(), concatcp!(super::PROGRAM, " augment").underline(),
+        "none".yellow(), "auto".yellow(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",
@@ -432,7 +433,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                     args.databases.push(val.parse()?);
                 }
             }
-            Long("basis") => args.basis = parser.value()?.parse()?,
+            Short('b') | Long("basis") => args.basis = parser.value()?.parse()?,
             Short('o') | Long("output") => args.output = Some(parser.value()?.parse()?),
             Long("subset-loci") | Long("loci-subset") => {
                 for val in parser.values()? {
@@ -1012,7 +1013,7 @@ fn get_mapping_fasta_filename(
     let full_fname = locus.db_dir.join(paths::LOCUS_FASTA);
     let (mut filename, is_full) = match &args.basis as &str {
         "none" => (full_fname.clone(), true),
-        "default" => (locus.db_dir.join(paths::DEFAULT_BASIS_FASTA), false),
+        "auto" => (locus.db_dir.join(paths::DEFAULT_BASIS_FASTA), false),
         s => (locus.db_dir.join(format!("haplotypes-basis.{}.fa.gz", s)), false),
     };
     if !is_full && !filename.exists() {

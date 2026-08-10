@@ -51,7 +51,8 @@ From: rust:1.92-slim-trixie
     cp target/release/strobealign "${PREFIX}/bin"
 
     cd /repos
-    git clone --single-branch --branch beta https://github.com/tprodanov/locityper
+    # git clone --single-branch --branch beta https://github.com/tprodanov/locityper
+    git clone https://github.com/tprodanov/locityper
     cd locityper
     git clone https://github.com/smarco/WFA2-lib WFA2
     cargo install --no-track --verbose --root "${PREFIX}" --path .
