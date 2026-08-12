@@ -193,7 +193,7 @@ impl InputFiles {
 
         // Should only be run once, so there is no need for lazy static.
         let re_fastx = RegexBuilder::new(r"\.f(ast)?[aq](\.[^.]{1,3})?$").case_insensitive(true).build().unwrap();
-        let fastx_descr = "fasta/fastq[.gz]";
+        let fastx_descr = "fa/fq/fasta/fastq[.*]";
         let re_bam = RegexBuilder::new(r"\.(bam|cram)$").case_insensitive(true).build().unwrap();
         let bam_descr = "bam/cram";
 
