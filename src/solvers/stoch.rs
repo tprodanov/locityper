@@ -140,7 +140,7 @@ impl super::SetParams for Greedy {
 
 impl fmt::Display for Greedy {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Stoch.Greedy")
+        write!(f, "Stochastic greedy")
     }
 }
 
@@ -261,6 +261,6 @@ impl super::SetParams for SimAnneal {
 
 impl fmt::Display for SimAnneal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Sim.Anneal")
+        write!(f, "Simulated annealing")
     }
 }

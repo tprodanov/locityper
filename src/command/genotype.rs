@@ -1229,12 +1229,12 @@ fn analyze_locus(
         let dist_filename = locus.db_dir.join(paths::DISTANCES);
         if contig_distances.is_none() && dist_filename.exists() {
             let dist_file = ext::sys::open_uncompressed(&dist_filename)?;
-            let (_k, _w, dists) = minim_div::load_divergences_and_convert(
+            let (_k, _w, mut dists) = minim_div::load_divergences_and_convert(
                 dist_file, &dist_filename, locus.init_nhaps, Some)?;
+            if let Some(ixs) = &locus.keep_ixs {
+                dists = dists.thin_out(ixs);
+            }
             contig_distances = Some(dists);
-        }
-        if let Some(dists) = &mut contig_distances && let Some(ixs) = &locus.keep_ixs {
-            *dists = dists.thin_out(ixs);
         }
 
         let data = Arc::new(solve::Data {

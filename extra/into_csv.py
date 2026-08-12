@@ -122,7 +122,6 @@ def main():
     finished = 0
 
     out = common.open(args.output, 'wt')
-    out.write('# {}\n'.format(' '.join(sys.argv)))
     out.write('sample\tlocus\tgenotype\tquality\ttotal_reads\tunexpl_reads\tweight_dist\twarnings\n')
 
     def callback(s):
