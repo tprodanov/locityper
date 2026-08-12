@@ -156,7 +156,7 @@ function load_names {
 
 function prepare_targets {
     [[ $have_targets_fa = n ]] || return 0
-    targets_fa="${output}/targets.fa"
+    targets_fa="${output}/ref_targets.fa"
     [[ ! -f "${targets_fa}" ]] || return 0
 
     local targets_tmp="${targets_fa}.tmp"
