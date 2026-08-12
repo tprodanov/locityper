@@ -146,8 +146,9 @@ fn print_help() {
         "-L, --loci".green(), "FILE".yellow(), "-v".green());
 
     println!("\n{}", "Haplotype extraction parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Name of the reference haplotype [default: tries to guess].",
-        "-g, --genome".green(), "STR".yellow());
+    println!("    {:KEY$} {:VAL$}  Name of the reference haplotype [default: tries to guess].\n\
+        {EMPTY}  Only relevant together with {}.",
+        "-g, --genome".green(), "STR".yellow(), "-v".green());
     println!("    {:KEY$} {:VAL$}  If needed, expand locus coordinates by <= {} bp [{}].\n\
         {EMPTY}  Boundaries are checked one by one until the locus\n\
         {EMPTY}  does not overlap any long pangenomic bubbles.",

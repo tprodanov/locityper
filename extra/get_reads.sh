@@ -19,6 +19,7 @@ Input/output arguments:
     -z, --gzip    y|n  Should the output files be gzipped? [$compress].
     -o, --output  DIR  Optional: output directory or prefix.
                        If not specified, read files are placed in the same output directory.
+    -L, --loci   FILE  Extract reads for loci mentioned in this file (each line = one locus).
 
 Other arguments:
     -h, --help              Print this help and exit.
@@ -48,9 +49,10 @@ function parse_args {
     frac=
     both=y
     compress=y
+    loci_file=/dev/null
     output=
 
-    ARGS="$(getopt -o d:f:b:o:h --long "edit:,frac:,both:,output:,help" --name "$SCRIPT_NAME" -- "$@")"
+    ARGS="$(getopt -o d:f:b:o:L:h --long "edit:,frac:,both:,output:,loci:,help" --name "$SCRIPT_NAME" -- "$@")"
     eval set -- "$ARGS"
     while :; do
         case "$1" in
@@ -64,6 +66,8 @@ function parse_args {
                 compress="$2"; shift 2 ;;
             -o | --output )
                 output="$2"; shift 2 ;;
+            -L | --loci )
+                loci_file="$2"; shift 2 ;;
             -h | --help)
                  help_message; exit 0 ;;
             -- ) shift; break ;;
@@ -156,6 +160,12 @@ function process_dir {
 
 setup_colors
 parse_args "$@"
-find "$input/loci" -mindepth 1 -maxdepth 1 -type d | while read d; do
+find "$input/loci" -mindepth 1 -maxdepth 1 -type d | \
+    awk -F/ '
+        ENDFILE { ++filenum }
+        filenum == 0 { ++seen[$1] }
+        filenum == 1 && (length(seen) == 0 || seen[$NF]) { print }
+        ' "$loci_file" - | \
+while read d; do
     process_dir "$d"
 done
