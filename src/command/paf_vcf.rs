@@ -135,8 +135,11 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 }
 
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
-/// Returns chromosome name and 0-based start position.
-pub(super) fn load_region(s: &str, fasta_filename: &Path, ref_len: u32) -> crate::Result<Option<(String, u32)>> {
+/// Returns chromosome name and 0-based start position and end.
+pub(super) fn load_region(
+    s: &str,
+    fasta_filename: &Path,
+) -> crate::Result<Option<(String, u32, u32)>> {
     if s == "none" { return Ok(None) };
 
     let fname = if s == "auto" {
@@ -152,12 +155,7 @@ pub(super) fn load_region(s: &str, fasta_filename: &Path, ref_len: u32) -> crate
                 .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get().strict_sub(1);
             let end = captures[3].parse::<PrettyU32>()
                 .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get();
-            if end - start != ref_len {
-                return Err(error!(InvalidData,
-                    "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
-                    chrom, start + 1, end, end - start, ref_len));
-            }
-            return Ok(Some((chrom, start)));
+            return Ok(Some((chrom, start, end)));
         }
         PathBuf::from(s)
     };
@@ -180,12 +178,7 @@ pub(super) fn load_region(s: &str, fasta_filename: &Path, ref_len: u32) -> crate
     let end: u32 = split.next()
         .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
         .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
-    if end - start != ref_len {
-        return Err(error!(InvalidData,
-            "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
-            chrom, start + 1, end, end - start, ref_len));
-    }
-    Ok(Some((chrom, start)))
+    Ok(Some((chrom, start, end)))
 }
 
 #[derive(Clone, Debug)]
@@ -352,8 +345,7 @@ fn process_paf(
     paf_filename: &Path,
     contig_set: &ContigSet,
     ref_id: ContigId,
-) -> crate::Result<Vec<Option<Vec<VarRange>>>>
-{
+) -> crate::Result<Vec<Option<Vec<VarRange>>>> {
     let contigs = contig_set.contigs();
     let ref_hap = contigs.get_name(ref_id);
     let ref_seq = contig_set.get_seq(ref_id);
@@ -517,8 +509,7 @@ fn combine_variants(
     groupped_haps: &[(String, Vec<Option<usize>>)],
     merged_vcf_filename: &Path,
     separate_vcf_filename: &Option<PathBuf>,
-) -> crate::Result<()>
-{
+) -> crate::Result<()> {
     let mut unique_ranges: Vec<_> = vars.iter()
         .filter_map(|v| v.as_ref())
         .flat_map(|v| v.iter())
@@ -550,23 +541,35 @@ fn combine_variants(
 }
 
 /// Groups haplotypes into samples.
-/// Returns vector of samples (name, vector [contig index or None if missing]).
+/// Returns
+/// - vector of samples (name, vector [contig index or None if missing]),
+/// - reference contig ID.
 fn group_haplotypes(
     contigs: &ContigNames,
-    ref_id: ContigId,
+    ref_hap: &str,
     disc_haps: &DiscardedHaplotypes,
-) -> crate::Result<Vec<(String, Vec<Option<usize>>)>>
+) -> crate::Result<(Vec<(String, Vec<Option<usize>>)>, ContigId)>
 {
     // First, regular contig name, with lazy *? specifier.
     // Then, single digit after either . or _
     const PATTERN: &'static str = r"^([0-9A-Za-z][0-9A-Za-z+._|~=@^-]*?)([._][1-9])?$";
     let re = regex::Regex::new(PATTERN).unwrap();
 
+    let mut ref_id = None;
     let mut map = HashMap::<String, Vec<Option<usize>>>::default();
     let mut add = |i: usize, name: &str| -> crate::Result<()> {
         let c = re.captures(name).ok_or_else(|| error!(ParsingError, "Cannot parse contig name `{}`", name))?;
         let sample = &c[1];
         let opt_hap = c.get(2);
+        if name == ref_hap {
+            ref_id = Some(ContigId::new(i));
+            if let Some(hap) = &opt_hap {
+                log::warn!("Reference name {} has haplotype suffix ({}); will keep it in the VCF file",
+                    ref_hap, hap.as_str());
+            } else {
+                return Ok(());
+            }
+        }
         let hap = opt_hap.map(|hap| hap.as_str().as_bytes()[1] - b'1').unwrap_or(0) as usize;
         let vec = map.entry(sample.to_string()).or_default();
         // If haplotype has .1 suffix, make vector length at least 2,
@@ -578,24 +581,29 @@ fn group_haplotypes(
     };
 
     for (i, contig) in contigs.names().iter().enumerate() {
-        if i != ref_id.ix() {
-            add(i, contig)?;
-        }
+        add(i, contig)?;
         for (hap, _) in disc_haps.identical_to(ContigId::new(i)).into_iter().flat_map(|vec| vec.iter()) {
             add(i, hap)?;
         }
     }
+
+    let Some(ref_id) = ref_id else {
+        return Err(error!(InvalidInput,
+            "Cannot find reference haplotype {} in neither the fasta file nor among the discarded haplotypes",
+            ref_hap));
+    };
+
     let mut groupped: Vec<_> = map.into_iter().collect();
     groupped.sort_unstable();
-    Ok(groupped)
+    Ok((groupped, ref_id))
 }
 
 pub(super) fn convert_to_vcf(
     paf_filename: &Path,
     contig_set: &ContigSet,
     disc_haps: &DiscardedHaplotypes,
-    ref_id: ContigId,
-    chrom: &str, shift: u32,
+    ref_hap: &str,
+    region: Option<(String, u32, u32)>,
     out_merged: &Path,
     out_separate: Option<&Path>,
 ) -> crate::Result<()>
@@ -603,7 +611,17 @@ pub(super) fn convert_to_vcf(
     if !disc_haps.all_identical() {
         log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
     }
-    let groupped_haps = group_haplotypes(contig_set.contigs(), ref_id, &disc_haps)?;
+    let (groupped_haps, ref_id) = group_haplotypes(contig_set.contigs(), ref_hap, &disc_haps)?;
+    let ref_len = contig_set.contigs().get_len(ref_id);
+    let (chrom, shift) = match region {
+        Some((chrom, start, end)) if end - start != ref_len =>
+            return Err(error!(InvalidData,
+                "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
+                chrom, start + 1, end, end - start, ref_len)),
+        Some((chrom, start, _end)) => (chrom, start),
+        None => (ref_hap.to_string(), 0),
+    };
+
     let vars = process_paf(paf_filename, &contig_set, ref_id)?;
     let tmp_merged = ext::sys::temp_filename(out_merged);
     let tmp_separate = out_separate.map(|p| ext::sys::temp_filename(p));
@@ -623,10 +641,6 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let fasta_filename = args.fasta.as_ref().expect("Fasta file must be provided");
     let contig_set = ContigSet::load(String::new(), fasta_filename)?;
-    let ref_hap = args.ref_hap.clone().expect("Reference haplotype must be provided");
-    let ref_id = contig_set.contigs().try_get_id(&ref_hap)
-        .ok_or_else(|| error!(InvalidInput, "Reference haplotype {} not found in the fasta file", ref_hap))?;
-    let ref_len = contig_set.contigs().get_len(ref_id);
 
     let disc_filename = match &args.disc_filename as &str {
         "auto" => Some(Path::new(fasta_filename).parent()
@@ -645,9 +659,10 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         _ => Default::default(),
     };
 
-    let (chrom, shift) = load_region(&args.region, fasta_filename, ref_len)?.unwrap_or((ref_hap.clone(), 0));
-    convert_to_vcf(args.paf.as_ref().expect("PAF filename must be provided"),
-        &contig_set, &disc_haps, ref_id, &chrom, shift,
+    let region = load_region(&args.region, fasta_filename)?;
+    let paf_filename = args.paf.as_ref().expect("PAF filename must be provided");
+    let ref_hap = args.ref_hap.as_ref().expect("Reference haplotype must be provided");
+    convert_to_vcf(paf_filename, &contig_set, &disc_haps, ref_hap, region,
         args.out_merged.as_ref().expect("Merged output VCF must be present"),
         args.out_separate.as_ref().map(|fname| fname as &Path))?;
 

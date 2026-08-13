@@ -3,7 +3,7 @@ From: rust:1.92-slim-trixie
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v1.7.0
+    Version v1.7.2
 
 %post
     PREFIX=/usr/local
@@ -11,7 +11,7 @@ From: rust:1.92-slim-trixie
     SAMTOOLS_VER=1.19
     MM2_VER=2.26
     # Strobealign 0.18.0-alpha
-    STROBEALIGN_SHA1=369130ced7e2065bbe44653331796ea5fc8ec535
+    STROBEALIGN_SHA1=8ba69020e86905b249b51ede94ca6f992c555bc5
 
     apt-get update
     apt-get install --assume-yes --no-install-recommends \

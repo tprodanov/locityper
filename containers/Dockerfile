@@ -1,14 +1,14 @@
 FROM rust:1.92-slim-trixie
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.7.0"
+LABEL version="1.7.2"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local
 ARG SAMTOOLS_VER=1.19
 ARG MM2_VER=2.26
 # Strobealign 0.18.0-alpha
-ARG STROBEALIGN_SHA1=369130ced7e2065bbe44653331796ea5fc8ec535
+ARG STROBEALIGN_SHA1=8ba69020e86905b249b51ede94ca6f992c555bc5
 
 RUN apt-get update \
     &&  apt-get install --assume-yes --no-install-recommends \

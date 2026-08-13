@@ -21,8 +21,10 @@ pub fn find_exe(p: impl AsRef<Path>) -> crate::Result<PathBuf> {
     which::which(p.as_ref()).map_err(|_| Error::NoExec(p.as_ref().to_owned()))
 }
 
+/// 1Mb buffer.
+pub(super) const BUFFER_SIZE_1MB: usize = 1 << 20;
 /// 4Mb buffer.
-const BUFFER_SIZE_4MB: usize = 4_194_304;
+pub(super) const BUFFER_SIZE_4MB: usize = 1 << 22;
 
 // #[inline]
 // pub fn open_gzip(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
@@ -37,7 +39,7 @@ const BUFFER_SIZE_4MB: usize = 4_194_304;
 /// Opens compressed brotli file. Cannot operate on a stream because there are no magic bytes at the start.
 pub fn open_brotli(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
     let f = File::open(filename).map_err(add_path!(filename))?;
-    Ok(BufReader::new(brotli::Decompressor::new(f, BUFFER_SIZE_4MB)))
+    Ok(BufReader::with_capacity(BUFFER_SIZE_1MB, super::brotli::BrotliReader::new(f)))
 }
 
 /// Guesses compression type (gzip | lz4 | nothing) and returns decompressed stream.
@@ -52,10 +54,10 @@ fn decompress_stream(
         return Ok(Box::new(stream));
     } else if buffer[0] == 0x1f && buffer[1] == 0x8b {
         // gzip magic number
-        Ok(Box::new(BufReader::new(MultiGzDecoder::new(stream))))
+        Ok(Box::new(BufReader::with_capacity(BUFFER_SIZE_1MB, MultiGzDecoder::new(stream))))
     } else if buffer[0] == 0x04 && buffer[1] == 0x22 {
         // lz4 magic number
-        Ok(Box::new(BufReader::new(lz4::Decoder::new(stream).map_err(add_path!(filename))?)))
+        Ok(Box::new(BufReader::with_capacity(BUFFER_SIZE_1MB, lz4::Decoder::new(stream).map_err(add_path!(filename))?)))
     } else {
         Ok(Box::new(stream))
     }
@@ -70,7 +72,8 @@ pub fn open(filename: impl AsRef<Path>) -> crate::Result<Box<dyn BufRead + Send>
     } else if filename.extension() == Some(OsStr::new("br")) {
         open_brotli(filename).map(|stream| Box::new(stream) as Box<dyn BufRead + Send>)
     } else {
-        decompress_stream(BufReader::new(File::open(filename).map_err(add_path!(filename))?), filename)
+        decompress_stream(BufReader::with_capacity(BUFFER_SIZE_1MB,
+            File::open(filename).map_err(add_path!(filename))?), filename)
     }
 }
 
@@ -89,7 +92,7 @@ pub fn open_first_of(filenames: &[impl AsRef<Path>]) -> crate::Result<Box<dyn Bu
 /// Opens file that is not compressed. It also should not be - (synonym for /dev/stdin).
 pub fn open_uncompressed(filename: impl AsRef<Path>) -> crate::Result<BufReader<File>> {
     let filename = filename.as_ref();
-    File::open(filename).map_err(add_path!(filename)).map(BufReader::new)
+    File::open(filename).map_err(add_path!(filename)).map(|f| BufReader::with_capacity(BUFFER_SIZE_1MB, f))
 }
 
 /// Chain multiple files together.
