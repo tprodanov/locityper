@@ -43,7 +43,6 @@ Minimap2 arguments:
     -@, --threads     INT   Minimap2 threads [${threads}].
     -S, --secondary   INT   Number of secondary alignments [${secondary}].
     -p, --score-ratio NUM   Secondary-to-primary score ratio [${score_ratio}].
-    --  ARGUMENTS           If necessary, provide additional minimap2 arguments.
 
 Other arguments:
     -T, --timeout     INT   Number of minutes the script will wait for other instances to finish
@@ -132,9 +131,7 @@ function parse_args {
     done
 
     minimap2_args=( -c -x "$preset" -t "$threads" -N "$secondary" -p "$score_ratio" )
-    if [[ ${#@} -ne 0 ]]; then
-        minimap2_args+=( "$@" )
-    fi
+    [[ $# -eq 0 ]] || panic "Too many arguments ($*)"
 
     [[ ${input[@]:+${input[@]}} ]] || panic "Missing -i/--input"
     [[ -n "${targets_bed-}" ]] || panic "Missing required parameter -c/--coordinates"
