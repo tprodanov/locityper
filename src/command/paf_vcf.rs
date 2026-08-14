@@ -20,9 +20,11 @@ use crate::{
     },
     algo::{bisect, HashMap},
     math::ifelse0,
+    command::paths,
 };
 
 struct Args {
+    input: Option<PathBuf>,
     paf: Option<PathBuf>,
     fasta: Option<PathBuf>,
     disc_filename: String,
@@ -35,6 +37,7 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
+            input: None,
             paf: None,
             fasta: None,
             disc_filename: String::from("auto"),
@@ -47,11 +50,21 @@ impl Default for Args {
 }
 
 impl Args {
+    fn replace_input(mut self) -> Self {
+        if let Some(dir) = &self.input {
+            self.paf = self.paf.or_else(|| paths::LOCUS_PAFS.iter()
+                .map(|path| dir.join(path)).filter(|path| path.exists()).next());
+            self.fasta = self.fasta.or_else(|| Some(dir.join(paths::LOCUS_FASTA)));
+            self.out_merged = self.out_merged.or_else(|| Some(dir.join("haplotypes.vcf.gz")));
+        }
+        self
+    }
+
     fn validate(self) -> crate::Result<Self> {
         validate_param!(self.paf.is_some(), "Input PAF file is not provided (see -p/--paf)");
         validate_param!(self.fasta.is_some(), "Input FASTA file is not provided (see -f/--fasta)");
         validate_param!(self.out_merged.is_some(), "Output VCF file must be provided (see -o/--output)");
-        validate_param!(self.ref_hap.is_some(), "Reference haplotype must be provided");
+        validate_param!(self.ref_hap.is_some(), "Reference haplotype name (-r) must be provided");
         Ok(self)
     }
 }
@@ -64,11 +77,15 @@ fn print_help() {
     // let defaults = Args::default();
     println!("{}", "Convert PAF file to VCF file(s).".yellow());
 
-    print!("\n{}", "Usage:".bold());
-    println!(" {} -p input.paf -f input.fa -r ref_hap [-d discarded_haplotypes.txt] \\", super::PROGRAM);
-    println!("    -o merged.vcf.gz [separate.vcf.gz] [args]");
+    println!("\n{}", "Usage:".bold());
+    println!("    {} -i dir -r ref_hap [args]", super::PROGRAM);
+    println!("    {} -p input.paf -f input.fa -r ref_hap [-d discarded_haplotypes.txt] \\", super::PROGRAM);
+    println!("        -o merged.vcf.gz [separate.vcf.gz] [args]");
 
     println!("\n{}", "Input/output arguments:".bold());
+    println!("    {:KEY$} {:VAL$}  Input locityper/loci/{{}} directory. Unless specified\n\
+        {EMPTY}  otherwise, sets {}, {}, {}, {} to files in that directory.",
+        "-i, --input".green(), "DIR".yellow(), "-p".green(), "-f".green(), "-d".green(), "-o".green());
     println!("    {:KEY$} {:VAL$}  Input PAF[.gz] file with alignments between haplotypes.",
         "-p, --paf".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input FASTA[.gz] file with haplotypes.",
@@ -107,6 +124,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
     while let Some(arg) = parser.next()? {
         match arg {
+            Short('i') | Long("input") => args.input = Some(parser.value()?.parse()?),
             Short('p') | Long("paf") => args.paf = Some(parser.value()?.parse()?),
             Short('f') | Long("fasta") => args.fasta = Some(parser.value()?.parse()?),
             Short('d') | Long("discarded") => args.disc_filename = parser.value()?.parse()?,
@@ -389,6 +407,10 @@ fn process_paf(
         }
         var_ranges[hap_id.ix()] = Some(process_haplotype(ref_seq, hap_seq, &cigar)?);
     }
+    let n_missing = var_ranges.iter().filter(|opt| opt.is_none()).count();
+    if n_missing > 0 {
+        log::warn!("    {} / {} haplotype-reference alignments are missing", n_missing, var_ranges.len());
+    }
     Ok(var_ranges)
 }
 
@@ -635,7 +657,7 @@ pub(super) fn convert_to_vcf(
 }
 
 pub(super) fn run(argv: &[String]) -> crate::Result<()> {
-    let args = parse_args(argv)?.validate()?;
+    let args = parse_args(argv)?.replace_input().validate()?;
     super::greet();
     let timer = Instant::now();
 
