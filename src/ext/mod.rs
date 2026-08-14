@@ -5,7 +5,6 @@ pub mod trimat;
 pub mod fmt;
 pub mod sys;
 pub mod rand;
-mod brotli;
 
 pub use trimat::TriangleMatrix;
 

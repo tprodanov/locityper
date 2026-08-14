@@ -7,7 +7,7 @@ use brotli::{
     enc::StandardAlloc,
 };
 
-use super::sys::BUFFER_SIZE_4MB;
+use super::BUFFER_SIZE_4MB;
 
 #[inline]
 fn new_state() -> BrotliState<StandardAlloc, StandardAlloc, StandardAlloc> {
@@ -15,7 +15,7 @@ fn new_state() -> BrotliState<StandardAlloc, StandardAlloc, StandardAlloc> {
 }
 
 /// Wrapper around brotli Decompressor that supports multiple concatenated streams.
-pub struct BrotliReader<R: Read> {
+pub struct MultiBrDecoder<R: Read> {
     stream: R,
     buf: Vec<u8>,
     /// Current buffer offset.
@@ -26,7 +26,7 @@ pub struct BrotliReader<R: Read> {
     last_result: BrotliResult,
 }
 
-impl<R: Read> BrotliReader<R> {
+impl<R: Read> MultiBrDecoder<R> {
     pub fn new(stream: R) -> Self {
         Self {
             stream,
@@ -50,7 +50,7 @@ impl<R: Read> BrotliReader<R> {
     }
 }
 
-impl<R: Read> Read for BrotliReader<R> {
+impl<R: Read> Read for MultiBrDecoder<R> {
     fn read(&mut self, out_buf: &mut [u8]) -> io::Result<usize> {
         let mut out_offset = 0;
         let mut rem_out = out_buf.len();

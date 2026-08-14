@@ -1,3 +1,5 @@
+mod brotli;
+
 use std::{
     fmt::Write as FmtWrite,
     io::{self, Read, BufRead, BufReader, Write, BufWriter, stdin, stdout},
@@ -22,9 +24,9 @@ pub fn find_exe(p: impl AsRef<Path>) -> crate::Result<PathBuf> {
 }
 
 /// 1Mb buffer.
-pub(super) const BUFFER_SIZE_1MB: usize = 1 << 20;
+const BUFFER_SIZE_1MB: usize = 1 << 20;
 /// 4Mb buffer.
-pub(super) const BUFFER_SIZE_4MB: usize = 1 << 22;
+const BUFFER_SIZE_4MB: usize = 1 << 22;
 
 // #[inline]
 // pub fn open_gzip(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
@@ -39,7 +41,7 @@ pub(super) const BUFFER_SIZE_4MB: usize = 1 << 22;
 /// Opens compressed brotli file. Cannot operate on a stream because there are no magic bytes at the start.
 pub fn open_brotli(filename: &Path) -> crate::Result<impl BufRead + Send + use<>> {
     let f = File::open(filename).map_err(add_path!(filename))?;
-    Ok(BufReader::with_capacity(BUFFER_SIZE_1MB, super::brotli::BrotliReader::new(f)))
+    Ok(BufReader::with_capacity(BUFFER_SIZE_1MB, brotli::MultiBrDecoder::new(f)))
 }
 
 /// Guesses compression type (gzip | lz4 | nothing) and returns decompressed stream.
@@ -200,11 +202,11 @@ pub fn create_lz4_slow(filename: &Path) -> crate::Result<AutoFinishLz4<BufWriter
     create_lz4(filename, 7)
 }
 
-pub type BrFile = brotli::CompressorWriter<File>;
+pub type BrFile = ::brotli::CompressorWriter<File>;
 
 pub fn create_brotli_with_lvl(filename: &Path, compression: u8) -> crate::Result<BrFile> {
     let file = File::create(filename).map_err(add_path!(filename))?;
-    let params = brotli::enc::BrotliEncoderParams {
+    let params = ::brotli::enc::BrotliEncoderParams {
         quality: i32::from(compression),
         large_window: true,
         catable: true,
@@ -213,7 +215,7 @@ pub fn create_brotli_with_lvl(filename: &Path, compression: u8) -> crate::Result
         size_hint: 0x40000000, // 1 Gb
         ..Default::default()
     };
-    Ok(brotli::CompressorWriter::with_params(file, BUFFER_SIZE_4MB, &params))
+    Ok(::brotli::CompressorWriter::with_params(file, BUFFER_SIZE_4MB, &params))
 }
 
 #[inline]
