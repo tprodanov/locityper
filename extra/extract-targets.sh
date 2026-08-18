@@ -364,8 +364,15 @@ function combine_panels {
         panic "Cannot combine reference panels: exceeded timeout (-T) and there are unfinished jobs"
 
     msg "Combining reference panels"
-    latest_ok_file="$(find "${output1}" -mindepth 1 -maxdepth 1 -name "*.ok" -printf "%T@\t%p\n" | sort -k1,1gr | \
-        head -n1 | cut -f2)"
+    latest_ok_file="$(find "${output1}" -mindepth 1 -maxdepth 1 -name "*.ok" -printf "%T@\t%p\n" | \
+        awk 'BEGIN { max = 0; filename = "UNDEF" } {
+            if (max < $1) {
+                max = $1;
+                filename = $2;
+            }
+        } END {
+            print filename;
+        }')"
     cut -f4 "$targets_bed" | while read target; do
         combine_locus "$target"
     done

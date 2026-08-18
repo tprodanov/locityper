@@ -27,7 +27,7 @@ def write_fasta(out, name, seq, comment=None, linesize=120):
         out.write('\n')
 
 
-def load_haplotypes(path, subset_loci):
+def load_haplotypes(path, basename, subset_loci):
     loci_dir = os.path.join(path, 'loci')
     if not os.path.isdir(loci_dir):
         common.error(f'Directory `{path}` does not contain "loci" subdirectory')
@@ -42,7 +42,7 @@ def load_haplotypes(path, subset_loci):
         if subset_loci is not None and locus not in subset_loci:
             continue
         locus_dir = entry.path
-        reader = SeqIO.parse(gzip.open(os.path.join(locus_dir, 'haplotypes.fa.gz'), 'rt'), 'fasta')
+        reader = SeqIO.parse(common.open(os.path.join(locus_dir, basename), 'rt'), 'fasta')
         haplotypes[locus] = { rec.id: str(rec.seq) for rec in reader }
 
     sys.stderr.write(f'Loaded {len(haplotypes)} loci\n')
@@ -82,6 +82,8 @@ def main():
         help='CSV file with Locityper predictions.')
     parser.add_argument('-d', '--database', metavar='FILE', required=True,
         help='Path to Locityper database.')
+    parser.add_argument('-b', '--basename', metavar='STR', default='haplotypes.fa.gz',
+        help='Basename of haplotypes FASTA file inside each locus directory [%(default)s].')
     parser.add_argument('-o', '--output', metavar='DIR', required=True,
         help='Output directory.')
     parser.add_argument('-@', '--threads', metavar='INT', type=int, default=8,
@@ -94,7 +96,7 @@ def main():
 
     common.mkdir(args.output)
     sys.stderr.write('Loading haplotypes\n')
-    haplotypes = load_haplotypes(args.database, args.subset_loci)
+    haplotypes = load_haplotypes(args.database, args.basename, args.subset_loci)
     sys.stderr.write('Loading genotype predictions\n')
     with common.open(args.input) as f:
         preds, samples = into_vcf.load_predictions(f)
