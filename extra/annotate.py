@@ -14,10 +14,12 @@ def main():
         help='Locityper CSV file for multiple loci and samples.')
     parser.add_argument('-a', '--annotation', metavar='FILE', required=True,
         help='Tab-separated annotation for locus haplotypes.\n'
-        'Columns: locus, haplotype, annotation, tag. Tag is an optional column,\n'
-        'used if the same locus has multiple annotations.')
+            'Columns: locus, haplotype, annotation, tag. Tag is an optional column,\n'
+            'used if the same locus has multiple annotations.')
     parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output CSV file.')
+    parser.add_argument('-t', '--truth', action='store_true',
+        help='Add ground-truth sample annotation to the output file.')
     args = parser.parse_args()
 
     explicit_tags = False
@@ -43,7 +45,11 @@ def main():
 
     with common.open(args.input) as inp, common.open(args.output, 'wt') as out:
         out.write(f'# {" ".join(sys.argv)}\n')
-        out.write(f'sample\tlocus{format_tag("tag")}\thap1\thap2\n')
+        out.write(f'sample\tlocus{format_tag("tag")}\thap1\thap2')
+        if args.truth:
+            out.write('\ttrue1\ttrue2')
+        out.write('\n')
+
         for row in common.read_csv(inp):
             locus = row['locus']
             locus_annot = annotation.get(locus)
@@ -61,6 +67,9 @@ def main():
                 out.write(f'{sample}\t{locus}{format_tag(tag)}')
                 for hap in gt.split(','):
                     out.write('\t{}'.format(tag_annot.get(hap, '<UNKNOWN>')))
+                if args.truth:
+                    for i in range(1, 3):
+                        out.write('\t{}'.format(tag_annot.get(f'{sample}.{i}', '<UNKNOWN>')))
                 out.write('\n')
 
 

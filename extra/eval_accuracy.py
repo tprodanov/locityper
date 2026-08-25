@@ -103,7 +103,7 @@ def main():
     if args.excluded:
         with common.open(args.excluded) as inp:
             excluded_samples = [line.strip() for line in inp]
-        sys.stderr.write(f'Exclude {len(excluded_samples)} samples\n')
+        sys.stderr.write(f'Database had {len(excluded_samples)} samples excluded\n')
 
     cached_dists = {}
     with common.open(args.input) as inp, common.open(args.output, 'wt') as out:

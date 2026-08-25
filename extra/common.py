@@ -82,3 +82,8 @@ def read_csv(f):
 def error(msg):
     sys.stderr.write(f'ERROR: {msg}\n')
     exit(1)
+
+
+class Sink:
+    def write(self, text):
+        pass
