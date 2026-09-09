@@ -977,7 +977,8 @@ fn create_mapping_command(
         // which produces too large output, and takes a lot of time.
         cmd.args(&[
             "-M", &n_locs,   // Try as many secondary locations as possible.
-            "-N", &n_locs,   // Output as many secondary alignments as possible.
+            "-N", "-1",      // Output as many secondary alignments as possible (since Strobealign 0.18).
+            "--st", "0.5",   // Output secondary alignments with this score relative to best score (also since 0.18).
             "-S", "0.5",     // Try candidate sites with minimizer hits >= FLOAT * best hits.
             "-f", "0.001",
             "-k", "15",      // Use smaller minimizers to get more matches.

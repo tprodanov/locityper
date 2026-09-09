@@ -4,8 +4,7 @@ ARG PREFIX=/usr/local
 ARG SAMTOOLS_VER=1.19
 ARG MM2_VER=2.31
 ARG JF_VERSION=2.3.1
-# Strobealign 0.18.0-alpha
-ARG STROBEALIGN_SHA1=8ba69020e86905b249b51ede94ca6f992c555bc5
+ARG STROBEALIGN_VERSION=0.18.0
 
 RUN apk update \
     &&  apk upgrade --no-cache \
@@ -48,9 +47,9 @@ RUN apk update \
     #
     # Building Strobealign
     &&  cd /repos \
-    &&  git clone https://github.com/ksahlin/strobealign \
-    &&  cd /repos/strobealign \
-    &&  git reset --hard ${STROBEALIGN_SHA1} \
+    &&  curl -L https://github.com/ksahlin/strobealign/archive/refs/tags/v${STROBEALIGN_VERSION}.tar.gz | \
+        tar --no-same-owner -zxvf - \
+    &&  cd /repos/strobealign-${STROBEALIGN_VERSION} \
     &&  cargo build --verbose --release --bins \
     &&  cp target/release/strobealign ${PREFIX}/bin \
     #
@@ -71,7 +70,7 @@ RUN apk update \
 FROM alpine:3.23
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.7.2"
+LABEL version="1.7.4"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local
