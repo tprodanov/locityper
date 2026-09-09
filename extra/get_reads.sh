@@ -17,6 +17,7 @@ Input/output arguments:
     -f, --frac    NUM  Instead of edit distance, filter by edit distance / read length.
     -b, --both    y|n  Should both (y) or only one (n) of the reads pass the filter [$both].
     -z, --gzip    y|n  Should the output files be gzipped? [$compress].
+    --interleave       Interleave output paired end reads.
     -o, --output  DIR  Optional: output directory or prefix.
                        If not specified, read files are placed in the same output directory.
     -L, --loci   FILE  Extract reads for loci mentioned in this file (each line = one locus).
@@ -49,10 +50,13 @@ function parse_args {
     frac=
     both=y
     compress=y
+    interleave=n
     loci_file=/dev/null
     output=
 
-    ARGS="$(getopt -o d:f:b:o:L:h --long "edit:,frac:,both:,output:,loci:,help" --name "$SCRIPT_NAME" -- "$@")"
+    ARGS="$(getopt -o d:f:b:o:L:h \
+        --long "edit:,frac:,both:,output:,loci:,interleave,help" \
+        --name "$SCRIPT_NAME" -- "$@")"
     eval set -- "$ARGS"
     while :; do
         case "$1" in
@@ -68,6 +72,8 @@ function parse_args {
                 output="$2"; shift 2 ;;
             -L | --loci )
                 loci_file="$2"; shift 2 ;;
+            --interleave )
+                interleave=y; shift 1 ;;
             -h | --help)
                  help_message; exit 0 ;;
             -- ) shift; break ;;
@@ -147,13 +153,21 @@ function process_dir {
             }
         }' | \
         samtools view -bo "${prefix}.keep.bam"
-    samtools fastq -1 "${prefix}1.fq" -2 "${prefix}2.fq" "${prefix}.keep.bam"
+
+    local first_filename
+    if [[ "$interleave" = y ]]; then
+        first_filename="${prefix}.fq"
+        samtools fastq -o "$first_filename" "${prefix}.keep.bam"
+    else
+        first_filename="${prefix}1.fq"
+        samtools fastq -1 "$first_filename" -2 "${prefix}2.fq" "${prefix}.keep.bam"
+    fi
     rm "${prefix}.keep.bam"
 
     [[ -s "${prefix}2.fq" ]] || rm "${prefix}2.fq"
 
     if [[ "$compress" = y ]]; then
-        gzip -f "${prefix}1.fq"
+        gzip -f "$first_filename"
         [[ ! -f "${prefix}2.fq" ]] || gzip -f "${prefix}2.fq"
     fi
 }
