@@ -164,7 +164,7 @@ function process_dir {
     fi
     rm "${prefix}.keep.bam"
 
-    [[ -s "${prefix}2.fq" ]] || rm "${prefix}2.fq"
+    [[ -f "${prefix}2.fq" && -s "${prefix}2.fq" ]] || rm "${prefix}2.fq"
 
     if [[ "$compress" = y ]]; then
         gzip -f "$first_filename"
