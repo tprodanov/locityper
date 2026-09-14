@@ -130,11 +130,14 @@ def process_mappings(
     """
     mappings.sort()
     curr = []
+    curr_end = -sys.maxsize
     res = []
     for m in mappings:
-        if curr and (curr[-1].chrom != m.chrom or curr[-1].end + max_distance < m.start):
+        if curr and (curr[-1].chrom != m.chrom or curr_end + max_distance < m.start):
             res.append(merge(target, curr))
             curr.clear()
+            curr_end = -sys.maxsize
+        curr_end = max(curr_end, m.end)
         curr.append(m)
     if curr:
         res.append(merge(target, curr))
