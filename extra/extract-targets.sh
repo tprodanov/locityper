@@ -70,6 +70,12 @@ function panic {
     exit "${2-1}" # Return 1 by default.
 }
 
+function test_exe {
+    for exe in "$@"; do
+        (command -v "$exe" > /dev/null) || panic "Executable $exe not found"
+    done
+}
+
 function parse_args {
     input=()
 
@@ -231,7 +237,7 @@ function process_assembly {
         -b "$targets_bed" -g "$short_name" \
         -d "$distance" -l "$min_len" -s "$min_simil" \
         -o "${prefix}.bed.gz" -c "${prefix}.copy_num.csv.gz" \
-        2> "${prefix}.warnings.csv"
+        |& tee "${prefix}.warnings.csv"
     [[ -s "${prefix}.warnings.csv" ]] || rm "${prefix}.warnings.csv"
     # At this point, $prefix.bed.gz will have columns
     # chrom, start, end, strand (+/-), target name, length fraction, similarity.
@@ -410,6 +416,8 @@ function check_completion {
             `run additional instances, or check for error messages"
     fi
 }
+
+test_exe python3 awk xargs minimap2 agc seqtk samtools
 
 setup_colors
 parse_args "$@"
