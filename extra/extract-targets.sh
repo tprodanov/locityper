@@ -176,7 +176,9 @@ function prepare_targets {
         else
             trap 'rm -f "${targets_lock}"; exit 1' INT TERM ERR EXIT
             cat "${targets_bed}" | while read chrom start end name extra; do
-                samtools faidx "${reference}" "${chrom}:$((start+1))-${end}" | \
+                local region="${chrom}:$((start+1))-${end}"
+                [[ -n "${name}" ]] || panic "No name for entry $region"
+                samtools faidx "${reference}" "$region" | \
                     seqtk seq -U -l 120 | \
                     sed "1c>$name"
             done > "${targets_tmp}"
@@ -230,6 +232,7 @@ function process_assembly {
         if (minimap2 "${minimap2_args[@]}" "$genome_fasta" "$targets_fa" 2> "${paf_filename}.stderr" | \
                 gzip > "${paf_filename}.tmp"); then
             mv "${paf_filename}"{.tmp,}
+            rm "${paf_filename}.stderr"
         else
             cat "${paf_filename}.stderr" >&2
             rm "${paf_filename}.stderr"
