@@ -227,9 +227,14 @@ function process_assembly {
     local paf_filename="${prefix}.paf.gz"
     if [[ ! -f "$paf_filename" ]]; then
         msg "    Mapping targets to the assembly"
-        minimap2 "${minimap2_args[@]}" "$genome_fasta" "$targets_fa" 2> /dev/null | \
-            gzip > "${paf_filename}.tmp" \
-            && mv "${paf_filename}"{.tmp,}
+        if (minimap2 "${minimap2_args[@]}" "$genome_fasta" "$targets_fa" 2> "${paf_filename}.stderr" | \
+                gzip > "${paf_filename}.tmp"); then
+            mv "${paf_filename}"{.tmp,}
+        else
+            cat "${paf_filename}.stderr" >&2
+            rm "${paf_filename}.stderr"
+            panic "Minimap exited with an error"
+        fi
     fi
 
     msg "    Extracting target subsequences"

@@ -8,3 +8,4 @@ Cargo.lock
 __pycache__
 bin
 /containers/*.tar*
+/containers/*.sif
