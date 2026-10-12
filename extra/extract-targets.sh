@@ -262,15 +262,16 @@ function process_assembly {
                 ind = ++target_cn[target];
                 if (ind <= max_count) {
                     region = $1 ":" ($2+1) "-" $3;
-                    strand_arg = $6 == "+" ? "" : "-i";
+                    strand = $6;
+                    strand_arg = strand == "+" ? "" : "-i";
                     suffix = ind == 1 ? "" : ("-" ind);
-                    print target, region, strand_arg, suffix
+                    print target, region, strand, strand_arg, suffix
                 }
             }' | \
-        while IFS=";" read target region strand_arg suffix; do
+        while IFS=";" read target region strand strand_arg suffix; do
             samtools faidx "$genome_fasta" "$region" $strand_arg | \
                 seqtk seq -U -l 120 | \
-                sed "1c>${short_name}${suffix} ${region}" >> "${prefix}/${target}.fa"
+                sed "1c>${short_name}${suffix} ${region}:${strand}" >> "${prefix}/${target}.fa"
         done
     # This way we don't have to worry about zero matches.
     find "${prefix}" -name "*.fa" -exec gzip {} ';'
