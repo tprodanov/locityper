@@ -248,7 +248,7 @@ function process_assembly {
         |& tee "${prefix}.warnings.csv"
     [[ -s "${prefix}.warnings.csv" ]] || rm "${prefix}.warnings.csv"
     # At this point, $prefix.bed.gz will have columns
-    # chrom, start, end, strand (+/-), target name, length fraction, similarity.
+    # chrom, start, end, target name, similarity, strand (+/-), length fraction.
 
     rm -f "${prefix}/"*.fa{,.gz}
     # Take $count first entries,
@@ -258,11 +258,11 @@ function process_assembly {
         awk -F$'\t' -v name="$short_name" -v max_count="$count" \
             -v cn_csv="${prefix}.copy_num.csv" \
             'BEGIN{OFS=";"} {
-                target = $5;
+                target = $4;
                 ind = ++target_cn[target];
                 if (ind <= max_count) {
                     region = $1 ":" ($2+1) "-" $3;
-                    strand_arg = $4 == "+" ? "" : "-i";
+                    strand_arg = $6 == "+" ? "" : "-i";
                     suffix = ind == 1 ? "" : ("-" ind);
                     print target, region, strand_arg, suffix
                 }

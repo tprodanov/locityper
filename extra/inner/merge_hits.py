@@ -97,8 +97,8 @@ class MergedMapping:
         return s
 
     def to_string(self, genome: str, target_len: int) -> str:
-        return f'{self.chrom}\t{self.start}\t{self.end}\t{self.consensus_strand(genome)}\t{self.target}' \
-            f'\t{len(self) / target_len:.6f}\t{self.av_similarity:.6f}'
+        return f'{self.chrom}\t{self.start}\t{self.end}\t{self.target}' \
+            f'\t{100 * self.av_similarity:.4f}\t{self.consensus_strand(genome)}\t{len(self) / target_len:.6f}'
 
 
 def merge(target: str, mappings: list[Mapping]) -> MergedMapping:
