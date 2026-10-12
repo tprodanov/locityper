@@ -10,7 +10,7 @@ import common
 
 def process_gtf(gtf_file, hap_name, hap_len, gene):
     """
-    Returns list [(start, end, ty)] where ty = 0: CDSl; ty = 1: non-CDS part of the gene; ty = 2: rest.
+    Returns list [(start, end, ty)] where ty = 0: CDS; ty = 1: non-CDS part of the gene; ty = 2: rest.
     """
     # triples (pos, is_start? T/F, type: 0 exon, 1 gene, 2 boundaries).
     positions = [(0, True, 2), (hap_len, False, 2)]
