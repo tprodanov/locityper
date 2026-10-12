@@ -2,6 +2,7 @@
 
 from collections import defaultdict, namedtuple
 import re
+import os
 from sortedcontainers import SortedList
 from intervaltree import IntervalTree
 from common import open
@@ -9,9 +10,13 @@ from common import open
 
 _SAMPLE_SEP = re.compile('[_./-]')
 
-class Entry(namedtuple('Entry', 'haplotype contig start end strand')):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class Entry:
+    def __init__(self, haplotype, contig, start, end, strand):
+        self.haplotype = haplotype
+        self.contig = contig
+        self.start = start
+        self.end = end
+        self.strand = strand
         self.sample = _SAMPLE_SEP.split(self.haplotype, 1)[0]
 
 
@@ -45,6 +50,7 @@ def create_entries(args):
                     curr_len += len(line.strip())
             if haplotype is not None:
                 yield Entry(haplotype, haplotype, 0, curr_len, '+')
+
     elif args.fasta:
         with open(args.fasta) as f:
             for line in f:
@@ -54,6 +60,7 @@ def create_entries(args):
                 contig, coord, strand = split[1].split(':')
                 start, end = map(int, coord.split('-'))
                 yield Entry(split[0], contig, start-1, end, strand)
+
     elif args.regions:
         with open(args.regions) as f:
             for line in f:
@@ -74,8 +81,8 @@ def load_discarded_haps(filename):
                     continue
                 split = line.split(' ')
                 assert split[1] == '=' or split[1] == '~'
-                discarded_haplotypes.update(split[2:])
-    return discarded_haplotypes
+                discarded_haps.update(split[2:])
+    return discarded_haps
 
 
 def process_entries(entries, discarded_haps):
@@ -128,7 +135,7 @@ class GffEntry:
         self.score = split[5]
         self.strand = split[6]
         self.frame = split[7]
-        self.attributes = GffEntry._parse_gff3_attributes(split[8]) if fmt == "gff3" \
+        self.attributes = GffEntry._parse_gff3_attributes(split[8]) if is_gff3 \
             else GffEntry._parse_gtf_attributes(split[8])
 
     def __len__(self):
@@ -154,7 +161,7 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
         overlap = trees[(sample, entry.contig)].overlap(entry.start, entry.end)
         if not overlap:
             continue
-        feature_ix = next(i for i, feature in enumerate(features) if feature.pattern.match(entry.feature))
+        feature_ix = next(i for i, feature in enumerate(features) if feature.pattern is None or feature.pattern.match(entry.feature))
         for ovlp in overlap:
             start = max(entry.start - ovlp.begin, 0)
             end = min(entry.end, ovlp.end) - ovlp.begin
@@ -198,7 +205,7 @@ def main():
             f'Default: -F {default_features_str}.')
     parser.add_argument('-b', '--background', metavar='NUM', default=0.01,
         help='Weight of the background sequence that does not overlap any features [%(default)s].')
-    parser.add_argument('-o', '-output', metavar='FILE', required=True,
+    parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output BED file.')
     args = parser.parse_args()
 
@@ -216,13 +223,13 @@ def main():
             process_annotation(parse_annotation(f), sample, args.gene, trees, features, endpoints)
 
     enabled = SortedList()
-    with open(args.output, 'w') as out:
+    with open(args.output, 'wt') as out:
         for haplotype in sorted(endpoints.keys()):
             hap_endpoints = endpoints[haplotype]
             hap_endpoints.sort()
             last_pos = 0
             enabled.clear()
-            for pos, is_start, feature_ix in positions:
+            for pos, is_start, feature_ix in hap_endpoints:
                 if last_pos < pos:
                     # Smallest index of an enabled feature
                     out_feature_ix = enabled[0]
