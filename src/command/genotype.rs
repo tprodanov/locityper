@@ -81,7 +81,7 @@ struct Args {
     ploidy: u8,
     priors: Option<PathBuf>,
     leave_out: HashSet<String>,
-    reg_weights: Option<PathBuf>,
+    reg_weights: Option<String>,
 
     threads: u16,
     rerun: super::Rerun,
@@ -339,9 +339,11 @@ fn print_help(extended: bool) {
             super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().breakpoint()),
             super::fmt_def_f64(defaults.assgn_params.kmers_weight_calc.as_ref().unwrap().power()),
             "--kmers-weight".green());
-        println!("    {:KEY$} {:VAL$}  Explicit haplotype subregion weights, for example\n\
-            {EMPTY}  based on exons/introns (see documentation).",
-            "    --reg-weights".green(), "FILE".yellow());
+        println!("    {:KEY$} {:VAL$}  Specify explicit weights for haplotype subregions, e.g. based on\n\
+            {EMPTY}  exons/introns. Can be either a two-column file (locus & path to BED),\n\
+            {EMPTY}  or {} to indicate relative paths DB/loci/*/{}.\n\
+            {EMPTY}  BED files must fully cover all haplotypes, 4th column = region weight.",
+            "    --reg-weights".green(), "FILE".yellow(), "@@FILE".yellow(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Ignore windows with weight under this value [{}].",
             "    --min-weight".green(), "NUM".yellow(), super::fmt_def_f64(defaults.assgn_params.min_weight));
         println!("    {:KEY$} {:VAL$}  Likelihood skew (-1, 1) [{}]. Negative: alignment probabilities\n\
@@ -589,29 +591,57 @@ fn load_priors(path: &Path) -> crate::Result<HashMap<String, HashMap<String, f64
     Ok(res)
 }
 
-/// Returns a single filename for each locus.
-pub fn load_explicit_weights(path: &Path) -> crate::Result<HashMap<String, PathBuf>> {
-    let mut map = HashMap::default();
-    let dirname = ext::sys::parent_unless_tty(path);
-    for line in ext::sys::open(path)?.lines() {
-        let line = line.map_err(add_path!(path))?;
-        if line.starts_with('#') {
-            continue;
+/// Parses `--reg-weights` and returns a vector of paths to BED files with subregion weights for each locus
+/// (None if file does not exist, or not specified).
+///
+/// Argument can be either
+/// * filename: two-column text file, where first column = locus, second column = filename.
+/// ** @@filename: look up each BED file in <db>/loci/<locus>/filename.
+pub fn load_explicit_weights(cli_arg: &str, loci: &[LocusData]) -> crate::Result<Vec<Option<PathBuf>>> {
+    let mut paths = vec![None; loci.len()];
+    if cli_arg.starts_with('@') {
+        let basename = cli_arg.trim_start_matches('@');
+        for (locus, mut_path) in itertools::izip!(loci, &mut paths) {
+            let filename = locus.out_dir.join(&basename);
+            if filename.exists() {
+                *mut_path = Some(filename);
+            }
         }
-        let split: smallvec::SmallVec<[&str; 2]> = line.split_whitespace().collect();
-        if split.len() != 2 {
-            return Err(error!(ParsingError, "Failed to parse {}: more than 2 entries on line `{}`",
-                ext::fmt::path(path), line));
+    } else {
+        let reg_filename = Path::new(cli_arg);
+        let locus_ix: HashMap<String, usize> = loci.iter().enumerate()
+            .map(|(i, locus)| (locus.contig_set().tag().to_string(), i)).collect();
+        let dirname = ext::sys::parent_unless_tty(reg_filename);
+        for line in ext::sys::open(reg_filename)?.lines() {
+            let line = line.map_err(add_path!(reg_filename))?;
+            if line.starts_with('#') {
+                continue;
+            }
+            let split: smallvec::SmallVec<[&str; 2]> = line.split_whitespace().collect();
+            if split.len() != 2 {
+                return Err(error!(ParsingError, "Failed to parse {}: more than 2 entries on line `{}`",
+                    ext::fmt::path(reg_filename), line));
+            }
+            let locus = split[0];
+            let Some(ix) = locus_ix.get(locus) else {
+                log::debug!("    Ignoring line `{}` in {} (skip locus/locus not in the database)",
+                    line, ext::fmt::path(reg_filename));
+                continue
+            };
+            let filename = ext::sys::add_dir(dirname, split[1]);
+            if !filename.exists() {
+                return Err(error!(ParsingError, "Failed to parse {}: file {} does not exist",
+                    ext::fmt::path(reg_filename), ext::fmt::path(filename)));
+            }
+            paths[*ix] = Some(filename);
         }
-        let locus = split[0];
-        let filename = ext::sys::add_dir(dirname, split[1]);
-        if !filename.exists() {
-            return Err(error!(ParsingError, "Failed to parse {}: file {} does not exist",
-            ext::fmt::path(path), ext::fmt::path(filename)));
-        }
-        map.insert(locus.to_owned(), filename);
     }
-    Ok(map)
+    let missing: Vec<_> = paths.iter().enumerate().filter(|(_, opt)| opt.is_none()).map(|(i, _)| i).collect();
+    if !missing.is_empty() {
+        log::debug!("Found region weight files for {} loci, missing files for {} loci (e.g. {})",
+            loci.len() - missing.len(), missing.len(), loci[missing[0]].contig_set().tag())
+    }
+    Ok(paths)
 }
 
 pub(super) struct LocusData {
@@ -1310,11 +1340,11 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     }
 
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
-    let explicit_weights = args.reg_weights.as_ref().map(|path| load_explicit_weights(path)).transpose()?;
     let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun, &args.leave_out)?;
     if loci.is_empty() {
         return Ok(());
     }
+    let explicit_weights = args.reg_weights.as_ref().map(|path| load_explicit_weights(path, &loci)).transpose()?;
     let loci: Vec<_> = loci.into_iter()
         .map(|locus_data| {
             let filenames = Filenames::new(&locus_data.out_dir);
@@ -1329,14 +1359,13 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let scheme = Arc::new(Scheme::parse(&args.solvers)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, &args.assgn_params.alt_cn));
     let mut successes = 0;
-    for (locus, filenames) in loci.iter() {
+    for (i, (locus, filenames)) in loci.iter().enumerate() {
         // Remove to get ownership of the locus priors.
         let locus_priors = priors.as_ref().and_then(|priors| priors.get(locus.set.tag()));
         if priors.is_some() && locus_priors.is_none() {
             log::warn!("Priors for locus {} are not found. Assuming equal priors", locus.set.tag());
         }
-        let locus_weights = explicit_weights.as_ref()
-            .and_then(|paths| paths.get(locus.set.tag()).map(|path| path as &Path));
+        let locus_weights = explicit_weights.as_ref().and_then(|paths| paths[i].as_ref().map(|path| path as &Path));
         if explicit_weights.is_some() && locus_weights.is_none() {
             log::warn!("Explicit weights for locus {} are not found. Assuming no weights", locus.set.tag());
         }

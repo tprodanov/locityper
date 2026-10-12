@@ -406,11 +406,11 @@ fn find_ref_haplotype(
     for (&id, other_haps) in disc_haps.by_contig() {
         if let Some((_, is_identical)) = other_haps.iter().filter(|(name, _)| name == ref_name).next() {
             if !is_identical { break };
-            log::debug!("Replacing reference haplotype {} with {}", ref_name, contigs.get_name(id));
+            log::debug!("    Reference haplotype {} was discarded, replaced with {}", ref_name, contigs.get_name(id));
             return Ok(Some(id));
         }
     }
-    log::warn!("Could not find reference haplotype `{}`", ref_name);
+    log::debug!("    Could not find reference haplotype `{}`", ref_name);
     Ok(None)
 }
 
