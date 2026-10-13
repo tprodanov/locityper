@@ -2,9 +2,34 @@
 
 from common import open
 import weight_subregions
+from sortedcontainers import SortedSet
 
 
-def process_annotation(annot, sample, gene, trees, features, features_set, hap_annotations):
+class Feature:
+    def __init__(self, s):
+        """
+        Parse string of format "feature:attribute[:tag=XXX][:backup=XXX][:missing=XXX]"
+        """
+        split = s.split(':')
+        assert len(split) >= 2, f'At least two entries required in "{s}" (feature:attribute).'
+        self.feature = split[0]
+        self.attributes = split[1]
+        assert '=' not in self.feature, f'First entry in "{s}" must be the feature name (no = allowed)'
+        assert '=' not in self.attribute, f'Second entry in "{s}" must be the attribute key (no = allowed)'
+        self.tag = self.feature
+        self.missing = '<missing>'
+        for kw in split[1:]:
+            key, val = kw.split('=')
+            match key:
+                case 'tag':
+                    self.tag = val
+                case 'backup':
+                    self.attributes.append(val)
+                case 'missing':
+                    self.missing = val
+
+
+def process_annotation(annotation, sample, gene, trees, features, features_set, hap_annotations):
     for entry in annotation:
         gene_name = entry.attributes['gene_name']
         if gene_name != gene or entry.feature not in features_set:
@@ -15,10 +40,15 @@ def process_annotation(annot, sample, gene, trees, features, features_set, hap_a
         for ovlp in overlap:
             haplotype = ovlp.data[0]
             for feature in features:
-                if entry.feature != feature[0]:
+                if entry.feature != feature.feature:
                     continue
-                tag = feature[0] if len(feature) < 3 else feature[2]
-                hap_annotations[haplotype][tag].append(entry.attributes[feature[1]])
+                val = feature.missing
+                for attr in feature.attributes:
+                    curr_val = entry.attributes.get(attr)
+                    if curr_val is not None:
+                        val = curr_val
+                        continue
+                hap_annotations[haplotype][tag].append(val)
 
 
 def main():
@@ -42,29 +72,35 @@ def main():
         help='BED file with columns contig, start, end, haplotype_name, _, strand (mutually exclusive with -f).')
     parser.add_argument('-d', '--discarded', metavar='FILE',
         help='Optional: file with discarded haplotypes (DB/loci/LOCUS/discarded_haplotypes.txt).')
-    parser.add_argument('-f' '--features', metavar='STR:STR', nargs='+',
-        help='Features of interest. Each feature (3rd GFF column) must be followed by a colon (:) '
-            'and an attribute key (9th column). Optionally, you can set tag name after yet another colon.')
-    parser.add_argument('-o', '--output', metavar='FILE', required=True,
-        help='Output CSV file.')
+    parser.add_argument('-F', '--features', metavar='STR:STR', nargs='+', required=True,
+        help='Features of interest of format "feature:attribute[:tag=XXX][:backup=XXX][:missing=XXX]". '
+            'Feature name must match the 3rd GFF column, and attribute is a key from the 9th column. '
+            'Backup keys can supplied via "backup", they are only checked if the primary attribute is not found. '
+            'If no key/backup keys were found, missing value will be used (<missing> by default). '
+            'If missing value is empty (missing=) missing values will not be reported. '
+            'By default, tag will be equal to the feature, but this can be overridden with tag=XXX.')
     parser.add_argument('-s', '--separator', metavar='STR', default=';',
         help='Separator for outputting repeated annotations [%(default)s].')
+    parser.add_argument('-c', '--collapse', action='store_true',
+        help='Collapse repeated values in haplotype annotations.')
+    parser.add_argument('-o', '--output', metavar='FILE', required=True,
+        help='Output CSV file.')
     args = parser.parse_args()
 
     entries = weight_subregions.parse_haplotypes(args)
     discarded_haplotypes = weight_subregions.load_discarded_haps(args.discarded)
     samples, lengths, trees = weight_subregions.process_entries(entries, discarded_haplotypes)
 
-    features = [feature.split(':') for feature in args.features]
-    assert all(2 <= len(feature) <= 3 for feature in features)
-    features_set = { feature[0] for feature in features }
-    tags = sorted({ feature[0] if len(feature) < 3 else feature[2] for feature in features })
+    features = [Feature(s) for s in args.features]
+    features_set = { feature.feature for feature in features }
+    tags = sorted({ feature.tag for feature in features })
     hap_annotations = { haplotype: { tag: [] for tag in tags } for haplotype in lengths.keys() }
 
     for sample in samples:
         filename = args.annotation.replace('{}', sample)
         with open(filename) as f:
-            process_annotation(parse_annotation(f), sample, args.gene, trees, features, features_set, hap_annotations)
+            gff_entries = weight_subregions.parse_annotation(f)
+            process_annotation(gff_entries, sample, args.gene, trees, features, features_set, hap_annotations)
 
     locus = args.gene if args.locus is None else args.locus
     with open(args.output, 'wt') as out:
@@ -73,6 +109,8 @@ def main():
             curr_hap_annotations = hap_annotations[haplotype]
             for tag in tags:
                 hap_tag_annots = curr_hap_annotations[tag]
+                if args.collapse:
+                    hap_tag_annots = SortedSet(hap_tag_annots)
                 hap_tag_annots_str = args.separator.join(hap_tag_annots) if hap_tag_annots else '*'
                 out.write(f'{locus}\t{haplotype}\t{hap_tag_annots_str}\t{tag}\n')
 
