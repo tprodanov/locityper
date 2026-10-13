@@ -1,6 +1,7 @@
 import sys
 import gzip
 import lzma
+import zstd
 import os
 import builtins
 import csv
@@ -53,6 +54,8 @@ def open(filename, mode='rt'):
         return gzip.open(filename, mode)
     elif filename.endswith('.xz'):
         return lzma.open(filename, mode)
+    elif filename.endswith('.zst'):
+        return zstd.open(filename, mode)
     elif filename.endswith('.br'):
         return read_brotli(filename, mode) if 'r' in mode else write_brotli(filename, mode)
     else:
