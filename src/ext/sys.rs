@@ -54,10 +54,14 @@ fn decompress_stream(
     let buffer = stream.fill_buf().map_err(add_path!(filename))?;
     if buffer.len() < 2 {
         return Ok(Box::new(stream));
-    } else if buffer[0] == 0x1f && buffer[1] == 0x8b {
+    } else if buffer[..2] == *b"\x1f\x8b" {
         // gzip magic number
         Ok(Box::new(BufReader::with_capacity(BUFFER_SIZE_1MB, MultiGzDecoder::new(stream))))
-    } else if buffer[0] == 0x04 && buffer[1] == 0x22 {
+    } else if buffer.len() >= 4 && buffer[..4] == *b"\x28\xb5\x2f\xfd" {
+        // zstd magic number
+        Ok(Box::new(BufReader::with_capacity(BUFFER_SIZE_1MB,
+            zstd::stream::read::Decoder::new(stream).map_err(add_path!(filename))?)))
+    } else if buffer[..2] == *b"\x04\x22" {
         // lz4 magic number
         Ok(Box::new(BufReader::with_capacity(BUFFER_SIZE_1MB, lz4::Decoder::new(stream).map_err(add_path!(filename))?)))
     } else {
@@ -223,6 +227,22 @@ pub fn create_brotli(filename: &Path) -> crate::Result<BrFile> {
     create_brotli_with_lvl(filename, 5)
 }
 
+// 'static is used by Encoder::new
+pub type ZstdFile = BufWriter<zstd::stream::write::AutoFinishEncoder<'static, File>>;
+
+pub fn create_zstd_with_lvl(filename: &Path, compression: u8) -> crate::Result<ZstdFile> {
+    let file = File::create(filename).map_err(add_path!(filename))?;
+    zstd::stream::write::Encoder::new(file, i32::from(compression))
+        .map_err(add_path!(filename))
+        .map(|w| w.auto_finish())
+        .map(|w| BufWriter::with_capacity(BUFFER_SIZE_1MB, w))
+}
+
+#[inline]
+pub fn create_zstd(filename: &Path) -> crate::Result<ZstdFile> {
+    create_zstd_with_lvl(filename, 7)
+}
+
 /// Creates buffered output file.
 pub fn create_file(filename: &Path) -> crate::Result<BufWriter<File>> {
     File::create(filename).map_err(add_path!(filename))
@@ -239,6 +259,7 @@ pub fn create(filename: &Path) -> crate::Result<Box<dyn Write + Send>> {
             Some("gz") => Ok(Box::new(create_gzip(filename)?)),
             Some("lz4") => Ok(Box::new(create_lz4_slow(filename)?)),
             Some("br") => Ok(Box::new(create_brotli(filename)?)),
+            Some("zst") => Ok(Box::new(create_zstd(filename)?)),
             _ => Ok(Box::new(create_file(filename)?)),
         }
     }
