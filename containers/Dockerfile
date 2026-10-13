@@ -70,7 +70,7 @@ RUN apk update \
 FROM alpine:3.23
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.7.6"
+LABEL version="1.7.7"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local
