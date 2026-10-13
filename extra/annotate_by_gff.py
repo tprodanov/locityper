@@ -13,12 +13,12 @@ class Feature:
         split = s.split(':')
         assert len(split) >= 2, f'At least two entries required in "{s}" (feature:attribute).'
         self.feature = split[0]
-        self.attributes = split[1]
+        self.attributes = [split[1]]
         assert '=' not in self.feature, f'First entry in "{s}" must be the feature name (no = allowed)'
-        assert '=' not in self.attribute, f'Second entry in "{s}" must be the attribute key (no = allowed)'
+        assert '=' not in self.attributes[0], f'Second entry in "{s}" must be the attribute key (no = allowed)'
         self.tag = self.feature
         self.missing = '<missing>'
-        for kw in split[1:]:
+        for kw in split[2:]:
             key, val = kw.split('=')
             match key:
                 case 'tag':
@@ -47,8 +47,8 @@ def process_annotation(annotation, sample, gene, trees, features, features_set, 
                     curr_val = entry.attributes.get(attr)
                     if curr_val is not None:
                         val = curr_val
-                        continue
-                hap_annotations[haplotype][tag].append(val)
+                        break
+                hap_annotations[haplotype][feature.tag].append(val)
 
 
 def main():
