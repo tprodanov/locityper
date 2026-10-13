@@ -47,6 +47,8 @@ def main():
             'and an attribute key (9th column). Optionally, you can set tag name after yet another colon.')
     parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output CSV file.')
+    parser.add_argument('-s', '--separator', metavar='STR', default=';',
+        help='Separator for outputting repeated annotations [%(default)s].')
     args = parser.parse_args()
 
     entries = weight_subregions.parse_haplotypes(args)
@@ -71,10 +73,8 @@ def main():
             curr_hap_annotations = hap_annotations[haplotype]
             for tag in tags:
                 hap_tag_annots = curr_hap_annotations[tag]
-                hap_tag_annots_str = ','.join(hap_tag_annots) if hap_tag_annots else '*'
+                hap_tag_annots_str = args.separator.join(hap_tag_annots) if hap_tag_annots else '*'
                 out.write(f'{locus}\t{haplotype}\t{hap_tag_annots_str}\t{tag}\n')
-
-
 
 
 if __name__ == '__main__':
