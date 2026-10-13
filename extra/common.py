@@ -39,7 +39,7 @@ class BrotliReader:
         self.close()
 
     def __getattr__(self, name):
-        return getattr(self._proc.stdout, name)
+        return getattr(self.proc.stdout, name)
 
 
 class BrotliWriter:
@@ -69,7 +69,7 @@ class BrotliWriter:
         self.close()
 
     def __getattr__(self, name):
-        return getattr(self._proc.stdin, name)
+        return getattr(self.proc.stdin, name)
 
 
 def open(filename, mode='rt'):
