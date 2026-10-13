@@ -4,7 +4,6 @@ import lzma
 import os
 import builtins
 import csv
-from contextlib import contextmanager
 import subprocess
 try:
     from compression.zstd import open as zstd_open
@@ -13,17 +12,19 @@ except ModuleNotFoundError:
         error('zstd compression not supported (required Python >= 3.14)')
 
 
-@contextmanager
-def read_brotli(filename, mode='rt'):
-    proc = subprocess.Popen(
-        ['brotli', '-Kdc', filename],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text='b' not in mode,
-    )
-    try:
-        yield proc.stdout
-    finally:
+class BrotliReader:
+    def __init__(self, filename, mode='rt'):
+        assert 'w' not in mode
+        self.proc = subprocess.Popen(
+            ['brotli', '-Kdc', filename],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text='b' not in mode,
+        )
+
+    def close(self):
+        proc = self.proc
+        self.proc = None
         proc.stdout.close()
         stderr = proc.stderr.read()
         proc.stderr.close()
@@ -31,24 +32,44 @@ def read_brotli(filename, mode='rt'):
         if ret:
             raise subprocess.CalledProcessError(ret, proc.args, stderr=stderr)
 
+    def __enter__(self):
+        return self
 
-@contextmanager
-def write_brotli(filename, mode='wt'):
-    proc = subprocess.Popen(
-        ['brotli', '-5', '-f', '-w', '24', '-o', filename],
-        stdin=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text='b' not in mode,
-    )
-    try:
-        yield proc.stdin
-    finally:
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def __getattr__(self, name):
+        return getattr(self._proc.stdout, name)
+
+
+class BrotliWriter:
+    def __init__(self, filename, mode='wt'):
+        assert 'r' not in mode
+        self.proc = subprocess.Popen(
+            ['brotli', '-5', '-f', '-w', '24', '-o', filename],
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text='b' not in mode,
+        )
+
+    def close(self):
+        proc = self.proc
+        self.proc = None
         proc.stdin.close()
         stderr = proc.stderr.read()
         proc.stderr.close()
         ret = proc.wait()
         if ret:
             raise subprocess.CalledProcessError(ret, proc.args, stderr=stderr)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def __getattr__(self, name):
+        return getattr(self._proc.stdin, name)
 
 
 def open(filename, mode='rt'):
@@ -62,7 +83,7 @@ def open(filename, mode='rt'):
         level = 7 if 'w' in mode else None
         return zstd_open(filename, mode, level=level)
     elif filename.endswith('.br'):
-        return read_brotli(filename, mode) if 'r' in mode else write_brotli(filename, mode)
+        return BrotliReader(filename, mode) if 'r' in mode else BrotliWriter(filename, mode)
     else:
         return builtins.open(filename, mode)
 
