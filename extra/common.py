@@ -1,7 +1,7 @@
 import sys
 import gzip
 import lzma
-import zstd
+from compression import zstd
 import os
 import builtins
 import csv
