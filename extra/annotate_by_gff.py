@@ -83,6 +83,9 @@ def main():
         help='Separator for outputting repeated annotations [%(default)s].')
     parser.add_argument('-c', '--collapse', action='store_true',
         help='Collapse repeated values in haplotype annotations.')
+    parser.add_argument('--write-tag', choices=('yes', 'no', 'auto'), default='auto',
+        help='Output tag to the fourht column of the output file? '
+            'Options: yes, no, auto (only if there is more than one tag, default).')
     parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output CSV file.')
     args = parser.parse_args()
@@ -103,8 +106,15 @@ def main():
             process_annotation(gff_entries, sample, args.gene, trees, features, features_set, hap_annotations)
 
     locus = args.gene if args.locus is None else args.locus
+    match args.write_tag:
+        case 'yes':
+            write_tag = True
+        case 'no':
+            write_tag = False
+        case 'auto':
+            write_tag = len(tags) > 1
     with open(args.output, 'wt') as out:
-        out.write('locus\thaplotype\tannotation\ttag\n')
+        out.write(f'locus\thaplotype\tannotation{"\ttag" if write_tag else ""}\n')
         for haplotype in sorted(hap_annotations.keys()):
             curr_hap_annotations = hap_annotations[haplotype]
             for tag in tags:
@@ -112,7 +122,7 @@ def main():
                 if args.collapse:
                     hap_tag_annots = SortedSet(hap_tag_annots)
                 hap_tag_annots_str = args.separator.join(hap_tag_annots) if hap_tag_annots else '*'
-                out.write(f'{locus}\t{haplotype}\t{hap_tag_annots_str}\t{tag}\n')
+                out.write(f'{locus}\t{haplotype}\t{hap_tag_annots_str}{"\t" + tag if write_tag else ""}\n')
 
 
 if __name__ == '__main__':
