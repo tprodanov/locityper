@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: rust:1.92-alpine3.23
+From: rust:1.99-alpine3.23
 Stage: build
 
 %post
