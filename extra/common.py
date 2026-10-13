@@ -1,12 +1,16 @@
 import sys
 import gzip
 import lzma
-from compression import zstd
 import os
 import builtins
 import csv
 from contextlib import contextmanager
 import subprocess
+try:
+    from compression.zstd import open as zstd_open
+except ModuleNotFoundError:
+    def zstd_open(*args, **kwargs):
+        error('zstd compression not supported (required Python >= 3.14)')
 
 
 @contextmanager
@@ -55,7 +59,8 @@ def open(filename, mode='rt'):
     elif filename.endswith('.xz'):
         return lzma.open(filename, mode)
     elif filename.endswith('.zst'):
-        return zstd.open(filename, mode)
+        level = 7 if 'w' in mode else None
+        return zstd_open(filename, mode, level=level)
     elif filename.endswith('.br'):
         return read_brotli(filename, mode) if 'r' in mode else write_brotli(filename, mode)
     else:
