@@ -35,7 +35,7 @@ class Feature:
 Endpoint = namedtuple('Endpoint', 'pos is_start feature')
 
 
-def create_entries(args):
+def parse_haplotypes(args):
     if args.fasta and args.direct:
         with open(args.fasta) as f:
             haplotype = None
@@ -161,7 +161,8 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
         overlap = trees[(sample, entry.contig)].overlap(entry.start, entry.end)
         if not overlap:
             continue
-        feature_ix = next(i for i, feature in enumerate(features) if feature.pattern is None or feature.pattern.match(entry.feature))
+        feature_ix = next(i for i, feature in enumerate(features)
+            if feature.pattern is None or feature.pattern.match(entry.feature))
         for ovlp in overlap:
             start = max(entry.start - ovlp.begin, 0)
             end = min(entry.end, ovlp.end) - ovlp.begin
@@ -195,7 +196,7 @@ def main():
     parser.add_argument('-r', '--regions', metavar='FILE',
         help='BED file with columns contig, start, end, haplotype_name, _, strand (mutually exclusive with -f).')
     parser.add_argument('-d', '--discarded', metavar='FILE',
-        help='Optional: file with discarded haplotypes (DB/loci/LOCUS/discarded_haplotypes.txt)')
+        help='Optional: file with discarded haplotypes (DB/loci/LOCUS/discarded_haplotypes.txt).')
 
     default_features = ['CDS|start_codon|end_codon:1', 'gene:0.5']
     default_features_str = ' '.join(map('"{}"'.format, default_features))
@@ -209,7 +210,7 @@ def main():
         help='Output BED file.')
     args = parser.parse_args()
 
-    entries = create_entries(args)
+    entries = parse_haplotypes(args)
     discarded_haplotypes = load_discarded_haps(args.discarded)
     samples, lengths, trees = process_entries(entries, discarded_haplotypes)
 

@@ -1,4 +1,4 @@
-FROM rust:1.99.0-alpine3.23 AS build
+FROM rust:1.99.0-alpine3.24 AS build
 
 ARG PREFIX=/usr/local
 ARG SAMTOOLS_VER=1.19
