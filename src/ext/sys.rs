@@ -166,7 +166,7 @@ pub type GzFile = BufWriter<GzEncoder<File>>;
 /// Creates a gzip compressed file.
 pub fn create_gzip(filename: &Path) -> crate::Result<GzFile> {
     let file = File::create(filename).map_err(add_path!(filename))?;
-    Ok(BufWriter::new(GzEncoder::new(file, Compression::default())))
+    Ok(BufWriter::with_capacity(BUFFER_SIZE_1MB, GzEncoder::new(file, Compression::default())))
 }
 
 pub struct AutoFinishLz4<W: Write> {
