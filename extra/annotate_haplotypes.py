@@ -111,7 +111,7 @@ def main():
     for feature in features:
         old_val = tag_missing_vals.get(feature.tag)
         assert old_val is None or old_val == feature.missing, \
-            f'Different features for same tag ({feature.tag}) have different different missing values '
+            f'Different features for same tag ({feature.tag}) have different different missing values ' \
             f'({old_val} and {feature.missing})'
         tag_missing_vals[feature.tag] = feature.missing
 
