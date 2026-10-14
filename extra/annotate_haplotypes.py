@@ -5,10 +5,14 @@ import weight_subregions
 from sortedcontainers import SortedSet
 
 
+NO_ANNOT = '<no-annot>'
+MISSING = '<missing>'
+
+
 class Feature:
     def __init__(self, s):
         """
-        Parse string of format "feature:attribute[:tag=XXX][:backup=XXX][:missing=XXX]"
+        Parse string of format "feature:attribute[:tag=XXX][:backup=XXX][:no-annot=XXX][:missing=XXX]"
         """
         split = s.split(':')
         assert len(split) >= 2, f'At least two entries required in "{s}" (feature:attribute).'
@@ -17,7 +21,8 @@ class Feature:
         assert '=' not in self.feature, f'First entry in "{s}" must be the feature name (no = allowed)'
         assert '=' not in self.attributes[0], f'Second entry in "{s}" must be the attribute key (no = allowed)'
         self.tag = self.feature
-        self.missing = '<missing>'
+        self.no_annot = NO_ANNOT
+        self.missing = MISSING
         for kw in split[2:]:
             key, val = kw.split('=')
             match key:
@@ -25,6 +30,8 @@ class Feature:
                     self.tag = val
                 case 'backup':
                     self.attributes.append(val)
+                case 'no-annot':
+                    self.no_annot = val
                 case 'missing':
                     self.missing = val
 
@@ -42,13 +49,14 @@ def process_annotation(annotation, sample, gene, trees, features, features_set, 
             for feature in features:
                 if entry.feature != feature.feature:
                     continue
-                val = feature.missing
+                val = feature.no_annot
                 for attr in feature.attributes:
                     curr_val = entry.attributes.get(attr)
                     if curr_val is not None:
                         val = curr_val
                         break
-                hap_annotations[haplotype][feature.tag].append(val)
+                if val != '':
+                    hap_annotations[haplotype][feature.tag].append(val)
 
 
 def main():
@@ -73,11 +81,12 @@ def main():
     parser.add_argument('-d', '--discarded', metavar='FILE',
         help='Optional: file with discarded haplotypes (DB/loci/LOCUS/discarded_haplotypes.txt).')
     parser.add_argument('-F', '--features', metavar='STR:STR', nargs='+', required=True,
-        help='Features of interest of format "feature:attribute[:tag=XXX][:backup=XXX][:missing=XXX]". '
+        help='Features of interest of format "feature:attribute[:tag=XXX][:backup=XXX][:no-annot=XXX][:missing=XXX]". '
             'Feature name must match the 3rd GFF column, and attribute is a key from the 9th column. '
             'Backup keys can supplied via "backup", they are only checked if the primary attribute is not found. '
-            'If no key/backup keys were found, missing value will be used (<missing> by default). '
-            'If missing value is empty (missing=) missing values will not be reported. '
+            f'If no key/backup keys were found, "no-annot" value will be used ({NO_ANNOT} by default). '
+            'If the value is empty (no-annot=) missing values will not be reported. '
+            f'If the feature is missing for a haplotype, "missing" value will be used ({MISSING} by default).'
             'By default, tag will be equal to the feature, but this can be overridden with tag=XXX.')
     parser.add_argument('-s', '--separator', metavar='STR', default=';',
         help='Separator for outputting repeated annotations [%(default)s].')
@@ -98,6 +107,13 @@ def main():
     features_set = { feature.feature for feature in features }
     tags = sorted({ feature.tag for feature in features })
     hap_annotations = { haplotype: { tag: [] for tag in tags } for haplotype in lengths.keys() }
+    tag_missing_vals = {}
+    for feature in features:
+        old_val = tag_missing_vals.get(feature.tag)
+        assert old_val is None or old_val == feature.missing, \
+            f'Different features for same tag ({feature.tag}) have different different missing values '
+            f'({old_val} and {feature.missing})'
+        tag_missing_vals[feature.tag] = feature.missing
 
     for sample in samples:
         filename = args.annotation.replace('{}', sample)
@@ -121,7 +137,7 @@ def main():
                 hap_tag_annots = curr_hap_annotations[tag]
                 if args.collapse:
                     hap_tag_annots = SortedSet(hap_tag_annots)
-                hap_tag_annots_str = args.separator.join(hap_tag_annots) if hap_tag_annots else '*'
+                hap_tag_annots_str = args.separator.join(hap_tag_annots) if hap_tag_annots else tag_missing_vals[tag]
                 out.write(f'{locus}\t{haplotype}\t{hap_tag_annots_str}{"\t" + tag if write_tag else ""}\n')
 
 
