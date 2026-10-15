@@ -272,9 +272,11 @@ fn load_explicit_weights(
         let mut split = line.split_whitespace();
         let contig_name = split.next()
             .ok_or_else(|| error!(ParsingError, "Cannot parse BED line `{}`, not enough columns", line.trim()))?;
-        if let Some(contig_id) = contigs.try_get_id(contig_name)
-            && contig_names[contig_id.ix()].get_or_insert_with(|| contig_name.to_string()) != contig_name
-        {
+        // Will be false if the contig is discarded or does not match previously observed contig associated with its id.
+        let same_contig_name = contigs.try_get_id(contig_name)
+            .map(|contig_id| contig_names[contig_id.ix()].get_or_insert_with(|| contig_name.to_string()) == contig_name)
+            .unwrap_or(false);
+        if !same_contig_name {
             ignored_lines += 1;
             continue;
         }
