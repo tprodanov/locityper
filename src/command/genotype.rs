@@ -598,6 +598,7 @@ fn load_priors(path: &Path) -> crate::Result<HashMap<String, HashMap<String, f64
 /// * filename: two-column text file, where first column = locus, second column = filename.
 /// ** @@filename: look up each BED file in <db>/loci/<locus>/filename.
 pub fn load_explicit_weights(cli_arg: &str, loci: &[LocusData]) -> crate::Result<Vec<Option<PathBuf>>> {
+    log::debug!("Extracting BED paths from --reg-weights {}", ext::fmt::path(cli_arg));
     let mut paths = vec![None; loci.len()];
     if cli_arg.starts_with('@') {
         let basename = cli_arg.trim_start_matches('@');
@@ -837,7 +838,7 @@ fn load_recr_targets<'a>(
         let bed_filename = locus.db_dir.join(&bed_basename);
         for line in ext::sys::open(&bed_filename)?.lines() {
             let line = line.map_err(add_path!(bed_filename))?;
-            match Interval::parse_bed(&mut line.split('\t'), &contigs) {
+            match Interval::parse_bed_from_split(&mut line.split('\t'), &contigs) {
                 Ok(interv) => intervals.push(interv),
                 Err(Error::ParsingError(e)) => log::error!(
                     "[{}] Cannot parse locus coordinates ({}), the region may be absent from the BAM/CRAM file",

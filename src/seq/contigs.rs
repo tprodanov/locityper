@@ -348,12 +348,6 @@ impl ContigSet {
         leave_out: &HashSet<String>,
         disc_haps: &DiscardedHaplotypes,
     ) -> crate::Result<(Vec<usize>, Self)> {
-        if !disc_haps.all_identical() {
-            log::warn!("[{}] Haplotypes were previously pruned (~ in discarded haplotypes). \
-                Leave-out genotyping may lose relevant previously discarded haplotypes",
-                self.contigs.tag());
-        }
-
         let mut ixs = Vec::new();
         let mut contigs = ContigNames::new(self.contigs.tag());
         let mut discarded = Vec::new();
@@ -535,6 +529,9 @@ impl DiscardedHaplotypes {
         self.all_identical
     }
 
+    /// Returns a list of haplotypes, associated with contig id.
+    /// Returns vector of names & flag indicating whether the two haplotypes are fully identical (true)
+    /// or just similar (false).
     pub fn identical_to(&self, contig_id: ContigId) -> Option<&Vec<(String, bool)>> {
         self.by_contig.get(&contig_id)
     }

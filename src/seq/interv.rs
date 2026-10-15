@@ -93,20 +93,23 @@ impl Interval {
         Self::from_captures(s, &captures, contigs)
     }
 
-    /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
-    /// Start is 0-based, inclusive, end is 0-based, non-inclusive.
-    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> crate::Result<Self>
-    where I: Iterator<Item = &'a str>,
+    /// Parses BED from three parts (contig, start, end). All must be Some(..),
+    /// start is 0-based inclusive, end is 0-based non-inclusive.
+    pub fn parse_bed_from_parts(
+        contig_name: Option<&str>,
+        start: Option<&str>,
+        end: Option<&str>,
+        contigs: &Arc<ContigNames>,
+    ) -> crate::Result<Self>
     {
-        let contig_name = split.next()
+        let contig_name = contig_name
             .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?;
-        // NOTE: Do not change this error message without checking `model/windows.rs`.
         let contig_id = contigs.try_get_id(contig_name)
             .ok_or_else(|| error!(ParsingError, "Unknown contig {:?}", contig_name))?;
-        let start = split.next()
+        let start = start
             .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?
             .parse::<u32>().map_err(|e| error!(ParsingError, "Cannot parse BED line: {}", e))?;
-        let end = split.next()
+        let end = end
             .ok_or_else(|| error!(ParsingError, "Cannot parse BED line, not enough columns"))?
             .parse::<u32>().map_err(|e| error!(ParsingError, "Cannot parse BED line: {}", e))?;
         if end > contigs.get_len(contig_id) {
@@ -115,6 +118,16 @@ impl Interval {
                 contig_name, start+1, end, contig_name));
         }
         Ok(Self::new(Arc::clone(contigs), contig_id, start, end))
+    }
+
+    /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
+    /// Start is 0-based inclusive, end is 0-based non-inclusive.
+    #[inline]
+    pub fn parse_bed_from_split<'a>(
+        split: &mut impl Iterator<Item = &'a str>,
+        contigs: &Arc<ContigNames>,
+    ) -> crate::Result<Self> {
+        Self::parse_bed_from_parts(split.next(), split.next(), split.next(), contigs)
     }
 
     /// Contig id.
@@ -258,12 +271,12 @@ pub fn load_bed(
     for line in file.lines() {
         let line = line.map_err(add_path!(filename))?;
 
-        match Interval::parse_bed(&mut line.trim().split('\t'), contigs) {
+        match Interval::parse_bed_from_split(&mut line.trim().split('\t'), contigs) {
             Ok(interv) => intervals.push(interv),
             Err(crate::Error::ParsingError(e)) => log::error!(
-                "Cannot parse BED line `{}`: {}. Possible, contig missing from reference/BAM/CRAM files",
+                "While processing line `{}`: {}. Possible, contig missing from reference/BAM/CRAM files",
                 line.trim(), e),
-            Err(e) => log::error!("Cannot parse BED line `{}`: {}", line.trim(), e.display()),
+            Err(e) => log::error!("While processing line `{}`: {}", line.trim(), e.display()),
         }
     }
     Ok(())
@@ -342,10 +355,11 @@ impl NamedInterval {
 
     /// Parses interval from iterator over strings. Moves iterator by three positions (chrom, start, end).
     /// Start is 0-based, inclusive, end is 0-based, non-inclusive.
-    pub fn parse_bed<'a, I>(split: &mut I, contigs: &Arc<ContigNames>) -> crate::Result<Self>
-    where I: Iterator<Item = &'a str>,
-    {
-        let interval = Interval::parse_bed(split, contigs)?;
+    pub fn parse_bed_from_split<'a>(
+        split: &mut impl Iterator<Item = &'a str>,
+        contigs: &Arc<ContigNames>,
+    ) -> crate::Result<Self> {
+        let interval = Interval::parse_bed_from_split(split, contigs)?;
         let name = split.next().ok_or_else(|| error!(InvalidData, "Fourth column must contain locus name"))?;
         Self::new(name.to_owned(), interval)
     }

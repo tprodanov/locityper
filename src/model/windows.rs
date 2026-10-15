@@ -263,19 +263,23 @@ fn load_explicit_weights(
     log::debug!("    Loading explicit region weights from {}", ext::fmt::path(&filename));
     // Explicit weights for each basepair.
     let mut weights = vec![Some(ExplicitWeights::default()); contigs.len()];
+    // Because of discarded haplotypes and their synonyms, the same contig id can represent multiple haplotypes.
+    // Store observed haplotype, and continue
+    let mut contig_names = vec![None::<String>; contigs.len()];
     let mut ignored_lines = 0;
     for line in reader.lines() {
         let line = line.map_err(add_path!(filename))?;
         let mut split = line.split_whitespace();
-        let interval = match Interval::parse_bed(&mut split, contigs) {
-            Ok(interval) => interval,
-            Err(crate::Error::ParsingError(s)) if s.starts_with("Unknown contig") => {
-                ignored_lines += 1;
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
+        let contig_name = split.next()
+            .ok_or_else(|| error!(ParsingError, "Cannot parse BED line `{}`, not enough columns", line.trim()))?;
+        if let Some(contig_id) = contigs.try_get_id(contig_name)
+            && contig_names[contig_id.ix()].get_or_insert_with(|| contig_name.to_string()) != contig_name
+        {
+            ignored_lines += 1;
+            continue;
+        }
 
+        let interval = Interval::parse_bed_from_parts(Some(contig_name), split.next(), split.next(), contigs)?;
         let val: f64 = split.next()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| error!(ParsingError,
@@ -289,8 +293,8 @@ fn load_explicit_weights(
 
         let curr_weights = weights[interval.contig_id().ix()].as_mut().unwrap();
         if curr_weights.len() != interval.start() as usize {
-            return Err(error!(ParsingError,
-                "Failed to parse explicit weights ({}): haplotype {} not fully covered",
+            return Err(error!(InvalidInput,
+                "Failed to load explicit weights ({}): haplotype {} not fully covered",
                 ext::fmt::path(&filename), interval.contig_name()));
         }
         curr_weights.extend_by(interval.len() as usize, val);
@@ -304,11 +308,11 @@ fn load_explicit_weights(
     for (curr_weights, (name, &length)) in weights.iter_mut().zip(contigs.names().iter().zip(contigs.lengths())) {
         let curr_weights = curr_weights.as_mut().unwrap();
         if curr_weights.is_empty() {
-            return Err(error!(ParsingError,
-                "Failed to parse explicit weights ({}): haplotype {} missing", ext::fmt::path(filename), name));
+            return Err(error!(InvalidInput,
+                "Failed to load explicit weights ({}): haplotype {} missing", ext::fmt::path(filename), name));
         } else if curr_weights.len() != length as usize {
-            return Err(error!(ParsingError,
-                "Failed to parse explicit weights ({}): haplotype {} not fully covered/has different length",
+            return Err(error!(InvalidInput,
+                "Failed to load explicit weights ({}): haplotype {} not fully covered/has different length",
                 ext::fmt::path(&filename), name));
         }
         curr_weights.finish();

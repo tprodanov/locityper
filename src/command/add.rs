@@ -324,7 +324,7 @@ fn parse_loci(
         for line in ext::sys::open(filename)?.lines() {
             let line = line.map_err(add_path!(filename))?;
             let mut split = line.trim_end().split('\t');
-            let interval = NamedInterval::parse_bed(&mut split, contigs)?;
+            let interval = NamedInterval::parse_bed_from_split(&mut split, contigs)?;
             if !names.insert(interval.name().to_string()) {
                 return Err(error!(InvalidInput, "Locus name '{}' appears at least twice", interval.name()));
             }
