@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 from collections import defaultdict, namedtuple
+import sys
 import re
 import os
+import numpy as np
 from sortedcontainers import SortedList
 from intervaltree import IntervalTree
 from common import open
@@ -130,7 +132,7 @@ class GffEntry:
         self.contig = split[0]
         self.source = split[1]
         self.feature = split[2]
-        self.start = int(split[3])
+        self.start = int(split[3]) - 1
         self.end = int(split[4])
         self.score = split[5]
         self.strand = split[6]
@@ -178,26 +180,38 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
 
 def write_weights(features, endpoints, lengths, out):
     enabled = SortedList()
+    hap_weights = []
     for haplotype in sorted(endpoints.keys()):
         hap_endpoints = endpoints[haplotype]
         hap_endpoints.sort()
         enabled.clear()
 
         last_pos = 0
-        last_feature = 0
+        n_features = len(features)
+        # Temporary value
+        last_feature = n_features
+        sum_weight = 0
         for pos, is_start, feature_ix in hap_endpoints:
-            # Smallest index of an enabled feature
-            curr_feature = enabled[0]
-            if last_feature != curr_feature:
-                if last_pos < pos:
-                    out.write(f'{haplotype}\t{last_pos}\t{pos}\t{features[last_feature].weight:.8g}\n')
-                    last_pos = pos
-                last_feature = curr_feature
             if is_start:
                 enabled.add(feature_ix)
             else:
                 enabled.remove(feature_ix)
-        assert not enabled and last_pos == lengths[haplotype]
+             # Smallest index of an enabled feature
+            curr_feature = enabled[0] if enabled else n_features
+            if last_feature != curr_feature:
+                if last_pos < pos:
+                    assert last_feature < n_features, \
+                        f'Hap {haplotype},\n{hap_endpoints}\n{last_pos} - {pos} {last_feature}'
+                    w = features[last_feature].weight
+                    sum_weight += w * (pos - last_pos)
+                    out.write(f'{haplotype}\t{last_pos}\t{pos}\t{w:.8g}\n')
+                    last_pos = pos
+                last_feature = curr_feature
+        hap_length = lengths[haplotype]
+        assert not enabled and last_pos == hap_length
+        hap_weights.append((sum_weight / hap_length, haplotype))
+    hap_weights.sort()
+    return hap_weights
 
 
 def main():
@@ -249,7 +263,15 @@ def main():
             process_annotation(parse_annotation(f), sample, args.gene, trees, features, endpoints)
 
     with open(args.output, 'wt') as out:
-        write_weights(features, endpoints, lengths, out)
+        aver_hap_weights = write_weights(features, endpoints, lengths, out)
+    first_weight, first_hap = aver_hap_weights[0]
+    last_weight, last_hap = aver_hap_weights[-1]
+    aver_weights = [w for w, _ in aver_hap_weights]
+    sys.stderr.write(
+        f'Completed calculation of subregion weights for {args.gene}\n'
+        f'Average weights: mean = {np.mean(aver_weights):.5f}, median = {np.median(aver_weights):.5f}, sd = {np.std(aver_weights):.5f}\n'
+        f'    min: {first_weight:7.5f} ({first_hap})\n'
+        f'    max: {last_weight:7.5f} ({last_hap})\n')
 
 
 if __name__ == '__main__':
