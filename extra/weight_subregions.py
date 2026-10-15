@@ -176,6 +176,30 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
             endpoints[haplotype].append(Endpoint(end, False, feature_ix))
 
 
+def write_weights(features, endpoints, lengths, out):
+    enabled = SortedList()
+    for haplotype in sorted(endpoints.keys()):
+        hap_endpoints = endpoints[haplotype]
+        hap_endpoints.sort()
+        enabled.clear()
+
+        last_pos = 0
+        last_feature = 0
+        for pos, is_start, feature_ix in hap_endpoints:
+            # Smallest index of an enabled feature
+            curr_feature = enabled[0]
+            if last_feature != curr_feature:
+                if last_pos < pos:
+                    out.write(f'{haplotype}\t{last_pos}\t{pos}\t{features[last_feature].weight:.8g}\n')
+                    last_pos = pos
+                last_feature = curr_feature
+            if is_start:
+                enabled.add(feature_ix)
+            else:
+                enabled.remove(feature_ix)
+        assert not enabled and last_pos == lengths[haplotype]
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Assign weights to haplotype subregions based '
@@ -202,7 +226,7 @@ def main():
     default_features_str = ' '.join(map('"{}"'.format, default_features))
     parser.add_argument('-F', '--features', nargs='+', metavar='PATTERN:NUM', default=default_features,
         help='Feature and and corresponding weight, separated with ":". '
-            'If multiple feature patterns match, first matched applies. '
+            'If multiple feature patterns match, highest-weighted will match first. '
             f'Default: -F {default_features_str}.')
     parser.add_argument('-b', '--background', metavar='NUM', default=0.01,
         help='Weight of the background sequence that does not overlap any features [%(default)s].')
@@ -215,7 +239,8 @@ def main():
     samples, lengths, trees = process_entries(entries, discarded_haplotypes)
 
     features = list(map(Feature.from_str, args.features)) + [Feature(None, args.background)]
-    bg_ix = len(features) - 1
+    features.sort(key=lambda feature: -feature.weight)
+    bg_ix = next(i for i, feature in enumerate(features) if feature.pattern is None)
     endpoints = { haplotype: [Endpoint(0, True, bg_ix), Endpoint(length, False, bg_ix)]
         for haplotype, length in lengths.items() }
     for sample in samples:
@@ -223,24 +248,8 @@ def main():
         with open(filename) as f:
             process_annotation(parse_annotation(f), sample, args.gene, trees, features, endpoints)
 
-    enabled = SortedList()
     with open(args.output, 'wt') as out:
-        for haplotype in sorted(endpoints.keys()):
-            hap_endpoints = endpoints[haplotype]
-            hap_endpoints.sort()
-            last_pos = 0
-            enabled.clear()
-            for pos, is_start, feature_ix in hap_endpoints:
-                if last_pos < pos:
-                    # Smallest index of an enabled feature
-                    out_feature_ix = enabled[0]
-                    out.write(f'{haplotype}\t{last_pos}\t{pos}\t{features[out_feature_ix].weight:.8g}\n')
-                if is_start:
-                    enabled.add(feature_ix)
-                else:
-                    enabled.remove(feature_ix)
-                last_pos = pos
-            assert not enabled and last_pos == lengths[haplotype]
+        write_weights(features, endpoints, lengths, out)
 
 
 if __name__ == '__main__':
