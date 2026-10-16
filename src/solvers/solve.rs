@@ -852,9 +852,9 @@ fn solve_single_thread(
 /// Creates `threads` filenames, one for each thread.
 fn csv_filenames(prefix: &Path, threads: usize) -> Vec<PathBuf> {
     (0..threads).map(|i| if i == 0 {
-        prefix.with_added_extension(".csv.br")
+        prefix.with_added_extension("csv.br")
     } else {
-        prefix.with_added_extension(format!(".{}.csv.br", i))
+        prefix.with_added_extension(format!("{}.csv.br", i))
     }).collect()
 }
 

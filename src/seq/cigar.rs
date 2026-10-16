@@ -1071,7 +1071,7 @@ impl CigarDirection for RefToQuery {
 pub struct ApproxPosition {
     pub min_cigar_ix: u32,
     pub max_cigar_ix: u32,
-    pub approx_pos: u32,
+    pub pos: u32,
 }
 
 /// Structure, returned by `CigarIndex::find_cigar_offset`.
@@ -1136,7 +1136,7 @@ impl CigarIndex {
         //     qpos & SPARSE_MASK = qpos - qpos1
         //     X >> SPARSE_STEP_PWR = X / (qpos2 - qpos1)
         let approx_pos = rpos1 + (((qpos & SPARSE_MASK) * (rpos2 - rpos1)) >> SPARSE_STEP_PWR);
-        ApproxPosition { min_cigar_ix, max_cigar_ix, approx_pos }
+        ApproxPosition { min_cigar_ix, max_cigar_ix, pos: approx_pos }
     }
 
     /// Refines approximate position, finding specific CIGAR index, query and ref positions at that point.

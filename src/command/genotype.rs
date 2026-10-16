@@ -223,11 +223,11 @@ fn print_help(extended: bool) {
         {EMPTY}  Multiple databases allowed, but must contain unique loci names.",
         "-d, --database[s]".green(), "DIR+".yellow(), concatcp!(super::PROGRAM, " target").underline());
     println!("    {:KEY$} {:VAL$}  Haplotype basis to speed up read mapping (see {}):\n\
-    {EMPTY}  - {} =  `<database>/loci/*/haplotypes-basis.fa.gz`,\n\
+    {EMPTY}  - {} = <database>/loci/*/haplotypes-basis.fa.gz,\n\
     {EMPTY}  - {} = all haplotypes `.../haplotypes.fa.gz`  (default),\n\
         {EMPTY}  - otherwise, use custom `.../haplotypes-basis.{}.fa.gz`.",
         "-b, --basis".green(), "STR".yellow(), concatcp!(super::PROGRAM, " augment").underline(),
-        "none".yellow(), "auto".yellow(), "STR".yellow());
+        "auto".yellow(), "none".yellow(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Output directory.",
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",

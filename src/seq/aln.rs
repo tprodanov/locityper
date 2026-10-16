@@ -10,7 +10,7 @@ use htslib::bam::Record;
 use crate::{
     bg::{
         InsertDistr,
-        err_prof::{OperCounts, EditDist},
+        err_prof::{OperCounts, EditDist, ErrorProfile},
     },
     seq::{
         Interval, ContigId, ContigNames,
@@ -204,6 +204,7 @@ impl Alignment {
     }
 
     /// Sets ln-probability of the alignment.
+    #[inline(always)]
     pub fn set_ln_prob(&mut self, ln_prob: f64) {
         self.ln_prob = ln_prob;
     }
@@ -213,6 +214,7 @@ impl Alignment {
         self.dist
     }
 
+    #[inline(always)]
     pub fn set_distance(&mut self, dist: EditDist) {
         self.dist = Some(dist);
     }
@@ -331,6 +333,13 @@ impl Alignment {
             }
         }
         counts
+    }
+
+    /// Calculates and saves edit distance and alignment probability.
+    pub fn calculate_edit_and_prob(&mut self, contigs: &ContigNames, err_prof: &ErrorProfile) {
+        let read_prof = self.count_region_operations_fast(contigs.get_len(self.contig_id()));
+        self.set_distance(read_prof.edit_distance());
+        self.set_ln_prob(err_prof.ln_prob(&read_prof));
     }
 }
 
