@@ -41,6 +41,9 @@ class BrotliReader:
     def __getattr__(self, name):
         return getattr(self.proc.stdout, name)
 
+    def __iter__(self):
+        return self.proc.stdout.__iter__()
+
 
 class BrotliWriter:
     def __init__(self, filename, mode='wt'):

@@ -67,10 +67,10 @@ RUN apk update \
     &&  cd / \
     &&  rm -rf /repos "${PREFIX}/cargo" "${PREFIX}/rustup"
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.7.8"
+LABEL version="1.7.9"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local

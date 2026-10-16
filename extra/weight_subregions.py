@@ -83,7 +83,7 @@ def load_discarded_haps(filename):
                     continue
                 split = line.split(' ')
                 assert split[1] == '=' or split[1] == '~'
-                discarded_haps.update(split[2:])
+                discarded_haps.update(hap.rstrip(',') for hap in split[2:])
     return discarded_haps
 
 

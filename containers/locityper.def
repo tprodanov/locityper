@@ -59,7 +59,7 @@ Stage: build
 #########################################################
 
 Bootstrap: docker
-From: alpine:3.23
+From: alpine:3.24
 Stage: final
 
 %files from build
@@ -93,4 +93,4 @@ Stage: final
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v1.7.8
+    Version v1.7.9
