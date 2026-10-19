@@ -37,11 +37,20 @@ class Feature:
 
 
 def process_annotation(annotation, sample, gene, trees, features, features_set, hap_annotations):
+    sample_trees = trees[sample]
+    if not sample_trees:
+        return
+    sample_contigs = set(sample_trees.keys())
+    seen_contigs = set()
+
     for entry in annotation:
+        seen_contigs.add(entry.contig)
         gene_name = entry.attributes['gene_name']
-        if gene_name != gene or entry.feature not in features_set:
+        if gene_name != gene or entry.contig not in sample_contigs:
             continue
-        overlap = trees[(sample, entry.contig)].overlap(entry.start, entry.end)
+
+        tree = trees[sample][entry.contig]
+        overlap = tree.overlap(entry.start, entry.end)
         if not overlap:
             continue
         for ovlp in overlap:
@@ -57,6 +66,9 @@ def process_annotation(annotation, sample, gene, trees, features, features_set, 
                         break
                 if val != '':
                     hap_annotations[haplotype][feature.tag].append(val)
+    diff = sample_contigs - seen_contigs
+    if diff:
+        raise RuntimeError(f'Contigs {", ".join(diff)} missing from the annotation for sample {sample}')
 
 
 def main():
@@ -101,7 +113,7 @@ def main():
 
     entries = weight_subregions.parse_haplotypes(args)
     discarded_haplotypes = weight_subregions.load_discarded_haps(args.discarded)
-    samples, lengths, trees = weight_subregions.process_entries(entries, discarded_haplotypes)
+    samples, lengths, trees = weight_subregions.process_haplotypes(entries, discarded_haplotypes)
 
     features = [Feature(s) for s in args.features]
     features_set = { feature.feature for feature in features }

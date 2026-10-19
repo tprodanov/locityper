@@ -164,10 +164,10 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
     seen_contigs = set()
 
     for entry in annotation:
+        seen_contigs.add(entry.contig)
         gene_name = entry.attributes['gene_name']
         if gene_name != gene or entry.contig not in sample_contigs:
             continue
-        seen_contigs.add(entry.contig)
 
         tree = trees[sample][entry.contig]
         overlap = tree.overlap(entry.start, entry.end)
@@ -188,7 +188,7 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
             endpoints[haplotype].append(Endpoint(end, False, feature_ix))
     diff = sample_contigs - seen_contigs
     if diff:
-        raise RuntimeError, f'Contigs {",".join(diff)} missing from the annotation for sample {sample}'
+        raise RuntimeError(f'Contigs {", ".join(diff)} missing from the annotation for sample {sample}')
 
 
 def write_weights(features, endpoints, lengths, out):
