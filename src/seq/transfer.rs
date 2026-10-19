@@ -127,6 +127,13 @@ impl HapAlns {
                         aligner, RefToQuery)
                 };
                 let cigar_ref_len = new_cigar.ref_len();
+                const MIN_ALN_SIZE: u32 = 50;
+                // Either too high edit distance or too short alignment.
+                if cigar_ref_len < MIN_ALN_SIZE {
+                    // Break if produced too many fails for this specific alignment.
+                    if n_fails.next().is_none() { break } else { continue };
+                }
+
                 let interval = Interval::new(Arc::clone(contigs), target_contig_id,
                     new_start, new_start + cigar_ref_len);
                 let mut new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);
