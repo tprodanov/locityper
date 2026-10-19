@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import sys
 import re
 import os
@@ -87,21 +87,15 @@ def load_discarded_haps(filename):
     return discarded_haps
 
 
-def process_entries(entries, discarded_haps):
+def process_haplotypes(entries, discarded_haps):
     samples = set()
     lengths = {}
-    # Use dictionary instead of a defaultdict so that we can be sure
-    # we haven't inserted an empty tree when we shouldn't have.
-    trees = {}
+    trees = defaultdict(lambda: defaultdict(IntervalTree))
     for entry in entries:
         if entry.haplotype in discarded_haps:
             continue
         assert entry.haplotype not in lengths
-        key = (entry.sample, entry.contig)
-        tree = trees.get(key)
-        if tree is None:
-            tree = IntervalTree()
-            trees[key] = tree
+        tree = trees[entry.sample][entry.contig]
         assert not tree.overlaps(entry.start, entry.end)
         assert entry.strand == '+' or entry.strand == '-'
         samples.add(entry.sample)
@@ -163,12 +157,19 @@ def parse_annotation(f):
 
 
 def process_annotation(annotation, sample, gene, trees, features, endpoints):
+    sample_trees = trees[sample]
+    if not sample_trees:
+        return
+    sample_contigs = set(sample_trees.keys())
+    seen_contigs = set()
+
     for entry in annotation:
         gene_name = entry.attributes['gene_name']
-        if gene_name != gene:
+        if gene_name != gene or entry.contig not in sample_contigs:
             continue
-        tree = trees.get((sample, entry.contig))
-        assert tree is not None, f'Sample {sample} has no contig {entry.contig}'
+        seen_contigs.add(entry.contig)
+
+        tree = trees[sample][entry.contig]
         overlap = tree.overlap(entry.start, entry.end)
         if not overlap:
             continue
@@ -185,6 +186,9 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
                 assert strand == '+'
             endpoints[haplotype].append(Endpoint(start, True, feature_ix))
             endpoints[haplotype].append(Endpoint(end, False, feature_ix))
+    diff = sample_contigs - seen_contigs
+    if diff:
+        raise RuntimeError, f'Contigs {",".join(diff)} missing from the annotation for sample {sample}'
 
 
 def write_weights(features, endpoints, lengths, out):
@@ -257,9 +261,9 @@ def main():
         help='Output BED file.')
     args = parser.parse_args()
 
-    entries = parse_haplotypes(args)
+    hap_entries = parse_haplotypes(args)
     discarded_haplotypes = load_discarded_haps(args.discarded)
-    samples, lengths, trees = process_entries(entries, discarded_haplotypes)
+    samples, lengths, trees = process_haplotypes(hap_entries, discarded_haplotypes)
 
     features = list(map(Feature.from_str, args.features)) + [Feature(None, args.background)]
     features.sort(key=lambda feature: -feature.weight)
