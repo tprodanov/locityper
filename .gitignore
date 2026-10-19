@@ -9,3 +9,4 @@ __pycache__
 bin
 /containers/*.tar*
 /containers/*.sif
+/containers/build_docker.sh

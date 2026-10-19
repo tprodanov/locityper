@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from collections import defaultdict, namedtuple
+from collections import namedtuple
 import sys
 import re
 import os
@@ -90,16 +90,23 @@ def load_discarded_haps(filename):
 def process_entries(entries, discarded_haps):
     samples = set()
     lengths = {}
-    trees = defaultdict(IntervalTree)
+    # Use dictionary instead of a defaultdict so that we can be sure
+    # we haven't inserted an empty tree when we shouldn't have.
+    trees = {}
     for entry in entries:
         if entry.haplotype in discarded_haps:
             continue
         assert entry.haplotype not in lengths
-        assert not trees[(entry.sample, entry.contig)].overlaps(entry.start, entry.end)
+        key = (entry.sample, entry.contig)
+        tree = trees.get(key)
+        if tree is None:
+            tree = IntervalTree()
+            trees[key] = tree
+        assert not tree.overlaps(entry.start, entry.end)
         assert entry.strand == '+' or entry.strand == '-'
         samples.add(entry.sample)
         lengths[entry.haplotype] = entry.end - entry.start
-        trees[(entry.sample, entry.contig)].addi(entry.start, entry.end, (entry.haplotype, entry.strand))
+        tree.addi(entry.start, entry.end, (entry.haplotype, entry.strand))
     return samples, lengths, trees
 
 
@@ -160,7 +167,9 @@ def process_annotation(annotation, sample, gene, trees, features, endpoints):
         gene_name = entry.attributes['gene_name']
         if gene_name != gene:
             continue
-        overlap = trees[(sample, entry.contig)].overlap(entry.start, entry.end)
+        tree = trees.get((sample, entry.contig))
+        assert tree is not None, f'Sample {sample} has no contig {entry.contig}'
+        overlap = tree.overlap(entry.start, entry.end)
         if not overlap:
             continue
         feature_ix = next(i for i, feature in enumerate(features)

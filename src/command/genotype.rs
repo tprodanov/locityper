@@ -625,7 +625,7 @@ pub fn load_explicit_weights(cli_arg: &str, loci: &[LocusData]) -> crate::Result
             }
             let locus = split[0];
             let Some(ix) = locus_ix.get(locus) else {
-                log::debug!("    Ignoring line `{}` in {} (skip locus/locus not in the database)",
+                log::debug!("    Ignoring line `{}` in {} (not in the database/already completed)",
                     line, ext::fmt::path(reg_filename));
                 continue
             };

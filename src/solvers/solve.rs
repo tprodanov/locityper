@@ -482,7 +482,7 @@ impl Predictions {
     fn produce_result(mut self, data: &Data) -> Genotyping {
         // ln(1e-5).
         const THRESH: f64 = -11.512925464970229;
-        // Output at most 100 genotypes.
+        // Output at most this number of genotypes.
         const MAX_GENOTYPES: usize = 50;
 
         let params = &data.assgn_params;
