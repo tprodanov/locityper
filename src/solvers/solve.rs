@@ -54,33 +54,31 @@ fn truncate_ixs(
     scores: &[f64],
     genotypes: &[Genotype],
     filt_diff: f64,
-    min_size: usize,
+    mut min_size: usize,
     threads: usize,
 ) {
     ixs.sort_unstable_by(|&i, &j| scores[j].total_cmp(&scores[i]));
     let n = ixs.len();
+    let max_size = min(n, min_size * 2);
+    min_size = max(min_size, threads).min(max_size).min(n);
 
     let best = scores[ixs[0]];
     let worst = scores[ixs[n - 1]];
-    log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
+    log::debug!("        Worst score: {} ({:.0}), Best: {} ({:.0})",
         genotypes[ixs[n - 1]], Ln::to_log10(worst), genotypes[ixs[0]], Ln::to_log10(best));
-    let mut thresh = best - filt_diff;
-    if min_size >= n || worst >= thresh {
-        log::debug!("        Keep {n}/{n} genotypes (100.0%)");
-        return;
-    }
+    let thresh = best - filt_diff;
 
-    let mut m = ixs.partition_point(|&i| scores[i] >= thresh);
-    if m < min_size {
-        thresh = scores[ixs[min_size - 1]];
-        m = ixs.partition_point(|&i| scores[i] >= thresh);
-    }
+    let m = if min_size >= n && thresh <= worst {
+        min_size
+    } else {
+        ixs.partition_point(|&i| scores[i] >= thresh).max(min_size).min(max_size)
+    };
 
-    // Increase up to `threads`.
-    m = m.max(threads).min(n);
     ixs.truncate(m);
-    log::debug!("        Keep {}/{} genotypes ({:.1}%), threshold: {:.0} ({:.1}%)",
-        m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(thresh), 100.0 * (thresh - worst) / (best - worst));
+    let last_score = scores[m - 1];
+    log::debug!("        Keep {}/{} genotypes ({:.1}%), smallest score: {:.0} ({:.1}%)",
+        m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(last_score),
+        100.0 * (last_score - worst) / (best - worst).max(1.0));
 }
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
@@ -448,7 +446,7 @@ impl Predictions {
         const SOPHISTICATED_COUNT: usize = 500;
 
         let mut new_ixs = self.ixs[..out_size].to_vec();
-        let mut rem_ixs = self.ixs[out_size..].iter().copied();
+        let mut rem_ixs = self.ixs[out_size..min(out_size * 2, n)].iter().copied();
         if out_size <= SOPHISTICATED_COUNT {
             // Stop when encountered 5 unlikely genotypes.
             const STOP_COUNT: u32 = 5;

@@ -1,7 +1,7 @@
 [package]
 name = "locityper"
 authors = ["Timofey Prodanov <timofey.prodanov@hhu.de>", "Tobias Marschall <tobias.marschall@hhu.de>"]
-version = "1.7.9"
+version = "1.7.10"
 rust-version = "1.91"
 edition = "2024"
 
@@ -41,7 +41,7 @@ glob = { version = "0.3", default-features = false }
 ruint = { version = "1.17", default-features = false, features = ["alloc", "num-traits"] }
 itertools = { version = "0.15", default-features = false, features = ["use_std"] }
 kodama = { version = "0.3" }
-russcip = { version = "0.10.0", default-features = false }
+russcip = { version = "0.11.0", default-features = false }
 arc-swap = { version = "1.9" }
 brotli = { version = "9" }
 zstd = { version = "0.14", default-features = false, features = ["arrays", "zdict_builder"] }
