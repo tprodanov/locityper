@@ -300,12 +300,10 @@ impl PrelimAlignments {
             Entry::Occupied(mut entry) => {
                 let entry = entry.get_mut();
                 entry.allowed_to_improve &= initial;
-                // log::debug!("        record bad alignment at {:?}", entry);
                 Some(entry.index())
             }
             Entry::Vacant(entry) => {
-                let e = entry.insert(PosCollectionValue::new(NOT_SAVED, aln_start, initial));
-                // log::debug!("        record bad alignment at {:?} (new)", e);
+                entry.insert(PosCollectionValue::new(NOT_SAVED, aln_start, initial));
                 None
             }
         }
@@ -335,7 +333,6 @@ impl PrelimAlignments {
         match self.pos_collection.entry(read_end, aln.contig_id(), aln_start) {
             Entry::Occupied(mut entry) => {
                 let entry = entry.get_mut();
-                // log::debug!("        replace existing alignment at {:?}", entry);
                 let aln_ix = entry.index();
                 entry.allowed_to_improve &= allowed_to_improve;
                 if aln_ix == NOT_SAVED {
@@ -350,8 +347,7 @@ impl PrelimAlignments {
                 }
             }
             Entry::Vacant(entry) => {
-                let e = entry.insert(PosCollectionValue::new(self.alns.len() as u32, aln_start, allowed_to_improve));
-                // log::debug!("        store new alignment {:?}", e); // [TODO] remove
+                entry.insert(PosCollectionValue::new(self.alns.len() as u32, aln_start, allowed_to_improve));
                 self.alns.push(aln);
             }
         }
