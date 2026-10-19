@@ -183,16 +183,25 @@ fn encode(read_end: ReadEnd, contig: ContigId, pos: u32) -> u64 {
     (read_end.as_int::<u64>() << 48) | (u64::from(contig.get()) << 32) | u64::from(pos >> STEP_PWR)
 }
 
-#[derive(Clone, Copy)]
+/// Use this value for indices of alignments that are not saved due to poor edit distance.
+const NOT_SAVED: u32 = u32::MAX;
+/// Do not attempt to create a new alignment when the current alignment edit distance <= best edit + 1.
+const MAX_DIST_BEST: u32 = 1;
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct PosCollectionValue {
+    /// Index of the alignment (could be `NOT_SAVED` if the alignment was too bad).
     index: u32,
+    /// Alignment position.
     pos: u32,
+    /// How many times this alignment can be replaced in the future.
+    allowed_to_improve: bool,
 }
 
 impl PosCollectionValue {
     #[inline(always)]
-    pub(crate) fn new(index: u32, pos: u32) -> Self {
-        Self { index, pos }
+    pub(crate) fn new(index: u32, pos: u32, allowed_to_improve: bool) -> Self {
+        Self { index, pos, allowed_to_improve }
     }
 
     #[inline(always)]
@@ -200,14 +209,11 @@ impl PosCollectionValue {
         self.index
     }
 
-    // #[inline(always)]
-    // pub(crate) fn pos(self) -> u32 {
-    //     self.pos
-    // }
+    #[inline(always)]
+    pub(crate) fn allowed_to_improve(&self) -> bool {
+        self.allowed_to_improve
+    }
 }
-
-/// Use this value for indices of alignments that are not saved due to poor edit distance.
-const NOT_SAVED: u32 = u32::MAX;
 
 /// Store previously observed alignment starts.
 #[derive(Default, Clone)]
@@ -217,19 +223,6 @@ pub(crate) struct PosCollection {
 }
 
 impl PosCollection {
-    // /// Adds position to the collection. Returns false if the 128-bin is already in use.
-    // /// Returns `Some(index)` and does not update collection if a similar position (within 128 bp) is already stored.
-    // #[inline(always)]
-    // pub(crate) fn add(&mut self, read_end: ReadEnd, contig: ContigId, pos: u32, index: u32) -> bool {
-    //     match self.entry(read_end, contig, pos) {
-    //         Entry::Occupied(_) => false,
-    //         Entry::Vacant(entry) => {
-    //             entry.insert(PosCollectionValue::new(index, pos));
-    //             true
-    //         }
-    //     }
-    // }
-
     /// Returns entry corresponding to a given contig and the 128 bp bin around the position.
     /// When modifying the entry, be careful that start position is still inside the bin
     /// (won't panic if not, but can screw up the distance check in `get`).
@@ -243,20 +236,20 @@ impl PosCollection {
         self.map.entry(encode(read_end, contig, pos))
     }
 
-    /// Returns previously observed index if the position is similar (within 64 bp or inside the same 128 bp bin).
+    /// Returns an entry at this approximate position if its within 64 bp or inside the same 128 bp bin.
     #[inline(always)]
-    pub(crate) fn get(&self, read_end: ReadEnd, contig: ContigId, pos: u32) -> Option<u32> {
-        let key = encode(read_end, contig, pos);
+    pub(crate) fn get(&self, read_end: ReadEnd, contig: ContigId, approx_pos: u32) -> Option<PosCollectionValue> {
+        let key = encode(read_end, contig, approx_pos);
         if let Some(&val) = self.map.get(&key) {
-            return Some(val.index());
+            return Some(val);
         }
         // +1 if start is closer to 128, -1 if start is closer to 0.
-        let key_increment = 1 - (i64::from((pos & UP_DOWN_MASK) == 0) << 1);
+        let key_increment = 1 - (i64::from((approx_pos & UP_DOWN_MASK) == 0) << 1);
         // Don't care about wrapping since we won't get any matches in the map.
         // Could also use `key.checked_add_signed()?`, but it may be slower.
         let key2 = key.wrapping_add_signed(key_increment);
         match self.map.get(&key2) {
-            Some(&val) if (val.pos.abs_diff(pos) >> DIST_PWR) != 0 => Some(val.index()),
+            Some(&val) if (val.pos.abs_diff(approx_pos) >> DIST_PWR) != 0 => Some(val),
             _ => None,
         }
     }
@@ -294,53 +287,75 @@ impl PrelimAlignments {
         self.best_edit[0] <= self.good_dist[0] && self.best_edit[1] <= self.good_dist[1]
     }
 
-    /// Adds new alignment. Returns false if edit distance is under `passable_dist`.
-    pub(crate) fn push(
+    /// Add information about a bad alignment
+    #[inline]
+    pub(crate) fn record_bad_alignment(
         &mut self,
-        mut aln: Alignment,
-        contigs: &ContigNames,
-        err_prof: &ErrorProfile,
-    ) -> bool {
-        let read_end = aln.read_end();
-        let read_prof = aln.count_region_operations_fast(contigs.get_len(aln.contig_id()));
-        let dist = read_prof.edit_distance();
-        let aln_prob = err_prof.ln_prob(&read_prof);
-        aln.set_distance(dist);
-        aln.set_ln_prob(aln_prob);
-        self.best_edit[read_end.ix()] = self.best_edit[read_end.ix()].min(dist.edit());
-        self.best_lik[read_end.ix()] = self.best_lik[read_end.ix()].max(aln_prob);
-
-        let new_aln_ix = self.alns.len() as u32;
-        let save = dist.edit() <= self.passable_dist[read_end.ix()];
-        // Return false now before we update pos collection.
-        if new_aln_ix == 0 && !save {
-            return false;
-        }
-
-        let aln_start = aln.interval().start();
-        match (self.pos_collection.entry(read_end, aln.contig_id(), aln_start), save) {
-            (Entry::Occupied(mut entry), true) => {
+        read_end: ReadEnd,
+        contig_id: ContigId,
+        aln_start: u32,
+        initial: bool,
+    ) -> Option<u32> {
+        match self.pos_collection.entry(read_end, contig_id, aln_start) {
+            Entry::Occupied(mut entry) => {
                 let entry = entry.get_mut();
+                entry.allowed_to_improve &= initial;
+                // log::debug!("        record bad alignment at {:?}", entry);
+                Some(entry.index())
+            }
+            Entry::Vacant(entry) => {
+                let e = entry.insert(PosCollectionValue::new(NOT_SAVED, aln_start, initial));
+                // log::debug!("        record bad alignment at {:?} (new)", e);
+                None
+            }
+        }
+    }
+
+    /// Adds new alignment.
+    /// Returns Ok if the alignment is successfully inserted.
+    /// Returns Err(None) when the new alignment is bad.
+    /// Returns Err(Some(i)) when an existing alignment [i] at a similar posision is better.
+    pub(crate) fn insert(&mut self, aln: Alignment, initial: bool) -> Result<(), Option<u32>> {
+        let read_end = aln.read_end();
+        let edit_dist = aln.distance().expect("Edit distance must be defined").edit();
+        let aln_start = aln.interval().start();
+        if edit_dist > self.passable_dist[read_end.ix()] {
+            // This is the primary alignment. Everything will be skipped, so no need to record the bad alignment.
+            if !self.alns.is_empty() {
+                return Err(self.record_bad_alignment(read_end, aln.contig_id(), aln_start, initial));
+            }
+            return Err(None);
+        }
+        // [NOTE] Edit distance does not account for soft clipping!
+        let best_edit = &mut self.best_edit[read_end.ix()];
+        *best_edit = (*best_edit).min(edit_dist);
+        self.best_lik[read_end.ix()] = self.best_lik[read_end.ix()].max(aln.ln_prob());
+        let allowed_to_improve = initial && edit_dist > *best_edit + MAX_DIST_BEST;
+
+        match self.pos_collection.entry(read_end, aln.contig_id(), aln_start) {
+            Entry::Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                // log::debug!("        replace existing alignment at {:?}", entry);
                 let aln_ix = entry.index();
+                entry.allowed_to_improve &= allowed_to_improve;
                 if aln_ix == NOT_SAVED {
-                    entry.index = new_aln_ix;
+                    entry.index = self.alns.len() as u32;
                     entry.pos = aln_start;
                     self.alns.push(aln);
-                } else if aln_prob > self.alns[aln_ix as usize].ln_prob() {
+                } else if aln.ln_prob() > self.alns[aln_ix as usize].ln_prob() {
                     self.alns[aln_ix as usize] = aln;
                     entry.pos = aln_start;
+                } else {
+                    return Err(Some(aln_ix));
                 }
             }
-            (Entry::Occupied(_entry), false) => {}
-            (Entry::Vacant(entry), true) => {
-                entry.insert(PosCollectionValue::new(new_aln_ix, aln_start));
+            Entry::Vacant(entry) => {
+                let e = entry.insert(PosCollectionValue::new(self.alns.len() as u32, aln_start, allowed_to_improve));
+                // log::debug!("        store new alignment {:?}", e); // [TODO] remove
                 self.alns.push(aln);
             }
-            (Entry::Vacant(entry), false) => {
-                entry.insert(PosCollectionValue::new(NOT_SAVED, aln_start));
-            }
         }
-        save
+        Ok(())
     }
 
     fn debug_write(&self, read_data: &ReadData, dbg_writer: &mut impl Write) -> crate::Result<()> {
@@ -370,10 +385,10 @@ impl PrelimAlignments {
         &self.pos_collection
     }
 
-    #[inline(always)]
-    pub fn passable_dist(&self, read_end: ReadEnd) -> u32 {
-        self.passable_dist[read_end.ix()]
-    }
+    // #[inline(always)]
+    // pub fn passable_dist(&self, read_end: ReadEnd) -> u32 {
+    //     self.passable_dist[read_end.ix()]
+    // }
 }
 
 impl std::ops::Index<usize> for PrelimAlignments {
@@ -524,7 +539,7 @@ fn read_next_alns<'a>(
 
     let cigar = Cigar::from_raw(record.raw_cigar());
     assert!(!cigar.has_hard_clipping(), "Primary alignment has hard clipping");
-    let aln = Alignment::from_record_w_contig_id(record, data.tid2contig[record.tid() as usize],
+    let mut aln = Alignment::from_record_w_contig_id(record, data.tid2contig[record.tid() as usize],
         cigar, read_end, Arc::clone(data.contig_set.contigs()));
     let neighb_complexity = if data.are_short_reads { data.contig_infos.neighb_complexity(&aln) } else { 1.0 };
     let read_len = record.seq().len() as u32;
@@ -536,7 +551,8 @@ fn read_next_alns<'a>(
     }
 
     prelim_alignments.set_thresholds(read_end, threshold_dist, passable_dist);
-    if !prelim_alignments.push(aln, data.contig_set.contigs(), data.err_prof) {
+    aln.calculate_edit_and_prob(data.contig_set.contigs(), data.err_prof);
+    if prelim_alignments.insert(aln, true).is_err() {
         // Primary alignment is not good enough.
         reader.skip_until_primary()?;
         return Ok(false);
@@ -552,9 +568,10 @@ fn read_next_alns<'a>(
                 read_data.name, record.flags());
             continue;
         }
-        let aln = Alignment::from_record_w_contig_id(record, data.tid2contig[record.tid() as usize],
+        let mut aln = Alignment::from_record_w_contig_id(record, data.tid2contig[record.tid() as usize],
             cigar, read_end, Arc::clone(data.contig_set.contigs()));
-        prelim_alignments.push(aln, data.contig_set.contigs(), data.err_prof);
+        aln.calculate_edit_and_prob(data.contig_set.contigs(), data.err_prof);
+        let _ignore_res = prelim_alignments.insert(aln, true);
     }
 
     let best_edit = prelim_alignments.best_edit[read_end.ix()];
@@ -810,12 +827,12 @@ fn identify_paired_end_alignments(
     insert_distr: &InsertDistr,
     contig_infos: &ContigInfos,
     params: &super::Params,
-) -> GrouppedAlignments
-{
+) -> GrouppedAlignments {
     let insert_penalty = insert_distr.insert_penalty();
     let unm_ins_penalty = params.unmapped_penalty + insert_penalty;
 
-    // First: by contig (decr.), second: by read end (decr.), third: by aln probability (incr.).
+    // Sort by contig (decr), by read end (decr) and aln probability (incr).
+    // Basically, sorted in reverse order because we will pop() elements one by one later.
     tmp_alns.sort_unstable_by(|a, b|
         (b.contig_id(), b.read_end(), a.ln_prob()).partial_cmp(&(a.contig_id(), a.read_end(), b.ln_prob())).unwrap());
     let mut alignments = Vec::new();

@@ -75,11 +75,24 @@ impl HapAlns {
         aligner: &Aligner,
         err_prof: &ErrorProfile,
     ) -> usize {
+        let contigs = contig_set.contigs();
         let n = prelim_alignments.len();
         let mut seen = vec![false; n];
 
+        let mut total_transfers = 0;
+        let mut total_saved = 0;
+
         for i in 0..n {
-            if std::mem::replace(&mut seen[i], true) { continue }
+            if std::mem::replace(&mut seen[i], true) {
+                // [TODO] remove
+                // let source_aln = &prelim_alignments[i];
+                // let read_end = source_aln.read_end();
+                // let source_cigar = source_aln.cigar().clone();
+                // log::debug!("  % Skip [i={}, re={}] {} {}", i, read_end.ix()+1, source_aln.interval(), source_cigar);
+                continue
+            }
+            let mut curr_transfers = 0;
+            let mut curr_saved = 0;
             let source_aln = &prelim_alignments[i];
             // Copy various variables before `source_aln` is dropped to make `prelim_alignments` mutable.
             let source_contig_id = source_aln.contig_id();
@@ -88,8 +101,9 @@ impl HapAlns {
             let source_strand = source_aln.strand();
             let read_end = source_aln.read_end();
             let read_seq = read_data.mate_data(read_end).get_seq(source_strand);
-            let passable_dist = prelim_alignments.passable_dist(read_end);
             let mut n_fails = 0..self.transfer_fails;
+
+            // log::debug!("  * Source [i={}, re={}] {} {}", i, read_end.ix()+1, source_aln.interval(), source_cigar);
 
             for &(target_contig_id, _) in &self.best_ixs[source_contig_id.ix()] {
                 let target_seq = contig_set.get_seq(target_contig_id);
@@ -103,16 +117,24 @@ impl HapAlns {
                 } else {
                     cigar_index.find_approx_position(source_aln_start, RefToQuery)
                 };
-                if let Some(ix) = prelim_alignments.pos_collection()
-                    .get(read_end, target_contig_id, approx_pos.approx_pos)
+
+                // log::debug!("      > Target {}:{} (QtoR {})", contigs.get_name(target_contig_id), approx_pos.pos+1,
+                //     query_to_ref);
+
+                if let Some(prev_aln_entry) = prelim_alignments.pos_collection()
+                    .get(read_end, target_contig_id, approx_pos.pos)
                 {
-                    // Similar position is observed in alignment `ix`. Do not transfer it later.
-                    if let Some(v) = seen.get_mut(ix as usize) {
-                        *v = true;
+                    // log::debug!("        already have an entry {:?}", prev_aln_entry);
+                    if let Some(seen_val) = seen.get_mut(prev_aln_entry.index() as usize) {
+                        *seen_val = true;
                     }
-                    continue;
+                    if !prev_aln_entry.allowed_to_improve() {
+                        // log::debug!("        not allowed to improve");
+                        continue;
+                    }
                 }
 
+                curr_transfers += 1;
                 let (new_start, new_cigar) = if query_to_ref {
                     let offset = cigar_index.find_cigar_offset(source_aln_start, approx_pos, QueryToRef);
                     haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
@@ -122,20 +144,29 @@ impl HapAlns {
                     haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
                         aligner, RefToQuery)
                 };
-                const MIN_ALN_SIZE: u32 = 50;
+                // log::debug!("        new alignment {}:{}  {}", contigs.get_name(target_contig_id), new_start+1, new_cigar);
                 let cigar_ref_len = new_cigar.ref_len();
-                // Either too high edit distance or too short alignment.
-                if cigar_ref_len.abs_diff(new_cigar.query_len()) > passable_dist || cigar_ref_len < MIN_ALN_SIZE {
-                    // Break if produced too many fails for this specific alignment.
-                    if n_fails.next().is_none() { break } else { continue };
-                }
-
-                let interval = Interval::new(Arc::clone(contig_set.contigs()), target_contig_id,
+                let interval = Interval::new(Arc::clone(contigs), target_contig_id,
                     new_start, new_start + cigar_ref_len);
-                let new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);
-                prelim_alignments.push(new_aln, contig_set.contigs(), err_prof);
+                let mut new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);
+                new_aln.calculate_edit_and_prob(contigs, err_prof);
+                if let Err(opt_prev_ix) = prelim_alignments.insert(new_aln, false) {
+                    // log::debug!("        could not insert, entry at {:?}", opt_prev_ix);
+                    if let Some(j) = opt_prev_ix && let Some(seen_val) = seen.get_mut(j as usize) {
+                        *seen_val = true;
+                    }
+                    if n_fails.next().is_none() {
+                        // log::debug!("        break"); // [TODO] REMOVE
+                        break; }
+                } else {
+                    curr_saved += 1;
+                }
             }
+            total_transfers += curr_transfers;
+            total_saved += curr_saved;
+            log::debug!("    {:20} @ {:10} :{:4} ({:4})", read_data.name(), contigs.get_name(source_contig_id), curr_transfers, curr_saved);
         }
+        log::debug!("    {:20} @ {:10} :{:4} ({:4})", read_data.name(), "all", total_transfers, total_saved);
         prelim_alignments.len() - n
     }
 }
