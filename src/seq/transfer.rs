@@ -66,7 +66,7 @@ impl HapAlns {
     }
 
     /// Try to identify any new alignments for a given read/read pair.
-    /// Returns the number of new alignments.
+    /// Returns the number of new alignments and a total number of attempted transfers.
     pub(crate) fn transfer_alignments(
         &self,
         prelim_alignments: &mut PrelimAlignments,
@@ -74,10 +74,11 @@ impl HapAlns {
         contig_set: &ContigSet,
         aligner: &Aligner,
         err_prof: &ErrorProfile,
-    ) -> usize {
+    ) -> (usize, usize) {
         let contigs = contig_set.contigs();
         let n = prelim_alignments.len();
         let mut seen = vec![false; n];
+        let mut total_transfers = 0;
 
         for i in 0..n {
             if std::mem::replace(&mut seen[i], true) {
@@ -126,10 +127,12 @@ impl HapAlns {
                     haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
                         aligner, RefToQuery)
                 };
+                total_transfers += 1;
                 let cigar_ref_len = new_cigar.ref_len();
                 const MIN_ALN_SIZE: u32 = 50;
                 // Either too high edit distance or too short alignment.
                 if cigar_ref_len < MIN_ALN_SIZE {
+                    prelim_alignments.record_bad_alignment(read_end, target_contig_id, new_start, false);
                     // Break if produced too many fails for this specific alignment.
                     if n_fails.next().is_none() { break } else { continue };
                 }
@@ -148,6 +151,6 @@ impl HapAlns {
                 }
             }
         }
-        prelim_alignments.len() - n
+        (prelim_alignments.len() - n, total_transfers)
     }
 }

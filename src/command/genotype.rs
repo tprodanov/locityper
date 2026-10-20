@@ -1230,9 +1230,9 @@ fn analyze_locus(
 
     let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
     let dbg_writers = if args.debug >= DebugLvl::Full {
-        locs::DbgWriters::new(&locus.out_dir)?
+        locs::DbgWriters::new(&locus.out_dir, usize::from(args.threads))?
     } else {
-        Default::default()
+        locs::DbgWriters::sink(usize::from(args.threads))
     };
     let all_alns = AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache,
         &contig_infos, &hap_alns, &args.assgn_params, usize::from(args.threads), dbg_writers)?;

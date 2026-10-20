@@ -2,11 +2,11 @@
 //! Each next solver is expected to take more time, therefore is called on a smaller subset of haplotypes.
 
 use std::{
-    thread, iter, fmt,
+    thread, fmt,
     cmp::{min, max},
     io::Write,
     time::{Instant, Duration},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         mpsc::{self, Sender, Receiver},
@@ -25,6 +25,7 @@ use crate::{
         vec::{F64Ext, IterExt},
         rand::XoshiroRng,
         fmt::PrettyUsize,
+        thread_files::{ThreadFile, ThreadFiles},
     },
     bg::{BgDistr, ReadDepth},
     math::{
@@ -151,7 +152,6 @@ impl Stage {
             "greedy" => Box::new(super::Greedy::default()),
             "anneal" | "simanneal" | "annealing" | "simannealing"
                 => Box::new(super::SimAnneal::default()),
-            "scip" => Box::new(super::ScipSolver::default()),
             "highs" => {
                 #[cfg(feature = "highs")]
                 { Box::new(super::HighsSolver::default()) }
@@ -790,7 +790,8 @@ fn solve_single_thread(
     rng: &mut XoshiroRng,
     predictions: &mut Predictions,
     sol_writer: &mut BrFile,
-    mut files: ThreadDebugFiles,
+    mut depth_writer: Option<ThreadFile<BrFile>>,
+    mut ext_sol_writer: Option<ThreadFile<BrFile>>,
 ) -> crate::Result<()>
 {
     const ONE_THREAD: usize = 1;
@@ -825,10 +826,10 @@ fn solve_single_thread(
                 let assgns = stage.solver.solve(&gt_alns, rng)?;
                 *lik = prior + assgns.likelihood();
                 let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
-                if let Some(w) = &mut files.depth_writer {
+                if let Some(w) = &mut depth_writer {
                     assgns.write_depth(w, &ext_prefix).map_err(add_path!(!))?;
                 }
-                if let Some(w) = &mut files.ext_sol_writer {
+                if let Some(w) = &mut ext_sol_writer {
                     assgns.summarize(w, &ext_prefix).map_err(add_path!(!))?;
                 }
                 assgns.update_counts(&mut counts);
@@ -848,78 +849,25 @@ fn solve_single_thread(
     Ok(())
 }
 
-/// Creates `threads` filenames, one for each thread.
-fn csv_filenames(prefix: &Path, threads: usize) -> Vec<PathBuf> {
-    (0..threads).map(|i| if i == 0 {
-        prefix.with_added_extension("csv.br")
+/// Creates debug files for read depth and for extended solution information.
+fn create_debug_files(
+    locus_dir: &Path,
+    threads: usize,
+    debug: DebugLvl,
+) -> (ThreadFiles, ThreadFiles) {
+    let depth_writers = if debug == DebugLvl::Full {
+        ThreadFiles::new(locus_dir.join("depth.csv.br"), threads,
+            Some(format!("stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER)))
     } else {
-        prefix.with_added_extension(format!("{}.csv.br", i))
-    }).collect()
-}
-
-/// Opens one gzip file for each filename.
-fn open_files(filenames: &[PathBuf]) -> crate::Result<Vec<BrFile>> {
-    filenames.iter().map(|path| ext::sys::create_brotli(path)).collect()
-}
-
-struct ThreadDebugFiles {
-    depth_writer: Option<BrFile>,
-    ext_sol_writer: Option<BrFile>,
-}
-
-struct DebugFiles {
-    depth_filenames: Option<Vec<PathBuf>>,
-    depth_writers: Option<Vec<BrFile>>,
-
-    ext_sol_filenames: Option<Vec<PathBuf>>,
-    ext_sol_writers: Option<Vec<BrFile>>,
-}
-
-impl DebugFiles {
-    fn new(locus_dir: &Path, threads: usize, debug: DebugLvl) -> crate::Result<Self> {
-        let mut depth_filenames = None;
-        let mut depth_writers = None;
-        if debug == DebugLvl::Full {
-            depth_filenames = Some(csv_filenames(&locus_dir.join("depth"), threads));
-            depth_writers = depth_filenames.as_ref().map(|filenames| open_files(filenames)).transpose()?;
-            writeln!(depth_writers.as_mut().unwrap()[0],
-                "stage\tgenotype\tattempt\t{}", ReadAssignment::DEPTH_CSV_HEADER).map_err(add_path!(!))?;
-        }
-
-        let mut ext_sol_filenames = None;
-        let mut ext_sol_writers = None;
-        if debug >= DebugLvl::Some {
-            ext_sol_filenames = Some(csv_filenames(&locus_dir.join("sol_ext"), threads));
-            ext_sol_writers = ext_sol_filenames.as_ref().map(|filenames| open_files(filenames)).transpose()?;
-            writeln!(ext_sol_writers.as_mut().unwrap()[0],
-                "stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER).map_err(add_path!(!))?;
-        }
-
-        Ok(Self {
-            depth_filenames, depth_writers, ext_sol_filenames, ext_sol_writers,
-        })
-    }
-
-    /// Takes files and splits them between threads.
-    fn into_threads(&mut self) -> impl Iterator<Item = ThreadDebugFiles> + '_ {
-        let depth_iter = self.depth_writers.take().into_iter()
-            .flatten().map(Some).chain(iter::repeat_with(|| None));
-        let ext_sol_iter = self.ext_sol_writers.take().into_iter()
-            .flatten().map(Some).chain(iter::repeat_with(|| None));
-        depth_iter.zip(ext_sol_iter)
-            .map(|(depth_writer, ext_sol_writer)| ThreadDebugFiles { depth_writer, ext_sol_writer })
-    }
-
-    fn merge(&self) -> crate::Result<()> {
-        debug_assert!(self.depth_writers.is_none() && self.ext_sol_writers.is_none());
-        if let Some(filenames) = &self.depth_filenames {
-            ext::sys::merge_files(&filenames[0], &filenames[1..])?;
-        }
-        if let Some(filenames) = &self.ext_sol_filenames {
-            ext::sys::merge_files(&filenames[0], &filenames[1..])?;
-        }
-        Ok(())
-    }
+        ThreadFiles::disabled(threads)
+    };
+    let ext_sol_writers = if debug >= DebugLvl::Some {
+        ThreadFiles::new(locus_dir.join("sol_ext.csv.br"), threads,
+            Some(format!("stage\tgenotype\tattempt\t{}", ReadAssignment::SUMMARY_HEADER)))
+    } else {
+        ThreadFiles::disabled(threads)
+    };
+    (depth_writers, ext_sol_writers)
 }
 
 pub fn solve(
@@ -931,7 +879,7 @@ pub fn solve(
 {
     let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
-    log::info!("    Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);
+    log::info!("=== Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);
 
     let mut sol_writer = ext::sys::create_brotli(&locus_dir.join("sol.csv.br"))?;
     writeln!(sol_writer, "stage\tgenotype\tscore").map_err(add_path!(!))?;
@@ -943,14 +891,16 @@ pub fn solve(
             &data.priors, &data.all_alns, curr_sol_writer, &data.assgn_params, out_size0, data.threads)?;
     }
 
-    let mut files = DebugFiles::new(locus_dir, data.threads, data.debug)?;
+    let (mut depth_writers, mut ext_sol_writers) = create_debug_files(locus_dir, data.threads, data.debug);
     if data.threads == 1 {
-        solve_single_thread(&data, rng, &mut predictions, &mut sol_writer, files.into_threads().next().unwrap())?;
+        solve_single_thread(&data, rng, &mut predictions, &mut sol_writer,
+            depth_writers.create_optional_next()?, ext_sol_writers.create_optional_next()?)?;
     } else {
-        let main_worker = MainWorker::new(Arc::clone(data), rng, files.into_threads());
+        let main_worker = MainWorker::new(Arc::clone(data), rng, &mut depth_writers, &mut ext_sol_writers)?;
         main_worker.run(&mut sol_writer, rng, &mut predictions)?;
-        files.merge()?;
     }
+    depth_writers.merge()?;
+    ext_sol_writers.merge()?;
     std::mem::drop(sol_writer);
 
     let data = &data;
@@ -995,8 +945,9 @@ impl MainWorker {
     fn new(
         data: Arc<Data>,
         rng: &mut XoshiroRng,
-        mut files: impl Iterator<Item = ThreadDebugFiles>,
-    ) -> Self
+        depth_writers: &mut ThreadFiles,
+        ext_sol_writers: &mut ThreadFiles,
+    ) -> crate::Result<Self>
     {
         let n_workers = data.threads;
         let mut senders = Vec::with_capacity(n_workers);
@@ -1011,14 +962,15 @@ impl MainWorker {
                 rng: rng.clone(),
                 receiver: task_receiver,
                 sender: sol_sender,
-                files: files.next().expect("Not enough debug files"),
+                depth_writer: depth_writers.create_optional_next()?,
+                ext_sol_writer: ext_sol_writers.create_optional_next()?,
             };
             rng.jump();
             senders.push(task_sender);
             receivers.push(sol_receiver);
             handles.push(thread::spawn(|| worker.run()));
         }
-        MainWorker { data, senders, receivers, handles }
+        Ok(MainWorker { data, senders, receivers, handles })
     }
 
     fn run(self,
@@ -1096,7 +1048,8 @@ struct Worker {
     rng: XoshiroRng,
     receiver: Receiver<Task>,
     sender: Sender<Solution>,
-    files: ThreadDebugFiles,
+    depth_writer: Option<ThreadFile<BrFile>>,
+    ext_sol_writer: Option<ThreadFile<BrFile>>,
 }
 
 impl Worker {
@@ -1124,10 +1077,10 @@ impl Worker {
                     let assgns = stage.solver.solve(&gt_alns, &mut self.rng)?;
                     *lik = prior + assgns.likelihood();
                     let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
-                    if let Some(w) = &mut self.files.depth_writer {
+                    if let Some(w) = &mut self.depth_writer {
                         assgns.write_depth(w, &ext_prefix).map_err(add_path!(!))?;
                     }
-                    if let Some(w) = &mut self.files.ext_sol_writer {
+                    if let Some(w) = &mut self.ext_sol_writer {
                         assgns.summarize(w, &ext_prefix).map_err(add_path!(!))?;
                     }
                     assgns.update_counts(&mut counts);

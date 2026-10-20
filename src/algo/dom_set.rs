@@ -5,7 +5,6 @@ use crate::{
 };
 
 /// Finds dominating set based on the adjacencies list.
-/// If corresponding feature is enabled, tries SCIP ILP solver, otherwise uses a greedy solution.
 pub fn find_dominating_set<'a>(
     n_vars: usize,
     constraints: impl Iterator<Item = &'a BitArray>,

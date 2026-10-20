@@ -29,6 +29,7 @@ use crate::{
         windows::ContigInfos,
     },
     ext::{
+        ThreadFiles,
         sys::{BrFile, create_brotli},
     },
 };
@@ -196,9 +197,15 @@ pub(crate) struct PosCollectionValue {
     pos: u32,
     /// How many times this alignment can be replaced in the future.
     allowed_to_improve: bool,
+    // rem_attempts: u8,
 }
 
 impl PosCollectionValue {
+    // #[inline(always)]
+    // pub(crate) fn new(index: u32, pos: u32, rem_attempts: u8) -> Self {
+    //     Self { index, pos, rem_attempts }
+    // }
+
     #[inline(always)]
     pub(crate) fn new(index: u32, pos: u32, allowed_to_improve: bool) -> Self {
         Self { index, pos, allowed_to_improve }
@@ -209,8 +216,19 @@ impl PosCollectionValue {
         self.index
     }
 
+    // #[inline(always)]
+    // pub(crate) fn add_attempt(&mut self) {
+    //     self.rem_attempts = self.rem_attempts.saturating_sub(1);
+    // }
+
+    // #[inline(always)]
+    // pub(crate) fn disallow_improvement(&mut self) {
+    //     self.rem_attempts = 0;
+    // }
+
     #[inline(always)]
     pub(crate) fn allowed_to_improve(&self) -> bool {
+        // self.rem_attempts != 0
         self.allowed_to_improve
     }
 }
@@ -218,7 +236,7 @@ impl PosCollectionValue {
 /// Store previously observed alignment starts.
 #[derive(Default, Clone)]
 pub(crate) struct PosCollection {
-    /// Key = encode(contig, pos); value = PosCollectionValue { index, pos }.
+    /// Key = encode(read_end, contig, pos).
     map: IntMap<u64, PosCollectionValue>,
 }
 
@@ -354,7 +372,7 @@ impl PrelimAlignments {
         Ok(())
     }
 
-    fn debug_write(&self, read_data: &ReadData, dbg_writer: &mut impl Write) -> crate::Result<()> {
+    fn write_debug_reads(&self, read_data: &ReadData, dbg_writer: &mut impl Write) -> crate::Result<()> {
         for (i, aln) in self.alns.iter().enumerate() {
             write!(dbg_writer, "{}\t{}\t{}\t{}\t{:.2}", read_data.name_hash, aln.read_end(), aln.interval(),
                 aln.distance().unwrap(), Ln::to_log10(aln.ln_prob())).map_err(add_path!(!))?;
@@ -1035,6 +1053,7 @@ struct ReadCounts {
 
     original_alns: usize,
     recovered_alns: usize,
+    total_transfers: usize,
 }
 
 impl ReadCounts {
@@ -1046,6 +1065,7 @@ impl ReadCounts {
 
         self.original_alns += oth.original_alns;
         self.recovered_alns += oth.recovered_alns;
+        self.total_transfers += oth.total_transfers;
     }
 
     fn total_reads(&self) -> u32 {
@@ -1061,22 +1081,31 @@ impl ReadCounts {
             (self.original_alns + self.recovered_alns) as f64 / divisor,
             self.original_alns as f64 / divisor, self.recovered_alns as f64 / divisor,
         );
+        if self.total_transfers > 0 {
+            log::debug!("    Attempted {} alignment recovieries in total", self.total_transfers);
+        }
     }
 }
 
-#[derive(Default)]
 pub struct DbgWriters {
-    reads: Option<BrFile>,
+    reads: ThreadFiles,
     read_kmers: Option<BrFile>,
 }
 
 impl DbgWriters {
-    pub fn new(dir: &Path) -> crate::Result<Self> {
-        let mut reads = create_brotli(&dir.join("reads.csv.br"))?;
-        writeln!(reads, "read_hash\tread_end\tinterval\tedit_dist\tlik\tread_name").map_err(add_path!(!))?;
+    pub fn new(dir: &Path, threads: usize) -> crate::Result<Self> {
+        let reads = ThreadFiles::new(dir.join("reads.csv.br"), threads,
+            Some("read_hash\tread_end\tinterval\tedit_dist\tlik\tread_name".to_string()));
         let mut read_kmers = create_brotli(&dir.join("read_kmers.csv.br"))?;
         writeln!(read_kmers, "read_hash\tuniq_kmers1\tuniq_kmers2\tweight").map_err(add_path!(!))?;
-        Ok(Self { reads: Some(reads), read_kmers: Some(read_kmers) })
+        Ok(Self { reads, read_kmers: Some(read_kmers) })
+    }
+
+    pub fn sink(threads: usize) -> Self {
+        Self {
+            reads: ThreadFiles::disabled(threads),
+            read_kmers: None,
+        }
     }
 }
 
@@ -1124,7 +1153,7 @@ impl AllAlignments {
         let mut collisions = 0;
 
         let mut counts = ReadCounts::default();
-        let mut ungroupped_reads = vec![Vec::new(); usize::from(threads)];
+        let mut ungroupped_reads = vec![Vec::new(); threads];
         let mut total_index = 0..;
         while reader.has_more() {
             let mut read_data = ReadData::default();
@@ -1151,9 +1180,9 @@ impl AllAlignments {
                 continue;
             }
 
-            if let Some(w) = &mut dbg_writers.reads {
-                prelim_alignments.debug_write(&read_data, w)?;
-            }
+            // if let Some(w) = &mut dbg_writers.reads {
+            //     prelim_alignments.debug_write(&read_data, w)?;
+            // }
             if let Some(w) = &mut dbg_writers.read_kmers {
                 unique_kmers.calculate_read_weight(&mut read_data, w).map_err(add_path!(!))?;
             } else {
@@ -1167,25 +1196,30 @@ impl AllAlignments {
         } else {
             log::debug!("    Recovering and groupping alignments");
         }
+        let mut dbg_read_writers = dbg_writers.reads.iter_options::<BrFile>().collect::<Result<Vec<_>, _>>()?;
         let (all_alns, counts2) = if threads == 1 {
             recover_and_group_alignments(ungroupped_reads.pop().unwrap(), bg_distr, &opt_hap_alns, &contig_infos,
-                &contig_set, params)
+                &contig_set, dbg_read_writers.pop().unwrap(), params)?
         } else {
-            thread::scope(|s| {
-                let handles: Vec<_> = ungroupped_reads.into_iter()
-                    .map(|thread_reads| s.spawn(|| recover_and_group_alignments(thread_reads, &bg_distr, &opt_hap_alns,
-                        &contig_infos, &contig_set, &params)))
+            thread::scope(|s| -> crate::Result<_> {
+                let handles: Vec<_> = itertools::izip!(ungroupped_reads, dbg_read_writers)
+                    .map(|(thread_reads, thread_writer)| s.spawn(||
+                        recover_and_group_alignments(
+                            thread_reads, &bg_distr, &opt_hap_alns,
+                            &contig_infos, &contig_set, thread_writer, &params)
+                        ))
                     .collect();
                 let mut all_alns = AllAlignments::default();
                 let mut counts2 = ReadCounts::default();
                 for handle in handles {
-                    let tup = handle.join().expect("Thread failed for unknown reason");
+                    let tup = handle.join().expect("Thread failed for unknown reason")?;
                     all_alns.extend(tup.0);
                     counts2.add(&tup.1);
                 }
-                (all_alns, counts2)
-            })
+                Ok((all_alns, counts2))
+            })?
         };
+        dbg_writers.reads.merge()?;
         counts.add(&counts2);
 
         counts.few_kmers = all_alns.unused_reads.len() as u32;
@@ -1253,8 +1287,9 @@ fn recover_and_group_alignments(
     opt_hap_alns: &Option<Arc<HapAlns>>,
     contig_infos: &ContigInfos,
     contig_set: &ContigSet,
+    mut dbg_writer: Option<impl Write>,
     params: &super::Params,
-) -> (AllAlignments, ReadCounts) {
+) -> crate::Result<(AllAlignments, ReadCounts)> {
     // Accuracy under 6 produces CIGARs without =/X.
     const ALIGNER_ACCURACY: u8 = 6;
     // For read alignment, use 10 bp band
@@ -1269,14 +1304,19 @@ fn recover_and_group_alignments(
         let original_alns = read_alignments.len();
         let mut recovered_alns = 0;
         if read_data.weight >= params.min_weight && let Some(hap_alns) = opt_hap_alns {
-            recovered_alns += hap_alns.transfer_alignments(&mut read_alignments, &read_data, &contig_set, &aligner,
-                bg_distr.error_profile());
+            let curr_transfers;
+            (recovered_alns, curr_transfers) = hap_alns.transfer_alignments(&mut read_alignments, &read_data,
+                &contig_set, &aligner, bg_distr.error_profile());
+            counts.total_transfers += curr_transfers;
         }
         if !read_alignments.best_edit_is_good() {
             counts.poorly_mapped += 1;
             continue;
         }
         read_alignments.normalize_probs();
+        if let Some(w) = &mut dbg_writer {
+            read_alignments.write_debug_reads(&read_data, w)?
+        }
 
         let max_alns = if read_data.weight >= params.min_weight { MAX_USED_ALNS } else { MAX_UNUSED_ALNS };
         let groupped_alns = if is_paired_end {
@@ -1297,5 +1337,5 @@ fn recover_and_group_alignments(
             all_alns.unused_reads.push(groupped_alns);
         }
     }
-    (all_alns, counts)
+    Ok((all_alns, counts))
 }

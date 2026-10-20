@@ -5,8 +5,10 @@ pub mod trimat;
 pub mod fmt;
 pub mod sys;
 pub mod rand;
+pub mod thread_files;
 
 pub use trimat::TriangleMatrix;
+pub use thread_files::ThreadFiles;
 
 enum State<T, F> {
     Uninit(F),

@@ -1163,8 +1163,26 @@ impl CigarIndex {
 }
 
 impl Cigar {
-    /// Realign potentially incorrect parts of the alignment.
-    fn optimize(
+    // /// Tries to improve a read alignment by realigning stretches
+    // /// between anchors of size between min_size and max_size.
+    // /// Returns new alignment start and new alignment.
+    // /// If no changes were made, the same CIGAR is returned to the caller.
+    // pub fn improve_read_alignment(
+    //     self,
+    //     ref_start: u32,
+    //     ref_seq: &[u8],
+    //     query_seq: &[u8],
+    //     aligner: &Aligner,
+    //     anchor_size: u32,
+    //     min_size: u32,
+    //     max_size: u32,
+    // ) -> (u32, Self) {
+
+    // }
+
+    /// Realign potentially incorrect parts of the alignment, where
+    /// a segment contains both insertion and deletion on a gap under `max_gap` size.
+    fn correct_alignment_errors(
         &mut self,
         ref_seq: &[u8],
         query_seq: &[u8],
@@ -1357,11 +1375,11 @@ impl Cigar {
         if GLOBAL_ALN {
             const MAX_OPTIMIZATION_GAP: u32 = 1000;
             const OPTIMIZATION_ANCHOR: u32 = 51;
-            new_cigar.optimize(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
+            new_cigar.correct_alignment_errors(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
         } else {
             const MAX_OPTIMIZATION_GAP: u32 = 20;
             const OPTIMIZATION_ANCHOR: u32 = 5;
-            new_cigar.optimize(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
+            new_cigar.correct_alignment_errors(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
             new_cigar.boundary_ins_to_soft();
         }
         (start_k, new_cigar)
@@ -1412,6 +1430,8 @@ impl Cigar {
         assert_eq!(cigar.rlen, seq_k.len() as u32);
         cigar
     }
+
+
 }
 
 /// Depending on the two parallel CIGAR operations (read v. hapQ) and (hapQ v. hapT)

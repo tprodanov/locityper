@@ -192,8 +192,10 @@ impl<W: Write> Write for AutoFinishLz4<W> {
     }
 }
 
+pub type Lz4File = AutoFinishLz4<BufWriter<File>>;
+
 /// Creates an lz4 compressed file.
-fn create_lz4(filename: &Path, level: u32) -> crate::Result<AutoFinishLz4<BufWriter<File>>> {
+fn create_lz4(filename: &Path, level: u32) -> crate::Result<Lz4File> {
     let file = create_file(filename)?;
     let encoder = lz4::EncoderBuilder::new().level(level).build(file).map_err(add_path!(filename))?;
     Ok(AutoFinishLz4 {
@@ -202,7 +204,7 @@ fn create_lz4(filename: &Path, level: u32) -> crate::Result<AutoFinishLz4<BufWri
 }
 
 #[inline]
-pub fn create_lz4_slow(filename: &Path) -> crate::Result<AutoFinishLz4<BufWriter<File>>> {
+pub fn create_lz4_slow(filename: &Path) -> crate::Result<Lz4File> {
     create_lz4(filename, 7)
 }
 
@@ -262,6 +264,40 @@ pub fn create(filename: &Path) -> crate::Result<Box<dyn Write + Send>> {
             Some("zst") => Ok(Box::new(create_zstd(filename)?)),
             _ => Ok(Box::new(create_file(filename)?)),
         }
+    }
+}
+
+pub trait CreatableFile: Write + Sized {
+    fn create(filename: &Path) -> crate::Result<Self>;
+}
+
+impl CreatableFile for Box<dyn Write + Send> {
+    fn create(filename: &Path) -> crate::Result<Self> {
+        create(filename)
+    }
+}
+
+impl CreatableFile for GzFile {
+    fn create(filename: &Path) -> crate::Result<Self> {
+        create_gzip(filename)
+    }
+}
+
+impl CreatableFile for Lz4File {
+    fn create(filename: &Path) -> crate::Result<Self> {
+        create_lz4_slow(filename)
+    }
+}
+
+impl CreatableFile for BrFile {
+    fn create(filename: &Path) -> crate::Result<Self> {
+        create_brotli(filename)
+    }
+}
+
+impl CreatableFile for ZstdFile {
+    fn create(filename: &Path) -> crate::Result<Self> {
+        create_zstd(filename)
     }
 }
 
