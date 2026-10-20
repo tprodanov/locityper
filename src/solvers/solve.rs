@@ -151,6 +151,7 @@ impl Stage {
             "greedy" => Box::new(super::Greedy::default()),
             "anneal" | "simanneal" | "annealing" | "simannealing"
                 => Box::new(super::SimAnneal::default()),
+            "scip" => Box::new(super::ScipSolver::default()),
             "highs" => {
                 #[cfg(feature = "highs")]
                 { Box::new(super::HighsSolver::default()) }
