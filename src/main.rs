@@ -30,6 +30,7 @@ fn init_logger() {
         })
         .level(log::LevelFilter::Debug)
         .level_for("highs", log::LevelFilter::Info)
+        .level_for("microlp", log::LevelFilter::Warn)
         .chain(std::io::stderr())
         // .chain(fern::log_file("output.log")?)
         .apply()
