@@ -652,19 +652,40 @@ impl Cigar {
         }
         max_edit
     }
+}
 
+/// Either index or index + edit distance.
+pub trait LocallySimilarOutput {
+    fn new(index: u32, edit: u32) -> Self;
+}
+
+impl LocallySimilarOutput for u32 {
+    #[inline(always)]
+    fn new(index: u32, _edit: u32) -> Self {
+        index
+    }
+}
+
+impl LocallySimilarOutput for (u32, u32) {
+    #[inline(always)]
+    fn new(index: u32, edit: u32) -> Self {
+        (index, edit)
+    }
+}
+
+impl Cigar {
     /// Finds locally similar moving windows (size = `window`, step = `step`)
     /// whose edit distances do not exceed `max_edit`.
     ///
     /// Appends `indices` with the corresponding window indices (vector is not cleared).
-    pub fn locally_similar<const IN_QUERY: bool>(
+    pub fn locally_similar<const IN_QUERY: bool, T: LocallySimilarOutput>(
         &self,
         window: u32,
         step: u32,
         max_edit: u32,
-        indices: &mut Vec<usize>,
+        output: &mut Vec<T>,
     ) {
-        indices.clear();
+        output.clear();
         // ...1 = variables at the window start, ...2 = variables at the window end.
         let mut pos2 = 0;
         let mut iter2 = self.tuples.iter();
@@ -687,7 +708,7 @@ impl Cigar {
             } else {
                 // Reached the end of alignment.
                 if edit <= max_edit {
-                    indices.push(0);
+                    output.push(T::new(0, edit));
                 }
                 return;
             }
@@ -712,8 +733,9 @@ impl Cigar {
                 let next_saved_pos = pos1 + i32::rem_euclid(-(pos1 as i32), step as i32) as u32;
                 for pos in (next_saved_pos..pos1 + shift).step_by(step as usize) {
                     let curr_shift = pos - pos1;
-                    if edit + (mask2 & curr_shift) - (mask1 & curr_shift) <= max_edit {
-                        indices.push((pos / step) as usize);
+                    let curr_edit = edit + (mask2 & curr_shift) - (mask1 & curr_shift);
+                    if curr_edit <= max_edit {
+                        output.push(T::new(pos / step, curr_edit));
                     }
                 }
                 pos1 += shift;
@@ -744,7 +766,7 @@ impl Cigar {
             }
         }
         if edit <= max_edit {
-            indices.push(pos1.fast_ceil_div(step) as usize);
+            output.push(T::new(pos1.fast_ceil_div(step), edit));
         }
         assert!(pos1 + window == pos2);
         assert!(pos2 == if IN_QUERY { self.qlen } else { self.rlen });

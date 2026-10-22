@@ -293,7 +293,7 @@ fn update_bitarray<const IN_QUERY: bool>(
     global_div: f64,
     bitarrays: &mut [BitArray],
     oth_index: usize,
-    buf_indices: &mut Vec<usize>,
+    buf_indices: &mut Vec<u32>,
     step: u32,
     max_window_edit: u32,
     args: &Args,
@@ -304,10 +304,10 @@ fn update_bitarray<const IN_QUERY: bool>(
             buf_indices.push(0);
         }
     } else {
-        cigar.locally_similar::<IN_QUERY>(args.window, step, max_window_edit, buf_indices);
+        cigar.locally_similar::<IN_QUERY, u32>(args.window, step, max_window_edit, buf_indices);
     }
-    for &w in buf_indices as &[usize] {
-        bitarrays[w].set_true(oth_index);
+    for &w in buf_indices.iter() {
+        bitarrays[w as usize].set_true(oth_index);
     }
 }
 
