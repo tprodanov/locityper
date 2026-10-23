@@ -418,7 +418,7 @@ impl std::ops::Index<usize> for PrelimAlignments {
 /// For each BAM contig, store its index across `ContigNames`.
 /// BAM contigs must be a subset (possibly equal) of the contig names since if there are new contigs,
 /// we cannot transfer alignments from them.
-fn construct_tid_to_contig_map(header: &bam::HeaderView, contigs: &ContigNames) -> crate::Result<Vec<ContigId>> {
+pub fn construct_tid_to_contig_map(header: &bam::HeaderView, contigs: &ContigNames) -> crate::Result<Vec<ContigId>> {
     let mut conversion = Vec::with_capacity(header.target_count() as usize);
     for i in 0..header.target_count() {
         let name_bytes = header.tid2name(i);
@@ -1076,13 +1076,15 @@ impl ReadCounts {
         log::debug!("    Use {} read{}s. Discard {} poorly mapped, {} out of bounds and {} with few unique k-mers",
             self.good_reads, if is_paired_end { " pair" } else { "" },
             self.poorly_mapped, self.out_of_bounds, self.few_kmers);
-        let divisor = ((1 + usize::from(is_paired_end)) * n_contigs * self.good_reads as usize) as f64;
+        let n_reads = self.good_reads * (1 + u32::from(is_paired_end));
+        let divisor = (n_reads as usize * n_contigs) as f64;
         log::debug!("    Found {:.3} alignments / read / haplotype (loaded {:.3} + recovered {:.3})",
             (self.original_alns + self.recovered_alns) as f64 / divisor,
             self.original_alns as f64 / divisor, self.recovered_alns as f64 / divisor,
         );
         if self.total_transfers > 0 {
-            log::debug!("    Attempted {} alignment recovieries in total", self.total_transfers);
+            log::debug!("    Attempted {:.3} alignment recoveries / read",
+                self.total_transfers as f64 / n_reads as f64);
         }
     }
 }
@@ -1126,6 +1128,7 @@ impl AllAlignments {
     /// (ii) there is an alignment that overlaps an inner region of any contig (beyond the boundary region).
     pub fn load(
         reader: impl bam::Read,
+        tid2contig: Vec<ContigId>,
         contig_set: &Arc<ContigSet>,
         kmer_counts: &KmerCounts,
         bg_distr: &Arc<BgDistr>,
@@ -1145,7 +1148,6 @@ impl AllAlignments {
             params.kmer_hard_thresh, params.kmer_soft_thresh);
 
         log::info!("    Loading read alignments");
-        let tid2contig = construct_tid_to_contig_map(reader.header(), contig_set.contigs())?;
         let mut reader = LaggedReader::new(reader)?;
         let data = Data::new(contig_set, contig_infos, tid2contig, bg_distr, edit_dist_cache, params)?;
         let is_paired_end = bg_distr.insert_distr().is_paired_end();

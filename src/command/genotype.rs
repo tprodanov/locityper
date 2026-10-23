@@ -106,6 +106,8 @@ struct Args {
     use_paf: bool,
 
     transfer_div: f64,
+    transfer_window: Option<u32>,
+    transfer_step: Option<u32>,
     transfer_fails: u32,
 }
 
@@ -147,6 +149,8 @@ impl Default for Args {
             use_paf: true,
 
             transfer_div: 0.1,
+            transfer_window: None,
+            transfer_step: None,
             transfer_fails: 100,
         }
     }
@@ -174,6 +178,17 @@ impl Args {
         self.samtools = ext::sys::find_exe(self.samtools)?;
         self.assgn_params.validate()?;
         Ok(self)
+    }
+
+    /// If transfer window / transfer step are None, sets them automatically.
+    fn set_transfer_window(&mut self, mean_read_len: f64) -> crate::Result<()> {
+        let window = self.transfer_window.get_or_insert_with(|| 1000.0_f64.max(mean_read_len * 3.0).ceil() as u32);
+        let step = self.transfer_step.get_or_insert_with(|| window.div_ceil(3));
+        validate_param!(step < window, "Transfer step ({}) must be smaller than the window size ({})",
+            step, window);
+        log::debug!("    During alignment recovery, use locally similar windows (sim >= {}) of size {} and step {}",
+            crate::math::fmt_signif(self.transfer_div, 5), window, step);
+        Ok(())
     }
 }
 
@@ -256,6 +271,9 @@ fn print_help(extended: bool) {
             {EMPTY}  (see {}). Use zero to disable alignment recovery.",
             "    --tr-div".green(), "NUM".yellow(), super::fmt_def_f64(defaults.transfer_div), paths::LOCUS_PAF_PREF,
             "locityper align".underline());
+        println!("    {} {:VAL$} Use locally similar haplotypes with this window size [{}].\n\
+            {EMPTY}  First argument: window size, second: step (= size / 3 if omitted).",
+            "    --tr-window".green(), "INT [INT]".yellow(), super::fmt_def("auto"));
         println!("    {:KEY$} {:VAL$}  Skip to next alignment whenever alignment tranfer produces high edit\n\
             {EMPTY}  distance {} times [{}]. Use \"inf\" to continue indefinitely.",
             "    --tr-fails".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.transfer_fails));
@@ -533,7 +551,24 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
             Long("minimap") | Long("minimap2") => args.minimap = parser.value()?.parse()?,
             Long("samtools") => args.samtools = parser.value()?.parse()?,
             Long("use-paf") => args.use_paf = parser.value()?.parse::<YesNo>()?.into(),
+
             Long("tr-div") => args.transfer_div = parser.value()?.parse()?,
+            Long("tr-window") => {
+                let mut values = parser.values()?.take(2);
+                let arg1: String = values.next().expect("First argument is always present").parse()?;
+                if arg1 == "auto" {
+                    args.transfer_window = None;
+                } else {
+                    args.transfer_window = Some(arg1.parse::<PrettyU32>()
+                        .map_err(|e| lexopt::Error::ParsingFailed {
+                            value: "--tr-window".to_string(), error: Box::new(e) })?
+                        .get());
+                    args.transfer_step = values.next()
+                        .map(|val| val.parse::<PrettyU32>())
+                        .transpose()?
+                        .map(PrettyU32::get);
+                }
+            }
             Long("tr-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
 
             Short('V') | Long("version") => {
@@ -1163,29 +1198,39 @@ fn generate_genotypes(
 fn process_paf(
     paf_filename: &Path,
     contigs: &ContigNames,
+    basis_contigs: &[ContigId],
     args: &Args,
 ) -> crate::Result<(Option<Arc<HapAlns>>, Option<TriangleMatrix<Option<u32>>>)> {
     let mut opt_hap_alns = if args.transfer_div > 0.0 {
-        Some(HapAlns::new(contigs.len(), args.transfer_fails, args.transfer_div))
+        Some(HapAlns::new(contigs.len(), args.transfer_fails))
     } else { None };
     let mut contig_distances = if args.use_paf { Some(TriangleMatrix::new(contigs.len(), None)) } else { None };
     if opt_hap_alns.is_none() && contig_distances.is_none() {
         return Ok((None, None));
     }
 
+    let mut in_basis_contigs = vec![false; contigs.len()];
+    for contig_id in basis_contigs {
+        in_basis_contigs[contig_id.ix()] = true;
+    }
+
     let mut paf_file = ext::sys::open(paf_filename).map(PafFile::new)?;
     while let Some(entry) = paf_file.next_wo_tags(contigs)? {
         let PafParseResult::Entry(mut entry) = entry else { continue };
         if entry.query_id() == entry.target_id() || entry.cigar().is_none() { continue };
+        if !in_basis_contigs[entry.query_id().ix()] && !in_basis_contigs[entry.target_id().ix()] { continue}
+
         if let Some(dists) = &mut contig_distances && let Some(d) = entry.edit_distance() {
             *dists.get_symmetric_mut(entry.query_id().ix(), entry.target_id().ix()) = Some(d);
         }
         if let Some(hap_alns) = &mut opt_hap_alns {
-            hap_alns.add(&mut entry, contigs);
+            hap_alns.add(&mut entry, contigs, 1.5 * args.transfer_div);
         }
     }
     if let Some(hap_alns) = &mut opt_hap_alns {
-        hap_alns.sort_best_ixs();
+        hap_alns.create_locally_similar_lists(contigs, basis_contigs,
+            args.transfer_window.expect("Window size must be defined"),
+            args.transfer_step.expect("Transfer step must be defined"), args.transfer_div);
     }
     Ok((opt_hap_alns.map(Arc::new), contig_distances))
 }
@@ -1219,23 +1264,24 @@ fn analyze_locus(
     let contig_infos = ContigInfos::new(&locus.set, &locus.kmer_counts, explicit_weights,
         bg_distr.depth(), &args.assgn_params, windows_writer).map(Arc::new)?;
 
+    let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
+    let tid2contig = locs::construct_tid_to_contig_map(bam_reader.header(), contigs)?;
     let opt_paf_fname = paths::LOCUS_PAFS.iter()
         .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
     let (hap_alns, mut contig_distances) = if let Some(paf_fname) = opt_paf_fname {
-        process_paf(&paf_fname, contigs, args)?
+        process_paf(&paf_fname, contigs, &tid2contig, args)?
     } else {
         (None, None)
     };
     let true_edit_distances = contig_distances.is_some();
 
-    let bam_reader = bam::Reader::from_path(&filenames.aln_filename)?;
     let dbg_writers = if args.debug >= DebugLvl::Full {
         locs::DbgWriters::new(&locus.out_dir, usize::from(args.threads))?
     } else {
         locs::DbgWriters::sink(usize::from(args.threads))
     };
-    let all_alns = AllAlignments::load(bam_reader, &locus.set, &locus.kmer_counts, bg_distr, edit_dist_cache,
-        &contig_infos, &hap_alns, &args.assgn_params, usize::from(args.threads), dbg_writers)?;
+    let all_alns = AllAlignments::load(bam_reader, tid2contig, &locus.set, &locus.kmer_counts, bg_distr,
+        edit_dist_cache, &contig_infos, &hap_alns, &args.assgn_params, usize::from(args.threads), dbg_writers)?;
 
     if filenames.reads_filename.exists() {
         // Alignments are succesfully loaded, now we can remove file with reads.
@@ -1299,11 +1345,11 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     super::greet();
     let timer = Instant::now();
     let mut rng = ext::rand::init_rng(args.seed, true);
-    let out_dir = args.output.as_ref().unwrap();
-    ext::sys::mkdir(out_dir)?;
+    let out_dir = args.output.clone().unwrap();
+    ext::sys::mkdir(&out_dir)?;
     ext::sys::mkdir(&out_dir.join(paths::LOCI_DIR))?;
 
-    let preproc_path = args.preproc.as_ref().unwrap();
+    let preproc_path = args.preproc.clone().unwrap();
     let bg_distr = if let Some("gz") = preproc_path.extension().and_then(std::ffi::OsStr::to_str) {
         BgDistr::load_from(&preproc_path, None)
     } else {
@@ -1316,6 +1362,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         return Err(error!(InvalidInput, "Background read depth undefined"));
     }
     let tech = bg_distr.seq_info().technology();
+    args.set_transfer_window(bg_distr.seq_info().mean_read_len())?;
     let recr_params = recruit::Params::new(
         args.minimizer_kw,
         args.match_frac.unwrap_or_else(|| tech.default_match_frac(bg_distr.insert_distr().is_paired_end())),
@@ -1341,7 +1388,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     }
 
     let priors = args.priors.as_ref().map(|path| load_priors(path)).transpose()?;
-    let loci = load_loci(&args.databases, out_dir, &args.subset_loci, args.rerun, &args.leave_out)?;
+    let loci = load_loci(&args.databases, &out_dir, &args.subset_loci, args.rerun, &args.leave_out)?;
     if loci.is_empty() {
         return Ok(());
     }

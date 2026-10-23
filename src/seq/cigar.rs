@@ -678,7 +678,7 @@ impl Cigar {
     /// whose edit distances do not exceed `max_edit`.
     ///
     /// Appends `indices` with the corresponding window indices (vector is not cleared).
-    pub fn locally_similar<const IN_QUERY: bool, T: LocallySimilarOutput>(
+    pub fn locally_similar_gen<const IN_QUERY: bool, T: LocallySimilarOutput>(
         &self,
         window: u32,
         step: u32,
@@ -770,6 +770,22 @@ impl Cigar {
         }
         assert!(pos1 + window == pos2);
         assert!(pos2 == if IN_QUERY { self.qlen } else { self.rlen });
+    }
+
+    #[inline(always)]
+    pub fn locally_similar<T: LocallySimilarOutput>(
+        &self,
+        in_query: bool,
+        window: u32,
+        step: u32,
+        max_edit: u32,
+        output: &mut Vec<T>,
+    ) {
+        if in_query {
+            self.locally_similar_gen::<true, T>(window, step, max_edit, output)
+        } else {
+            self.locally_similar_gen::<false, T>(window, step, max_edit, output)
+        }
     }
 }
 

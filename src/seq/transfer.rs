@@ -2,6 +2,7 @@
 
 use std::{
     sync::Arc,
+    cmp::min,
 };
 use crate::{
     seq::{
@@ -15,6 +16,7 @@ use crate::{
     bg::ErrorProfile,
     model::locs::{ReadData, PrelimAlignments},
     ext::TriangleMatrix,
+    math::RoundDiv,
 };
 
 /// Haplotype-haplotype alignments.
@@ -22,23 +24,28 @@ pub struct HapAlns {
     /// Alignments from each contig to other contigs.
     /// matrix[i, j] contains alignment where contig i is query, j is reference.
     aln_matrix: TriangleMatrix<Option<(Cigar, CigarIndex)>>,
-    /// For each contig, contains list of other indices and number of matches.
-    /// Inner lists are ordered by decreasing edit distance.
-    best_ixs: Vec<Vec<(ContigId, u32)>>,
     transfer_fails: u32,
-    max_div: f64,
+
+    local_step: u32,
+    /// Haplotype -> Window -> offset in `locally_similar_ixs`. Inner vector has size of (n_windows + 1).
+    contig_offsets: Vec<Vec<usize>>,
+    /// Slice [contig_offset[contig][window] .. contig_offset[contig][window + 1]] will contain a sorted list of
+    /// other locally similar contigs.
+    locally_similar_ixs: Vec<ContigId>,
 }
 
 impl HapAlns {
-    pub fn new(n_contigs: usize, transfer_fails: u32, max_div: f64) -> Self {
+    pub fn new(n_contigs: usize, transfer_fails: u32) -> Self {
         Self {
             aln_matrix: TriangleMatrix::new(n_contigs, None),
-            best_ixs: vec![Vec::new(); n_contigs],
-            transfer_fails, max_div,
+            transfer_fails,
+            local_step: 0,
+            contig_offsets: Vec::new(),
+            locally_similar_ixs: Vec::new(),
         }
     }
 
-    pub fn add(&mut self, entry: &mut PafEntry, contigs: &ContigNames) {
+    pub fn add(&mut self, entry: &mut PafEntry, contigs: &ContigNames, max_div: f64) {
         let id1 = entry.query_id();
         let id2 = entry.target_id();
         let matrix_cell = self.aln_matrix.get_symmetric_mut(id1.ix(), id2.ix());
@@ -49,20 +56,65 @@ impl HapAlns {
                 contigs.get_name(id1), contigs.get_name(id2));
             return;
         }
-        if entry.divergence().unwrap_or(f64::INFINITY) > self.max_div { return };
+        if entry.divergence().unwrap_or(f64::INFINITY) > max_div { return };
         let Some(mut cigar) = entry.take_cigar() else { return };
         if id1 > id2 {
             cigar = cigar.invert();
         }
         let cigar_index = CigarIndex::new(&cigar);
         *matrix_cell = Some((cigar, cigar_index));
-        let n_matches = entry.n_matches();
-        self.best_ixs[id1.ix()].push((id2, n_matches));
-        self.best_ixs[id2.ix()].push((id1, n_matches));
     }
 
-    pub fn sort_best_ixs(&mut self) {
-        self.best_ixs.iter_mut().for_each(|v| v.sort_by(|a, b| b.1.cmp(&a.1)));
+    /// Identify closest local haplotypes.
+    pub fn create_locally_similar_lists(
+        &mut self,
+        contigs: &ContigNames,
+        basis_contigs: &[ContigId],
+        window: u32,
+        step: u32,
+        max_div: f64,
+    ) {
+        let max_edit = (f64::from(window) * max_div).floor() as u32;
+        let n_contigs = contigs.len();
+        let mut contig_offsets = vec![Vec::new(); n_contigs];
+        let mut locally_similar_ixs = Vec::new();
+
+        let mut buffer = Vec::new();
+        let max_len = contigs.lengths().iter().max().expect("At least one contig must be present");
+        // Temporary structure: window index -> [(haplotype index, edit size)]
+        let mut contig_locally_similar = vec![Vec::new(); (max_len - window).fast_ceil_div(step) as usize + 1];
+        for &contig_id in basis_contigs {
+            let contig_len = contigs.get_len(contig_id);
+            let n_windows = (contig_len - window).fast_ceil_div(step) as usize + 1;
+            // This way we will for certain not get out of bounds.
+            let curr_locally_similar = &mut contig_locally_similar[..n_windows];
+
+            let i = contig_id.ix();
+            for j in 0..n_contigs {
+                if i == j { continue };
+                let Some((cigar, _)) = self.aln_matrix.get_symmetric(i, j).as_ref() else { continue };
+                let in_query = i < j;
+                cigar.locally_similar::<(u32, u32)>(in_query, window, step, max_edit, &mut buffer);
+                for &(window, edit) in &buffer {
+                    curr_locally_similar[window as usize].push((j, edit));
+                }
+            }
+
+            let curr_offsets = &mut contig_offsets[i];
+            curr_offsets.reserve_exact(n_windows + 1);
+            curr_offsets.push(locally_similar_ixs.len());
+            for similar_at_window in curr_locally_similar {
+                similar_at_window.sort_unstable_by_key(|tup| tup.1);
+                locally_similar_ixs.extend(similar_at_window.iter().map(|tup| ContigId::new(tup.0)));
+                curr_offsets.push(locally_similar_ixs.len());
+                similar_at_window.clear();
+            }
+            assert!(curr_offsets.len() == n_windows + 1);
+        }
+
+        self.local_step = step;
+        self.contig_offsets = contig_offsets;
+        self.locally_similar_ixs = locally_similar_ixs;
     }
 
     /// Try to identify any new alignments for a given read/read pair.
@@ -94,7 +146,15 @@ impl HapAlns {
             let read_seq = read_data.mate_data(read_end).get_seq(source_strand);
             let mut n_fails = 0..self.transfer_fails;
 
-            for &(target_contig_id, _) in &self.best_ixs[source_contig_id.ix()] {
+            let curr_offsets = &self.contig_offsets[source_contig_id.ix()];
+            assert!(!curr_offsets.is_empty(), "Trying to reconstruct alignments not from a basis haplotype");
+            let n_windows = curr_offsets.len().strict_sub(1);
+            // If we are in the last window, start / step can put us beyond the size of the vector.
+            let k = min(n_windows, (source_aln_start / self.local_step + 1) as usize);
+            // Safety: we know that k is at most n_windows, and length = n_windows + 1.
+            let start_offset = unsafe { *curr_offsets.get_unchecked(k.strict_sub(1)) };
+            let end_offset = unsafe { *curr_offsets.get_unchecked(k) };
+            for &target_contig_id in &self.locally_similar_ixs[start_offset..end_offset] {
                 let target_seq = contig_set.get_seq(target_contig_id);
                 let (haps_cigar, cigar_index) = self.aln_matrix
                     .get_symmetric(source_contig_id.ix(), target_contig_id.ix())

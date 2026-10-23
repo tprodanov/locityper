@@ -304,7 +304,7 @@ fn update_bitarray<const IN_QUERY: bool>(
             buf_indices.push(0);
         }
     } else {
-        cigar.locally_similar::<IN_QUERY, u32>(args.window, step, max_window_edit, buf_indices);
+        cigar.locally_similar_gen::<IN_QUERY, u32>(args.window, step, max_window_edit, buf_indices);
     }
     for &w in buf_indices.iter() {
         bitarrays[w as usize].set_true(oth_index);
