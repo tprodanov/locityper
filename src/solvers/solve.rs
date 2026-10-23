@@ -352,7 +352,7 @@ fn genotype_distance(gt1: &Genotype, gt2: &Genotype, distances: &TriangleMatrix<
         }
         min_dist = min(min_dist, dist);
     });
-    if min_dist == u32::MAX { None } else { Some(min_dist) }
+    (min_dist != u32::MAX).then_some(min_dist)
 }
 
 /// Prediction for a single genotype.
@@ -808,8 +808,8 @@ fn solve_single_thread(
             continue;
         }
 
-        let mut curr_sol_writer: Option<&mut BrFile> =
-            if data.debug == DebugLvl::None && out_size.is_some() { None } else { Some(sol_writer) };
+        let mut curr_sol_writer: Option<&mut BrFile> = (data.debug != DebugLvl::None || out_size.is_none())
+            .then_some(sol_writer);
 
         logger.reset(n_gts);
         let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
@@ -886,7 +886,7 @@ pub fn solve(
     let mut predictions = Predictions::new(n_gts);
     let out_size0 = data.scheme.stages[0].in_size;
     if data.assgn_params.dont_skip || out_size0 < n_gts {
-        let curr_sol_writer = if data.debug == DebugLvl::None { None } else { Some(&mut sol_writer) };
+        let curr_sol_writer = (data.debug != DebugLvl::None).then_some(&mut sol_writer);
         run_filter(&data.contigs, &data.genotypes, &mut predictions.ixs,
             &data.priors, &data.all_alns, curr_sol_writer, &data.assgn_params, out_size0, data.threads)?;
     }
@@ -1013,8 +1013,8 @@ impl MainWorker {
             }
             assert_eq!(start, n_gts);
 
-            let mut curr_sol_writer: Option<&mut BrFile> =
-                if data.debug == DebugLvl::None && out_size.is_some() { None } else { Some(sol_writer) };
+            let mut curr_sol_writer: Option<&mut BrFile> = (data.debug != DebugLvl::None || out_size.is_none())
+                .then_some(sol_writer);
             while logger.solved_genotypes < n_gts {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {

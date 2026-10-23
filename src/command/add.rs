@@ -778,7 +778,7 @@ fn add_locus(
     if without_ns < obtained_count {
         log::warn!("    Removed {}/{} haplotypes with Ns", obtained_count - without_ns, obtained_count);
     }
-    check_sequences(&allele_seqs, &locus, if alleles_fasta.is_some() { Some(&ref_seq) } else { None })?;
+    check_sequences(&allele_seqs, &locus, alleles_fasta.is_some().then_some(&ref_seq as &[u8]))?;
     process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)?;
     lock_file.release()?;
     super::write_success_file(locus_dir.join(paths::SUCCESS))?;

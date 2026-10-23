@@ -1204,7 +1204,7 @@ fn process_paf(
     let mut opt_hap_alns = if args.transfer_div > 0.0 {
         Some(HapAlns::new(contigs.len(), args.transfer_fails))
     } else { None };
-    let mut contig_distances = if args.use_paf { Some(TriangleMatrix::new(contigs.len(), None)) } else { None };
+    let mut contig_distances = args.use_paf.then(|| TriangleMatrix::new(contigs.len(), None));
     if opt_hap_alns.is_none() && contig_distances.is_none() {
         return Ok((None, None));
     }

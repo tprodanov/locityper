@@ -237,8 +237,8 @@ fn generate_paired_end_records(
     let best_ij = count_alignments::<true>(read_alns, assgn_counts, buffer1);
     let read_data = groupped_alns.read_data();
     for (&ij, &(count, ln_prob)) in buffer1.iter() {
-        let opt_aln1 = if ij.0 == UNMAPPED { None } else { Some(groupped_alns.ith_aln(ij.0)) };
-        let opt_aln2 = if ij.1 == UNMAPPED { None } else { Some(groupped_alns.ith_aln(ij.1)) };
+        let opt_aln1 = (ij.0 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.0));
+        let opt_aln2 = (ij.1 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.1));
         let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data,
             ReadEnd::First, ln_prob, buffer2)?;
         let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data,
@@ -310,7 +310,7 @@ fn generate_single_end_records(
     let best_ij = count_alignments::<false>(read_alns, assgn_counts, buffer1);
     let read_data = groupped_alns.read_data();
     for (&ij, &(count, ln_prob)) in buffer1.iter() {
-        let opt_aln = if ij.0 == UNMAPPED { None } else { Some(groupped_alns.ith_aln(ij.0)) };
+        let opt_aln = (ij.0 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.0));
         let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data,
             ReadEnd::First, ln_prob, buffer2)?;
         let (prob, mapq) = count_to_prob(count, attempts);

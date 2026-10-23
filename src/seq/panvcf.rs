@@ -213,8 +213,7 @@ fn discard_unknown(
     }
 
     let unfilt_seqs = std::mem::replace(seqs, Vec::with_capacity(n_remain));
-    seqs.extend(unfilt_seqs.into_iter().zip(&keep_seqs)
-        .filter_map(|(seq, &keep)| if keep { Some(seq) } else { None }));
+    seqs.extend(itertools::izip!(&keep_seqs, unfilt_seqs).filter_map(|(&keep, seq)| keep.then_some(seq)));
     log::warn!("        Reconstructed {} alleles ({} unavailable)", n_remain, n_discard);
 }
 

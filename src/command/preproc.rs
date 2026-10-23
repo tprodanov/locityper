@@ -140,7 +140,7 @@ impl InputFiles {
                     self.reads1.push(ext::sys::add_dir(dirname, filename1));
                 }
                 "a" => {
-                    let idx_file = if split.len() == 3 { Some(ext::sys::add_dir(dirname, split[2])) } else { None };
+                    let idx_file = (split.len() == 3).then(|| ext::sys::add_dir(dirname, split[2]));
                     self.alns.push((ext::sys::add_dir(dirname, filename1), idx_file));
                 }
                 "u" => {
@@ -1161,7 +1161,7 @@ fn estimate_bg_distrs(
     bg_region: Option<&BgRegion>,
 ) -> crate::Result<BgDistr>
 {
-    let opt_out_dir = if args.debug { Some(out_dir) } else { None };
+    let opt_out_dir = args.debug.then_some(out_dir);
     let ref_filename = args.in_files.reference.as_ref().unwrap();
     let aln_is_paired_end: bool;
     let alns: Vec<NamedAlignment>;

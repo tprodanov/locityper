@@ -199,7 +199,7 @@ impl PafEntry {
 
     #[inline(always)]
     pub fn edit_distance(&self) -> Option<u32> {
-        if self.aln_len == 0 { None } else { Some(self.aln_len - self.n_matches) }
+        (self.aln_len > 0).then(|| self.aln_len - self.n_matches)
     }
 
     #[inline(always)]

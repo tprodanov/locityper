@@ -463,7 +463,7 @@ impl Answer for bool {
 
     #[inline(always)]
     fn iter(&self) -> Self::Iter<'_> {
-        (if *self { Some(0) } else { None }).into_iter()
+        self.then_some(0).into_iter()
     }
 }
 
