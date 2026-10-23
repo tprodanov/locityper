@@ -16,7 +16,6 @@ use crate::{
     bg::ErrorProfile,
     model::locs::{ReadData, PrelimAlignments},
     ext::TriangleMatrix,
-    math::RoundDiv,
 };
 
 /// Haplotype-haplotype alignments.
@@ -82,10 +81,10 @@ impl HapAlns {
         let mut buffer = Vec::new();
         let max_len = contigs.lengths().iter().max().expect("At least one contig must be present");
         // Temporary structure: window index -> [(haplotype index, edit size)]
-        let mut contig_locally_similar = vec![Vec::new(); (max_len - window).fast_ceil_div(step) as usize + 1];
+        let mut contig_locally_similar = vec![Vec::new(); max_len.saturating_sub(window).div_ceil(step) as usize + 1];
         for &contig_id in basis_contigs {
             let contig_len = contigs.get_len(contig_id);
-            let n_windows = (contig_len - window).fast_ceil_div(step) as usize + 1;
+            let n_windows = contig_len.saturating_sub(window).div_ceil(step) as usize + 1;
             // This way we will for certain not get out of bounds.
             let curr_locally_similar = &mut contig_locally_similar[..n_windows];
 
