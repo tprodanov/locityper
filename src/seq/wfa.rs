@@ -307,9 +307,10 @@ impl Aligner {
     }
 
     /// Use semi-global alignment to align sequences in either left-free or right-free mode.
-    /// If `CLIPPING`, replace all relevant non-matches with soft clipping.
     /// Returns start offset.
-    pub fn align_ends(
+    /// `clip_left` and `clip_right` are either `Off`, or `With(ref_free_end, read_free_end)`.
+    /// If `clip_left` is not `Off`, replace all relevant starting non-matches with soft clipping.
+    pub fn align_free_ends(
         &self,
         ref_seq: &[u8],
         query_seq: &[u8],
@@ -348,13 +349,13 @@ impl Aligner {
     /// Returns start offset in the reference sequence.
     #[inline(always)]
     pub fn align_left_end(&self, ref_seq: &[u8], query_seq: &[u8], cigar: &mut Cigar) -> u32 {
-        self.align_ends(ref_seq, query_seq, cigar, With((ref_seq.len() as i32, query_seq.len() as i32)), Off)
+        self.align_free_ends(ref_seq, query_seq, cigar, With((ref_seq.len() as i32, query_seq.len() as i32)), Off)
     }
 
     /// Aligns two sequences with fixed left end and free right end.
     #[inline(always)]
     pub fn align_right_end(&self, ref_seq: &[u8], query_seq: &[u8], cigar: &mut Cigar) {
-        self.align_ends(ref_seq, query_seq, cigar, Off, With((ref_seq.len() as i32, query_seq.len() as i32)));
+        self.align_free_ends(ref_seq, query_seq, cigar, Off, With((ref_seq.len() as i32, query_seq.len() as i32)));
     }
 }
 

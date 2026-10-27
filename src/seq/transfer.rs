@@ -15,7 +15,10 @@ use crate::{
     },
     bg::ErrorProfile,
     model::locs::{ReadData, PrelimAlignments},
-    ext::TriangleMatrix,
+    ext::{
+        TriangleMatrix,
+        opt::With,
+    }
 };
 
 /// Haplotype-haplotype alignments.
@@ -139,11 +142,14 @@ impl HapAlns {
             // Copy various variables before `source_aln` is dropped to make `prelim_alignments` mutable.
             let source_contig_id = source_aln.contig_id();
             let source_aln_start = source_aln.interval().start();
+            let source_aln_end = source_aln.interval().end();
             let source_cigar = source_aln.cigar().clone();
             let source_strand = source_aln.strand();
             let read_end = source_aln.read_end();
             let read_seq = read_data.mate_data(read_end).get_seq(source_strand);
             let mut n_fails = 0..self.transfer_fails;
+
+            let (left_clipping, right_clipping) = source_cigar.soft_clipping();
 
             let curr_offsets = &self.contig_offsets[source_contig_id.ix()];
             assert!(!curr_offsets.is_empty(), "Trying to reconstruct alignments not from a basis haplotype");
@@ -183,6 +189,38 @@ impl HapAlns {
                     haps_cigar.transfer_read_alignment(offset, &source_cigar, read_seq, target_seq,
                         aligner, RefToQuery)
                 };
+
+                {
+                    // How much to add to the sides of the reference sequence
+                    const PADDING: u32 = 10;
+                    // Inside the region corresponding to the reference alignment,
+                    // allow this size of free indels on the sides.
+                    const FREE_END: u32 = 10;
+                    let target_len = target_seq.len() as u32;
+                    let target_end = if query_to_ref {
+                        cigar_index.find_cigar_offset(source_aln_end - 1, QueryToRef)
+                    } else {
+                        cigar_index.find_cigar_offset(source_aln_end - 1, RefToQuery)
+                    }.rpos() + 1;
+                    let padded_target_start = offset.rpos().saturating_sub(PADDING);
+                    let padded_target_end = min(target_end + PADDING, target_len);
+                    let target_subseq = &target_seq[padded_target_start as usize..padded_target_end as usize];
+                    let target_free_left = FREE_END + offset.rpos() - padded_target_start;
+                    let target_free_right = FREE_END + padded_target_end.saturating_sub(target_end);
+                    let mut alt_cigar = Cigar::new();
+                    let alt_start = padded_target_start + aligner.align_free_ends(target_subseq, read_seq, &mut alt_cigar,
+                        With((target_free_left as i32, (FREE_END + left_clipping) as i32)),
+                        With((target_free_right as i32, (FREE_END + right_clipping) as i32)));
+                    alt_cigar.boundary_ins_to_soft();
+                    log::debug!("{} R{} to {}.   Approx {}-{}", read_data.name(), read_end.ix() + 1,
+                        contigs.get_name(target_contig_id), offset.rpos() + 1, target_end);
+                    log::debug!("    {:4}  {}", new_start, new_cigar);
+                    log::debug!("    {:4}  {}", alt_start, alt_cigar);
+                    if new_cigar != alt_cigar {
+                        log::warn!("    Different");
+                    }
+                }
+
                 total_transfers += 1;
                 let cigar_ref_len = new_cigar.ref_len();
                 const MIN_ALN_SIZE: u32 = 50;
