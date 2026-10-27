@@ -1203,6 +1203,11 @@ impl CigarIndex {
     }
 }
 
+#[inline(always)]
+fn subseq(seq: &[u8], start: u32, end: u32) -> &[u8] {
+    &seq[start as usize..end as usize]
+}
+
 impl Cigar {
     /// Realign potentially incorrect parts of the alignment, where
     /// a segment contains both insertion and deletion on a gap under `max_gap` size.
@@ -1356,8 +1361,9 @@ impl Cigar {
             };
             if add_operation.is_some() {
                 if !GLOBAL_ALN && last1 == 0 && pos1 > 0 {
-                    let start_offset = aligner.align_left_end(seq_k, last2.saturating_sub(pos1 + CLIP_PADDING), pos2,
-                        seq_i, last1, pos1, &mut new_cigar);
+                    let start_offset = aligner.align_left_end(
+                        subseq(seq_k, last2.saturating_sub(pos1 + CLIP_PADDING), pos2),
+                        subseq(seq_i, last1, pos1), &mut new_cigar);
                     // [TODO] Fix simpler expression, remove assert
                     assert_eq!(start_k + pos2 - last2 - new_cigar.rlen, start_k + last2 + start_offset);
                     start_k = start_k + pos2 - last2 - new_cigar.rlen;
@@ -1391,8 +1397,9 @@ impl Cigar {
             if GLOBAL_ALN {
                 aligner.smart_align(seq_k, last2, len_k, seq_i, last1, len_i, max_gap, &mut new_cigar);
             } else {
-                aligner.align_right_end(seq_k, last2, min(len_k, last2 + len_i - last1 + CLIP_PADDING),
-                    seq_i, last1, len_i, &mut new_cigar);
+                aligner.align_right_end(
+                    subseq(seq_k, last2, min(len_k, last2 + len_i - last1 + CLIP_PADDING)),
+                    subseq(seq_i, last1, len_i), &mut new_cigar);
             }
         }
         assert_eq!(len_i, new_cigar.qlen,

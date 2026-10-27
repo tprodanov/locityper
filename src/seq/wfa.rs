@@ -198,18 +198,18 @@ impl Aligner {
     fn align(
         &self,
         aligner: *mut cwfa::wavefront_aligner_t,
-        seq1: &[u8],
-        seq2: &[u8],
+        ref_seq: &[u8],
+        query_seq: &[u8],
         cigar: &mut Cigar,
         clip_left: impl Flag,
     ) -> (u32, i32) {
         let status = unsafe { cwfa::wavefront_align(aligner,
-            seq1.as_ptr() as *const c_char, seq1.len() as i32,
-            seq2.as_ptr() as *const c_char, seq2.len() as i32,
+            ref_seq.as_ptr() as *const c_char, ref_seq.len() as i32,
+            query_seq.as_ptr() as *const c_char, query_seq.len() as i32,
         ) };
         if status != 0 {
             // Alignment was dropped, create approximate alignment.
-            return (0, self.penalties.align_simple(seq1, seq2, cigar));
+            return (0, self.penalties.align_simple(ref_seq, query_seq, cigar));
         }
 
         let c_cigar = unsafe { (*aligner).cigar };
@@ -249,11 +249,11 @@ impl Aligner {
         let score = unsafe { (*c_cigar).score };
         if score <= -0x60000000_i32 {
             #[cold]
-            fn warn(score: i32, seq1: &[u8], seq2: &[u8]) {
+            fn warn(score: i32, ref_seq: &[u8], query_seq: &[u8]) {
                 log::warn!("WFA produced very small score ({}). Sequences: {} and {}",
-                    score, String::from_utf8_lossy(seq1), String::from_utf8_lossy(seq2));
+                    score, String::from_utf8_lossy(ref_seq), String::from_utf8_lossy(query_seq));
             }
-            warn(score, seq1, seq2);
+            warn(score, ref_seq, query_seq);
         }
         (ref_offset, score)
     }
@@ -311,24 +311,18 @@ impl Aligner {
     /// Returns start offset.
     pub fn align_ends(
         &self,
-        seq1: &[u8], // ref sequence
-        i1: u32,
-        i2: u32,
-        seq2: &[u8], // query sequence
-        j1: u32,
-        j2: u32,
+        ref_seq: &[u8],
+        query_seq: &[u8],
         cigar: &mut Cigar,
         clip_left: impl Optional<(i32, i32)>,
         clip_right: impl Optional<(i32, i32)>,
     ) -> u32 {
-        assert!(j1 != j2);
-        if i1 == i2 {
-            // Will be replaced with Operation::Soft later in the analysis.
-            cigar.push_checked(Operation::Ins, j2 - j1);
+        assert!(!query_seq.is_empty());
+        if ref_seq.is_empty() {
+            // Will be replaced by Operation::Soft later in the analysis.
+            cigar.push_checked(Operation::Ins, query_seq.len() as u32);
             return 0;
         }
-        let subseq1 = &seq1[i1 as usize..i2 as usize];
-        let subseq2 = &seq2[j1 as usize..j2 as usize];
         let aligner = self.semiglobal_aligner.expect("Semi-global aligner undefined");
 
         let (free1_left, free2_left) = clip_left.get().unwrap_or((0, 0));
@@ -336,7 +330,7 @@ impl Aligner {
         unsafe {
             cwfa::wavefront_aligner_set_alignment_free_ends(aligner, free1_left, free1_right, free2_left, free2_right);
         };
-        let (start_offset, _) = self.align(aligner, subseq1, subseq2, cigar, clip_left.flag());
+        let (start_offset, _) = self.align(aligner, ref_seq, query_seq, cigar, clip_left.flag());
         if clip_right.enabled() {
             let mut soft_clipping = 0;
             while let Some(item) = cigar.pop_if(|item| item.operation() != Operation::Equal) {
@@ -350,63 +344,18 @@ impl Aligner {
         start_offset
     }
 
+    /// Aligns two sequences with free left end and fixed right end.
+    /// Returns start offset in the reference sequence.
     #[inline(always)]
-    pub fn align_left_end(
-        &self,
-        seq1: &[u8], // ref sequence
-        i1: u32,
-        i2: u32,
-        seq2: &[u8], // query sequence
-        j1: u32,
-        j2: u32,
-        cigar: &mut Cigar,
-    ) -> u32 {
-        let len1 = i2 - i1;
-        let len2 = j2 - j1;
-        self.align_ends(seq1, i1, i2, seq2, j1, j2, cigar, With((len1 as i32, len2 as i32)), Off)
+    pub fn align_left_end(&self, ref_seq: &[u8], query_seq: &[u8], cigar: &mut Cigar) -> u32 {
+        self.align_ends(ref_seq, query_seq, cigar, With((ref_seq.len() as i32, query_seq.len() as i32)), Off)
     }
 
+    /// Aligns two sequences with fixed left end and free right end.
     #[inline(always)]
-    pub fn align_right_end(
-        &self,
-        seq1: &[u8], // ref sequence
-        i1: u32,
-        i2: u32,
-        seq2: &[u8], // query sequence
-        j1: u32,
-        j2: u32,
-        cigar: &mut Cigar,
-    ) -> u32 {
-        let len1 = i2 - i1;
-        let len2 = j2 - j1;
-        self.align_ends(seq1, i1, i2, seq2, j1, j2, cigar, Off, With((len1 as i32, len2 as i32)))
+    pub fn align_right_end(&self, ref_seq: &[u8], query_seq: &[u8], cigar: &mut Cigar) {
+        self.align_ends(ref_seq, query_seq, cigar, Off, With((ref_seq.len() as i32, query_seq.len() as i32)));
     }
-
-    // /// Aligns read to the reference in a ends-free fashion.
-    // /// Returns aligned start position (ref_start <= result < ref_end) and CIGAR.
-    // /// If read_start > 0 or read_end < read_len, adds clipping to CIGAR.
-    // pub fn align_read(&self,
-    //     ref_seq: &[u8],
-    //     ref_start: u32,
-    //     ref_end: u32,
-    //     read_seq: &[u8],
-    //     read_start: u32,
-    //     read_end: u32,
-    // ) -> (u32, Cigar) {
-    //     let ref_subseq = &ref_seq[ref_start as usize..ref_end as usize];
-    //     let read_subseq = &read_seq[read_start as usize..read_end as usize];
-    //     let ref_len = ref_subseq.len() as i32;
-    //     let read_len = read_subseq.len() as i32;
-    //     unsafe { cwfa::wavefront_aligner_set_alignment_free_ends(aligner, ref_len, ref_len, read_len, read_len) };
-    //     let (start_offset, _) = self.align::<LEFT>(aligner, subseq1, subseq2, cigar);
-    //     let mut soft_clipping = 0;
-    //     while let Some(item) = cigar.pop_if(|item| item.operation() != Operation::Equal) {
-    //         soft_clipping += u32::from(item.operation().consumes_query()) * item.len();
-    //     }
-    //     if soft_clipping > 0 {
-    //         cigar.push_unchecked(Operation::Ins, soft_clipping);
-    //     }
-    // }
 }
 
 /// Convert char into operation, replacing M with X.
