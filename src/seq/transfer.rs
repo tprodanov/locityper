@@ -160,14 +160,13 @@ impl HapAlns {
                     .as_ref().expect("Alignment between haplotypes must exist");
                 let query_to_ref = source_contig_id < target_contig_id;
 
-                let approx_pos = if query_to_ref {
-                    cigar_index.find_approx_position(source_aln_start, QueryToRef)
+                let offset = if query_to_ref {
+                    cigar_index.find_cigar_offset(source_aln_start, QueryToRef)
                 } else {
-                    cigar_index.find_approx_position(source_aln_start, RefToQuery)
+                    cigar_index.find_cigar_offset(source_aln_start, RefToQuery)
                 };
-
                 if let Some(prev_aln_entry) = prelim_alignments.pos_collection()
-                    .get(read_end, target_contig_id, approx_pos.pos)
+                    .get(read_end, target_contig_id, offset.rpos())
                 {
                     if let Some(seen_val) = seen.get_mut(prev_aln_entry.index() as usize) {
                         *seen_val = true;
@@ -178,12 +177,10 @@ impl HapAlns {
                 }
 
                 let (new_start, new_cigar) = if query_to_ref {
-                    let offset = cigar_index.find_cigar_offset(source_aln_start, approx_pos, QueryToRef);
-                    haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
+                    haps_cigar.transfer_read_alignment(offset, &source_cigar, read_seq, target_seq,
                         aligner, QueryToRef)
                 } else {
-                    let offset = cigar_index.find_cigar_offset(source_aln_start, approx_pos, RefToQuery);
-                    haps_cigar.transfer_read_alignment(source_aln_start, offset, &source_cigar, read_seq, target_seq,
+                    haps_cigar.transfer_read_alignment(offset, &source_cigar, read_seq, target_seq,
                         aligner, RefToQuery)
                 };
                 total_transfers += 1;

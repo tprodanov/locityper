@@ -1006,26 +1006,6 @@ pub fn clipping_rate(record: &record::Record) -> f64 {
     }
 }
 
-/// To speed up binary search, store cigar index for each position = i << STEP_PWR. With pwr = 8, step is 256 bp.
-pub const SPARSE_STEP_PWR: u32 = 8;
-const SPARSE_MASK: u32 = (1 << SPARSE_STEP_PWR) - 1;
-
-#[inline(always)]
-fn update_sparse_index(
-    sparse_index: &mut Vec<(u32, u32)>,
-    cigar_ix: u32,
-    len: u32,
-    pos1: u32,
-    pos2: u32,
-    consumes_other: bool,
-) {
-    for i in sparse_index.len() as u32..=((pos1 + len - 1) >> SPARSE_STEP_PWR) {
-        let sparse_pos1 = i << SPARSE_STEP_PWR;
-        let sparse_pos2 = pos2 + u32::from(consumes_other) * (sparse_pos1 - pos1);
-        sparse_index.push((cigar_ix, sparse_pos2));
-    }
-}
-
 /// Search direction, either from query to reference, or reference to query.
 pub trait CigarDirection : Copy + fmt::Debug {
     /// In an array of two values [qpos, rpos], returns index of the qpos.
@@ -1107,33 +1087,39 @@ impl CigarDirection for RefToQuery {
     fn invert(self) -> bool { true}
 }
 
-/// Structure, returned by `CigarIndex::find_approx_position`.
-#[derive(Clone, Copy, Debug)]
-pub struct ApproxPosition {
-    pub min_cigar_ix: u32,
-    pub max_cigar_ix: u32,
-    pub pos: u32,
-}
-
 /// Structure, returned by `CigarIndex::find_cigar_offset`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CigarOffset {
-    pub cigar_ix: usize,
-    pub qpos_at_ix: u32,
-    pub rpos_at_ix: u32,
+    /// Index of CIGAR operation in which query position is located (always consumes query).
+    cigar_ix: usize,
+    /// Difference qpos - (qpos at cigar_ix).
+    qshift: u32,
+    /// Reference position corresponding to the query position.
+    rpos: u32,
 }
+
+impl CigarOffset {
+    #[inline(always)]
+    pub fn rpos(&self) -> u32 {
+        self.rpos
+    }
+}
+
+/// To speed up binary search, store cigar index for each position = i << STEP_PWR. With pwr = 8, step is 256 bp.
+const SPARSE_STEP_PWR: u32 = 8;
 
 /// Extension over CIGAR that answers queries "convert range start..end to another sequence" in log(n) time,
 /// where n is the number of operations in this CIGAR.
 #[derive(Clone)]
 pub struct CigarIndex {
-    /// Length = cigar.len()
+    /// Length = cigar.len() + 1
     /// For each iteration, stores query and reference position at the start of the element.
     positions: Vec<[u32; 2]>,
-    /// Outer index: 0 = query -> ref, 1 = ref -> query.
-    /// Inner vector: for each position = i * STEP store cigar index and corresponding position in the other sequence.
-    /// As the final value, each vector contains cigar length - 1 and length of the other sequence.
-    sparse_index: [Vec<(u32, u32)>; 2],
+    /// Outer index: 0 = query, 1 = ref. Inner vector: [i] -> cigar index for position = i * STEP.
+    /// As the final value, each vector contains cigar length - 1.
+    /// We store length - 1 because consecutive values can be the same in case of long CIGAR operations,
+    /// therefore we check min_cigar_ix..=max_cigar_ix and so we need last value to be inside the vector.
+    sparse_index: [Vec<u32>; 2],
 }
 
 impl CigarIndex {
@@ -1147,59 +1133,53 @@ impl CigarIndex {
             let cigar_ix = cigar_ix as u32;
             positions.push([qpos, rpos]);
             let (cons_query, cons_ref) = op.consumes_query_ref();
-            let old_qpos = qpos;
             if cons_query {
-                update_sparse_index(&mut sparse_index_qr, cigar_ix, len, qpos, rpos, cons_ref);
                 qpos += len;
+                sparse_index_qr.resize(((qpos - 1) >> SPARSE_STEP_PWR) as usize + 1, cigar_ix);
             }
             if cons_ref {
-                update_sparse_index(&mut sparse_index_rq, cigar_ix, len, rpos, old_qpos, cons_query);
-                rpos += len
+                rpos += len;
+                sparse_index_rq.resize(((rpos - 1) >> SPARSE_STEP_PWR) as usize + 1, cigar_ix);
             }
         }
-        sparse_index_qr.push((cigar.len().strict_sub(1) as u32, cigar.rlen));
-        sparse_index_rq.push((cigar.len().strict_sub(1) as u32, cigar.qlen));
+        positions.push([qpos, rpos]);
+        let last_cigar_ix = cigar.len().strict_sub(1) as u32;
+        sparse_index_qr.push(last_cigar_ix);
+        sparse_index_rq.push(last_cigar_ix);
         Self {
             positions,
             sparse_index: [sparse_index_qr, sparse_index_rq],
         }
     }
 
-    /// Based on query position, returns approximate reference position.
-    #[inline]
-    pub fn find_approx_position(&self, qpos: u32, direction: impl CigarDirection) -> ApproxPosition {
+    /// Based on query positionm finds offset in the CIGAR and corresponding reference position.
+    pub fn find_cigar_offset(&self, qpos: u32, direction: impl CigarDirection) -> CigarOffset {
         let sparse_index = &self.sparse_index[direction.query_ix()];
-        let i = qpos >> SPARSE_STEP_PWR;
-        assert!(i as usize + 1 <= sparse_index.len());
-        let (min_cigar_ix, rpos1) = unsafe { *sparse_index.get_unchecked(i as usize) };
-        let (max_cigar_ix, rpos2) = unsafe { *sparse_index.get_unchecked(i as usize + 1) };
-        // Same as rpos1 + (qpos - qpos1) * (rpos2 - rpos1) / (qpos2 - qpos1), because:
-        //     qpos & SPARSE_MASK = qpos - qpos1
-        //     X >> SPARSE_STEP_PWR = X / (qpos2 - qpos1)
-        let approx_pos = rpos1 + (((qpos & SPARSE_MASK) * (rpos2 - rpos1)) >> SPARSE_STEP_PWR);
-        ApproxPosition { min_cigar_ix, max_cigar_ix, pos: approx_pos }
-    }
+        let i = (qpos >> SPARSE_STEP_PWR) as usize;
+        let next_i = i + 1;
+        assert!(next_i < sparse_index.len());
+        // Safety: we checked that i and next_i are under the vector length.
+        let min_cigar_ix = unsafe { *sparse_index.get_unchecked(i) } as usize;
+        let max_cigar_ix = unsafe { *sparse_index.get_unchecked(next_i) } as usize;
 
-    /// Refines approximate position, finding specific CIGAR index, query and ref positions at that point.
-    #[inline]
-    pub fn find_cigar_offset(
-        &self,
-        qpos: u32,
-        approx_pos: ApproxPosition,
-        direction: impl CigarDirection,
-    ) -> CigarOffset {
-        let cigar_ix = if approx_pos.min_cigar_ix == approx_pos.max_cigar_ix {
-            approx_pos.min_cigar_ix as usize
+        let cigar_ix = if min_cigar_ix == max_cigar_ix {
+            min_cigar_ix
         } else {
             bisect::right_by_at(&self.positions, |&pos| direction.query_pos(pos).cmp(&qpos),
-                approx_pos.min_cigar_ix as usize, approx_pos.max_cigar_ix as usize + 1).strict_sub(1)
+                min_cigar_ix, max_cigar_ix + 1).strict_sub(1)
         };
-        let pos = self.positions[cigar_ix];
-        CigarOffset {
-            cigar_ix,
-            qpos_at_ix: direction.query_pos(pos),
-            rpos_at_ix: direction.ref_pos(pos),
-        }
+
+        let next_cigar_ix = cigar_ix + 1;
+        assert!(next_cigar_ix < self.positions.len());
+        // Safety: we checked that cigar_ix and next_cigar_ix is under the length.
+        let pos = unsafe { *self.positions.get_unchecked(cigar_ix) };
+        let next_pos = unsafe { *self.positions.get_unchecked(next_cigar_ix) };
+        let qpos_at_ix = direction.query_pos(pos);
+        let rpos_at_ix = direction.ref_pos(pos);
+        let next_rpos = direction.ref_pos(next_pos);
+        let qshift = qpos - qpos_at_ix;
+        let rpos = rpos_at_ix + ifelse0(next_rpos > rpos_at_ix, qshift);
+        CigarOffset { cigar_ix, qshift, rpos }
     }
 }
 
@@ -1293,7 +1273,6 @@ impl Cigar {
     ///
     /// Anchor size represents the minimal size of the `=` operation that will act as an anchor.
     fn transfer_alignment<const GLOBAL_ALN: bool>(
-        start_j: u32,
         offset: CigarOffset,
         cigar_ij: &Cigar,
         direction_ij: impl CigarDirection,
@@ -1309,12 +1288,11 @@ impl Cigar {
         let mut cigar_jk_iter = cigar_jk.tuples[offset.cigar_ix..].iter();
         let tmp = cigar_jk_iter.next().unwrap();
         let mut op2 = direction_jk.operation(tmp.op);
-        let init_shift = start_j - offset.qpos_at_ix;
         let mut len2 = tmp.len;
-        let mut rem2 = len2 - init_shift;
+        let mut rem2 = len2 - offset.qshift;
 
         // Alignment starting position in the new haplotype. Could change when soft clipping is examined.
-        let mut start_k = offset.rpos_at_ix + ifelse0(op2.consumes_ref(), init_shift);
+        let mut start_k = offset.rpos;
         let len_k = seq_k.len() as u32;
 
         if GLOBAL_ALN {
@@ -1327,7 +1305,7 @@ impl Cigar {
             // If read is completely enclosed in a "=" entry + padding, simply copy the alignment.
             const FULL_MATCH_PADDING: u32 = 3;
             debug_assert!(!direction_ij.invert());
-            if op2 == Equal && init_shift >= FULL_MATCH_PADDING && rem2 >= cigar_ij.rlen + FULL_MATCH_PADDING {
+            if op2 == Equal && offset.qshift >= FULL_MATCH_PADDING && rem2 >= cigar_ij.rlen + FULL_MATCH_PADDING {
                 return (start_k, cigar_ij.clone());
             }
         }
@@ -1361,12 +1339,10 @@ impl Cigar {
             };
             if add_operation.is_some() {
                 if !GLOBAL_ALN && last1 == 0 && pos1 > 0 {
+                    let aln_ref_start = last2.saturating_sub(pos1 + CLIP_PADDING);
                     let start_offset = aligner.align_left_end(
-                        subseq(seq_k, last2.saturating_sub(pos1 + CLIP_PADDING), pos2),
-                        subseq(seq_i, last1, pos1), &mut new_cigar);
-                    // [TODO] Fix simpler expression, remove assert
-                    assert_eq!(start_k + pos2 - last2 - new_cigar.rlen, start_k + last2 + start_offset);
-                    start_k = start_k + pos2 - last2 - new_cigar.rlen;
+                        subseq(seq_k, aln_ref_start, pos2), subseq(seq_i, last1, pos1), &mut new_cigar);
+                    start_k = aln_ref_start + start_offset;
                 } else {
                     aligner.smart_align(seq_k, last2, pos2, seq_i, last1, pos1, max_gap, &mut new_cigar);
                 }
@@ -1421,7 +1397,6 @@ impl Cigar {
     #[inline]
     pub fn transfer_read_alignment(
         &self,
-        qpos: u32,
         offset: CigarOffset,
         read_cigar: &Cigar,
         read_seq: &[u8],
@@ -1431,7 +1406,7 @@ impl Cigar {
     ) -> (u32, Cigar) {
         const ANCHOR_SIZE: u32 = 5;
         Self::transfer_alignment::<false>(
-            qpos, offset, read_cigar, QueryToRef, self, direction, read_seq, ref_seq, aligner, Off, ANCHOR_SIZE)
+            offset, read_cigar, QueryToRef, self, direction, read_seq, ref_seq, aligner, Off, ANCHOR_SIZE)
     }
 
     /// Using alignments between haplotypes i, j and j, k; find new alignment between i (query) and k (reference).
@@ -1451,13 +1426,13 @@ impl Cigar {
         let offset0 = CigarOffset::default();
         let (pos, cigar) = match (j_ref_ij, k_ref_jk) {
             (true, true) => Self::transfer_alignment::<true>(
-                0, offset0, cigar_ij, QueryToRef, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
+                offset0, cigar_ij, QueryToRef, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
             (true, false) => Self::transfer_alignment::<true>(
-                0, offset0, cigar_ij, QueryToRef, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
+                offset0, cigar_ij, QueryToRef, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
             (false, true) => Self::transfer_alignment::<true>(
-                0, offset0, cigar_ij, RefToQuery, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
+                offset0, cigar_ij, RefToQuery, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
             (false, false) => Self::transfer_alignment::<true>(
-                0, offset0, cigar_ij, RefToQuery, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
+                offset0, cigar_ij, RefToQuery, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
         };
         assert_eq!(pos, 0);
         assert_eq!(cigar.rlen, seq_k.len() as u32);
