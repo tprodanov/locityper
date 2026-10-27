@@ -1,4 +1,4 @@
-FROM rust:1.99.0-alpine3.24 AS build
+FROM rust:1.99.1-alpine3.24 AS build
 
 ARG PREFIX=/usr/local
 ARG SAMTOOLS_VER=1.19
@@ -70,7 +70,7 @@ RUN apk update \
 FROM alpine:3.24
 
 LABEL org.opencontainers.image.authors="timofey.prodanov@hhu.de"
-LABEL version="1.7.14"
+LABEL version="1.7.15"
 LABEL description="Targeted genotyper for complex polymorphic loci from short and long read WGS."
 
 ARG PREFIX=/usr/local

@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: rust:1.99-alpine3.24
+From: rust:1.99.1-alpine3.24
 Stage: build
 
 %post
@@ -93,4 +93,4 @@ Stage: final
 
 %labels
     Author timofey.prodanov@hhu.de
-    Version v1.7.14
+    Version v1.7.15

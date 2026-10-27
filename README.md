@@ -2,9 +2,10 @@
 
 <div align="center">
 
-<a href="">[![Last updated](https://img.shields.io/github/last-commit/tprodanov/locityper/main.svg?label=Last%20updated&color=blue&style=flat-square)](https://github.com/tprodanov/locityper/commits/main/)</a>
-<a href="">[![Last release](https://img.shields.io/github/v/tag/tprodanov/locityper.svg?label=GitHub&color=blueviolet&style=flat-square)](https://github.com/tprodanov/locityper/releases)</a>
-<a href="">[![Bioconda](https://img.shields.io/conda/v/bioconda/locityper.svg?label=Bioconda&color=blue&style=flat-square)](https://anaconda.org/bioconda/locityper)</a>
+<a href="">[![Last updated](https://img.shields.io/github/last-commit/tprodanov/locityper/main.svg?label=Last%20updated&color=green&style=flat-square)](https://github.com/tprodanov/locityper/commits/main)</a>
+<a href="">[![Last release](https://img.shields.io/github/v/tag/tprodanov/locityper.svg?label=GitHub&color=green&style=flat-square)](https://github.com/tprodanov/locityper/releases)</a>
+<a href="">[![Bioconda](https://img.shields.io/conda/v/bioconda/locityper.svg?label=Bioconda&color=midnightblue&style=flat-square&logo=anaconda)](https://anaconda.org/bioconda/locityper)</a>
+<a href="">[![Docker](https://img.shields.io/docker/v/tprodanov/locityper.svg?label=Docker&color=midnightblue&style=flat-square&logo=docker)](https://hub.docker.com/repository/docker/tprodanov/locityper)</a>
 
 </div>
 

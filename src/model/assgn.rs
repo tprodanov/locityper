@@ -200,7 +200,6 @@ impl<'a> ReadAssignment<'a> {
     where F: FnMut(&[ReadGtAlns]) -> Result<usize, E>,
     {
         let mut depth = vec![0; parent.total_windows()];
-        // TODO: Replace with `array_windows`, once stable.
         let mut i = 0;
         let read_assgn = parent.read_ixs[1..].iter().map(|&j| {
             let m = j - i;

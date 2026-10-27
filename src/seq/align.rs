@@ -18,7 +18,10 @@ use crate::{
     },
     err::{error, validate_param, add_path},
     math::RoundDiv,
-    ext::TriangleMatrix,
+    ext::{
+        TriangleMatrix,
+        opt::With,
+    },
 };
 
 // ========== Parameters ==========
@@ -272,7 +275,7 @@ fn align_from_backbone(
             cigar.push_unchecked(Operation::Equal, curr_match);
             curr_match = 0;
         }
-        score += aligner.smart_align(entry1.seq, i1, i2, entry2.seq, j1, j2, max_gap, &mut cigar);
+        score += aligner.smart_align(entry1.seq, i1, i2, entry2.seq, j1, j2, With(max_gap), &mut cigar);
         curr_match += backbone_k;
         i1 = i2 + backbone_k;
         j1 = j2 + backbone_k;
@@ -283,7 +286,7 @@ fn align_from_backbone(
     }
     let n1 = entry1.seq.len() as u32;
     let n2 = entry2.seq.len() as u32;
-    score += aligner.smart_align(entry1.seq, i1, n1, entry2.seq, j1, n2, max_gap, &mut cigar);
+    score += aligner.smart_align(entry1.seq, i1, n1, entry2.seq, j1, n2, With(max_gap), &mut cigar);
     assert_eq!(cigar.ref_len(), entry1.seq.len() as u32,
         "Alignment {} - {} produced incorrect CIGAR {}", entry1.name, entry2.name, cigar);
     assert_eq!(cigar.query_len(), entry2.seq.len() as u32,
@@ -493,7 +496,7 @@ impl Strategy for TransitiveStrategy {
         if let Some((cigar_ij, j, cigar_jk)) = transitive_edge {
             let cigar_ik = Cigar::find_transitive_alignment(
                 &cigar_ij.cigar, cigar_ij.second_is_ref(i, j), &cigar_jk.cigar, cigar_jk.second_is_ref(j, k),
-                entry_i.seq, entry_k.seq, aligner, params.max_gap, params.transitive_anchor);
+                entry_i.seq, entry_k.seq, aligner, With(params.max_gap), params.transitive_anchor);
             let score = aligner.penalties().calculate_score(&cigar_ik);
             Ok((cigar_ik, score, true))
         } else {
@@ -565,7 +568,7 @@ impl Strategy for ParallelTransitiveStrategy {
         if let Some((cigar_ij, j, cigar_jk)) = transitive_edge {
             let cigar_ik = Cigar::find_transitive_alignment(
                 &cigar_ij.cigar, cigar_ij.second_is_ref(i, j), &cigar_jk.cigar, cigar_jk.second_is_ref(j, k),
-                entry_i.seq, entry_k.seq, aligner, params.max_gap, params.transitive_anchor);
+                entry_i.seq, entry_k.seq, aligner, With(params.max_gap), params.transitive_anchor);
             let score = aligner.penalties().calculate_score(&cigar_ik);
             Ok((cigar_ik, score, true))
         } else {

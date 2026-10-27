@@ -8,8 +8,11 @@ use std::{
 use htslib::bam::record;
 use crate::{
     err::error,
-    ext::vec::VecOrNone,
-    seq::wfa::{self, Aligner},
+    ext::{
+        vec::VecOrNone,
+        opt::{Optional, With, Off},
+    },
+    seq::wfa::{Aligner},
     algo::bisect,
     math::{RoundDiv, bool_mask, ifelse0},
 };
@@ -1201,23 +1204,6 @@ impl CigarIndex {
 }
 
 impl Cigar {
-    // /// Tries to improve a read alignment by realigning stretches
-    // /// between anchors of size between min_size and max_size.
-    // /// Returns new alignment start and new alignment.
-    // /// If no changes were made, the same CIGAR is returned to the caller.
-    // pub fn improve_read_alignment(
-    //     self,
-    //     ref_start: u32,
-    //     ref_seq: &[u8],
-    //     query_seq: &[u8],
-    //     aligner: &Aligner,
-    //     anchor_size: u32,
-    //     min_size: u32,
-    //     max_size: u32,
-    // ) -> (u32, Self) {
-
-    // }
-
     /// Realign potentially incorrect parts of the alignment, where
     /// a segment contains both insertion and deletion on a gap under `max_gap` size.
     fn correct_alignment_errors(
@@ -1225,7 +1211,7 @@ impl Cigar {
         ref_seq: &[u8],
         query_seq: &[u8],
         aligner: &Aligner,
-        max_gap: impl wfa::Threshold,
+        max_gap: impl Optional<u32>,
         anchor_size: u32,
     ) {
         // Index after the last match (= or X), and the corresponding query and reference positions.
@@ -1245,13 +1231,13 @@ impl Cigar {
                 let qshift = qpos2 - qpos1;
                 let rshift = rpos2 - rpos1;
                 // There was both a deletion and an insertion after the last anchor.
-                if flag == 0b11 && !max_gap.under(qshift) && !max_gap.under(rshift) {
+                if flag == 0b11 && max_gap.get().map(|m| qshift <= m && rshift <= m).unwrap_or(true) {
                     let new_cigar = lazy_new_cigar.get_or_insert_with(|| Cigar {
                         tuples: self.tuples[..i].to_vec(),
                         qlen: qpos1,
                         rlen: rpos1,
                     });
-                    aligner.smart_align(ref_seq, rpos1, rpos2, query_seq, qpos1, qpos2, (), new_cigar);
+                    aligner.smart_align(ref_seq, rpos1, rpos2, query_seq, qpos1, qpos2, Off, new_cigar);
                     i = j;
                 }
 
@@ -1276,14 +1262,14 @@ impl Cigar {
 
         let qshift = qpos2 - qpos1;
         let rshift = rpos2 - rpos1;
-        if flag == 0b11 && !max_gap.under(qshift) && !max_gap.under(rshift) {
+        if flag == 0b11 && max_gap.get().map(|m| qshift <= m && rshift <= m).unwrap_or(true) {
             // There were >=2 gap operations in a row at the end of the cigar.
             let new_cigar = lazy_new_cigar.get_or_insert_with(|| Cigar {
                 tuples: self.tuples[..i].to_vec(),
                 qlen: qpos1,
                 rlen: rpos1,
             });
-            aligner.smart_align(ref_seq, rpos1, rpos2, query_seq, qpos1, qpos2, (), new_cigar);
+            aligner.smart_align(ref_seq, rpos1, rpos2, query_seq, qpos1, qpos2, Off, new_cigar);
             i = self.len();
         }
         if let Some(mut new_cigar) = lazy_new_cigar {
@@ -1311,7 +1297,7 @@ impl Cigar {
         seq_i: &[u8],
         seq_k: &[u8],
         aligner: &Aligner,
-        max_gap: impl wfa::Threshold,
+        max_gap: impl Optional<u32>,
         anchor_size: u32,
     ) -> (u32, Cigar) {
         use Operation::Equal;
@@ -1370,8 +1356,10 @@ impl Cigar {
             };
             if add_operation.is_some() {
                 if !GLOBAL_ALN && last1 == 0 && pos1 > 0 {
-                    aligner.align_ends::<true>(seq_k, last2.saturating_sub(pos1 + CLIP_PADDING), pos2,
+                    let start_offset = aligner.align_left_end(seq_k, last2.saturating_sub(pos1 + CLIP_PADDING), pos2,
                         seq_i, last1, pos1, &mut new_cigar);
+                    // [TODO] Fix simpler expression, remove assert
+                    assert_eq!(start_k + pos2 - last2 - new_cigar.rlen, start_k + last2 + start_offset);
                     start_k = start_k + pos2 - last2 - new_cigar.rlen;
                 } else {
                     aligner.smart_align(seq_k, last2, pos2, seq_i, last1, pos1, max_gap, &mut new_cigar);
@@ -1403,7 +1391,7 @@ impl Cigar {
             if GLOBAL_ALN {
                 aligner.smart_align(seq_k, last2, len_k, seq_i, last1, len_i, max_gap, &mut new_cigar);
             } else {
-                aligner.align_ends::<false>(seq_k, last2, min(len_k, last2 + len_i - last1 + CLIP_PADDING),
+                aligner.align_right_end(seq_k, last2, min(len_k, last2 + len_i - last1 + CLIP_PADDING),
                     seq_i, last1, len_i, &mut new_cigar);
             }
         }
@@ -1411,11 +1399,11 @@ impl Cigar {
             "Please check that your WFA2 dependency is up to date. \
             If that does not help, please contact Locityper developers.");
         if GLOBAL_ALN {
-            const MAX_OPTIMIZATION_GAP: u32 = 1000;
+            const MAX_OPTIMIZATION_GAP: With<u32> = With(1000);
             const OPTIMIZATION_ANCHOR: u32 = 51;
             new_cigar.correct_alignment_errors(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
         } else {
-            const MAX_OPTIMIZATION_GAP: u32 = 20;
+            const MAX_OPTIMIZATION_GAP: With<u32> = With(20);
             const OPTIMIZATION_ANCHOR: u32 = 5;
             new_cigar.correct_alignment_errors(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
             new_cigar.boundary_ins_to_soft();
@@ -1436,7 +1424,7 @@ impl Cigar {
     ) -> (u32, Cigar) {
         const ANCHOR_SIZE: u32 = 5;
         Self::transfer_alignment::<false>(
-            qpos, offset, read_cigar, QueryToRef, self, direction, read_seq, ref_seq, aligner, (), ANCHOR_SIZE)
+            qpos, offset, read_cigar, QueryToRef, self, direction, read_seq, ref_seq, aligner, Off, ANCHOR_SIZE)
     }
 
     /// Using alignments between haplotypes i, j and j, k; find new alignment between i (query) and k (reference).
@@ -1450,7 +1438,7 @@ impl Cigar {
         seq_i: &[u8],
         seq_k: &[u8],
         aligner: &Aligner,
-        max_gap: u32,
+        max_gap: impl Optional<u32>,
         anchor_size: u32,
     ) -> Cigar {
         let offset0 = CigarOffset::default();
@@ -1468,8 +1456,6 @@ impl Cigar {
         assert_eq!(cigar.rlen, seq_k.len() as u32);
         cigar
     }
-
-
 }
 
 /// Depending on the two parallel CIGAR operations (read v. hapQ) and (hapQ v. hapT)

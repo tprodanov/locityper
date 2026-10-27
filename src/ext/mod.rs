@@ -5,6 +5,7 @@ pub mod trimat;
 pub mod fmt;
 pub mod sys;
 pub mod rand;
+pub mod opt;
 pub mod thread_files;
 
 pub use trimat::TriangleMatrix;
