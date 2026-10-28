@@ -272,7 +272,7 @@ fn align_from_backbone(
         }
 
         if curr_match > 0 {
-            cigar.push_unchecked(Operation::Equal, curr_match);
+            cigar.push_checked(Operation::Equal, curr_match);
             curr_match = 0;
         }
         score += aligner.smart_align(entry1.seq, i1, i2, entry2.seq, j1, j2, With(max_gap), &mut cigar);
@@ -282,15 +282,13 @@ fn align_from_backbone(
     }
 
     if curr_match > 0 {
-        cigar.push_unchecked(Operation::Equal, curr_match);
+        cigar.push_checked(Operation::Equal, curr_match);
     }
     let n1 = entry1.seq.len() as u32;
     let n2 = entry2.seq.len() as u32;
     score += aligner.smart_align(entry1.seq, i1, n1, entry2.seq, j1, n2, With(max_gap), &mut cigar);
-    assert_eq!(cigar.ref_len(), entry1.seq.len() as u32,
-        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name, entry2.name, cigar);
-    assert_eq!(cigar.query_len(), entry2.seq.len() as u32,
-        "Alignment {} - {} produced incorrect CIGAR {}", entry1.name, entry2.name, cigar);
+    assert_eq!(cigar.ref_len(), n1, "Alignment {} - {} produced incorrect CIGAR {}", entry1.name, entry2.name, cigar);
+    assert_eq!(cigar.query_len(), n2, "Alignment {} - {} produced incorrect CIGAR {}", entry1.name, entry2.name, cigar);
     Ok((cigar, score))
 }
 

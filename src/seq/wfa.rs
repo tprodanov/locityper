@@ -1,6 +1,6 @@
 use std::{
     ffi::c_char,
-    cmp::min,
+    cmp::{min, Ordering},
 };
 use crate::{
     seq::cigar::{Cigar, Operation},
@@ -53,20 +53,18 @@ impl Penalties {
         let m = seq2.len();
         debug_assert!(n > 0 && m > 0, "Cannot align empty sequences");
         let diff = n as i32 - m as i32;
-        let mut score;
-        let (i, j) = if diff < 0 {
-            cigar.push_checked(Operation::Ins, (-diff) as u32);
-            score = -self.gap_open + diff * self.gap_extend;
-            (0, (-diff) as usize)
-        } else if diff > 0 {
-            cigar.push_checked(Operation::Del, diff as u32);
-            score = -self.gap_open - diff * self.gap_extend;
-            (diff as usize, 0)
-        } else {
-            score = 0;
-            (0, 0)
+        let (mut score, i, j) = match diff.cmp(&0) {
+            Ordering::Less => {
+                cigar.push_checked(Operation::Ins, (-diff) as u32);
+                (-self.gap_open + diff * self.gap_extend, 0, (-diff) as usize)
+            }
+            Ordering::Greater => {
+                cigar.push_checked(Operation::Del, diff as u32);
+                (-self.gap_open - diff * self.gap_extend, diff as usize, 0)
+            }
+            Ordering::Equal => (0, 0, 0)
         };
-        for (&nt1, &nt2) in seq1[i + 1..].iter().zip(&seq2[j + 1..]) {
+        for (&nt1, &nt2) in seq1[i..].iter().zip(&seq2[j..]) {
             cigar.push_checked(if nt1 == nt2 { Operation::Equal } else { Operation::Diff }, 1);
             score -= if nt1 != nt2 { self.mismatch } else { 0 };
         }
