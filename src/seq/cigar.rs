@@ -10,7 +10,7 @@ use crate::{
     err::error,
     ext::{
         vec::VecOrNone,
-        opt::{Optional, With, Off},
+        opt::{Optional, With, Flag, On, Off},
     },
     seq::wfa::{Aligner},
     algo::bisect,
@@ -1012,9 +1012,9 @@ pub trait CigarDirection : Copy + fmt::Debug {
     /// In q_to_r direction, this is 0, otherwise 1.
     fn query_ix(self) -> usize;
 
-    /// In an array of two values [qpos, rpos], returns index of the rpos.
-    /// In q_to_r direction, this is 1, otherwise 0.
-    fn ref_ix(self) -> usize;
+    // /// In an array of two values [qpos, rpos], returns index of the rpos.
+    // /// In q_to_r direction, this is 1, otherwise 0.
+    // fn ref_ix(self) -> usize;
 
     /// Returns query position out of two positions.
     /// In q_to_r direction, returns the first value, otherwise the second.
@@ -1030,15 +1030,15 @@ pub trait CigarDirection : Copy + fmt::Debug {
     /// False for q_to_r, true otherwise.
     fn invert(self) -> bool;
 
-    #[inline(always)]
-    fn query_len(self, cigar: &Cigar) -> u32 {
-        if self.invert() { cigar.rlen } else { cigar.qlen }
-    }
+    // #[inline(always)]
+    // fn query_len(self, cigar: &Cigar) -> u32 {
+    //     if self.invert() { cigar.rlen } else { cigar.qlen }
+    // }
 
-    #[inline(always)]
-    fn ref_len(self, cigar: &Cigar) -> u32 {
-        if self.invert() { cigar.qlen } else { cigar.rlen }
-    }
+    // #[inline(always)]
+    // fn ref_len(self, cigar: &Cigar) -> u32 {
+    //     if self.invert() { cigar.qlen } else { cigar.rlen }
+    // }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1048,8 +1048,8 @@ impl CigarDirection for QueryToRef {
     #[inline(always)]
     fn query_ix(self) -> usize { 0 }
 
-    #[inline(always)]
-    fn ref_ix(self) -> usize { 1 }
+    // #[inline(always)]
+    // fn ref_ix(self) -> usize { 1 }
 
     #[inline(always)]
     fn query_pos(self, [qpos, _]: [u32; 2]) -> u32 { qpos }
@@ -1071,8 +1071,8 @@ impl CigarDirection for RefToQuery {
     #[inline(always)]
     fn query_ix(self) -> usize { 1 }
 
-    #[inline(always)]
-    fn ref_ix(self) -> usize { 0 }
+    // #[inline(always)]
+    // fn ref_ix(self) -> usize { 0 }
 
     #[inline(always)]
     fn query_pos(self, [_, rpos]: [u32; 2]) -> u32 { rpos }
@@ -1153,7 +1153,7 @@ impl CigarIndex {
     }
 
     /// Based on query positionm finds offset in the CIGAR and corresponding reference position.
-    pub fn find_cigar_offset(&self, qpos: u32, direction: impl CigarDirection) -> CigarOffset {
+    pub fn gen_find_cigar_offset(&self, qpos: u32, direction: impl CigarDirection) -> CigarOffset {
         let sparse_index = &self.sparse_index[direction.query_ix()];
         let i = (qpos >> SPARSE_STEP_PWR) as usize;
         let next_i = i + 1;
@@ -1180,6 +1180,15 @@ impl CigarIndex {
         let qshift = qpos - qpos_at_ix;
         let rpos = rpos_at_ix + ifelse0(next_rpos > rpos_at_ix, qshift);
         CigarOffset { cigar_ix, qshift, rpos }
+    }
+
+    #[inline]
+    pub fn find_cigar_offset(&self, qpos: u32, query_to_ref: bool) -> CigarOffset {
+        if query_to_ref {
+            self.gen_find_cigar_offset(qpos, QueryToRef)
+        } else {
+            self.gen_find_cigar_offset(qpos, RefToQuery)
+        }
     }
 }
 
@@ -1272,7 +1281,8 @@ impl Cigar {
     /// `direction_jk`, j can be query or reference compared to k.
     ///
     /// Anchor size represents the minimal size of the `=` operation that will act as an anchor.
-    fn transfer_alignment<const GLOBAL_ALN: bool>(
+    fn transfer_alignment(
+        global_alignment: impl Flag,
         offset: CigarOffset,
         cigar_ij: &Cigar,
         direction_ij: impl CigarDirection,
@@ -1295,7 +1305,7 @@ impl Cigar {
         let mut start_k = offset.rpos;
         let len_k = seq_k.len() as u32;
 
-        if GLOBAL_ALN {
+        if global_alignment.enabled() {
             if cigar_ij.full_sequence_match() {
                 return (0, if direction_jk.invert() { cigar_jk.invert() } else { cigar_jk.clone() });
             } else if cigar_jk.full_sequence_match() {
@@ -1338,7 +1348,7 @@ impl Cigar {
                 _ => None,
             };
             if add_operation.is_some() {
-                if !GLOBAL_ALN && last1 == 0 && pos1 > 0 {
+                if !global_alignment.enabled() && last1 == 0 && pos1 > 0 {
                     let aln_ref_start = last2.saturating_sub(pos1 + CLIP_PADDING);
                     let start_offset = aligner.align_left_end(
                         subseq(seq_k, aln_ref_start, pos2), subseq(seq_i, last1, pos1), &mut new_cigar);
@@ -1369,8 +1379,8 @@ impl Cigar {
             }
         }
         let len_i = seq_i.len() as u32;
-        if last1 != len_i || (GLOBAL_ALN && last2 != len_k) {
-            if GLOBAL_ALN {
+        if last1 != len_i || (global_alignment.enabled() && last2 != len_k) {
+            if global_alignment.enabled() {
                 aligner.smart_align(seq_k, last2, len_k, seq_i, last1, len_i, max_gap, &mut new_cigar);
             } else {
                 aligner.align_right_end(
@@ -1381,7 +1391,7 @@ impl Cigar {
         assert_eq!(len_i, new_cigar.qlen,
             "Please check that your WFA2 dependency is up to date. \
             If that does not help, please contact Locityper developers.");
-        if GLOBAL_ALN {
+        if global_alignment.enabled() {
             const MAX_OPTIMIZATION_GAP: With<u32> = With(1000);
             const OPTIMIZATION_ANCHOR: u32 = 51;
             new_cigar.correct_alignment_errors(seq_k, seq_i, aligner, MAX_OPTIMIZATION_GAP, OPTIMIZATION_ANCHOR);
@@ -1402,11 +1412,16 @@ impl Cigar {
         read_seq: &[u8],
         ref_seq: &[u8],
         aligner: &Aligner,
-        direction: impl CigarDirection,
+        query_to_ref: bool,
     ) -> (u32, Cigar) {
         const ANCHOR_SIZE: u32 = 5;
-        Self::transfer_alignment::<false>(
-            offset, read_cigar, QueryToRef, self, direction, read_seq, ref_seq, aligner, Off, ANCHOR_SIZE)
+        if query_to_ref {
+            Self::transfer_alignment(
+                Off, offset, read_cigar, QueryToRef, self, QueryToRef, read_seq, ref_seq, aligner, Off, ANCHOR_SIZE)
+        } else {
+            Self::transfer_alignment(
+                Off, offset, read_cigar, QueryToRef, self, RefToQuery, read_seq, ref_seq, aligner, Off, ANCHOR_SIZE)
+        }
     }
 
     /// Using alignments between haplotypes i, j and j, k; find new alignment between i (query) and k (reference).
@@ -1425,14 +1440,14 @@ impl Cigar {
     ) -> Cigar {
         let offset0 = CigarOffset::default();
         let (pos, cigar) = match (j_ref_ij, k_ref_jk) {
-            (true, true) => Self::transfer_alignment::<true>(
-                offset0, cigar_ij, QueryToRef, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
-            (true, false) => Self::transfer_alignment::<true>(
-                offset0, cigar_ij, QueryToRef, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
-            (false, true) => Self::transfer_alignment::<true>(
-                offset0, cigar_ij, RefToQuery, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
-            (false, false) => Self::transfer_alignment::<true>(
-                offset0, cigar_ij, RefToQuery, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
+            (true, true) => Self::transfer_alignment(
+                On, offset0, cigar_ij, QueryToRef, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
+            (true, false) => Self::transfer_alignment(
+                On, offset0, cigar_ij, QueryToRef, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
+            (false, true) => Self::transfer_alignment(
+                On, offset0, cigar_ij, RefToQuery, cigar_jk, QueryToRef, seq_i, seq_k, aligner, max_gap, anchor_size),
+            (false, false) => Self::transfer_alignment(
+                On, offset0, cigar_ij, RefToQuery, cigar_jk, RefToQuery, seq_i, seq_k, aligner, max_gap, anchor_size),
         };
         assert_eq!(pos, 0);
         assert_eq!(cigar.rlen, seq_k.len() as u32);

@@ -8,7 +8,7 @@ use crate::{
     seq::{
         Interval,
         contigs::{ContigId, ContigNames, ContigSet},
-        cigar::{Cigar, CigarIndex, QueryToRef, RefToQuery},
+        cigar::{Cigar, CigarIndex},
         paf::{PafEntry},
         aln::Alignment,
         wfa::Aligner,
@@ -140,9 +140,7 @@ impl HapAlns {
             }
             let source_aln = &prelim_alignments[i];
             // Copy various variables before `source_aln` is dropped to make `prelim_alignments` mutable.
-            let source_contig_id = source_aln.contig_id();
-            let source_aln_start = source_aln.interval().start();
-            let source_aln_end = source_aln.interval().end();
+            let source_interval = source_aln.interval().clone();
             let source_cigar = source_aln.cigar().clone();
             let source_strand = source_aln.strand();
             let read_end = source_aln.read_end();
@@ -151,26 +149,22 @@ impl HapAlns {
 
             let (left_clipping, right_clipping) = source_cigar.soft_clipping();
 
-            let curr_offsets = &self.contig_offsets[source_contig_id.ix()];
+            let curr_offsets = &self.contig_offsets[source_interval.contig_id().ix()];
             assert!(!curr_offsets.is_empty(), "Trying to reconstruct alignments not from a basis haplotype");
             let n_windows = curr_offsets.len().strict_sub(1);
             // If we are in the last window, start / step can put us beyond the size of the vector.
-            let k = min(n_windows, (source_aln_start / self.local_step + 1) as usize);
+            let k = min(n_windows, (source_interval.start() / self.local_step + 1) as usize);
             // Safety: we know that k is at most n_windows, and length = n_windows + 1.
             let start_offset = unsafe { *curr_offsets.get_unchecked(k.strict_sub(1)) };
             let end_offset = unsafe { *curr_offsets.get_unchecked(k) };
             for &target_contig_id in &self.locally_similar_ixs[start_offset..end_offset] {
                 let target_seq = contig_set.get_seq(target_contig_id);
                 let (haps_cigar, cigar_index) = self.aln_matrix
-                    .get_symmetric(source_contig_id.ix(), target_contig_id.ix())
+                    .get_symmetric(source_interval.contig_id().ix(), target_contig_id.ix())
                     .as_ref().expect("Alignment between haplotypes must exist");
-                let query_to_ref = source_contig_id < target_contig_id;
+                let query_to_ref = source_interval.contig_id() < target_contig_id;
 
-                let offset = if query_to_ref {
-                    cigar_index.find_cigar_offset(source_aln_start, QueryToRef)
-                } else {
-                    cigar_index.find_cigar_offset(source_aln_start, RefToQuery)
-                };
+                let offset = cigar_index.find_cigar_offset(source_interval.start(), query_to_ref);
                 if let Some(prev_aln_entry) = prelim_alignments.pos_collection()
                     .get(read_end, target_contig_id, offset.rpos())
                 {
@@ -182,13 +176,8 @@ impl HapAlns {
                     }
                 }
 
-                let (new_start, new_cigar) = if query_to_ref {
-                    haps_cigar.transfer_read_alignment(offset, &source_cigar, read_seq, target_seq,
-                        aligner, QueryToRef)
-                } else {
-                    haps_cigar.transfer_read_alignment(offset, &source_cigar, read_seq, target_seq,
-                        aligner, RefToQuery)
-                };
+                let (new_start, new_cigar) = haps_cigar.transfer_read_alignment(
+                    offset, &source_cigar, read_seq, target_seq, aligner, query_to_ref);
 
                 {
                     // How much to add to the sides of the reference sequence
@@ -197,11 +186,7 @@ impl HapAlns {
                     // allow this size of free indels on the sides.
                     const FREE_END: u32 = 10;
                     let target_len = target_seq.len() as u32;
-                    let target_end = if query_to_ref {
-                        cigar_index.find_cigar_offset(source_aln_end - 1, QueryToRef)
-                    } else {
-                        cigar_index.find_cigar_offset(source_aln_end - 1, RefToQuery)
-                    }.rpos() + 1;
+                    let target_end = cigar_index.find_cigar_offset(source_interval.end() - 1, query_to_ref).rpos() + 1;
                     let padded_target_start = offset.rpos().saturating_sub(PADDING);
                     let padded_target_end = min(target_end + PADDING, target_len);
                     let target_subseq = &target_seq[padded_target_start as usize..padded_target_end as usize];
