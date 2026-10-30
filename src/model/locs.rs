@@ -169,6 +169,11 @@ impl ReadData {
     pub fn mate_data(&self, read_end: ReadEnd) -> &MateData {
         self.mates[read_end.ix()].as_ref().expect("Mate data undefined")
     }
+
+    #[inline(always)]
+    pub fn weight(&self) -> f64 {
+        self.weight
+    }
 }
 
 /// Store start positions divided by 128.
