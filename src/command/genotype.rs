@@ -1197,12 +1197,13 @@ fn generate_genotypes(
 /// Go through the haplotype-haplotype alignments, and store `HapAlns` and matrix of edit distances, when needed.
 fn process_paf(
     paf_filename: &Path,
-    contigs: &ContigNames,
+    contig_set: &ContigSet,
     basis_contigs: &[ContigId],
     args: &Args,
 ) -> crate::Result<(Option<Arc<HapAlns>>, Option<TriangleMatrix<Option<u32>>>)> {
+    let contigs = contig_set.contigs();
     let mut opt_hap_alns = if args.transfer_div > 0.0 {
-        Some(HapAlns::new(contigs.len(), args.transfer_fails))
+        Some(HapAlns::new(contig_set, args.transfer_fails))
     } else { None };
     let mut contig_distances = args.use_paf.then(|| TriangleMatrix::new(contigs.len(), None));
     if opt_hap_alns.is_none() && contig_distances.is_none() {
@@ -1269,7 +1270,7 @@ fn analyze_locus(
     let opt_paf_fname = paths::LOCUS_PAFS.iter()
         .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
     let (hap_alns, mut contig_distances) = if let Some(paf_fname) = opt_paf_fname {
-        process_paf(&paf_fname, contigs, &tid2contig, args)?
+        process_paf(&paf_fname, &locus.set, &tid2contig, args)?
     } else {
         (None, None)
     };

@@ -373,6 +373,8 @@ impl ContigInfo {
         depth: &ReadDepth,
         explicit_weights: Option<ExplicitWeights>,
         params: &super::Params,
+        buffer: &mut Vec<u32>,
+        complexities_buf: &mut Vec<f64>,
     ) -> crate::Result<Self>
     {
         let contig_len = seq.len() as u32;
@@ -407,8 +409,8 @@ impl ContigInfo {
         {
             w.uniq_kmer_frac = f64::from(c2 - c1) * mult;
         }
-        let complexities = seq::compl::linguistic_complexity(seq, params.complexity_k, neighb_size as usize);
-        for (&c, w) in complexities.iter().zip(&mut mov_info) {
+        seq::compl::linguistic_complexity(seq, params.complexity_k, neighb_size as usize, buffer, complexities_buf);
+        for (&c, w) in complexities_buf.iter().zip(&mut mov_info) {
             w.complexity = c;
         }
 
@@ -605,9 +607,12 @@ impl ContigInfos {
 
         let seqs = set.seqs();
         let mut infos = Vec::with_capacity(seqs.len());
+        let mut buffer1 = Vec::new();
+        let mut buffer2 = Vec::new();
         for (id, seq, curr_weights) in itertools::izip!(contigs.ids(), seqs, explicit_weights) {
             infos.push(
-                ContigInfo::new(id, contigs, seq, kmer_counts, depth, curr_weights, params).map(Arc::new)?);
+                ContigInfo::new(id, contigs, seq, kmer_counts, depth, curr_weights, params, &mut buffer1, &mut buffer2)
+                    .map(Arc::new)?);
         }
         if let Some(mut writer) = dbg_writer {
             writeln!(writer,

@@ -111,32 +111,58 @@ where K: PartialEq,
 //     set.len() as f64 / (seq.len() + 1 - k as usize) as f64
 // }
 
+pub trait FracOrCount {
+    const MULT_NEEDED: bool;
+
+    fn new(n_unique: u16, mult: f64) -> Self;
+}
+
+impl FracOrCount for u16 {
+    const MULT_NEEDED: bool = false;
+
+    #[inline(always)]
+    fn new(n_unique: u16, _mult: f64) -> Self { n_unique }
+}
+
+impl FracOrCount for f64 {
+    const MULT_NEEDED: bool = true;
+
+    #[inline(always)]
+    fn new(n_unique: u16, mult: f64) -> Self { f64::from(n_unique) * mult }
+}
+
 /// Calculate linguistic complexity (fraction of unique k-mers) across each moving window of size w.
-pub fn linguistic_complexity(seq: &[u8], k: u8, w: usize) -> Vec<f64> {
+pub fn linguistic_complexity<T: FracOrCount>(
+    seq: &[u8],
+    k: u8,
+    w: usize,
+    buffer: &mut Vec<u32>,
+    output: &mut Vec<T>,
+) {
     let n = seq.len();
     debug_assert!(k <= u32::MAX_KMER_SIZE);
     debug_assert!(usize::from(k) < w && w < n && w < usize::from(u16::MAX));
 
-    let mut kmers: Vec<u32> = Vec::with_capacity(n - usize::from(k) + 1);
-    kmers::kmers::<u32, _, NON_CANONICAL>(seq, k, &mut kmers);
+    buffer.clear();
+    buffer.reserve(n - usize::from(k) + 1);
+    kmers::kmers::<u32, _, NON_CANONICAL>(seq, k, buffer);
 
+    output.clear();
+    output.reserve(n - w + 1);
     let k = usize::from(k);
-    let mult = 1.0 / min(w + 1 - k, 1 << (2 * k)) as f64;
-    let mut counts = IntMap::default();
+    let mult = if T::MULT_NEEDED { 1.0 / min(w + 1 - k, 1 << (2 * k)) as f64 } else { 0.0 };
+    let mut counts: IntMap<u32, u16> = IntMap::default();
     let mut unique = 0;
-    for &kmer in &kmers[..(w - k + 1)] {
+    for &kmer in &buffer[..(w - k + 1)] {
         let c = counts.entry(kmer).or_default();
         unique += u16::from(*c == 0);
         *c += 1;
     }
-
-    let mut res = Vec::with_capacity(n - w + 1);
-    res.push(unique as f64 * mult);
-    for (&lag_kmer, &kmer) in kmers.iter().zip(&kmers[(w - k + 1)..]) {
+    output.push(T::new(unique, mult));
+    for (&lag_kmer, &kmer) in buffer.iter().zip(&buffer[(w - k + 1)..]) {
         remove_add_kmer(&mut counts, lag_kmer, kmer, &mut unique);
-        res.push(unique as f64 * mult);
+        output.push(T::new(unique, mult));
     }
-    res
 }
 
 // /// Linguistic complexity of the full sequence.
