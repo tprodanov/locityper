@@ -1105,8 +1105,20 @@ impl CigarOffset {
     }
 }
 
+// const AMBIGUITY_STEP_PWR: u8 = 4;
+
+// struct CigarAmbiguity {
+//     /// Cumulative ambiguity
+//     cumul_ambiguity: [Vec<u32>; 2],
+// }
+
+// impl CigarAmbiguity {
+//     #[inline(always)]
+//     fn ambiguous(&self, )
+// }
+
 /// To speed up binary search, store cigar index for each position = i << STEP_PWR. With pwr = 8, step is 256 bp.
-const SPARSE_STEP_PWR: u32 = 8;
+const SPARSE_STEP_PWR: u8 = 8;
 
 /// Extension over CIGAR that answers queries "convert range start..end to another sequence" in log(n) time,
 /// where n is the number of operations in this CIGAR.
