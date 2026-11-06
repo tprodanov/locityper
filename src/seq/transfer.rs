@@ -189,21 +189,26 @@ fn align_anew(
     read_clipping: (u32, u32),
 ) -> (u32, Cigar) {
     // How much to add to the sides of the reference sequence
-    const PADDING: u32 = 10;
+    const PADDING: u32 = 20;
     // Inside the region corresponding to the reference alignment,
     // allow this size of free indels on the sides.
-    const FREE_MIDDLE: u32 = 20;
+    const FREE_MIDDLE: u32 = 50;
     let target_len = target_seq.len() as u32;
-    let padded_target_start = approx_target_start.saturating_sub(PADDING);
-    let padded_target_end = min(approx_target_end + PADDING, target_len);
+    let padding_left = min(PADDING, approx_target_start);
+    let padded_target_start = approx_target_start - padding_left;
+    let padding_right = min(PADDING, target_len - approx_target_end);
+    let padded_target_end = approx_target_end + padding_right;
     let target_subseq = &target_seq[padded_target_start as usize..padded_target_end as usize];
-    let free_middle = min(FREE_MIDDLE, (read_seq.len() as u32).saturating_sub(read_clipping.0 + read_clipping.1));
-    let target_free_left = free_middle + approx_target_start - padded_target_start;
-    let target_free_right = free_middle + padded_target_end.saturating_sub(approx_target_end);
+
+    let read_free_left = min((read_clipping.0 + FREE_MIDDLE) as i32, read_seq.len() as i32);
+    let read_free_right = min((read_clipping.1 + FREE_MIDDLE) as i32, read_seq.len() as i32);
+    let padded_len = padded_target_end - padded_target_start;
+    let target_free_left = min(padding_left + FREE_MIDDLE, padded_len) as i32;
+    let target_free_right = min(padding_right + FREE_MIDDLE, padded_len) as i32;
+
     let mut cigar = Cigar::new();
     let aln_start = padded_target_start + aligner.align_free_ends(target_subseq, read_seq, &mut cigar,
-        With((target_free_left as i32, (free_middle + read_clipping.0) as i32)),
-        With((target_free_right as i32, (free_middle + read_clipping.1) as i32)));
+        With((target_free_left, read_free_left)), With((target_free_right, read_free_right)));
     cigar.boundary_ins_to_soft();
     (aln_start, cigar)
 }
@@ -269,12 +274,25 @@ impl HapAlns {
                 let approx_target_end = cigar_index.find_cigar_offset(
                     source_interval.end() - 1, query_to_ref).rpos() + 1;
                 let ambiguous = self.ambiguities.ambiguous(target_contig_id, approx_target_start, approx_target_end);
-                let (new_start, new_cigar) = if ambiguous {
-                    align_anew(aligner, target_seq, approx_target_start, approx_target_end, read_seq, read_clipping)
-                } else {
-                    haps_cigar.transfer_read_alignment(
-                        offset, &source_cigar, read_seq, target_seq, aligner, query_to_ref)
-                };
+                // log::debug!("Transferring {} R{} to {}, ambiguous? {}, n unique {}",
+                //     read_data.name(), read_end, contigs.get_name(target_contig_id), ambiguous,
+                //     self.ambiguities.min_unique_kmers(target_contig_id, approx_target_start, approx_target_end),
+                // );
+                // let (new_start, new_cigar) = if ambiguous {
+                //     align_anew(aligner, target_seq, approx_target_start, approx_target_end, read_seq, read_clipping)
+                // } else {
+                //     haps_cigar.transfer_read_alignment(
+                //         offset, &source_cigar, read_seq, target_seq, aligner, query_to_ref)
+                // };
+                // log::debug!("   -> {}", new_cigar);
+
+
+                let (new_start, new_cigar) = haps_cigar.transfer_read_alignment(
+                    offset, &source_cigar, read_seq, target_seq, aligner, query_to_ref);
+                let (alt_start, alt_cigar) = align_anew(aligner, target_seq, approx_target_start, approx_target_end,
+                    read_seq, read_clipping);
+
+
 
                 total_transfers += 1;
                 let cigar_ref_len = new_cigar.ref_len();
@@ -290,6 +308,18 @@ impl HapAlns {
                     new_start, new_start + cigar_ref_len);
                 let mut new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);
                 new_aln.calculate_edit_and_prob(contigs, err_prof);
+
+                let alt_interval = Interval::new(Arc::clone(contigs), target_contig_id,
+                    alt_start, alt_start + alt_cigar.ref_len());
+                let mut alt_aln = Alignment::new(alt_interval, alt_cigar, source_strand, read_end);
+                alt_aln.calculate_edit_and_prob(contigs, err_prof);
+
+                println!("{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{:.4}\t{}",
+                    read_data.name(), read_data.name_hash(), read_end,
+                    self.ambiguities.min_unique_kmers(target_contig_id, approx_target_start, approx_target_end),
+                    new_aln.interval(), new_aln.cigar(), new_aln.ln_prob(), new_aln.distance().unwrap().edit(),
+                    alt_aln.interval(), alt_aln.cigar(), alt_aln.ln_prob(), alt_aln.distance().unwrap().edit(),
+                );
 
                 if let Err(opt_prev_ix) = prelim_alignments.insert(new_aln, false) {
                     if let Some(j) = opt_prev_ix && let Some(seen_val) = seen.get_mut(j as usize) {
