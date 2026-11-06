@@ -2,9 +2,9 @@
 
 use std::{
     sync::Arc,
-    cmp::{min, max},
+    cmp::min,
 };
-use vers_vecs::rmq::fast_rmq::FastRmq;
+use itertools::izip;
 use crate::{
     seq::{
         Interval,
@@ -23,57 +23,79 @@ use crate::{
     }
 };
 
-/// Store ambiguity for each 32 bp.
-const STEP_PWR: u8 = 5;
-/// 64 bp.
-const WINDOW_SIZE: usize = 1 << (STEP_PWR + 1);
+mod amb {
+    use super::*;
 
-/// For one haplotype answers queries where alignments are ambiguous.
-struct AmbiguousRegions {
-    /// For each haplotype, store a range-minimum-query structure on the number of unique k-mers in
-    /// the next 64 bp. So, we have counts for 64 bp windows stored for each mode 32 bp position.
-    haplotype_rmqs: Vec<FastRmq>,
-}
+    /// Store ambiguity for each 32 bp.
+    const STEP_PWR: u8 = 5;
+    /// 32 bp.
+    const WINDOW_SIZE: usize = 1 << STEP_PWR;
+    /// 64 bp.
+    const DOUBLE_WINDOW_SIZE: usize = WINDOW_SIZE << 1;
 
-impl AmbiguousRegions {
-    fn new(contig_set: &ContigSet) -> Self {
-        const KMER_SIZE: u8 = 5;
-        // const ALL_UNIQUE: u16 = (WINDOW_SIZE + 1 - KMER_SIZE as usize) as u16;
+    /// For one haplotype answers queries where alignments are ambiguous.
+    pub(super) struct AmbiguousRegions {
+        /// Cumulative ambiguity for each 32 bp window.
+        cumul_ambiguity: Vec<Vec<u32>>,
+    }
 
-        let mut haplotype_rmqs = Vec::with_capacity(contig_set.len());
-        let mut buffer = Vec::<u32>::new();
-        let mut n_unique = Vec::<u16>::new();
+    impl AmbiguousRegions {
+        pub(super) fn new(contig_set: &ContigSet, kmer: u8, frac: f64) -> Self {
+            let mut buffer = Vec::<u32>::new();
+            let mut n_unique = Vec::<u16>::new();
+            let threshold = (frac * min(DOUBLE_WINDOW_SIZE + 1 - usize::from(kmer), 1 << (2 * kmer)) as f64).ceil()
+                as u16;
 
-        for contig_id in contig_set.contigs().ids() {
-            let seq = contig_set.get_seq(contig_id);
-            linguistic_complexity(seq, KMER_SIZE, WINDOW_SIZE, &mut buffer, &mut n_unique);
-            let n = (seq.len() - 1) >> STEP_PWR;
-            let mut rmq = Vec::<u64>::with_capacity(n);
-            let m = min(n, ((n_unique.len() - 1) >> STEP_PWR) + 1);
-            for i in 0..m {
-                rmq.push(u64::from(n_unique[i << STEP_PWR]));
+            let mut cumul_ambiguity = Vec::with_capacity(contig_set.len());
+            for contig_id in contig_set.contigs().ids() {
+                let seq = contig_set.get_seq(contig_id);
+                linguistic_complexity(seq, kmer, DOUBLE_WINDOW_SIZE, &mut buffer, &mut n_unique);
+                let mut ambiguity = vec![0; ((seq.len() - 1) >> STEP_PWR) + 1];
+                for (amb, n) in izip!(&mut ambiguity, n_unique.iter().copied().step_by(WINDOW_SIZE)) {
+                    *amb += u32::from(n < threshold);
+                }
+                let mut acc = 0;
+                ambiguity.iter_mut().for_each(|x| {
+                    acc += *x;
+                    *x = acc;
+                });
+                cumul_ambiguity.push(ambiguity);
             }
-            let last = u64::from(*n_unique.last().unwrap());
-            rmq.resize(n, last);
-            haplotype_rmqs.push(FastRmq::from_vec(rmq));
+            Self { cumul_ambiguity }
         }
-        Self { haplotype_rmqs }
+
+        #[inline]
+        pub(super) fn ambiguous(&self, contig_id: ContigId, start: u32, end: u32) -> bool {
+            let ambiguity = &self.cumul_ambiguity[contig_id.ix()];
+            ambiguity[(start >> STEP_PWR) as usize] != ambiguity[((end - 1) >> STEP_PWR) as usize]
+        }
     }
 
-    fn min_unique_kmers(&self, contig_id: ContigId, start: u32, end: u32) -> u64 {
-        let rmq = &self.haplotype_rmqs[contig_id.ix()];
-        let a = (start >> STEP_PWR) as usize;
-        // Because windows overlap, we want to take a previous window for the end index.
-        let b = max(a, ((end - 1) >> STEP_PWR).saturating_sub(1) as usize);
-        let i = self.haplotype_rmqs[contig_id.ix()].range_min(a, b);
-        rmq[i]
+    pub(super) enum Ambiguity {
+        Always,
+        Never,
+        Sometimes(AmbiguousRegions),
     }
 
-    #[inline]
-    fn ambiguous(&self, contig_id: ContigId, start: u32, end: u32) -> bool {
-        /// Expect at least 2/3 of unique k-mers.
-        const THRESHOLD: u64 = WINDOW_SIZE as u64 * 2 / 3;
-        self.min_unique_kmers(contig_id, start, end) < THRESHOLD
+    impl Ambiguity {
+        pub(super) fn new(contig_set: &ContigSet, short_reads: bool, kmer: u8, frac: f64) -> Self {
+            if !short_reads || frac <= 0.0 {
+                Self::Never
+            } else if frac >= 1.0 {
+                Self::Always
+            } else {
+                Self::Sometimes(AmbiguousRegions::new(contig_set, kmer, frac))
+            }
+        }
+
+        #[inline]
+        pub(super) fn ambiguous(&self, contig_id: ContigId, start: u32, end: u32) -> bool {
+            match self {
+                Self::Always => true,
+                Self::Never => false,
+                Self::Sometimes(regions) => regions.ambiguous(contig_id, start, end)
+            }
+        }
     }
 }
 
@@ -82,7 +104,7 @@ pub struct HapAlns {
     /// Alignments from each contig to other contigs.
     /// matrix[i, j] contains alignment where contig i is query, j is reference.
     aln_matrix: TriangleMatrix<Option<(Cigar, CigarIndex)>>,
-    ambiguities: AmbiguousRegions,
+    ambiguities: amb::Ambiguity,
     transfer_fails: u32,
 
     local_step: u32,
@@ -94,10 +116,16 @@ pub struct HapAlns {
 }
 
 impl HapAlns {
-    pub fn new(contig_set: &ContigSet, transfer_fails: u32) -> Self {
+    pub fn new(
+        contig_set: &ContigSet,
+        transfer_fails: u32,
+        short_reads: bool,
+        kmer_size: u8,
+        unique_kmer_frac: f64,
+    ) -> Self {
         Self {
             aln_matrix: TriangleMatrix::new(contig_set.len(), None),
-            ambiguities: AmbiguousRegions::new(contig_set),
+            ambiguities: amb::Ambiguity::new(contig_set, short_reads, kmer_size, unique_kmer_frac),
             transfer_fails,
             local_step: 0,
             contig_offsets: Vec::new(),
@@ -215,7 +243,10 @@ fn align_anew(
 
 impl HapAlns {
     /// Try to identify any new alignments for a given read/read pair.
-    /// Returns the number of new alignments and a total number of attempted transfers.
+    /// Returns
+    /// - the number of new alignments,
+    /// - total number of transfers,
+    /// - number of attempted expensive transfers,
     pub(crate) fn transfer_alignments(
         &self,
         prelim_alignments: &mut PrelimAlignments,
@@ -223,11 +254,12 @@ impl HapAlns {
         contig_set: &ContigSet,
         aligner: &Aligner,
         err_prof: &ErrorProfile,
-    ) -> (usize, usize) {
+    ) -> (usize, usize, usize) {
         let contigs = contig_set.contigs();
         let n = prelim_alignments.len();
         let mut seen = vec![false; n];
         let mut total_transfers = 0;
+        let mut expens_transfers = 0;
 
         for i in 0..n {
             if std::mem::replace(&mut seen[i], true) {
@@ -270,31 +302,19 @@ impl HapAlns {
                     }
                 }
 
+                total_transfers += 1;
                 let approx_target_start = offset.rpos();
                 let approx_target_end = cigar_index.find_cigar_offset(
                     source_interval.end() - 1, query_to_ref).rpos() + 1;
                 let ambiguous = self.ambiguities.ambiguous(target_contig_id, approx_target_start, approx_target_end);
-                // log::debug!("Transferring {} R{} to {}, ambiguous? {}, n unique {}",
-                //     read_data.name(), read_end, contigs.get_name(target_contig_id), ambiguous,
-                //     self.ambiguities.min_unique_kmers(target_contig_id, approx_target_start, approx_target_end),
-                // );
-                // let (new_start, new_cigar) = if ambiguous {
-                //     align_anew(aligner, target_seq, approx_target_start, approx_target_end, read_seq, read_clipping)
-                // } else {
-                //     haps_cigar.transfer_read_alignment(
-                //         offset, &source_cigar, read_seq, target_seq, aligner, query_to_ref)
-                // };
-                // log::debug!("   -> {}", new_cigar);
+                let (new_start, new_cigar) = if ambiguous {
+                    expens_transfers += 1;
+                    align_anew(aligner, target_seq, approx_target_start, approx_target_end, read_seq, read_clipping)
+                } else {
+                    haps_cigar.transfer_read_alignment(
+                        offset, &source_cigar, read_seq, target_seq, aligner, query_to_ref)
+                };
 
-
-                let (new_start, new_cigar) = haps_cigar.transfer_read_alignment(
-                    offset, &source_cigar, read_seq, target_seq, aligner, query_to_ref);
-                let (alt_start, alt_cigar) = align_anew(aligner, target_seq, approx_target_start, approx_target_end,
-                    read_seq, read_clipping);
-
-
-
-                total_transfers += 1;
                 let cigar_ref_len = new_cigar.ref_len();
                 const MIN_ALN_SIZE: u32 = 50;
                 // Either too high edit distance or too short alignment.
@@ -308,19 +328,6 @@ impl HapAlns {
                     new_start, new_start + cigar_ref_len);
                 let mut new_aln = Alignment::new(interval, new_cigar, source_strand, read_end);
                 new_aln.calculate_edit_and_prob(contigs, err_prof);
-
-                let alt_interval = Interval::new(Arc::clone(contigs), target_contig_id,
-                    alt_start, alt_start + alt_cigar.ref_len());
-                let mut alt_aln = Alignment::new(alt_interval, alt_cigar, source_strand, read_end);
-                alt_aln.calculate_edit_and_prob(contigs, err_prof);
-
-                println!("{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{:.4}\t{}",
-                    read_data.name(), read_data.name_hash(), read_end,
-                    self.ambiguities.min_unique_kmers(target_contig_id, approx_target_start, approx_target_end),
-                    new_aln.interval(), new_aln.cigar(), new_aln.ln_prob(), new_aln.distance().unwrap().edit(),
-                    alt_aln.interval(), alt_aln.cigar(), alt_aln.ln_prob(), alt_aln.distance().unwrap().edit(),
-                );
-
                 if let Err(opt_prev_ix) = prelim_alignments.insert(new_aln, false) {
                     if let Some(j) = opt_prev_ix && let Some(seen_val) = seen.get_mut(j as usize) {
                         *seen_val = true;
@@ -331,6 +338,6 @@ impl HapAlns {
                 }
             }
         }
-        (prelim_alignments.len() - n, total_transfers)
+        (prelim_alignments.len() - n, total_transfers, expens_transfers)
     }
 }

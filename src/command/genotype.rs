@@ -109,6 +109,8 @@ struct Args {
     transfer_window: Option<u32>,
     transfer_step: Option<u32>,
     transfer_fails: u32,
+    transfer_compl_kmer: u8,
+    transfer_compl_frac: f64,
 }
 
 impl Default for Args {
@@ -152,6 +154,8 @@ impl Default for Args {
             transfer_window: None,
             transfer_step: None,
             transfer_fails: 100,
+            transfer_compl_kmer: 5,
+            transfer_compl_frac: 0.66,
         }
     }
 }
@@ -177,6 +181,9 @@ impl Args {
         validate_param!(self.ploidy > 0, "Ploidy must be positive");
         self.samtools = ext::sys::find_exe(self.samtools)?;
         self.assgn_params.validate()?;
+
+        validate_param!(0 < self.transfer_compl_kmer && self.transfer_compl_kmer <= u16::MAX_KMER_SIZE,
+            "k-mer size in --tr-compl must be between 1 and {}", u16::MAX_KMER_SIZE);
         Ok(self)
     }
 
@@ -277,6 +284,12 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Skip to next alignment whenever alignment tranfer produces high edit\n\
             {EMPTY}  distance {} times [{}]. Use \"inf\" to continue indefinitely.",
             "    --tr-fails".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.transfer_fails));
+        println!("    {}   {}  During alignment transfer for short reads, use more accurate alignment\n\
+            {EMPTY}  algorithm if fraction of unique {}-mers [{}] in 64 bp windows drops\n\
+            {EMPTY}  below {} [{}]. Use 0 or 1 to always use cheap or expensive algorithms.",
+            "    --tr-compl".green(), "INT NUM".yellow(),
+            "INT".yellow(), super::fmt_def(defaults.transfer_compl_kmer),
+            "NUM".yellow(), super::fmt_def(defaults.transfer_compl_frac));
 
         println!("\n{}", "Read recruitment:".bold());
         println!("    {}  {}  Use k-mers of size {} (<= {}) with smallest hash\n\
@@ -570,6 +583,10 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("tr-fails") => args.transfer_fails = parser.value()?.parse::<PrettyU32>()?.get(),
+            Long("tr-compl") => {
+                args.transfer_compl_kmer = parser.value()?.parse()?;
+                args.transfer_compl_frac = parser.value()?.parse()?;
+            }
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -1036,7 +1053,7 @@ fn create_mapping_command(
     let n_locs = min(25000, n_seqs * 4).to_string();
 
     let mut cmd: Command;
-    if seq_info.technology() == Technology::Illumina {
+    if seq_info.technology().are_short_reads() {
         cmd = Command::new(&args.strobealign);
         // NOTE: Provide single input FASTQ, and do not use --interleaved option.
         // This is because Strobealign starts to connect read pairs in multiple ways,
@@ -1199,11 +1216,13 @@ fn process_paf(
     paf_filename: &Path,
     contig_set: &ContigSet,
     basis_contigs: &[ContigId],
+    technology: Technology,
     args: &Args,
 ) -> crate::Result<(Option<Arc<HapAlns>>, Option<TriangleMatrix<Option<u32>>>)> {
     let contigs = contig_set.contigs();
     let mut opt_hap_alns = if args.transfer_div > 0.0 {
-        Some(HapAlns::new(contig_set, args.transfer_fails))
+        Some(HapAlns::new(contig_set, args.transfer_fails, technology.are_short_reads(),
+            args.transfer_compl_kmer, args.transfer_compl_frac))
     } else { None };
     let mut contig_distances = args.use_paf.then(|| TriangleMatrix::new(contigs.len(), None));
     if opt_hap_alns.is_none() && contig_distances.is_none() {
@@ -1270,7 +1289,7 @@ fn analyze_locus(
     let opt_paf_fname = paths::LOCUS_PAFS.iter()
         .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
     let (hap_alns, mut contig_distances) = if let Some(paf_fname) = opt_paf_fname {
-        process_paf(&paf_fname, &locus.set, &tid2contig, args)?
+        process_paf(&paf_fname, &locus.set, &tid2contig, bg_distr.seq_info().technology(), args)?
     } else {
         (None, None)
     };
@@ -1382,7 +1401,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     validate_param!(args.in_files.has_indexed_alignment()
         || bg_distr.insert_distr().is_paired_end() == args.in_files.is_paired_end(),
         "Paired-end/Single-end status does not match background data");
-    if tech == Technology::Illumina {
+    if tech.are_short_reads() {
         args.strobealign = ext::sys::find_exe(args.strobealign)?;
     } else {
         args.minimap = ext::sys::find_exe(args.minimap)?;

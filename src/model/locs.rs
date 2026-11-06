@@ -1059,6 +1059,7 @@ struct ReadCounts {
     original_alns: usize,
     recovered_alns: usize,
     total_transfers: usize,
+    expens_transfers: usize,
 }
 
 impl ReadCounts {
@@ -1071,6 +1072,7 @@ impl ReadCounts {
         self.original_alns += oth.original_alns;
         self.recovered_alns += oth.recovered_alns;
         self.total_transfers += oth.total_transfers;
+        self.expens_transfers += oth.expens_transfers;
     }
 
     fn total_reads(&self) -> u32 {
@@ -1088,8 +1090,9 @@ impl ReadCounts {
             self.original_alns as f64 / divisor, self.recovered_alns as f64 / divisor,
         );
         if self.total_transfers > 0 {
-            log::debug!("    Attempted {:.3} alignment recoveries / read",
-                self.total_transfers as f64 / n_reads as f64);
+            log::debug!("    Attempted {:.3} alignment recoveries / read ({:.1}% expensive transfers)",
+                self.total_transfers as f64 / n_reads as f64,
+                100.0 * self.expens_transfers as f64 / self.total_transfers as f64);
         }
     }
 }
@@ -1313,9 +1316,11 @@ fn recover_and_group_alignments(
         let mut recovered_alns = 0;
         if read_data.weight >= params.min_weight && let Some(hap_alns) = opt_hap_alns {
             let curr_transfers;
-            (recovered_alns, curr_transfers) = hap_alns.transfer_alignments(&mut read_alignments, &read_data,
-                &contig_set, &aligner, bg_distr.error_profile());
+            let curr_expens_transfers;
+            (recovered_alns, curr_transfers, curr_expens_transfers) = hap_alns.transfer_alignments(
+                &mut read_alignments, &read_data, &contig_set, &aligner, bg_distr.error_profile());
             counts.total_transfers += curr_transfers;
+            counts.expens_transfers += curr_expens_transfers;
         }
         if !read_alignments.best_edit_is_good() {
             counts.poorly_mapped += 1;

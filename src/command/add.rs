@@ -223,10 +223,6 @@ fn parse_args(argv: &[String]) -> Result<Args, lexopt::Error> {
                 }
             }
             Short('e') | Long("expand") => {
-                // args.max_expansion.clear();
-                // for v in parser.values()? {
-                //     args.max_expansion.push(v.parse::<PrettyU32>()?);
-                // }
                 args.max_expansion = parser.values()?
                     .map(|v| v.parse::<PrettyU32>().map(PrettyU32::get))
                     .collect::<Result<Vec<u32>, _>>()?;
