@@ -770,8 +770,8 @@ pub fn align_sequences(
     let mut n_rem = n_contigs;
     for &(i, j) in &pairs {
         // Will do -1 if old value was false.
-        n_rem -= usize::from(std::mem::replace(&mut in_use[i.ix()], true));
-        n_rem -= usize::from(std::mem::replace(&mut in_use[j.ix()], true));
+        n_rem -= usize::from(!std::mem::replace(&mut in_use[i.ix()], true));
+        n_rem -= usize::from(!std::mem::replace(&mut in_use[j.ix()], true));
         if n_rem == 0 {
             break;
         }
