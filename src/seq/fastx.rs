@@ -133,7 +133,7 @@ pub trait SingleRecord: WritableRecord {
     }
 
     fn name_str(&self) -> crate::Result<&str> {
-        std::str::from_utf8(self.name()).map_err(|_| Error::Utf8("record name", self.name().to_vec()))
+        std::str::from_utf8(self.name()).map_err(|_| Error::utf8("record name", self.name()))
     }
 
     /// Read sequence.
@@ -568,7 +568,7 @@ pub fn count_reads_bam(
     // Use match instead of `map_err` to suppress brrow checked error.
     let s = match std::str::from_utf8(&output.stdout) {
         Ok(val) => val,
-        Err(_) => return Err(Error::Utf8("samtools output", output.stdout)),
+        Err(_) => return Err(Error::utf8("samtools output", &output.stdout)),
     };
     s.trim().parse().map_err(|_| error!(RuntimeError,
         "Cannot parse samtools output: {:?} is not a number", s.trim()))
@@ -947,8 +947,7 @@ pub fn set_reference(
     let mut incorrect_len = 0;
     let header = aln_reader.header();
     for (tid, contig) in header.target_names().into_iter().enumerate() {
-        let contig = std::str::from_utf8(contig)
-            .map_err(|_| Error::Utf8("contig name", contig.to_vec()))?;
+        let contig = std::str::from_utf8(contig).map_err(|_| Error::utf8("contig name", contig))?;
         if let Some(contig_id) = ref_contigs.try_get_id(&contig) {
             let in_ref_len = u64::from(ref_contigs.get_len(contig_id));
             let in_bam_len = header.target_len(tid as u32).expect("Unknown contig length");

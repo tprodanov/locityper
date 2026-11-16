@@ -86,7 +86,7 @@ impl HaplotypeNames {
             .ok_or_else(|| error!(InvalidData, "Input VCF file does not contain any records"))??;
         let genotypes = record.genotypes()?;
         for (sample_id, sample) in reader.header().samples().into_iter().enumerate() {
-            let sample = std::str::from_utf8(sample).map_err(|_| Error::Utf8("VCF sample name", sample.to_vec()))?;
+            let sample = std::str::from_utf8(sample).map_err(|_| Error::utf8("VCF sample name", sample))?;
 
             let ploidy = genotypes.get(sample_id).len();
             if leave_out.contains(sample) {

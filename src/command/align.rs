@@ -350,8 +350,7 @@ fn define_temporary_filenames(
                 match e.to_str() {
                     Some("paf") => "paf.tmp".to_string(),
                     Some(s) => format!("tmp.{}", s),
-                    None => return Err(crate::Error::Utf8("output filename",
-                        out_filename.as_os_str().as_encoded_bytes().to_vec())),
+                    None => return Err(crate::Error::Utf8("output filename", out_filename.display().to_string())),
                 }
             }
         };

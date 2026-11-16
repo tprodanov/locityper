@@ -321,8 +321,7 @@ fn load_seqs_all(seqs_all: &Path, distinct: bool, output: &str) -> crate::Result
     let mut fasta_reader = fastx::Reader::from_path(seqs_all)?;
     let mut record = FastxRecord::default();
     while fasta_reader.read_next_standardized(&mut record)? {
-        let name = std::str::from_utf8(record.name())
-            .map_err(|_| Error::Utf8("read name", record.name().to_vec()))?;
+        let name = std::str::from_utf8(record.name()).map_err(|_| Error::utf8("read name", record.name()))?;
         let locus = if distinct { name } else {
             name.split_once('*').ok_or_else(||error!(InvalidData,
                 "Invalid record name `{}` for -S {}. Symbol `*` required (also see --distinct)",

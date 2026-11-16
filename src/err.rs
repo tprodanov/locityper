@@ -25,8 +25,9 @@ pub enum Error {
     ParsingError(String),
     RuntimeError(String),
     JsonLoad(String),
-    /// Non-UTF8 encountered. First field: what is the object (for example, `read name`), second: failed byte string.
-    Utf8(&'static str, Vec<u8>)
+    /// Non-UTF8 encountered.
+    /// First field: what is the object (for example, `read name`), second: lossy-converted failed string.
+    Utf8(&'static str, String),
 }
 
 #[cfg(feature = "gurobi")]
@@ -54,7 +55,17 @@ impl From<json::JsonError> for Error {
     }
 }
 
+// impl From<camino::FromPathBufError> for Error {
+//     fn from(e: camino::FromPathBufError) -> Self {
+//         Self::Utf8("path", e.into_path_buf().display().to_string())
+//     }
+// }
+
 impl Error {
+    pub fn utf8(desc: &'static str, failed_string: &[u8]) -> Self {
+        Self::Utf8(desc, String::from_utf8_lossy(failed_string).into_owned())
+    }
+
     /// Converts an error, produced by a solver.
     pub fn solver(solver_name: &'static str, s: impl Into<String>) -> Self {
         Self::Solver(solver_name, s.into())
@@ -88,8 +99,8 @@ impl Error {
             Self::ParsingError(e) => write!(s, "{}: {}", "Parsing error".red(), e).unwrap(),
             Self::RuntimeError(e) => write!(s, "{}: {}", "Runtime error".red(), e).unwrap(),
             Self::JsonLoad(e) => write!(s, "{}: {}", "Could not load JSON".red(), e).unwrap(),
-            Self::Utf8(desc, bytes) => write!(s, "{}: {} cannot be decoded ({}, {:?})",
-                "UTF-8 error".red(), desc, String::from_utf8_lossy(bytes), bytes).unwrap(),
+            Self::Utf8(desc, failed_string) => write!(s, "{}: {} cannot be decoded ({})",
+                "UTF-8 error".red(), desc, failed_string).unwrap(),
         };
         s
     }
