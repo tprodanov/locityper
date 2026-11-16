@@ -13,6 +13,7 @@ pub mod minim_div;
 pub mod align;
 pub mod paf;
 pub mod transfer;
+pub mod hint_vcf;
 
 pub use interv::{Interval, NamedInterval};
 pub use contigs::{ContigId, ContigNames, ContigSet};
