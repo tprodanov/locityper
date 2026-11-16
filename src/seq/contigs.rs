@@ -123,8 +123,7 @@ impl ContigNames {
         let mut contigs = Self::new(tag);
         for i in 0..header.target_count() {
             let byte_name = header.tid2name(i);
-            let name = String::from_utf8(byte_name.to_vec())
-                .map_err(|_| Error::Utf8("contig name", byte_name.to_vec()))?;
+            let name = String::from_utf8(byte_name.to_vec()).map_err(|_| Error::utf8("contig name", byte_name))?;
             contigs.add(name, header.target_len(i).expect("Contig length undefined in BAM"))?;
         }
         Ok(contigs)

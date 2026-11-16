@@ -149,8 +149,7 @@ impl ReadData {
             }
         }
         assert!(self.name.is_empty());
-        self.name = String::from_utf8(qname.to_vec())
-            .map_err(|_| Error::Utf8("read name", record.qname().to_vec()))?;
+        self.name = String::from_utf8(qname.to_vec()).map_err(|_| Error::utf8("read name", record.qname()))?;
         self.name_hash = NameHash::new(qname);
         Ok(())
     }
@@ -427,7 +426,7 @@ pub fn construct_tid_to_contig_map(header: &bam::HeaderView, contigs: &ContigNam
     let mut conversion = Vec::with_capacity(header.target_count() as usize);
     for i in 0..header.target_count() {
         let name_bytes = header.tid2name(i);
-        let name = std::str::from_utf8(name_bytes).map_err(|_| Error::Utf8("read name", name_bytes.to_vec()))?;
+        let name = std::str::from_utf8(name_bytes).map_err(|_| Error::utf8("read name", name_bytes))?;
         let id = contigs.try_get_id(name)
             .ok_or_else(|| error!(InvalidData, "Intermediate BAM file contains unexpected contigs (e.g. {})", name))?;
         conversion.push(id);
