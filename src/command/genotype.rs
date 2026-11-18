@@ -26,6 +26,7 @@ use crate::{
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
         transfer::HapAlns,
+        hint_vcf,
     },
     bg::{
         TECHNOLOGIES, BgDistr, Technology, SequencingInfo,
@@ -111,6 +112,8 @@ struct Args {
     transfer_fails: u32,
     transfer_compl_kmer: u8,
     transfer_compl_frac: f64,
+
+    hint: hint_vcf::Params,
 }
 
 impl Default for Args {
@@ -156,6 +159,8 @@ impl Default for Args {
             transfer_fails: 100,
             transfer_compl_kmer: 5,
             transfer_compl_frac: 0.66,
+
+            hint: Default::default(),
         }
     }
 }
@@ -403,6 +408,24 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Use pairwise haplotype alignments (db/loci/*/haplotypes.paf.gz)\n\
             {EMPTY}  to identify potentially incorrect predictions [{}].",
             "    --use-paf".green(), "y|n".yellow(), super::fmt_def(YesNo::from(defaults.use_paf)));
+
+        println!("\n{}", "Hint VCF file:".bold());
+        println!("    {:KEY$} {:VAL$}  Incorporate information from this VCF file.",
+            "    --hint-vcf".green(), "FILE".yellow());
+        println!("    {:KEY$} {:VAL$}  Input VCF file is already phased.",
+            "    --hint-phased".green(), super::flag());
+        println!("    {}  {}  Reference haplotype name of the VCF file, or a BED file\n\
+            {EMPTY}  with reference coordinates and haplotype name in the fifth column.\n\
+            {EMPTY}  The file must be located in db/loci/*/{}.",
+            "    --hint-ref".green(), "STR|FILE".yellow(), "FILE".yellow());
+        println!("    {:KEY$} {:VAL$}  Only examine variants with this genotype quality [{}].",
+            "    --hint-gq".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hint.min_gq));
+        //     By default, VCF file is assumed to be constructed using the same\n\
+        //     {EMPTY}  reference genome as the Locityper database. This option allows to override the\n\
+        //     {EMPTY}  reference haplotype name. If VCF reference is completely different\n\
+        //     {EMPTY}  (e.g. GRCh38 instead of CHM13), provide a local If corresponding reference haplotype name\n\
+        //     {EMPTY} was constructed relative to this reference genome.\n\
+        //     {EMPTY}  Must match one of the haplotypes.
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -587,6 +610,11 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 args.transfer_compl_kmer = parser.value()?.parse()?;
                 args.transfer_compl_frac = parser.value()?.parse()?;
             }
+
+            Long("hint-vcf") => args.hint.vcf = Some(parser.value()?.parse()?),
+            Long("hint-phased") => args.hint.already_phased = true,
+            Long("hint-ref") => args.hint.ref_hap_or_bed = Some(parser.value()?.parse()?),
+            Long("hint-gq") => args.hint.min_gq = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
                 super::print_version();

@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+};
 use htslib::{
     bcf::{
         self,
@@ -12,6 +14,24 @@ use crate::{
 use super::{
     Interval,
 };
+
+pub struct Params {
+    pub vcf: Option<PathBuf>,
+    pub already_phased: bool,
+    pub ref_hap_or_bed: Option<String>,
+    pub min_gq: f32,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            vcf: None,
+            already_phased: false,
+            ref_hap_or_bed: None,
+            min_gq: 10.0,
+        }
+    }
+}
 
 const GQ_TAG: &'static [u8; 2] = b"GQ";
 

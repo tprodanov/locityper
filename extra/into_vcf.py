@@ -61,7 +61,9 @@ def load_database(path, subset_loci):
 
         locus_dir = entry.path
         with open(os.path.join(locus_dir, 'ref.bed')) as f:
-            chrom, start, end, name = next(f).strip().split()
+            parts = next(f).strip().split('\t')
+            chrom, start, end, name = parts[:4]
+            # [NOTE] Can also read genome name from parts[4]
         if name != locus:
             common.error(f'Locus directory `{locus_dir}` contains locus `{name}` (expected `{locus}`)')
         start = int(start)

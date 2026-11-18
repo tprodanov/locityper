@@ -129,8 +129,8 @@ fn fmt_def(val: impl fmt::Display) -> colored::ColoredString {
     val.to_string().cyan()
 }
 
-fn fmt_def_f64(val: f64) -> colored::ColoredString {
-    crate::math::fmt_signif(val, 6).cyan()
+fn fmt_def_f64(val: impl Into<f64>) -> colored::ColoredString {
+    crate::math::fmt_signif(val.into(), 6).cyan()
 }
 
 /// Re-runing mode.

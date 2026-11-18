@@ -187,7 +187,7 @@ def process_locus(locus_dir, locus, out, sat_out, trees, args):
     mean_edit, mean_div = distances.average_divergence()
 
     with open(os.path.join(locus_dir, 'ref.bed')) as f:
-        chrom, start, end, _ = next(f).split('\t')
+        chrom, start, end = next(f).split('\t')[:3]
         overl = calc_dupl_frac(trees, chrom, int(start), int(end))
 
     sat_k = sat_gamma = kmer_sat_k = kmer_sat_gamma = np.nan
