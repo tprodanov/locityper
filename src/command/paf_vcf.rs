@@ -64,7 +64,6 @@ impl Args {
         validate_param!(self.paf.is_some(), "Input PAF file is not provided (see -p/--paf)");
         validate_param!(self.fasta.is_some(), "Input FASTA file is not provided (see -f/--fasta)");
         validate_param!(self.out_merged.is_some(), "Output VCF file must be provided (see -o/--output)");
-        validate_param!(self.ref_hap.is_some(), "Reference haplotype name (-r) must be provided");
         Ok(self)
     }
 }
@@ -78,7 +77,7 @@ fn print_help() {
     println!("{}", "Convert PAF file to VCF file(s).".yellow());
 
     println!("\n{}", "Usage:".bold());
-    println!("    {} -i dir -r ref_hap [args]", super::PROGRAM);
+    println!("    {} -i dir [-r ref_hap] [args]", super::PROGRAM);
     println!("    {} -p input.paf -f input.fa -r ref_hap [-d discarded_haplotypes.txt] \\", super::PROGRAM);
     println!("        -o merged.vcf.gz [separate.vcf.gz] [args]");
 
@@ -90,7 +89,8 @@ fn print_help() {
         "-p, --paf".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input FASTA[.gz] file with haplotypes.",
         "-f, --fasta".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Reference haplotypes name.",
+    println!("    {:KEY$} {:VAL$}  Reference haplotypes name. Optional if\n\
+        {EMPTY}  <-i directory>/ref.bed or -R region.bed contains haplotype name in fifth column.",
         "-r, --ref-hap".green(), "STR".yellow());
     println!("    {:KEY$} {}\n\
         {EMPTY}  Text file with discarded haplotypes [{}].\n\
@@ -104,7 +104,7 @@ fn print_help() {
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Adjust variant positions relative to this region [{}].\n\
-        {EMPTY}  Should be either {} (take from ref.bed), {},\n\
+        {EMPTY}  Should be either {} (search for ref.bed relative to haplotypes PAF), {},\n\
         {EMPTY}  `chrom:start-end` or a BED file with one entry.",
         "-R, --region".green(), "STR".yellow(), super::fmt_def("auto"), "auto".yellow(), "none".yellow());
 
@@ -152,12 +152,19 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
     Ok(args)
 }
 
+pub(super) struct RegionInfo {
+    chrom: String,
+    start: u32,
+    end: u32,
+    ref_name: Option<String>,
+}
+
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
 /// Returns chromosome name and 0-based start position and end.
 pub(super) fn load_region(
     s: &str,
     fasta_filename: &Path,
-) -> crate::Result<Option<(String, u32, u32)>> {
+) -> crate::Result<Option<RegionInfo>> {
     if s == "none" { return Ok(None) };
 
     let fname = if s == "auto" {
@@ -173,7 +180,7 @@ pub(super) fn load_region(
                 .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get().strict_sub(1);
             let end = captures[3].parse::<PrettyU32>()
                 .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get();
-            return Ok(Some((chrom, start, end)));
+            return Ok(Some(RegionInfo { chrom, start, end, ref_name: None }));
         }
         PathBuf::from(s)
     };
@@ -196,7 +203,9 @@ pub(super) fn load_region(
     let end: u32 = split.next()
         .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
         .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
-    Ok(Some((chrom, start, end)))
+    let _ = split.next();
+    let ref_name = split.next().map(|s| s.to_string());
+    Ok(Some(RegionInfo { chrom, start, end, ref_name }))
 }
 
 #[derive(Clone, Debug)]
@@ -624,8 +633,8 @@ pub(super) fn convert_to_vcf(
     paf_filename: &Path,
     contig_set: &ContigSet,
     disc_haps: &DiscardedHaplotypes,
-    ref_hap: &str,
-    region: Option<(String, u32, u32)>,
+    opt_ref_hap: Option<&str>,
+    region: Option<RegionInfo>,
     out_merged: &Path,
     out_separate: Option<&Path>,
 ) -> crate::Result<()>
@@ -633,14 +642,16 @@ pub(super) fn convert_to_vcf(
     if !disc_haps.all_identical() {
         log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
     }
+    let ref_hap = opt_ref_hap.or(region.as_ref().and_then(|region| region.ref_name.as_ref().map(|s| s as &str)))
+        .ok_or_else(|| error!(InvalidInput, "Reference haplotype not found in the BED file and not provided with -r"))?;
     let (groupped_haps, ref_id) = group_haplotypes(contig_set.contigs(), ref_hap, &disc_haps)?;
     let ref_len = contig_set.contigs().get_len(ref_id);
     let (chrom, shift) = match region {
-        Some((chrom, start, end)) if end - start != ref_len =>
+        Some(region) if region.end - region.start != ref_len =>
             return Err(error!(InvalidData,
                 "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
-                chrom, start + 1, end, end - start, ref_len)),
-        Some((chrom, start, _end)) => (chrom, start),
+                region.chrom, region.start + 1, region.end, region.end - region.start, ref_len)),
+        Some(region) => (region.chrom, region.start),
         None => (ref_hap.to_string(), 0),
     };
 
@@ -683,8 +694,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let region = load_region(&args.region, fasta_filename)?;
     let paf_filename = args.paf.as_ref().expect("PAF filename must be provided");
-    let ref_hap = args.ref_hap.as_ref().expect("Reference haplotype must be provided");
-    convert_to_vcf(paf_filename, &contig_set, &disc_haps, ref_hap, region,
+    convert_to_vcf(paf_filename, &contig_set, &disc_haps, args.ref_hap.as_ref().map(|s| s as &str), region,
         args.out_merged.as_ref().expect("Merged output VCF must be present"),
         args.out_separate.as_ref().map(|fname| fname as &Path))?;
 

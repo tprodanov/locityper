@@ -1,6 +1,7 @@
 use std::{
     fs,
-    io::BufRead,
+    io::{Read, BufRead},
+    fs::File,
     time::Instant,
     path::{Path, PathBuf},
     fmt::Write as FmtWrite,
@@ -10,7 +11,7 @@ use std::{
 };
 use colored::Colorize;
 use crate::{
-    err::{error, add_path, validate_param},
+    err::{error, add_path, validate_param, Error},
     ext::{
         self, TriangleMatrix, LazyResult,
         fmt::{PrettyU32, YesNo},
@@ -31,7 +32,7 @@ use super::{paths, Rerun};
 struct Args {
     database: Option<PathBuf>,
     subset_loci: HashSet<String>,
-    ref_name: Option<String>,
+    ref_hap: Option<String>,
 
     aln_compression: String,
     divergence: f64,
@@ -53,7 +54,7 @@ impl Default for Args {
         Self {
             database: None,
             subset_loci: Default::default(),
-            ref_name: None,
+            ref_hap: None,
 
             aln_compression: "br".to_string(),
             divergence: 0.01,
@@ -75,7 +76,7 @@ impl Default for Args {
 impl Args {
     fn validate(self) -> crate::Result<Self> {
         validate_param!(self.database.is_some(), "Input database is not provided (see -i/--input)");
-        if self.aln_params.thresh_div < 1.0 && self.ref_name.is_none() {
+        if self.aln_params.thresh_div < 1.0 && self.ref_hap.is_none() {
             log::warn!("It is recommended to provide reference haplotype name (-n) with -D < 1");
         }
         validate_param!(self.divergence >= 0.0 && self.divergence <= 1.0,
@@ -114,7 +115,7 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Reference haplotype name, alignments to which\n\
         {EMPTY}  will be constructed irrespective of minimizer divergence.\n\
         {EMPTY}  Recommended with {} < 1.",
-        "-n, --ref-name".green(), "STR".yellow(), "-D".green());
+        "-r, --ref-hap".green(), "STR".yellow(), "-D".green());
     println!("    {}  {} (k,w)-minimizers for sequence divergence calculation [{} {}].",
         "-m, --minimizer".green(), "INT INT".yellow(),
         super::fmt_def(defaults.aln_params.div_k), super::fmt_def(defaults.aln_params.div_w));
@@ -200,7 +201,11 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
 
-            Short('n') | Long("ref-name") => args.ref_name = Some(parser.value()?.parse()?),
+            Short('n') | Long("ref-name") => {
+                log::warn!("Argument -n/--ref-name was deprecated, please use -r/--ref-hap instead");
+                args.ref_hap = Some(parser.value()?.parse()?);
+            }
+            Short('r') | Long("ref-hap") => args.ref_hap = Some(parser.value()?.parse()?),
             Short('m') | Long("minimizer") | Long("minimizers") =>
             {
                 args.aln_params.div_k = parser.value()?.parse()?;
@@ -398,20 +403,29 @@ fn construct_dominant_set(
 fn find_ref_haplotype(
     contigs: &ContigNames,
     disc_haps: &DiscardedHaplotypes,
-    ref_name: &str,
-) -> crate::Result<Option<ContigId>> {
-    if let Some(id) = contigs.try_get_id(ref_name) {
-        return Ok(Some(id));
+    ref_hap: &str,
+) -> Option<ContigId> {
+    if let Some(id) = contigs.try_get_id(ref_hap) {
+        return Some(id);
     }
     for (&id, other_haps) in disc_haps.by_contig() {
-        if let Some((_, is_identical)) = other_haps.iter().filter(|(name, _)| name == ref_name).next() {
+        if let Some((_, is_identical)) = other_haps.iter().filter(|(name, _)| name == ref_hap).next() {
             if !is_identical { break };
-            log::debug!("    Reference haplotype {} was discarded, replaced with {}", ref_name, contigs.get_name(id));
-            return Ok(Some(id));
+            log::debug!("    Reference haplotype {} was discarded, replaced with {}", ref_hap, contigs.get_name(id));
+            return Some(id);
         }
     }
-    log::debug!("    Could not find reference haplotype `{}`", ref_name);
-    Ok(None)
+    log::debug!("    Could not find reference haplotype `{}`", ref_hap);
+    None
+}
+
+fn get_ref_name_from_bed(filename: impl AsRef<Path>) -> crate::Result<Option<String>> {
+    let mut buf = Vec::new();
+    File::open(&filename).and_then(|mut f| f.read_to_end(&mut buf)).map_err(add_path!(filename))?;
+    let line_end = buf.iter().position(|&ch| ch == b'\n').unwrap_or(buf.len());
+    buf.truncate(line_end);
+    let s = String::from_utf8(buf).map_err(|e| Error::utf8("ref.bed file", e.as_bytes()))?;
+    Ok(s.split('\t').skip(4).next().map(|s| s.trim().to_string()))
 }
 
 fn process_locus(
@@ -432,9 +446,11 @@ fn process_locus(
     let mut lazy_data = LazyResult::new(|| -> crate::Result<_> {
         let contig_set = ContigSet::load(locus, &fasta_filename).map(Arc::new)?;
         let disc_haps = DiscardedHaplotypes::load_if_present(&dir.join(paths::DISCARDED_HAPS), contig_set.contigs())?;
-        let ref_id: Option<ContigId> = if let Some(name) = &args.ref_name {
-            find_ref_haplotype(contig_set.contigs(), &disc_haps, name)?
-        } else { None };
+        let opt_ref_hap = match &args.ref_hap {
+            Some(name) => Some(name.clone()),
+            None => get_ref_name_from_bed(dir.join(paths::LOCUS_BED))?,
+        };
+        let ref_id = opt_ref_hap.and_then(|name| find_ref_haplotype(contig_set.contigs(), &disc_haps, &name));
         Ok((contig_set, disc_haps, ref_id))
     });
 
