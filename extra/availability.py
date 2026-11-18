@@ -49,18 +49,20 @@ def find_closest(genotypes, distances, excl_haplotypes, out):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description='For each sample in --S1, calculate haplotype availability assuming leave-one-out scheme. \
-        In addition, availability can be calculated assuming all samples from --S2 are discarded.')
+        description='For each sample in --samples, calculate haplotype availability assuming '
+            'the sample was discarded from the panel. Additionally, you can specify a subset of available haplotypes '
+            'with --include / subset of discarded haplotypes with --exclude.')
     parser.add_argument('-i', '--input', metavar='FILE', required=True,
         help='Input PAF[.gz] file with pairwise distances.')
     parser.add_argument('-d', '--discarded', metavar='FILE', required=False,
-        help='File with discarded haplotypes.')
+        help='Optional: file with identical haplotypes, discarded from the database '
+            '(<db>/loci/<locus>/discarded_haplotypes.txt).')
     parser.add_argument('-S', '--samples', metavar='FILE', required=True,
         help='Calculate availability for each sample from this file.')
     parser.add_argument('--include', metavar='FILE', required=False,
-        help='Assume that only these samples/haplotypes are available.')
+        help='Assume that only these samples/haplotypes are available (mutually exclusive with --exclude).')
     parser.add_argument('--exclude', metavar='FILE', required=False,
-        help='Assume that all samples/haplotypes except these are available.')
+        help='Assume that all samples/haplotypes except these are available (m.e. with --include).')
     parser.add_argument('-o', '--output', metavar='FILE', required=True,
         help='Output CSV file.')
     args = parser.parse_args()
