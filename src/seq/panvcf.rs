@@ -253,10 +253,6 @@ pub fn reconstruct_sequences(
 
     for var in recs.iter() {
         let alleles = var.alleles();
-        // if alleles.iter().copied().any(seq::has_n) {
-        //     return Err(error!(InvalidData, "Input VCF file contains Ns in one of the alleles of {}",
-        //         format_var(var, header)));
-        // }
         let var_start = u32::try_from(var.pos()).unwrap();
         let ref_len = alleles[0].len() as u32;
         let var_end = var_start + ref_len;

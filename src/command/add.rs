@@ -146,9 +146,8 @@ fn print_help() {
         "-L, --loci".green(), "FILE".yellow(), "-v".green());
 
     println!("\n{}", "Haplotype extraction parameters:".bold());
-    println!("    {:KEY$} {:VAL$}  Name of the reference haplotype [default: tries to guess].\n\
-        {EMPTY}  Only relevant together with {}.",
-        "-g, --genome".green(), "STR".yellow(), "-v".green());
+    println!("    {:KEY$} {:VAL$}  Name of the reference haplotype [default: tries to guess].",
+        "-g, --genome".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  If needed, expand locus coordinates by <= {} bp [{}].\n\
         {EMPTY}  Boundaries are checked one by one until the locus\n\
         {EMPTY}  does not overlap any long pangenomic bubbles.",
@@ -161,7 +160,8 @@ fn print_help() {
         super::fmt_def(PrettyU32(defaults.moving_window)));
     println!("    {:KEY$} {:VAL$}  Allow this fraction of unknown nucleotides per haplotype [{}]\n\
         {EMPTY}  relative to the haplotype length. Variants that have no known\n\
-        {EMPTY}  variation in the input VCF pangenome are ignored.",
+        {EMPTY}  variation in the input VCF pangenome are ignored.\n\
+        {EMPTY}  This option only affects haplotypes extracted from the VCF file.",
         "-u, --unknown".green(), "NUM".yellow(), super::fmt_def_f64(defaults.unknown_frac));
     println!("    {:KEY$} {:VAL$}  Leave out sequences with specified names.",
         "    --leave-out".green(), "STR+".yellow());
@@ -598,7 +598,6 @@ fn process_alleles(
         seqs.push(entry.seq().to_vec());
     }
     std::mem::drop(fasta_writer);
-
     if args.only_seqs {
         super::write_success_file(locus_dir.join(paths::SUCCESS))?;
         return Ok(());
@@ -624,13 +623,11 @@ fn process_alleles(
     for &(start, end) in ref_n_runs.iter() {
         (&mut ref_seq[start as usize..end as usize]).fill(b'A');
     }
-
     // Calculate k-mer counts for the reference sequence as well.
     seqs.push(ref_seq);
     let mut kmer_counts = kmer_getter.fetch(seqs.clone())?;
     let ref_seq = seqs.pop().unwrap();
     let mut ref_counts = kmer_counts.pop();
-
     // Replace k-mer counts with 0s where Ns were observed.
     let k = kmer_getter.k();
     let ref_counts_size = ref_counts.len();
@@ -717,6 +714,7 @@ fn add_locus(
     vcf_data: &mut Option<(bcf::IndexedReader, panvcf::HaplotypeNames)>,
     kmer_getter: &JfKmerGetter,
     args: &Args,
+    opt_ref_name: Option<&str>,
 ) -> crate::Result<bool>
 {
     let lock_filename = locus_dir.join("lock");
@@ -751,11 +749,6 @@ fn add_locus(
     }
     let ref_seq = locus.interval().fetch_seq(fasta_reader)?;
 
-    // Write reference coordinates to the BED file.
-    let locus_bed = locus_dir.join(paths::LOCUS_BED);
-    let mut bed_writer = ext::sys::create_file(&locus_bed)?;
-    writeln!(bed_writer, "{}", locus.bed_fmt()).map_err(add_path!(locus_bed))?;
-
     // Load sequences.
     let allele_seqs = if let Some((vcf_file, hap_names)) = vcf_data {
         panvcf::reconstruct_sequences(locus.interval(), &ref_seq, vcf_file, hap_names,
@@ -774,6 +767,34 @@ fn add_locus(
     if without_ns < obtained_count {
         log::warn!("    Removed {}/{} haplotypes with Ns", obtained_count - without_ns, obtained_count);
     }
+
+    let stored_ref_name: Option<&str> = opt_ref_name.and_then(|ref_name| {
+        match allele_seqs.iter().position(|entry| entry.name() == ref_name) {
+            Some(i) => {
+                let hap_len = allele_seqs[i].seq().len() as u32;
+                if hap_len == locus.interval().len() {
+                    Some(ref_name)
+                } else {
+                    log::warn!("    Reference haplotype ({}) found, but has incorrect length ({}, expected {})",
+                        ref_name, hap_len, locus.interval().len());
+                    None
+                }
+            }
+            None => {
+                log::warn!("    Could not find reference haplotype {}", ref_name);
+                None
+            }
+        }
+    });
+    // Write reference coordinates to the BED file.
+    let locus_bed = locus_dir.join(paths::LOCUS_BED);
+    let bed_line = match stored_ref_name {
+        Some(name) => format!("{}\t{}\n", locus.bed_fmt(), name),
+        None => format!("{}\n", locus.bed_fmt()),
+    };
+    let mut bed_writer = ext::sys::create_file(&locus_bed)?;
+    bed_writer.write_all(bed_line.as_bytes()).map_err(add_path!(locus_bed))?;
+
     check_sequences(&allele_seqs, &locus, alleles_fasta.is_some().then_some(&ref_seq as &[u8]))?;
     process_alleles(locus.name(), locus_dir, ref_seq, allele_seqs, kmer_getter, args)?;
     lock_file.release()?;
@@ -794,12 +815,15 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
     let (contigs, mut fasta_reader) = ContigNames::load_indexed_fasta("REF", args.reference.as_ref().unwrap())?;
     let contigs = Arc::new(contigs);
     let loci = parse_loci(&contigs, &args.loci, &args.bed_files, args.variants.is_none())?;
+    let opt_ref_name = args.ref_name.clone()
+        .or_else(|| GenomeVersion::guess(&contigs).map(|ver| ver.to_str().to_owned()));
+
     let mut vcf_data = if let Some(vcf_filename) = &args.variants {
         let mut vcf_file = bcf::IndexedReader::from_path(vcf_filename)?;
-        let ref_name = args.ref_name.as_ref().map(String::clone)
-            .or_else(|| GenomeVersion::guess(&contigs).map(|ver| ver.to_str().to_owned()))
-            .ok_or_else(|| error!(RuntimeError, "Cannot guess reference genome name, please provide using -g"))?;
-        let hap_names = panvcf::HaplotypeNames::new(&mut vcf_file, &ref_name, &args.leave_out)?;
+        let Some(ref_name) = opt_ref_name.as_ref() else {
+            return Err(error!(RuntimeError, "Cannot guess reference genome name, please provide using -g"));
+        };
+        let hap_names = panvcf::HaplotypeNames::new(&mut vcf_file, ref_name, &args.leave_out)?;
         Some((vcf_file, hap_names))
     } else {
         None
@@ -816,8 +840,8 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
             skipped += 1;
             continue;
         }
-        match add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader,
-            &mut vcf_data, &kmer_getter, &args)
+        match add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader, &mut vcf_data,
+            &kmer_getter, &args, opt_ref_name.as_ref().map(|s| s as &str))
         {
             Ok(true) => {}
             Ok(false) => skipped += 1,
