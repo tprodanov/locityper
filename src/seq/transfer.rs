@@ -304,8 +304,8 @@ impl HapAlns {
 
                 total_transfers += 1;
                 let approx_target_start = offset.rpos();
-                let approx_target_end = cigar_index.find_cigar_offset(
-                    source_interval.end() - 1, query_to_ref).rpos() + 1;
+                let approx_target_end = min(target_seq.len() as u32,
+                    cigar_index.find_cigar_offset(source_interval.end() - 1, query_to_ref).rpos() + 1);
                 let ambiguous = self.ambiguities.ambiguous(target_contig_id, approx_target_start, approx_target_end);
                 let (new_start, new_cigar) = if ambiguous {
                     expens_transfers += 1;
