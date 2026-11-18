@@ -49,8 +49,8 @@ def find_closest(genotypes, distances, excl_haplotypes, out):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description='For each sample in --S1, calculate haplotype availability assuming leave-one-out scheme. \
-        In addition, availability can be calculated assuming all samples from --S2 are discarded.')
+        description='For each sample in --samples, calculate haplotype availability assuming \
+        haplotypes from --include are available and from --exclude are discarded.')
     parser.add_argument('-i', '--input', metavar='FILE', required=True,
         help='Input PAF[.gz] file with pairwise distances.')
     parser.add_argument('-d', '--discarded', metavar='FILE', required=False,
