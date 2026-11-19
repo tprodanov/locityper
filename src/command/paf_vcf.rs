@@ -340,14 +340,15 @@ fn process_haplotype(
     Ok(vars)
 }
 
-/// Creates either bgzip or plain output file.
+/// Creates either bgzip or plain output file. Second returned value is true if data is compressed.
 fn create_vcf_writer<'a>(
     filename: impl AsRef<Path>,
     samples: impl Iterator<Item = &'a str>,
-) -> crate::Result<Box<dyn Write>>
+) -> crate::Result<(Box<dyn Write>, bool)>
 {
     let filename = filename.as_ref();
-    let mut out = if filename.extension().and_then(OsStr::to_str) == Some("gz") {
+    let bgzip = filename.extension().and_then(OsStr::to_str) == Some("gz");
+    let mut out = if bgzip {
         htslib::bgzf::Writer::from_path(&filename)
             .map_err(|_| error!(RuntimeError, "Cannot create file {}", filename.display()))
             .map(|w| Box::new(w) as Box<dyn Write>)?
@@ -364,7 +365,7 @@ fn create_vcf_writer<'a>(
         write!(out, "\t{}", sample).map_err(add_path!(filename))?;
     }
     writeln!(out).map_err(add_path!(filename))?;
-    Ok(out)
+    Ok((out, bgzip))
 }
 
 /// Reads PAF file and returns a vector of variants for each haplotype found in the contig set and in the PAF file.
@@ -485,7 +486,7 @@ fn write_vcf(
         .collect();
 
     let ref_seq = contig_set.get_seq(ref_id);
-    let mut writer = create_vcf_writer(vcf_filename, groupped_haps.iter().map(|(name, _)| name as &str))?;
+    let (mut writer, bgzip) = create_vcf_writer(vcf_filename, groupped_haps.iter().map(|(name, _)| name as &str))?;
 
     for (i, &(ref_start, ref_end)) in ref_ranges.iter().enumerate() {
         let mut alleles = vec![&ref_seq[ref_start as usize..ref_end as usize]];
@@ -523,6 +524,13 @@ fn write_vcf(
             }
         }
         writeln!(writer).map_err(add_path!(vcf_filename))?;
+    }
+    writer.flush().map_err(add_path!(vcf_filename))?;
+    std::mem::drop(writer);
+    if bgzip {
+        if let Err(e) = htslib::bcf::index::build(vcf_filename, None, 1, htslib::bcf::index::Type::Tbx) {
+            log::error!("Could not construct tabix index for VCF file {}: {}", ext::fmt::path(vcf_filename), e);
+        }
     }
     Ok(())
 }
@@ -564,7 +572,6 @@ fn combine_variants(
     }
 
     write_vcf(chrom, shift, &merged_ref_ranges, &vars, contig_set, ref_id, groupped_haps, merged_vcf_filename)?;
-
     if let Some(separate_vcf_fname) = separate_vcf_filename {
         write_vcf(chrom, shift, &unique_ranges, &vars, contig_set, ref_id, groupped_haps, separate_vcf_fname)?;
     }
