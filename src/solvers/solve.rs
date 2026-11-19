@@ -53,7 +53,7 @@ use super::Solver;
 fn truncate_ixs(
     ixs: &mut Vec<usize>,
     scores: &[f64],
-    genotypes: &[Genotype],
+    genotypes: &[GenotypeInfo],
     filt_diff: f64,
     mut min_size: usize,
     threads: usize,
@@ -66,7 +66,7 @@ fn truncate_ixs(
     let best = scores[ixs[0]];
     let worst = scores[ixs[n - 1]];
     log::debug!("        Worst score: {} ({:.0}), Best: {} ({:.0})",
-        genotypes[ixs[n - 1]], Ln::to_log10(worst), genotypes[ixs[0]], Ln::to_log10(best));
+        genotypes[ixs[n - 1]].genotype, Ln::to_log10(worst), genotypes[ixs[0]].genotype, Ln::to_log10(best));
     let thresh = best - filt_diff;
 
     let m = if min_size >= n && thresh <= worst {
@@ -75,7 +75,18 @@ fn truncate_ixs(
         ixs.partition_point(|&i| scores[i] >= thresh).max(min_size).min(max_size)
     };
 
-    ixs.truncate(m);
+    // If there are any `never_discard` genotypes, put them at the back of the vector.
+    let mut insert_pos = m;
+    for i in m..n {
+        if genotypes[ixs[i]].never_discard {
+            if i != insert_pos {
+                // Here we are sure that insert_pos < i and genotypes[insert_pos] should be discarded.
+                ixs.swap(insert_pos, i);
+            }
+            insert_pos += 1;
+        }
+    }
+    ixs.truncate(insert_pos);
     let last_score = scores[m - 1];
     log::debug!("        Keep {}/{} genotypes ({:.1}%), smallest score: {:.0} ({:.1}%)",
         m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(last_score),
@@ -85,9 +96,8 @@ fn truncate_ixs(
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
 fn run_filter(
     contigs: &ContigNames,
-    genotypes: &[Genotype],
+    genotypes: &[GenotypeInfo],
     ixs: &mut Vec<usize>,
-    priors: &[f64],
     all_alns: &AllAlignments,
     mut writer: Option<&mut impl Write>,
     params: &AssgnParams,
@@ -102,17 +112,16 @@ fn run_filter(
     let mut gt_best_probs = vec![0.0_f64; all_alns.reads().len()];
     let mut scores = vec![f64::NEG_INFINITY; genotypes.len()];
     for &i in ixs.iter() {
-        let gt = &genotypes[i];
-        let prior = priors[i];
-        let gt_ids = gt.ids();
+        let info = &genotypes[i];
+        let gt_ids = info.genotype.ids();
         gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
         for id in gt_ids[1..].iter() {
             gt_best_probs.iter_mut().zip(&best_aln_matrix[id.ix()])
                 .for_each(|(best_prob, &curr_prob)| *best_prob = best_prob.max(curr_prob));
         }
-        let score = prior + gt_best_probs.iter().sum::<f64>();
+        let score = info.prior + gt_best_probs.iter().sum::<f64>();
         if let Some(ref mut w) = writer {
-            writeln!(w, "0\t{}\t{:.3}", gt, Ln::to_log10(score)).map_err(add_path!(!))?;
+            writeln!(w, "0\t{}\t{:.3}", info.genotype, Ln::to_log10(score)).map_err(add_path!(!))?;
         }
         scores[i] = score;
     }
@@ -249,6 +258,20 @@ impl Scheme {
     }
 }
 
+/// Genotype and associated information.
+pub struct GenotypeInfo {
+    pub genotype: Genotype,
+    pub prior: f64,
+    pub never_discard: bool,
+}
+
+impl GenotypeInfo {
+    #[inline]
+    pub fn new(genotype: Genotype, prior: f64) -> Self {
+        Self { genotype, prior, never_discard: false }
+    }
+}
+
 /// Various structures, needed for sample genotyping.
 pub struct Data {
     /// Solving scheme.
@@ -262,8 +285,7 @@ pub struct Data {
     pub distr_cache: Arc<DistrCache>,
 
     /// Genotypes and their priors.
-    pub genotypes: Vec<Genotype>,
-    pub priors: Vec<f64>,
+    pub genotypes: Vec<GenotypeInfo>,
 
     pub assgn_params: AssgnParams,
     pub debug: DebugLvl,
@@ -423,7 +445,7 @@ impl Predictions {
 
     fn discard_improbable_genotypes(
         &mut self,
-        genotypes: &[Genotype],
+        genotypes: &[GenotypeInfo],
         prob_thresh: f64,
         mut out_size: usize,
         threads: usize,
@@ -440,8 +462,8 @@ impl Predictions {
         let best = self.predictions[best_ix].as_ref().unwrap().cheap_clone();
         let worst = self.predictions[worst_ix].as_ref().unwrap().cheap_clone();
         log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
-            genotypes[worst_ix], Ln::to_log10(worst.lik_mean),
-            genotypes[best_ix], Ln::to_log10(best.lik_mean));
+            genotypes[worst_ix].genotype, Ln::to_log10(worst.lik_mean),
+            genotypes[best_ix].genotype, Ln::to_log10(best.lik_mean));
 
         // Only run sophisticated genotype comparison if output size is at most 500.
         const SOPHISTICATED_COUNT: usize = 500;
@@ -502,7 +524,7 @@ impl Predictions {
         while i < n {
             let u = self.ixs[i];
             let pred_i = self.predictions[u].take().unwrap();
-            out_genotypes.push(genotypes[u].clone());
+            out_genotypes.push(genotypes[u].genotype.clone());
             for j in i + 1..n {
                 let pred_j = self.predictions[self.ixs[j]].as_ref().unwrap();
                 let prob_j = compare_two_likelihoods(pred_j, &pred_i);
@@ -814,17 +836,16 @@ fn solve_single_thread(
         logger.reset(n_gts);
         let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
         for &ix in predictions.ixs.iter() {
-            let gt = &data.genotypes[ix];
-            let prefix = format!("{}\t{}\t", stage.ix + 1, gt);
-            let prior = data.priors[ix];
-            let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns,
+            let info = &data.genotypes[ix];
+            let prefix = format!("{}\t{}\t", stage.ix + 1, info.genotype);
+            let mut gt_alns = GenotypeAlignments::new(info.genotype.clone(), &data.contig_infos, &data.all_alns,
                 &data.assgn_params);
             let mut counts = gt_alns.create_counts();
 
             for (attempt, lik) in liks.iter_mut().enumerate() {
                 gt_alns.apply_tweak(rng, distr_cache, &data.assgn_params);
                 let assgns = stage.solver.solve(&gt_alns, rng)?;
-                *lik = prior + assgns.likelihood();
+                *lik = info.prior + assgns.likelihood();
                 let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
                 if let Some(w) = &mut depth_writer {
                     assgns.write_depth(w, &ext_prefix).map_err(add_path!(!))?;
@@ -835,7 +856,7 @@ fn solve_single_thread(
                 assgns.update_counts(&mut counts);
             }
             let (lik_mean, lik_var) = F64Ext::mean_variance_or_nan(&liks);
-            logger.update(gt, lik_mean);
+            logger.update(&info.genotype, lik_mean);
             predictions.predictions[ix] = Some(Prediction::new(lik_mean, lik_var, stage.attempts, counts));
             if let Some(ref mut w) = curr_sol_writer {
                 writeln!(w, "{}{:.4}", prefix, Ln::to_log10(lik_mean)).map_err(add_path!(!))?;
@@ -887,8 +908,8 @@ pub fn solve(
     let out_size0 = data.scheme.stages[0].in_size;
     if data.assgn_params.dont_skip || out_size0 < n_gts {
         let curr_sol_writer = (data.debug != DebugLvl::None).then_some(&mut sol_writer);
-        run_filter(&data.contigs, &data.genotypes, &mut predictions.ixs,
-            &data.priors, &data.all_alns, curr_sol_writer, &data.assgn_params, out_size0, data.threads)?;
+        run_filter(&data.contigs, &data.genotypes, &mut predictions.ixs, &data.all_alns, curr_sol_writer,
+            &data.assgn_params, out_size0, data.threads)?;
     }
 
     let (mut depth_writers, mut ext_sol_writers) = create_debug_files(locus_dir, data.threads, data.debug);
@@ -1019,10 +1040,10 @@ impl MainWorker {
                 for (receiver, jobs) in self.receivers.iter().zip(rem_jobs.iter_mut()) {
                     if *jobs > 0 {
                         let (ix, pred) = receiver.recv().expect("Genotyping worker has failed!");
-                        let gt = &data.genotypes[ix];
-                        logger.update(gt, pred.lik_mean);
+                        let info = &data.genotypes[ix];
+                        logger.update(&info.genotype, pred.lik_mean);
                         if let Some(ref mut w) = curr_sol_writer {
-                            writeln!(w, "{}\t{}\t{:.4}", stage.ix + 1, gt, Ln::to_log10(pred.lik_mean))
+                            writeln!(w, "{}\t{}\t{:.4}", stage.ix + 1, info.genotype, Ln::to_log10(pred.lik_mean))
                                 .map_err(add_path!(!))?;
                         }
                         predictions.predictions[ix] = Some(pred);
@@ -1066,16 +1087,15 @@ impl Worker {
 
             let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
             for ix in task.into_iter() {
-                let gt = &data.genotypes[ix];
-                let prefix = format!("{}\t{}\t", stage_ix + 1, gt);
-                let prior = data.priors[ix];
-                let mut gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns,
+                let info = &data.genotypes[ix];
+                let prefix = format!("{}\t{}\t", stage_ix + 1, info.genotype);
+                let mut gt_alns = GenotypeAlignments::new(info.genotype.clone(), &data.contig_infos, &data.all_alns,
                     &data.assgn_params);
                 let mut counts = gt_alns.create_counts();
                 for (attempt, lik) in liks.iter_mut().enumerate() {
                     gt_alns.apply_tweak(&mut self.rng, distr_cache, &data.assgn_params);
                     let assgns = stage.solver.solve(&gt_alns, &mut self.rng)?;
-                    *lik = prior + assgns.likelihood();
+                    *lik = info.prior + assgns.likelihood();
                     let ext_prefix = format!("{}{}\t", prefix, attempt + 1);
                     if let Some(w) = &mut self.depth_writer {
                         assgns.write_depth(w, &ext_prefix).map_err(add_path!(!))?;

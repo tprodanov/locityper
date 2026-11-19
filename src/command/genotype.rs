@@ -44,7 +44,7 @@ use crate::{
         windows::{ContigInfos, WeightCalculator},
         distr_cache::DistrCache,
     },
-    solvers::solve::{self, Scheme},
+    solvers::solve::{self, GenotypeInfo, Scheme},
     algo::{HashSet, HashMap},
 };
 use super::{paths, DebugLvl, preproc::InputFiles};
@@ -1211,13 +1211,12 @@ fn generate_genotypes(
     contigs: &ContigNames,
     opt_priors: Option<&HashMap<String, f64>>,
     ploidy: usize,
-) -> crate::Result<(Vec<Genotype>, Vec<f64>)>
-{
+) -> crate::Result<Vec<GenotypeInfo>> {
+    let mut genotypes = Vec::new();
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
             "All contig IDs must be present when priors are provided");
-        let mut genotypes = Vec::with_capacity(priors_map.len());
-        let mut priors = Vec::with_capacity(priors_map.len());
+        genotypes.reserve_exact(priors_map.len());
         for (s, &prior) in priors_map.iter() {
             let gt = Genotype::parse(s, contigs)?;
             if prior > 0.0 || prior.is_nan() {
@@ -1226,17 +1225,16 @@ fn generate_genotypes(
                 return Err(error!(InvalidInput,
                     "Cannot load prior for genotype {} (expected ploidy {})", s, ploidy));
             } else if prior.is_finite() {
-                genotypes.push(gt);
-                priors.push(prior);
+                genotypes.push(GenotypeInfo::new(gt, prior));
             }
         }
-        Ok((genotypes, priors))
     } else {
         let count = ext::vec::count_combinations_with_repl(contig_ids.len(), ploidy);
-        let mut genotypes = Vec::with_capacity(count);
-        ext::vec::gen_combinations_with_repl(&contig_ids, ploidy, |ids| genotypes.push(Genotype::new(ids, contigs)));
-        Ok((genotypes, vec![0.0; count]))
+        genotypes.reserve_exact(count);
+        ext::vec::gen_combinations_with_repl(&contig_ids, ploidy,
+            |ids| genotypes.push(GenotypeInfo::new(Genotype::new(ids, contigs), 0.0)));
     }
+    Ok(genotypes)
 }
 
 /// Go through the haplotype-haplotype alignments, and store `HapAlns` and matrix of edit distances, when needed.
@@ -1347,7 +1345,7 @@ fn analyze_locus(
         }
 
         let contig_ids: Vec<ContigId> = contigs.ids().collect();
-        let (genotypes, priors) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
+        let genotypes = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
         if genotypes.is_empty() {
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
@@ -1372,7 +1370,7 @@ fn analyze_locus(
             debug: args.debug,
             threads: usize::from(args.threads).min(genotypes.len()),
             is_paired_end: bg_distr.insert_distr().is_paired_end(),
-            all_alns, genotypes, priors, contig_infos,
+            all_alns, genotypes, contig_infos,
         });
         solve::solve(&data, bg_distr, &locus.out_dir, &mut rng)?
     };
