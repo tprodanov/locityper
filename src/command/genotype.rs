@@ -414,10 +414,11 @@ fn print_help(extended: bool) {
             "    --hint-vcf".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Input VCF file is already phased.",
             "    --hint-phased".green(), super::flag());
-        println!("    {}  {}  Reference haplotype name of the VCF file, or a BED file\n\
-            {EMPTY}  with reference coordinates and haplotype name in the fifth column.\n\
-            {EMPTY}  The file must be located in db/loci/*/{}.",
-            "    --hint-ref".green(), "STR|FILE".yellow(), "FILE".yellow());
+        println!("    {}  {}  If VCF has a different reference genome than the Locityper database,\n\
+            {EMPTY}  put BED files in `db/loci/*/<tag>.bed` (e.g. `.../GRCh38.bed`) with locus\n\
+            {EMPTY}  coordinates and specify basename here. BED files must contain the reference\n\
+            {EMPTY}  haplotype name with `ref-hap=...` in one of the columns.",
+            "    --hint-ref".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Only examine variants with this genotype quality [{}].",
             "    --hint-gq".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hint.min_gq));
         //     By default, VCF file is assumed to be constructed using the same\n\

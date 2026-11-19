@@ -534,6 +534,21 @@ impl DiscardedHaplotypes {
     pub fn identical_to(&self, contig_id: ContigId) -> Option<&Vec<(String, bool)>> {
         self.by_contig.get(&contig_id)
     }
+
+    /// Searches for a discarded haplotype.
+    pub fn search_for(&self, name: &str) -> Option<ContigId> {
+        for (&contig_id, discarded) in &self.by_contig {
+            if let Some(&(_, identical)) = discarded.iter().filter(|(s, _)| s == name).next() {
+                return if identical {
+                    Some(contig_id)
+                } else {
+                    log::warn!("Contig name {} was previously pruned, no identical copy remains in the panel", name);
+                    return None
+                };
+            }
+        }
+        None
+    }
 }
 
 /// Returns true if `name` is in `set`, or, if `name` ends with `.N` / `_N` / `-N` (N is a single digit)

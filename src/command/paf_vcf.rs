@@ -91,10 +91,6 @@ fn print_help() {
         "-p, --paf".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Input FASTA[.gz] file with haplotypes.",
         "-f, --fasta".green(), "FILE".yellow());
-    println!("    {:KEY$} {:VAL$}  Reference haplotypes name. Optional if\n\
-        {EMPTY}  <-i directory>/ref.bed or -R region.bed contain haplotype name\n\
-        {EMPTY}  in the format \"ref-hap=...\" in one of the columns.",
-        "-r, --ref-hap".green(), "STR".yellow());
     println!("    {:KEY$} {}\n\
         {EMPTY}  Text file with discarded haplotypes [{}].\n\
         {EMPTY}  {} = <Directory of {}>/discarded_haplotypes.txt.",
@@ -106,6 +102,10 @@ fn print_help() {
         "-o, --output".green(), "FILE [FILE]".yellow());
 
     println!("\n{}", "Optional arguments:".bold());
+    println!("    {:KEY$} {:VAL$}  Reference haplotypes name. Optional if\n\
+        {EMPTY}  <-i directory>/ref.bed or -R region.bed contain haplotype name\n\
+        {EMPTY}  in the format \"ref-hap=...\" in one of the columns.",
+        "-r, --ref-hap".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Adjust variant positions relative to this region [{}].\n\
         {EMPTY}  Should be either {} (search for ref.bed relative to haplotypes PAF), {},\n\
         {EMPTY}  `chrom:start-end` or a BED file with one entry.",
@@ -155,11 +155,48 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
     Ok(args)
 }
 
-pub(super) struct RegionInfo {
+/// Information about the reference region for the locus.
+pub(super) struct ReferenceRegion {
     chrom: String,
     start: u32,
     end: u32,
-    ref_name: Option<String>,
+    ref_hap: Option<String>,
+}
+
+impl ReferenceRegion {
+    #[inline]
+    pub fn new(chrom: String, start: u32, end: u32, ref_hap: Option<String>) -> Self {
+        Self { chrom, start, end, ref_hap }
+    }
+
+    pub fn load(filename: impl AsRef<Path>) -> crate::Result<Self> {
+        let filename = filename.as_ref();
+        let mut lines = ext::sys::open(filename)?.lines();
+        let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+            .map_err(add_path!(filename))?;
+        if lines.next().is_some() {
+            log::warn!("BED file {} has more than one line", filename.display());
+        }
+        let trimmed = line.trim();
+        let mut split = trimmed.splitn(4, '\t');
+        let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+            .to_string();
+        let start: u32 = split.next()
+            .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", filename.display(), trimmed))?
+            .parse()
+            .map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, filename.display()))?;
+        let end: u32 = split.next()
+            .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", filename.display(), trimmed))?
+            .parse()
+            .map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, filename.display()))?;
+        // (?:) is a non-capturing group.
+        const REFHAP_PATTERN: &'static str = formatcp!("(?:^|,|;|\t)ref[_-]?hap=({})", interv::CONTIG_PATTERN);
+        static REFHAP_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(REFHAP_PATTERN).unwrap());
+        let ref_hap = split.next()
+            .and_then(|remainder| REFHAP_REGEX.captures(remainder))
+            .map(|captures| captures[1].to_string());
+        Ok(Self::new(chrom, start, end, ref_hap))
+    }
 }
 
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
@@ -167,7 +204,7 @@ pub(super) struct RegionInfo {
 pub(super) fn load_region(
     s: &str,
     fasta_filename: &Path,
-) -> crate::Result<Option<RegionInfo>> {
+) -> crate::Result<Option<ReferenceRegion>> {
     if s == "none" { return Ok(None) };
 
     let fname = if s == "auto" {
@@ -183,7 +220,7 @@ pub(super) fn load_region(
                 .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get().strict_sub(1);
             let end = captures[3].parse::<PrettyU32>()
                 .map_err(|_| error!(ParsingError, "Cannot parse interval '{}'", s))?.get();
-            return Ok(Some(RegionInfo { chrom, start, end, ref_name: None }));
+            return Ok(Some(ReferenceRegion::new(chrom, start, end, None)));
         }
         PathBuf::from(s)
     };
@@ -192,27 +229,7 @@ pub(super) fn load_region(
         log::warn!("Cannot find BED file {}, using relative locus coordinates", fname.display());
         return Ok(None);
     }
-
-    let mut lines = ext::sys::open(&fname)?.lines();
-    let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
-        .map_err(add_path!(fname))?;
-    let trimmed = line.trim();
-    let mut split = trimmed.splitn(4, '\t');
-    let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
-        .to_string();
-    let start: u32 = split.next()
-        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
-        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
-    let end: u32 = split.next()
-        .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
-        .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
-    // (?:) is a non-capturing group.
-    const REFHAP_PATTERN: &'static str = formatcp!("(?:^|,|;|\t)ref[_-]?hap=({})", interv::CONTIG_PATTERN);
-    static REFHAP_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(REFHAP_PATTERN).unwrap());
-    let ref_name = split.next()
-        .and_then(|remainder| REFHAP_REGEX.captures(remainder))
-        .map(|captures| captures[1].to_string());
-    Ok(Some(RegionInfo { chrom, start, end, ref_name }))
+    ReferenceRegion::load(fname).map(Some)
 }
 
 #[derive(Clone, Debug)]
@@ -612,6 +629,7 @@ fn group_haplotypes(
                 log::warn!("Reference name {} has haplotype suffix ({}); will keep it in the VCF file",
                     ref_hap, hap.as_str());
             } else {
+                // Return from the inner function.
                 return Ok(());
             }
         }
@@ -648,7 +666,7 @@ pub(super) fn convert_to_vcf(
     contig_set: &ContigSet,
     disc_haps: &DiscardedHaplotypes,
     opt_ref_hap: Option<&str>,
-    region: Option<RegionInfo>,
+    region: Option<ReferenceRegion>,
     out_merged: &Path,
     out_separate: Option<&Path>,
 ) -> crate::Result<()>
@@ -656,7 +674,7 @@ pub(super) fn convert_to_vcf(
     if !disc_haps.all_identical() {
         log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
     }
-    let ref_hap = opt_ref_hap.or(region.as_ref().and_then(|region| region.ref_name.as_ref().map(|s| s as &str)))
+    let ref_hap = opt_ref_hap.or(region.as_ref().and_then(|region| region.ref_hap.as_ref().map(|s| s as &str)))
         .ok_or_else(|| error!(InvalidInput, "Reference haplotype not found in the BED file and not provided with -r"))?;
     let (groupped_haps, ref_id) = group_haplotypes(contig_set.contigs(), ref_hap, &disc_haps)?;
     let ref_len = contig_set.contigs().get_len(ref_id);
