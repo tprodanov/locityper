@@ -1,9 +1,11 @@
 use std::{
+    sync::LazyLock,
     path::{Path, PathBuf},
     time::Instant,
     io::{Write, BufRead},
     ffi::OsStr,
 };
+use const_format::formatcp;
 use colored::Colorize;
 use regex::Regex;
 use crate::{
@@ -90,7 +92,8 @@ fn print_help() {
     println!("    {:KEY$} {:VAL$}  Input FASTA[.gz] file with haplotypes.",
         "-f, --fasta".green(), "FILE".yellow());
     println!("    {:KEY$} {:VAL$}  Reference haplotypes name. Optional if\n\
-        {EMPTY}  <-i directory>/ref.bed or -R region.bed contains haplotype name in fifth column.",
+        {EMPTY}  <-i directory>/ref.bed or -R region.bed contain haplotype name\n\
+        {EMPTY}  in the format \"ref-hap=...\" in one of the columns.",
         "-r, --ref-hap".green(), "STR".yellow());
     println!("    {:KEY$} {}\n\
         {EMPTY}  Text file with discarded haplotypes [{}].\n\
@@ -194,7 +197,7 @@ pub(super) fn load_region(
     let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
         .map_err(add_path!(fname))?;
     let trimmed = line.trim();
-    let mut split = trimmed.split('\t');
+    let mut split = trimmed.splitn(4, '\t');
     let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", fname.display()))?
         .to_string();
     let start: u32 = split.next()
@@ -203,8 +206,12 @@ pub(super) fn load_region(
     let end: u32 = split.next()
         .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", fname.display(), trimmed))?
         .parse().map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, fname.display()))?;
-    let _ = split.next();
-    let ref_name = split.next().map(|s| s.to_string());
+    // (?:) is a non-capturing group.
+    const REFHAP_PATTERN: &'static str = formatcp!("(?:^|,|;|\t)ref[_-]?hap=({})", interv::CONTIG_PATTERN);
+    static REFHAP_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(REFHAP_PATTERN).unwrap());
+    let ref_name = split.next()
+        .and_then(|remainder| REFHAP_REGEX.captures(remainder))
+        .map(|captures| captures[1].to_string());
     Ok(Some(RegionInfo { chrom, start, end, ref_name }))
 }
 
@@ -627,7 +634,7 @@ fn group_haplotypes(
 
     let Some(ref_id) = ref_id else {
         return Err(error!(InvalidInput,
-            "Cannot find reference haplotype {} in neither the fasta file nor among the discarded haplotypes",
+            "Cannot find reference haplotype `{}` in neither the fasta file nor among the discarded haplotypes",
             ref_hap));
     };
 
