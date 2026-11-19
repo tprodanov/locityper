@@ -49,6 +49,20 @@ use crate::{
 };
 use super::Solver;
 
+/// Appends all forced genotypes to `end`, returns new end.
+fn append_forced_genotypes(ixs: &mut Vec<usize>, genotypes: &[GenotypeInfo], mut end: usize) -> usize {
+    for i in end..ixs.len() {
+        if genotypes[ixs[i]].never_discard {
+            if i != end {
+                // Here we are sure that end < i and genotypes[end] should be discarded.
+                ixs.swap(end, i);
+            }
+            end += 1;
+        }
+    }
+    end
+}
+
 /// Sorts indices by score (largest = best), and truncates the list if needed.
 fn truncate_ixs(
     ixs: &mut Vec<usize>,
@@ -76,21 +90,14 @@ fn truncate_ixs(
     };
 
     // If there are any `never_discard` genotypes, put them at the back of the vector.
-    let mut insert_pos = m;
-    for i in m..n {
-        if genotypes[ixs[i]].never_discard {
-            if i != insert_pos {
-                // Here we are sure that insert_pos < i and genotypes[insert_pos] should be discarded.
-                ixs.swap(insert_pos, i);
-            }
-            insert_pos += 1;
-        }
-    }
-    ixs.truncate(insert_pos);
+    let truncate_size = append_forced_genotypes(ixs, genotypes, m);
+    ixs.truncate(truncate_size);
     let last_score = scores[m - 1];
-    log::debug!("        Keep {}/{} genotypes ({:.1}%), smallest score: {:.0} ({:.1}%)",
+    log::debug!("        Keep {}/{} genotypes ({:.1}%), smallest score: {:.0} ({:.1}%){}",
         m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(last_score),
-        100.0 * (last_score - worst) / (best - worst).max(1.0));
+        100.0 * (last_score - worst) / (best - worst).max(1.0),
+        if m < truncate_size { " +1 reference genotype" } else { "" });
+    // [NOTE] Need to fix this message if there are every more than 1 fixed genotype.
 }
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
@@ -896,8 +903,7 @@ pub fn solve(
     bg_distr: &BgDistr,
     locus_dir: &Path,
     rng: &mut XoshiroRng,
-) -> crate::Result<Genotyping>
-{
+) -> crate::Result<Genotyping> {
     let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
     log::info!("=== Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);

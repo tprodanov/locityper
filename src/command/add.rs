@@ -841,7 +841,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
             continue;
         }
         match add_locus(locus.clone(), &alleles_fasta, &locus_dir, &mut fasta_reader, &mut vcf_data,
-            &kmer_getter, &args, opt_ref_name.as_ref().map(|s| s as &str))
+            &kmer_getter, &args, opt_ref_name.as_ref().map(AsRef::as_ref))
         {
             Ok(true) => {}
             Ok(false) => skipped += 1,

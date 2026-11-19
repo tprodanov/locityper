@@ -417,6 +417,19 @@ impl Genotype {
         Self { ids, name }
     }
 
+    pub fn new_homozygous(id: ContigId, ploidy: usize, contigs: &ContigNames) -> Self {
+        let ids: GtStorage = smallvec::smallvec![id; ploidy];
+        let mut name = String::new();
+        let contig_name = contigs.get_name(id);
+        for i in 0..ploidy {
+            if i > 0 {
+                name.push(',');
+            }
+            name.push_str(contig_name);
+        }
+        Self { ids, name }
+    }
+
     /// Returns contigs within the genotype (they can repeat).
     pub fn ids(&self) -> &[ContigId] {
         &self.ids
@@ -470,7 +483,8 @@ impl Default for DiscardedHaplotypes {
 impl DiscardedHaplotypes {
     /// Tries to read discarded haplotypes from a given filename.
     /// Does not warn on missing files.
-    pub fn load_if_present(filename: &Path, contigs: &ContigNames) -> crate::Result<Self> {
+    pub fn load_if_present(filename: impl AsRef<Path>, contigs: &ContigNames) -> crate::Result<Self> {
+        let filename = filename.as_ref();
         if filename.exists() {
             Self::load(ext::sys::open(filename)?, contigs)
         } else {

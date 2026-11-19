@@ -197,6 +197,31 @@ impl ReferenceRegion {
             .map(|captures| captures[1].to_string());
         Ok(Self::new(chrom, start, end, ref_hap))
     }
+
+    #[inline]
+    pub fn chrom(&self) -> &str {
+        &self.chrom
+    }
+
+    #[inline]
+    pub fn start(&self) -> u32 {
+        self.start
+    }
+
+    #[inline]
+    pub fn end(&self) -> u32 {
+        self.end
+    }
+
+    #[inline]
+    pub fn ref_hap(&self) -> Option<&str> {
+        self.ref_hap.as_ref().map(AsRef::as_ref)
+    }
+
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.end - self.start
+    }
 }
 
 /// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
@@ -674,15 +699,15 @@ pub(super) fn convert_to_vcf(
     if !disc_haps.all_identical() {
         log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
     }
-    let ref_hap = opt_ref_hap.or(region.as_ref().and_then(|region| region.ref_hap.as_ref().map(|s| s as &str)))
+    let ref_hap = opt_ref_hap.or(region.as_ref().and_then(|region| region.ref_hap.as_ref().map(AsRef::as_ref)))
         .ok_or_else(|| error!(InvalidInput, "Reference haplotype not found in the BED file and not provided with -r"))?;
     let (groupped_haps, ref_id) = group_haplotypes(contig_set.contigs(), ref_hap, &disc_haps)?;
     let ref_len = contig_set.contigs().get_len(ref_id);
     let (chrom, shift) = match region {
-        Some(region) if region.end - region.start != ref_len =>
+        Some(region) if region.len() != ref_len =>
             return Err(error!(InvalidData,
-                "paf-vcf: region {}:{}-{} (len = {}) does not match reference haplotype (len = {})",
-                region.chrom, region.start + 1, region.end, region.end - region.start, ref_len)),
+                "Region {}:{}-{} (len = {}) does not match saved reference haplotype (len = {})",
+                region.chrom(), region.start() + 1, region.end(), region.len(), ref_len)),
         Some(region) => (region.chrom, region.start),
         None => (ref_hap.to_string(), 0),
     };
@@ -726,7 +751,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
 
     let region = load_region(&args.region, fasta_filename)?;
     let paf_filename = args.paf.as_ref().expect("PAF filename must be provided");
-    convert_to_vcf(paf_filename, &contig_set, &disc_haps, args.ref_hap.as_ref().map(|s| s as &str), region,
+    convert_to_vcf(paf_filename, &contig_set, &disc_haps, args.ref_hap.as_ref().map(AsRef::as_ref), region,
         args.out_merged.as_ref().expect("Merged output VCF must be present"),
         args.out_separate.as_ref().map(|fname| fname as &Path))?;
 

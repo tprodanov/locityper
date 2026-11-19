@@ -47,7 +47,11 @@ use crate::{
     solvers::solve::{self, GenotypeInfo, Scheme},
     algo::{HashSet, HashMap},
 };
-use super::{paths, DebugLvl, preproc::InputFiles};
+use super::{
+    paths, DebugLvl,
+    preproc::InputFiles,
+    paf_vcf::ReferenceRegion,
+};
 
 pub const DEFAULT_CHUNK_LENGTH: u64 = 3_000_000;
 
@@ -614,7 +618,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
             Long("hint-vcf") => args.hint.vcf = Some(parser.value()?.parse()?),
             Long("hint-phased") => args.hint.already_phased = true,
-            Long("hint-ref") => args.hint.ref_hap_or_bed = Some(parser.value()?.parse()?),
+            Long("hint-ref") => args.hint.ref_bed = Some(parser.value()?.parse()?),
             Long("hint-gq") => args.hint.min_gq = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -728,6 +732,7 @@ pub fn load_explicit_weights(cli_arg: &str, loci: &[LocusData]) -> crate::Result
 
 pub(super) struct LocusData {
     set: Arc<ContigSet>,
+    disc_haps: DiscardedHaplotypes,
     kmer_counts: KmerCounts,
     /// Input directory DB/loci/LOCUS
     db_dir: PathBuf,
@@ -740,13 +745,19 @@ pub(super) struct LocusData {
 }
 
 impl LocusData {
-    pub fn new(set: ContigSet, kmer_counts: KmerCounts, db_locus_dir: &Path, out_locus_dir: &Path) -> Self {
+    pub fn new(
+        set: ContigSet,
+        disc_haps: DiscardedHaplotypes,
+        kmer_counts: KmerCounts,
+        db_locus_dir: &Path,
+        out_locus_dir: &Path,
+    ) -> Self {
         Self {
             db_dir: db_locus_dir.to_owned(),
             out_dir: out_locus_dir.to_owned(),
             init_nhaps: set.len(),
             set: Arc::new(set),
-            kmer_counts,
+            disc_haps, kmer_counts,
             keep_ixs: None,
         }
     }
@@ -852,18 +863,19 @@ pub(super) fn load_loci(
 
             let fasta_fname = db_locus_dir.join(paths::LOCUS_FASTA);
             let kmers_fnames = [db_locus_dir.join(paths::KMERS_BR), db_locus_dir.join(paths::KMERS_LZ4)];
-            let mut locus_data = match ContigSet::load_with_kmer_counts(&name, &fasta_fname, &kmers_fnames) {
-                Ok((set, kmer_counts)) => LocusData::new(set, kmer_counts, &db_locus_dir, &out_locus_dir),
+            let (set, kmer_counts) = match ContigSet::load_with_kmer_counts(&name, &fasta_fname, &kmers_fnames) {
+                Ok(res) => res,
                 Err(e) => {
                     log::error!("Could not load locus information from {}: {}",
-                        ext::fmt::path(&db_locus_dir), e.display());
+                    ext::fmt::path(&db_locus_dir), e.display());
                     continue;
                 }
             };
+            let disc_haps = DiscardedHaplotypes::load_if_present(
+                db_locus_dir.join(paths::DISCARDED_HAPS), set.contigs())?;
+            let mut locus_data = LocusData::new(set, disc_haps, kmer_counts, &db_locus_dir, &out_locus_dir);
             if !leave_out.is_empty() {
-                let disc_haps = DiscardedHaplotypes::load_if_present(&db_locus_dir.join(paths::DISCARDED_HAPS),
-                    locus_data.set.contigs())?;
-                let (ixs, new_set) = locus_data.set.extract_subset(leave_out, &disc_haps)?;
+                let (ixs, new_set) = locus_data.set.extract_subset(leave_out, &locus_data.disc_haps)?;
                 locus_data.set = Arc::new(new_set);
                 if ixs.len() != locus_data.init_nhaps {
                     locus_data.kmer_counts = locus_data.kmer_counts.thin_out(ixs.iter().copied());
@@ -1080,7 +1092,6 @@ fn create_mapping_command(
 ) -> Command
 {
     let n_locs = min(25000, n_seqs * 4).to_string();
-
     let mut cmd: Command;
     if seq_info.technology().are_short_reads() {
         cmd = Command::new(&args.strobealign);
@@ -1212,6 +1223,7 @@ fn generate_genotypes(
     contigs: &ContigNames,
     opt_priors: Option<&HashMap<String, f64>>,
     ploidy: usize,
+    ref_id: Option<ContigId>,
 ) -> crate::Result<Vec<GenotypeInfo>> {
     let mut genotypes = Vec::new();
     if let Some(priors_map) = opt_priors {
@@ -1234,6 +1246,17 @@ fn generate_genotypes(
         genotypes.reserve_exact(count);
         ext::vec::gen_combinations_with_repl(&contig_ids, ploidy,
             |ids| genotypes.push(GenotypeInfo::new(Genotype::new(ids, contigs), 0.0)));
+    }
+
+    if let Some(ref_id) = ref_id {
+        let Some(info) = genotypes.iter_mut()
+            .filter(|info| info.genotype.ids().iter().all(|&id| id == ref_id)).next()
+        else {
+            let ref_gt = Genotype::new_homozygous(ref_id, ploidy, contigs);
+            return Err(error!(InvalidInput,
+                "When --hint-vcf is used, reference genotype {} must have a prior value", ref_gt));
+        };
+        info.never_discard = true;
     }
     Ok(genotypes)
 }
@@ -1282,6 +1305,38 @@ fn process_paf(
     Ok((opt_hap_alns.map(Arc::new), contig_distances))
 }
 
+fn load_ref_region(
+    bed_filename: impl AsRef<Path>,
+    contigs: &ContigNames,
+    discarded_haplotypes: &DiscardedHaplotypes,
+) -> crate::Result<(ReferenceRegion, ContigId)> {
+    let bed_filename = bed_filename.as_ref();
+    let region = ReferenceRegion::load(bed_filename)?;
+    let Some(ref_hap) = &region.ref_hap() else {
+        let mut glob_filename = bed_filename.to_path_buf();
+        glob_filename.pop();
+        glob_filename.pop();
+        glob_filename.push("*");
+        glob_filename.push(bed_filename.file_name().expect("BED file must have a basename"));
+        log::error!("Cannot identify reference haplotype from {}\n    \
+            Expected to have substring \"ref-hap=...\".\n    \
+            Perhaps database was created with older version of Locityper,\n    \
+            You may be able to correct this by running \"sed -i 's/$/\tref-hap=NAME/' {}\"\n    \
+            (replace NAME with the reference haplotype name).", bed_filename.display(),
+            glob_filename.display());
+        return Err(error!(InvalidInput, "BED file does not have a reference haplotype"));
+    };
+    let ref_id = contigs.try_get_id(ref_hap).or_else(|| discarded_haplotypes.search_for(ref_hap))
+        .ok_or_else(|| error!(InvalidInput, "Cannot find reference haplotype {}", ref_hap))?;
+    let ref_len = contigs.get_len(ref_id);
+    if region.len() != ref_len {
+        return Err(error!(InvalidData,
+            "Region {}:{}-{} (len = {}) does not match {} haplotype (len = {})",
+            region.chrom(), region.start() + 1, region.end(), region.len(), ref_hap, ref_len));
+    }
+    Ok((region, ref_id))
+}
+
 fn analyze_locus(
     locus: &LocusData,
     filenames: &Filenames,
@@ -1304,6 +1359,11 @@ fn analyze_locus(
     }
 
     let contigs = locus.set.contigs();
+    let ref_region_and_id = if args.hint.vcf.is_some() {
+        let bed_basename = args.hint.ref_bed.as_ref().map(AsRef::as_ref).unwrap_or(paths::LOCUS_BED);
+        Some(load_ref_region(locus.out_dir.join(bed_basename), contigs, &locus.disc_haps)?)
+    } else { None };
+
     let windows_writer = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         Some(ext::sys::create_gzip(&windows_filename)?)
@@ -1346,7 +1406,8 @@ fn analyze_locus(
         }
 
         let contig_ids: Vec<ContigId> = contigs.ids().collect();
-        let genotypes = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
+        let genotypes = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy),
+            ref_region_and_id.as_ref().map(|t| t.1))?;
         if genotypes.is_empty() {
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }

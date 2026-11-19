@@ -18,7 +18,7 @@ use super::{
 pub struct Params {
     pub vcf: Option<PathBuf>,
     pub already_phased: bool,
-    pub ref_hap_or_bed: Option<PathBuf>,
+    pub ref_bed: Option<String>,
     pub min_gq: f32,
 }
 
@@ -27,7 +27,7 @@ impl Default for Params {
         Self {
             vcf: None,
             already_phased: false,
-            ref_hap_or_bed: None,
+            ref_bed: None,
             min_gq: 10.0,
         }
     }
