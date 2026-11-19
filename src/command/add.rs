@@ -789,7 +789,7 @@ fn add_locus(
     // Write reference coordinates to the BED file.
     let locus_bed = locus_dir.join(paths::LOCUS_BED);
     let bed_line = match stored_ref_name {
-        Some(name) => format!("{}\t{}\n", locus.bed_fmt(), name),
+        Some(name) => format!("{}\tref-hap={}\n", locus.bed_fmt(), name),
         None => format!("{}\n", locus.bed_fmt()),
     };
     let mut bed_writer = ext::sys::create_file(&locus_bed)?;

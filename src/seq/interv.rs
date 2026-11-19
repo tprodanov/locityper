@@ -21,10 +21,10 @@ use super::{ContigId, ContigNames};
 pub(crate) const CONTIG_PATTERN: &'static str = r"[0-9A-Za-z][0-9A-Za-z+._|~=@^-]*";
 
 /// Interval: `contig:start`.
-pub(crate) const CHROM_POS_PATTERN: &'static str = formatcp!("^({}):([0-9][0-9_,]*)$", CONTIG_PATTERN);
+pub(crate) const CHROM_POS_PATTERN: &'static str = formatcp!("^({CONTIG_PATTERN}):([0-9][0-9_,]*)$");
 
 /// Interval: `contig:start-end`.
-pub(crate) const INTERVAL_PATTERN: &'static str = formatcp!("^({}):([0-9][0-9_,]*)-([0-9][0-9_,]*)$", CONTIG_PATTERN);
+pub(crate) const INTERVAL_PATTERN: &'static str = formatcp!("^({CONTIG_PATTERN}):([0-9][0-9_,]*)-([0-9][0-9_,]*)$");
 
 /// Name of the interval (almost the same as `CONTIG_PATTERN`, but includes `:`).
 const NAME_PATTERN: &'static str = r"^[0-9A-Za-z][0-9A-Za-z:+._|~=@^-]*$";

@@ -283,7 +283,7 @@ impl From<u8> for DebugLvl {
 // }
 
 fn write_success_file(filename: impl AsRef<Path>) -> crate::Result<()> {
-    fs::write(&filename, const_format::formatcp!("v{}\n", VERSION)).map_err(add_path!(filename))
+    fs::write(&filename, const_format::formatcp!("v{VERSION}\n")).map_err(add_path!(filename))
 }
 
 /// Describe values for each technology in format
