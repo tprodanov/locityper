@@ -11,6 +11,7 @@ use crate::{
         contigs::{Genotype, ContigNames, ContigId},
         cigar::CigarItem,
         aln::{Alignment, Strand, ReadEnd},
+        interv::ReferenceRegion,
     },
     model::{
         locs::{GrouppedAlignments, ReadData, PairAlignment},
@@ -28,11 +29,11 @@ fn create_bam_header(
     gt: &Genotype,
     contigs: &ContigNames,
     contig_to_tid: &mut Vec<Option<i32>>,
+    ref_region: Option<&ReferenceRegion>,
 ) -> (bam::header::Header, Vec<ContigId>)
 {
     let mut unique_ids = Vec::new();
-    contig_to_tid.clear();
-    contig_to_tid.resize(contigs.len(), None);
+    contig_to_tid.fill(None);
     let mut header = bam::header::Header::new();
     let mut tid = 0;
     for &id in gt.ids() {
@@ -44,10 +45,20 @@ fn create_bam_header(
         contig_to_tid[id.ix()] = Some(tid);
         tid += 1;
         let mut record = bam::header::HeaderRecord::new(b"SQ");
-        record.push_tag(b"SN", contigs.get_name(id));
-        record.push_tag(b"LN", contigs.get_len(id));
+        match ref_region {
+            Some(region) => {
+                record.push_tag(b"SN", region.chrom());
+                record.push_tag(b"LN", region.end());
+            }
+            None => {
+                record.push_tag(b"SN", contigs.get_name(id));
+                record.push_tag(b"LN", contigs.get_len(id));
+            }
+        }
         header.push_record(&record);
     }
+    assert!(ref_region.is_none() || unique_ids.len() == 1,
+        "Genotype {} has more than one contig, impossible to use with defined reference region", gt);
     (header, unique_ids)
 }
 
@@ -87,6 +98,7 @@ fn calc_insert_size(opt_aln1: Option<&Alignment>, opt_aln2: Option<&Alignment>) 
 fn create_record(
     header: Rc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
+    shift: u32,
     opt_aln: Option<&Alignment>,
     read_data: &ReadData,
     read_end: ReadEnd,
@@ -98,7 +110,7 @@ fn create_record(
     record.set_header(header);
     let (cigar_view, strand) = if let Some(aln) = opt_aln {
         record.set_tid(contig_to_tid[aln.contig_id().ix()].expect("Contig ID undefined"));
-        record.set_pos(i64::from(aln.interval().start()));
+        record.set_pos(i64::from(aln.interval().start() + shift));
         // By default, record is created as unmapped.
         record.unset_unmapped();
         let strand = aln.strand();
@@ -227,6 +239,7 @@ fn generate_paired_end_records(
     read_alns: &[ReadGtAlns],
     header: &Rc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
+    shift: u32,
     records: &mut Vec<bam::Record>,
     assgn_counts: &mut impl Iterator<Item = u16>,
     attempts: u16,
@@ -239,9 +252,9 @@ fn generate_paired_end_records(
     for (&ij, &(count, ln_prob)) in buffer1.iter() {
         let opt_aln1 = (ij.0 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.0));
         let opt_aln2 = (ij.1 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.1));
-        let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data,
+        let mut record1 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln1, read_data,
             ReadEnd::First, ln_prob, buffer2)?;
-        let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data,
+        let mut record2 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln2, read_data,
             ReadEnd::Second, ln_prob, buffer2)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record1.set_mapq(mapq);
@@ -267,6 +280,7 @@ fn generate_unused_paired_end_records(
     aln_pairs: &[&PairAlignment],
     header: &Rc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
+    shift: u32,
     records: &mut Vec<bam::Record>,
     buffer: &mut bam::record::CigarString,
 ) -> htslib::errors::Result<()>
@@ -276,9 +290,9 @@ fn generate_unused_paired_end_records(
     for pair in aln_pairs {
         let opt_aln1 = pair.ix1().map(|i| groupped_alns.ith_aln(i));
         let opt_aln2 = pair.ix2().map(|j| groupped_alns.ith_aln(j));
-        let mut record1 = create_record(Rc::clone(header), contig_to_tid, opt_aln1, read_data,
+        let mut record1 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln1, read_data,
             ReadEnd::First, pair.ln_prob(), buffer)?;
-        let mut record2 = create_record(Rc::clone(header), contig_to_tid, opt_aln2, read_data,
+        let mut record2 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln2, read_data,
             ReadEnd::Second, pair.ln_prob(), buffer)?;
         if secondary {
             record1.set_secondary();
@@ -300,6 +314,7 @@ fn generate_single_end_records(
     read_alns: &[ReadGtAlns],
     header: &Rc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
+    shift: u32,
     records: &mut Vec<bam::Record>,
     assgn_counts: &mut impl Iterator<Item = u16>,
     attempts: u16,
@@ -311,7 +326,7 @@ fn generate_single_end_records(
     let read_data = groupped_alns.read_data();
     for (&ij, &(count, ln_prob)) in buffer1.iter() {
         let opt_aln = (ij.0 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.0));
-        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data,
+        let mut record = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln, read_data,
             ReadEnd::First, ln_prob, buffer2)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record.set_mapq(mapq);
@@ -331,6 +346,7 @@ fn generate_unused_single_end_records(
     aln_pairs: &[&PairAlignment],
     header: &Rc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
+    shift: u32,
     records: &mut Vec<bam::Record>,
     buffer: &mut bam::record::CigarString,
 ) -> htslib::errors::Result<()>
@@ -339,7 +355,7 @@ fn generate_unused_single_end_records(
     let mut secondary = false;
     for pair in aln_pairs {
         let opt_aln = pair.ix1().map(|i| groupped_alns.ith_aln(i));
-        let mut record = create_record(Rc::clone(header), contig_to_tid, opt_aln, read_data,
+        let mut record = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln, read_data,
             ReadEnd::First, pair.ln_prob(), buffer)?;
         if secondary {
             record.set_secondary();
@@ -360,9 +376,11 @@ pub fn write_bam(
     contig_to_tid: &mut Vec<Option<i32>>,
     attempts: u16,
     assgn_counts: &[u16],
+    ref_region: Option<&ReferenceRegion>,
 ) -> htslib::errors::Result<()>
 {
-    let (header, unique_ids) = create_bam_header(gt, &data.contigs, contig_to_tid);
+    let (header, unique_ids) = create_bam_header(gt, &data.contigs, contig_to_tid, ref_region);
+    let shift = ref_region.map(ReferenceRegion::start).unwrap_or(0);
     let header_view = Rc::new(bam::HeaderView::from_header(&header));
     let mut records = Vec::new();
 
@@ -373,10 +391,10 @@ pub fn write_bam(
     for (rp, groupped_alns) in data.all_alns.reads().iter().enumerate() {
         let read_alns = gt_alns.possible_read_alns(rp);
         if data.is_paired_end {
-            generate_paired_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, &mut records,
+            generate_paired_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, shift, &mut records,
                 &mut counts_iter, attempts, &mut buffer1, &mut buffer2)?;
         } else {
-            generate_single_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, &mut records,
+            generate_single_end_records(groupped_alns, read_alns, &header_view, contig_to_tid, shift, &mut records,
                 &mut counts_iter, attempts, &mut buffer1, &mut buffer2)?;
         }
     }
@@ -391,10 +409,10 @@ pub fn write_bam(
         }
         aln_pairs.sort_unstable_by(|a, b| b.ln_prob().total_cmp(&a.ln_prob()));
         if data.is_paired_end {
-            generate_unused_paired_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid,
+            generate_unused_paired_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, shift,
                 &mut records, &mut buffer2)?;
         } else {
-            generate_unused_single_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid,
+            generate_unused_single_end_records(groupped_alns, &aln_pairs, &header_view, contig_to_tid, shift,
                 &mut records, &mut buffer2)?;
         }
     }

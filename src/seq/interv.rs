@@ -444,3 +444,74 @@ where P: FnMut(i32) -> bool,
     debug_assert_eq!(curr_depth, 0);
     res
 }
+
+
+/// Information about the reference region for the locus.
+pub struct ReferenceRegion {
+    chrom: String,
+    start: u32,
+    end: u32,
+    ref_hap: Option<String>,
+}
+
+impl ReferenceRegion {
+    #[inline]
+    pub fn new(chrom: String, start: u32, end: u32, ref_hap: Option<String>) -> Self {
+        Self { chrom, start, end, ref_hap }
+    }
+
+    /// Loads from BED file.
+    pub fn load(filename: impl AsRef<Path>) -> crate::Result<Self> {
+        let filename = filename.as_ref();
+        let mut lines = crate::ext::sys::open(filename)?.lines();
+        let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+            .map_err(add_path!(filename))?;
+        if lines.next().is_some() {
+            log::warn!("BED file {} has more than one line", filename.display());
+        }
+        let trimmed = line.trim();
+        let mut split = trimmed.splitn(4, '\t');
+        let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
+            .to_string();
+        let start: u32 = split.next()
+            .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", filename.display(), trimmed))?
+            .parse()
+            .map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, filename.display()))?;
+        let end: u32 = split.next()
+            .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", filename.display(), trimmed))?
+            .parse()
+            .map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, filename.display()))?;
+        // (?:) is a non-capturing group.
+        const REFHAP_PATTERN: &'static str = formatcp!("(?:^|,|;|\t)ref[_-]?hap=({})", CONTIG_PATTERN);
+        static REFHAP_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(REFHAP_PATTERN).unwrap());
+        let ref_hap = split.next()
+            .and_then(|remainder| REFHAP_REGEX.captures(remainder))
+            .map(|captures| captures[1].to_string());
+        Ok(Self::new(chrom, start, end, ref_hap))
+    }
+
+    #[inline]
+    pub fn chrom(&self) -> &str {
+        &self.chrom
+    }
+
+    #[inline]
+    pub fn start(&self) -> u32 {
+        self.start
+    }
+
+    #[inline]
+    pub fn end(&self) -> u32 {
+        self.end
+    }
+
+    #[inline]
+    pub fn ref_hap(&self) -> Option<&str> {
+        self.ref_hap.as_ref().map(AsRef::as_ref)
+    }
+
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.end - self.start
+    }
+}

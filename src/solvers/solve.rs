@@ -34,7 +34,8 @@ use crate::{
     },
     err::{error, validate_param, add_path},
     seq::{
-        contigs::{ContigNames, Genotype},
+        contigs::{ContigId, ContigNames, Genotype},
+        interv::ReferenceRegion,
         recruit::UPDATE_SECS,
     },
     model::{
@@ -45,7 +46,9 @@ use crate::{
         windows::ContigInfos,
         distr_cache::DistrCache,
     },
-    command::DebugLvl,
+    command::{
+        DebugLvl,
+    },
 };
 use super::Solver;
 
@@ -363,8 +366,7 @@ pub struct Data {
 
     /// Genotypes and their priors.
     pub genotypes: Vec<GenotypeInfo>,
-    /// Index of a fixed genotype.
-    pub fixed_gt_ix: Option<usize>,
+    pub ref_region_and_id: Option<(ReferenceRegion, ContigId)>,
 
     pub assgn_params: AssgnParams,
     pub debug: DebugLvl,
@@ -506,11 +508,20 @@ struct Predictions {
 }
 
 impl Predictions {
-    fn new(n_gts: usize, fixed: Option<usize>) -> Self {
-        Self {
-            predictions: vec![None; n_gts],
-            ixs: GenotypeIxs::new((0..n_gts).collect(), fixed),
+    fn new(genotypes: &[GenotypeInfo], opt_ref_id: Option<ContigId>, contigs: &ContigNames) -> crate::Result<Self> {
+        let mut fixed = None;
+        if let Some(ref_id) = opt_ref_id {
+            fixed = genotypes.iter().position(|info| info.genotype.ids().iter().all(|&id| id == ref_id));
+            if fixed.is_none() {
+                let ref_gt = Genotype::new_homozygous(ref_id, genotypes[0].genotype.ploidy(), contigs);
+                return Err(error!(InvalidInput,
+                    "When --hint-vcf is used, reference genotype {} must have a prior value", ref_gt));
+            }
         }
+        Ok(Self {
+            predictions: vec![None; genotypes.len()],
+            ixs: GenotypeIxs::new((0..genotypes.len()).collect(), fixed),
+        })
     }
 
     /// Discard improbable genotypes. At least `min_size` genotypes will be preserved,
@@ -610,17 +621,21 @@ impl Predictions {
             Phred::from_ln_prob(Ln::sum(&ln_probs[1..])).min(1e9)
         };
 
+        let mut ref_gt_ix = self.ixs.fixed
+            .map(|fixed_ix| self.ixs.retained.iter().position(|&ix| ix == fixed_ix)
+            .expect("Reference genotype must not be dropped"));
         let mut write_n = MIN_GENOTYPES;
-        if n > write_n && let Some(j) = self.ixs.fixed
-                .and_then(|fixed_ix| self.ixs.retained[write_n..].iter().position(|&ix| ix == fixed_ix)) {
-            self.ixs.retained.swap(write_n, j + write_n);
-            ln_probs.swap(write_n, j + write_n);
+        if let Some(j) = ref_gt_ix && j >= write_n {
+            self.ixs.retained.swap(write_n, j);
+            ln_probs.swap(write_n, j);
+            ref_gt_ix = Some(write_n);
             write_n += 1;
         }
         ln_probs.truncate(write_n);
         self.ixs.retained.truncate(write_n);
         Genotyping {
             genotypes: self.ixs.retained.iter().map(|&ix| genotypes[ix].genotype.clone()).collect(),
+            ref_gt_ix,
             predictions: self.ixs.retained.iter().map(|&ix| self.predictions[ix].take().unwrap()).collect(),
             warnings: Vec::new(),
             weighted_dist: None,
@@ -670,6 +685,8 @@ pub struct Genotyping {
     /// Filtered list with the best genotypes.
     /// Genotypes are sorted from best to worst.
     genotypes: Vec<Genotype>,
+    /// Index of the reference genotype, if any.
+    ref_gt_ix: Option<usize>,
     /// Normalized ln-probabilities for each genotype.
     ln_probs: Vec<f64>,
     /// Predictions (likelihood and read counts) for each of the genotypes,
@@ -695,6 +712,7 @@ impl Genotyping {
             tag, warnings,
             genotypes: Vec::new(),
             predictions: Vec::new(),
+            ref_gt_ix: None,
             ln_probs: Vec::new(),
             weighted_dist: None,
             distances: None,
@@ -978,15 +996,16 @@ pub fn solve(
 ) -> crate::Result<Genotyping> {
     let n_gts = data.genotypes.len();
     assert!(n_gts > 0);
-    log::info!("=== Genotyping {}: {} possible genotypes", data.contigs.tag(), n_gts);
+    let contigs = &data.contigs;
+    log::info!("=== Genotyping {}: {} possible genotypes", contigs.tag(), n_gts);
 
     let mut sol_writer = ext::sys::create_brotli(&locus_dir.join("sol.csv.br"))?;
     writeln!(sol_writer, "stage\tgenotype\tscore").map_err(add_path!(!))?;
-    let mut predictions = Predictions::new(n_gts, data.fixed_gt_ix);
+    let mut predictions = Predictions::new(&data.genotypes, data.ref_region_and_id.as_ref().map(|t| t.1), contigs)?;
     let out_size0 = data.scheme.stages[0].in_size;
     if data.assgn_params.dont_skip || out_size0 < n_gts {
         let curr_sol_writer = (data.debug != DebugLvl::None).then_some(&mut sol_writer);
-        run_filter(&data.contigs, &data.genotypes, &mut predictions.ixs, &data.all_alns, curr_sol_writer,
+        run_filter(&contigs, &data.genotypes, &mut predictions.ixs, &data.all_alns, curr_sol_writer,
             &data.assgn_params, out_size0, data.threads)?;
     }
 
@@ -1004,18 +1023,27 @@ pub fn solve(
 
     let data = &data;
     let mut genotyping = predictions.produce_result(&data);
-    if data.assgn_params.out_bams > 0 {
+    if data.assgn_params.out_bams > 0 || data.ref_region_and_id.is_some() {
         let bam_dir = locus_dir.join(crate::command::paths::ALNS_DIR);
         ext::sys::mkdir(&bam_dir)?;
-        let mut contig_to_tid = Vec::new();
+        let mut contig_to_tid = vec![None; data.contigs.len()];
         log::info!("    Writing output alignments to {}", ext::fmt::path(&bam_dir));
-        let out_gts = data.assgn_params.out_bams.min(genotyping.genotypes.len());
+        let out_gts = min(data.assgn_params.out_bams, genotyping.genotypes.len());
         let width = max(2, math::num_digits(out_gts as f64) as usize);
         for (i, (gt, pred)) in genotyping.genotypes.iter().zip(&genotyping.predictions)
                 .take(data.assgn_params.out_bams).enumerate() {
             let bam_path = bam_dir.join(format!("{:0width$}.bam", i));
-            model::bam::write_bam(&bam_path, gt, data, &mut contig_to_tid, pred.attempts,
-                pred.assgn_counts.as_ref().expect("Assignment counts undefined"))?
+            let assgn_counts = pred.assgn_counts.as_ref().expect("Assignment counts undefined");
+            model::bam::write_bam(&bam_path, gt, data, &mut contig_to_tid, pred.attempts, assgn_counts, None)?;
+        }
+        if let Some((ref_region, ref_id)) = &data.ref_region_and_id {
+            let bam_path = bam_dir.join(format!("{}.bam", contigs.get_name(*ref_id)));
+            let i = genotyping.ref_gt_ix.expect("Reference genotype must not be dropped");
+            let gt = &genotyping.genotypes[i];
+            let pred = &genotyping.predictions[i];
+            let assgn_counts = pred.assgn_counts.as_ref().expect("Assignment counts undefined");
+            model::bam::write_bam(&bam_path, gt, data, &mut contig_to_tid, pred.attempts, assgn_counts,
+                Some(ref_region))?;
         }
     }
     if let Some(dist_matrix) = &data.contig_distances {

@@ -23,6 +23,7 @@ use crate::{
         paf::{PafFile, PafParseResult},
         fastx::{self, FastxRead, SingleRecord},
         contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
+        interv::ReferenceRegion,
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
         transfer::HapAlns,
@@ -50,7 +51,6 @@ use crate::{
 use super::{
     paths, DebugLvl,
     preproc::InputFiles,
-    paf_vcf::ReferenceRegion,
 };
 
 pub const DEFAULT_CHUNK_LENGTH: u64 = 3_000_000;
@@ -418,11 +418,11 @@ fn print_help(extended: bool) {
             "    --hint-vcf".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Input VCF file is already phased.",
             "    --hint-phased".green(), super::flag());
-        println!("    {}  {}  If VCF has a different reference genome than the Locityper database,\n\
-            {EMPTY}  put BED files in `db/loci/*/<tag>.bed` (e.g. `.../GRCh38.bed`) with locus\n\
-            {EMPTY}  coordinates and specify basename here. BED files must contain the reference\n\
-            {EMPTY}  haplotype name with `ref-hap=...` in one of the columns.",
-            "    --hint-ref".green(), "FILE".yellow());
+        // println!("    {}  {}  If VCF has a different reference genome than the Locityper database,\n\
+        //     {EMPTY}  put BED files in `db/loci/*/<tag>.bed` (e.g. `.../GRCh38.bed`) with locus\n\
+        //     {EMPTY}  coordinates and specify basename here. BED files must contain the reference\n\
+        //     {EMPTY}  haplotype name with `ref-hap=...` in one of the columns.",
+        //     "    --hint-ref".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Only examine variants with this genotype quality [{}].",
             "    --hint-gq".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hint.min_gq));
         //     By default, VCF file is assumed to be constructed using the same\n\
@@ -618,7 +618,6 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
 
             Long("hint-vcf") => args.hint.vcf = Some(parser.value()?.parse()?),
             Long("hint-phased") => args.hint.already_phased = true,
-            Long("hint-ref") => args.hint.ref_bed = Some(parser.value()?.parse()?),
             Long("hint-gq") => args.hint.min_gq = parser.value()?.parse()?,
 
             Short('V') | Long("version") => {
@@ -1218,14 +1217,12 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
 }
 
 /// Generates the list of genotypes and their priors.
-/// Second returned value is the index of the reference genotype, if needed.
 fn generate_genotypes(
     contig_ids: &[ContigId],
     contigs: &ContigNames,
     opt_priors: Option<&HashMap<String, f64>>,
     ploidy: usize,
-    opt_ref_id: Option<ContigId>,
-) -> crate::Result<(Vec<GenotypeInfo>, Option<usize>)> {
+) -> crate::Result<Vec<GenotypeInfo>> {
     let mut genotypes = Vec::new();
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
@@ -1248,17 +1245,7 @@ fn generate_genotypes(
         ext::vec::gen_combinations_with_repl(&contig_ids, ploidy,
             |ids| genotypes.push(GenotypeInfo::new(Genotype::new(ids, contigs), 0.0)));
     }
-
-    let mut fixed = None;
-    if let Some(ref_id) = opt_ref_id {
-        fixed = genotypes.iter().position(|info| info.genotype.ids().iter().all(|&id| id == ref_id));
-        if fixed.is_none() {
-            let ref_gt = Genotype::new_homozygous(ref_id, ploidy, contigs);
-            return Err(error!(InvalidInput,
-                "When --hint-vcf is used, reference genotype {} must have a prior value", ref_gt));
-        }
-    }
-    Ok((genotypes, fixed))
+    Ok(genotypes)
 }
 
 /// Go through the haplotype-haplotype alignments, and store `HapAlns` and matrix of edit distances, when needed.
@@ -1319,8 +1306,8 @@ fn load_ref_region(
         glob_filename.push("*");
         glob_filename.push(bed_filename.file_name().expect("BED file must have a basename"));
         log::error!("Cannot identify reference haplotype from {}\n    \
-            Expected to have substring \"ref-hap=...\".\n    \
-            Perhaps database was created with older version of Locityper,\n    \
+            Reference panel was created with older version of Locityper\n    \
+            and does not have substring \"ref-hap=...\",\n    \
             You may be able to correct this by running \"sed -i 's/$/\tref-hap=NAME/' {}\"\n    \
             (replace NAME with the reference haplotype name).", bed_filename.display(),
             glob_filename.display());
@@ -1360,8 +1347,7 @@ fn analyze_locus(
 
     let contigs = locus.set.contigs();
     let ref_region_and_id = if args.hint.vcf.is_some() {
-        let bed_basename = args.hint.ref_bed.as_ref().map(AsRef::as_ref).unwrap_or(paths::LOCUS_BED);
-        Some(load_ref_region(locus.db_dir.join(bed_basename), contigs, &locus.disc_haps)?)
+        Some(load_ref_region(locus.db_dir.join(paths::LOCUS_BED), contigs, &locus.disc_haps)?)
     } else { None };
 
     let windows_writer = if args.debug >= DebugLvl::Some {
@@ -1406,8 +1392,7 @@ fn analyze_locus(
         }
 
         let contig_ids: Vec<ContigId> = contigs.ids().collect();
-        let (genotypes, fixed_gt_ix) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy),
-            ref_region_and_id.as_ref().map(|t| t.1))?;
+        let genotypes = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy))?;
         if genotypes.is_empty() {
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
         }
@@ -1432,7 +1417,7 @@ fn analyze_locus(
             debug: args.debug,
             threads: usize::from(args.threads).min(genotypes.len()),
             is_paired_end: bg_distr.insert_distr().is_paired_end(),
-            all_alns, genotypes, contig_infos, fixed_gt_ix,
+            all_alns, genotypes, contig_infos, ref_region_and_id,
         });
         solve::solve(&data, bg_distr, &locus.out_dir, &mut rng)?
     };

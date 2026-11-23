@@ -1,11 +1,9 @@
 use std::{
-    sync::LazyLock,
     path::{Path, PathBuf},
     time::Instant,
-    io::{Write, BufRead},
+    io::Write,
     ffi::OsStr,
 };
-use const_format::formatcp;
 use colored::Colorize;
 use regex::Regex;
 use crate::{
@@ -15,7 +13,7 @@ use crate::{
         fmt::PrettyU32,
     },
     seq::{
-        interv,
+        interv::{self, ReferenceRegion},
         paf::{PafParseResult, PafFile},
         cigar::{Cigar, Operation},
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
@@ -108,8 +106,9 @@ fn print_help() {
         "-r, --ref-hap".green(), "STR".yellow());
     println!("    {:KEY$} {:VAL$}  Adjust variant positions relative to this region [{}].\n\
         {EMPTY}  Should be either {} (search for ref.bed relative to haplotypes PAF), {},\n\
-        {EMPTY}  `chrom:start-end` or a BED file with one entry.",
-        "-R, --region".green(), "STR".yellow(), super::fmt_def("auto"), "auto".yellow(), "none".yellow());
+        {EMPTY}  `chrom:start-end` or a BED file with one entry.\n\
+        {EMPTY}  {}: This will only work if the corresponding haplotype is on the forward strand.",
+        "-R, --region".green(), "STR".yellow(), super::fmt_def("auto"), "auto".yellow(), "none".yellow(), "NOTE".red());
 
     println!("\n{}", "Other arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Show this help message.", "-h, --help".green(), "");
@@ -155,78 +154,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
     Ok(args)
 }
 
-/// Information about the reference region for the locus.
-pub(super) struct ReferenceRegion {
-    chrom: String,
-    start: u32,
-    end: u32,
-    ref_hap: Option<String>,
-}
-
-impl ReferenceRegion {
-    #[inline]
-    pub fn new(chrom: String, start: u32, end: u32, ref_hap: Option<String>) -> Self {
-        Self { chrom, start, end, ref_hap }
-    }
-
-    pub fn load(filename: impl AsRef<Path>) -> crate::Result<Self> {
-        let filename = filename.as_ref();
-        let mut lines = ext::sys::open(filename)?.lines();
-        let line = lines.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
-            .map_err(add_path!(filename))?;
-        if lines.next().is_some() {
-            log::warn!("BED file {} has more than one line", filename.display());
-        }
-        let trimmed = line.trim();
-        let mut split = trimmed.splitn(4, '\t');
-        let chrom = split.next().ok_or_else(|| error!(InvalidInput, "BED file {} is empty", filename.display()))?
-            .to_string();
-        let start: u32 = split.next()
-            .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", filename.display(), trimmed))?
-            .parse()
-            .map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, filename.display()))?;
-        let end: u32 = split.next()
-            .ok_or_else(|| error!(InvalidInput, "Not enough columns in BED file {} ({})", filename.display(), trimmed))?
-            .parse()
-            .map_err(|_| error!(ParsingError, "Cannot parse line `{}` in BED file {}", trimmed, filename.display()))?;
-        // (?:) is a non-capturing group.
-        const REFHAP_PATTERN: &'static str = formatcp!("(?:^|,|;|\t)ref[_-]?hap=({})", interv::CONTIG_PATTERN);
-        static REFHAP_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(REFHAP_PATTERN).unwrap());
-        let ref_hap = split.next()
-            .and_then(|remainder| REFHAP_REGEX.captures(remainder))
-            .map(|captures| captures[1].to_string());
-        Ok(Self::new(chrom, start, end, ref_hap))
-    }
-
-    #[inline]
-    pub fn chrom(&self) -> &str {
-        &self.chrom
-    }
-
-    #[inline]
-    pub fn start(&self) -> u32 {
-        self.start
-    }
-
-    #[inline]
-    pub fn end(&self) -> u32 {
-        self.end
-    }
-
-    #[inline]
-    pub fn ref_hap(&self) -> Option<&str> {
-        self.ref_hap.as_ref().map(AsRef::as_ref)
-    }
-
-    #[inline]
-    pub fn len(&self) -> u32 {
-        self.end - self.start
-    }
-}
-
-/// Parse region (either chrom:start, chrom:start-end, or BED file with a single entry).
-/// Returns chromosome name and 0-based start position and end.
-pub(super) fn load_region(
+pub fn load_region(
     s: &str,
     fasta_filename: &Path,
 ) -> crate::Result<Option<ReferenceRegion>> {
@@ -699,7 +627,7 @@ pub(super) fn convert_to_vcf(
     if !disc_haps.all_identical() {
         log::warn!("Haplotypes were previously pruned (~ for some lines), VCF will be inaccurate");
     }
-    let ref_hap = opt_ref_hap.or(region.as_ref().and_then(|region| region.ref_hap.as_ref().map(AsRef::as_ref)))
+    let ref_hap = opt_ref_hap.or(region.as_ref().and_then(|region| region.ref_hap()))
         .ok_or_else(|| error!(InvalidInput, "Reference haplotype not found in the BED file and not provided with -r"))?;
     let (groupped_haps, ref_id) = group_haplotypes(contig_set.contigs(), ref_hap, &disc_haps)?;
     let ref_len = contig_set.contigs().get_len(ref_id);
@@ -708,7 +636,7 @@ pub(super) fn convert_to_vcf(
             return Err(error!(InvalidData,
                 "Region {}:{}-{} (len = {}) does not match saved reference haplotype (len = {})",
                 region.chrom(), region.start() + 1, region.end(), region.len(), ref_len)),
-        Some(region) => (region.chrom, region.start),
+        Some(region) => (region.chrom().to_string(), region.start()),
         None => (ref_hap.to_string(), 0),
     };
 

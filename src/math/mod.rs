@@ -138,7 +138,7 @@ impl Phred {
 
 /// Index of the leading in the 10-base representation of x.
 pub fn num_digits(x: f64) -> i32 {
-    x.abs().log10().floor() as i32 + 1
+    if x == 0.0 { 0 } else { x.abs().log10().floor() as i32 + 1 }
 }
 
 /// Round the number to the corresponding number of significant digits.
