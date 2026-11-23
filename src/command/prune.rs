@@ -224,7 +224,7 @@ fn load_divergences(
         let name1 = contigs.get_name(ContigId::new(i));
         let name2 = contigs.get_name(ContigId::new(j));
         log::warn!("[{}] Divergence missing for {:.1}% haplotypes pairs, for example {} and {}. Replacing with {:.5}",
-            contigs.tag(), 100.0 * missing_count as f64 / divergences.linear_len() as f64, name1, name2, repl_missing);
+            contigs.tag(), 100.0 * missing_count as f32 / divergences.linear_len() as f32, name1, name2, repl_missing);
     }
     Ok(divergences)
 }

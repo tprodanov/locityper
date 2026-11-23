@@ -16,7 +16,7 @@ pub struct Window {
     start: u32,
     end: u32,
     /// GC-content.
-    gc: f64,
+    gc: f32,
     /// Is this window used or discarded?
     keep: bool,
 }
@@ -25,12 +25,12 @@ impl Window {
     fn new(start: u32, end: u32) -> Self {
         Self {
             start, end,
-            gc: f64::NAN,
+            gc: f32::NAN,
             keep: true,
         }
     }
 
-    pub fn gc(&self) -> f64 {
+    pub fn gc(&self) -> f32 {
         self.gc
     }
 

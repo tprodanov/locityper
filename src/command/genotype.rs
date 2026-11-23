@@ -1218,13 +1218,14 @@ fn map_reads(locus: &LocusData, filenames: &Filenames, bg_distr: &BgDistr, args:
 }
 
 /// Generates the list of genotypes and their priors.
+/// Second returned value is the index of the reference genotype, if needed.
 fn generate_genotypes(
     contig_ids: &[ContigId],
     contigs: &ContigNames,
     opt_priors: Option<&HashMap<String, f64>>,
     ploidy: usize,
-    ref_id: Option<ContigId>,
-) -> crate::Result<Vec<GenotypeInfo>> {
+    opt_ref_id: Option<ContigId>,
+) -> crate::Result<(Vec<GenotypeInfo>, Option<usize>)> {
     let mut genotypes = Vec::new();
     if let Some(priors_map) = opt_priors {
         assert_eq!(contig_ids.len(), contigs.len(),
@@ -1248,17 +1249,16 @@ fn generate_genotypes(
             |ids| genotypes.push(GenotypeInfo::new(Genotype::new(ids, contigs), 0.0)));
     }
 
-    if let Some(ref_id) = ref_id {
-        let Some(info) = genotypes.iter_mut()
-            .filter(|info| info.genotype.ids().iter().all(|&id| id == ref_id)).next()
-        else {
+    let mut fixed = None;
+    if let Some(ref_id) = opt_ref_id {
+        fixed = genotypes.iter().position(|info| info.genotype.ids().iter().all(|&id| id == ref_id));
+        if fixed.is_none() {
             let ref_gt = Genotype::new_homozygous(ref_id, ploidy, contigs);
             return Err(error!(InvalidInput,
                 "When --hint-vcf is used, reference genotype {} must have a prior value", ref_gt));
-        };
-        info.never_discard = true;
+        }
     }
-    Ok(genotypes)
+    Ok((genotypes, fixed))
 }
 
 /// Go through the haplotype-haplotype alignments, and store `HapAlns` and matrix of edit distances, when needed.
@@ -1361,7 +1361,7 @@ fn analyze_locus(
     let contigs = locus.set.contigs();
     let ref_region_and_id = if args.hint.vcf.is_some() {
         let bed_basename = args.hint.ref_bed.as_ref().map(AsRef::as_ref).unwrap_or(paths::LOCUS_BED);
-        Some(load_ref_region(locus.out_dir.join(bed_basename), contigs, &locus.disc_haps)?)
+        Some(load_ref_region(locus.db_dir.join(bed_basename), contigs, &locus.disc_haps)?)
     } else { None };
 
     let windows_writer = if args.debug >= DebugLvl::Some {
@@ -1406,7 +1406,7 @@ fn analyze_locus(
         }
 
         let contig_ids: Vec<ContigId> = contigs.ids().collect();
-        let genotypes = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy),
+        let (genotypes, fixed_gt_ix) = generate_genotypes(&contig_ids, contigs, opt_priors, usize::from(args.ploidy),
             ref_region_and_id.as_ref().map(|t| t.1))?;
         if genotypes.is_empty() {
             return Err(error!(RuntimeError, "No available genotypes for locus {}", locus.set.tag()));
@@ -1432,7 +1432,7 @@ fn analyze_locus(
             debug: args.debug,
             threads: usize::from(args.threads).min(genotypes.len()),
             is_paired_end: bg_distr.insert_distr().is_paired_end(),
-            all_alns, genotypes, contig_infos,
+            all_alns, genotypes, contig_infos, fixed_gt_ix,
         });
         solve::solve(&data, bg_distr, &locus.out_dir, &mut rng)?
     };

@@ -50,8 +50,8 @@ pub fn gc_count(seq: &[u8]) -> u32 {
 }
 
 /// Calculate GC-content (between 0 and 100).
-pub fn gc_content(seq: &[u8]) -> f64 {
-    100.0 * f64::from(gc_count(seq)) / seq.len() as f64
+pub fn gc_content(seq: &[u8]) -> f32 {
+    100.0 * gc_count(seq) as f32 / seq.len() as f32
 }
 
 /// Finds runs of Ns in the sequence and returns pairs (start, end).

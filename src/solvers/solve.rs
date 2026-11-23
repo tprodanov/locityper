@@ -49,62 +49,125 @@ use crate::{
 };
 use super::Solver;
 
-/// Appends all forced genotypes to `end`, returns new end.
-fn append_forced_genotypes(ixs: &mut Vec<usize>, genotypes: &[GenotypeInfo], mut end: usize) -> usize {
-    for i in end..ixs.len() {
-        if genotypes[ixs[i]].never_discard {
-            if i != end {
-                // Here we are sure that end < i and genotypes[end] should be discarded.
-                ixs.swap(end, i);
-            }
-            end += 1;
-        }
-    }
-    end
+trait GenotypingScore {
+    fn as_f64(&self) -> f64;
 }
 
-/// Sorts indices by score (largest = best), and truncates the list if needed.
-fn truncate_ixs(
-    ixs: &mut Vec<usize>,
-    scores: &[f64],
-    genotypes: &[GenotypeInfo],
-    filt_diff: f64,
-    mut min_size: usize,
-    threads: usize,
-) {
-    ixs.sort_unstable_by(|&i, &j| scores[j].total_cmp(&scores[i]));
-    let n = ixs.len();
-    let max_size = min(n, min_size * 2);
-    min_size = max(min_size, threads).min(max_size).min(n);
+impl GenotypingScore for f64 {
+    #[inline]
+    fn as_f64(&self) -> f64 { *self }
+}
 
-    let best = scores[ixs[0]];
-    let worst = scores[ixs[n - 1]];
-    log::debug!("        Worst score: {} ({:.0}), Best: {} ({:.0})",
-        genotypes[ixs[n - 1]].genotype, Ln::to_log10(worst), genotypes[ixs[0]].genotype, Ln::to_log10(best));
-    let thresh = best - filt_diff;
+impl GenotypingScore for Option<Prediction> {
+    #[inline]
+    fn as_f64(&self) -> f64 {
+        self.as_ref().expect("Unavailable prediction").lik_mean
+    }
+}
 
-    let m = if min_size >= n && thresh <= worst {
-        min_size
-    } else {
-        ixs.partition_point(|&i| scores[i] >= thresh).max(min_size).min(max_size)
-    };
+struct CutRange {
+    min_size: usize,
+    max_size: usize,
+    best_score: f64,
+    worst_score: f64,
+}
 
-    // If there are any `never_discard` genotypes, put them at the back of the vector.
-    let truncate_size = append_forced_genotypes(ixs, genotypes, m);
-    ixs.truncate(truncate_size);
-    let last_score = scores[m - 1];
-    log::debug!("        Keep {}/{} genotypes ({:.1}%), smallest score: {:.0} ({:.1}%){}",
-        m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(last_score),
-        100.0 * (last_score - worst) / (best - worst).max(1.0),
-        if m < truncate_size { " +1 reference genotype" } else { "" });
-    // [NOTE] Need to fix this message if there are every more than 1 fixed genotype.
+/// Indices of the currently contended genotypes.
+pub struct GenotypeIxs {
+    /// Retained indices (can be freely rearranged).
+    retained: Vec<usize>,
+    /// Index of a genotype that cannot be discarded.
+    /// The same index must be inside the `retained` vector.
+    fixed: Option<usize>,
+}
+
+impl GenotypeIxs {
+    /// Removes fixed genotype from `ixs`, if needed.
+    pub fn new(retained: Vec<usize>, fixed: Option<usize>) -> Self {
+        Self { retained, fixed }
+    }
+
+    /// Iterate over all retained ixs + the fixed index.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = usize> {
+        self.retained.iter().copied()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.retained.len()
+    }
+
+    /// Sorts non-fixed indices by score (highest first).
+    #[inline]
+    fn sort_indices(&mut self, scores: &[impl GenotypingScore]) {
+        self.retained.sort_unstable_by(|&i, &j| scores[j].as_f64().total_cmp(&scores[i].as_f64()));
+    }
+
+    /// Sorts indices, writes debug messages, and returns `CutRange` containing min_size and max_size,
+    /// as well as total best and total worst scores.
+    fn identify_cut_range(
+        &mut self,
+        scores: &[impl GenotypingScore],
+        genotypes: &[GenotypeInfo],
+        mut threads: usize,
+        mut min_size: usize,
+        mut max_size: usize,
+        verbose: bool,
+    ) -> CutRange {
+        self.sort_indices(scores);
+        let n = self.retained.len();
+        // Safety: we just checked the vector size.
+        let first_ix = unsafe { *self.retained.get_unchecked(0) };
+        let last_ix = unsafe { *self.retained.get_unchecked(n - 1) };
+        let best_score = scores[first_ix].as_f64();
+        let worst_score = scores[last_ix].as_f64();
+        if verbose {
+            log::debug!("        Worst: {} ({:.0}), best: {} ({:.0})",
+                genotypes[last_ix].genotype, Ln::to_log10(worst_score),
+                genotypes[first_ix].genotype, Ln::to_log10(best_score));
+        }
+
+        max_size = min(n, max_size);
+        threads = threads.saturating_sub(usize::from(self.fixed.is_some()));
+        min_size = max(min_size, threads).min(max_size).min(n);
+        CutRange { min_size, max_size, best_score, worst_score }
+    }
+
+    /// Truncates indices at size `m` (not including fixed genotype), and writes a debug message.
+    fn truncate(
+        &mut self,
+        mut m: usize,
+        cut_range: &CutRange,
+        scores: &[impl GenotypingScore],
+        verbose: bool,
+    ) {
+        let n = self.retained.len();
+        let last_score = scores[self.retained[m - 1]].as_f64();
+        let opt_j = self.fixed
+            .and_then(|fixed_ix| self.retained[m..].iter().position(|&ix| ix == fixed_ix))
+            .map(|j| m + j);
+
+        if verbose {
+            log::debug!("        Keep {}/{} genotypes ({:.1}%), last retained: {:.0} ({:.1}% of full range){}",
+                m, n, 100.0 * m as f32 / n as f32, Ln::to_log10(last_score),
+                100.0 * (last_score - cut_range.worst_score) / (cut_range.best_score - cut_range.worst_score).max(1.0),
+                if opt_j.is_some() { " +1 reference genotype" } else { "" });
+        }
+
+        if let Some(j) = opt_j {
+            self.retained.swap(j, m);
+            m += 1;
+        }
+        self.retained.truncate(m);
+    }
 }
 
 /// Filter genotypes based on read alignments alone (without accounting for read depth).
 fn run_filter(
     contigs: &ContigNames,
     genotypes: &[GenotypeInfo],
-    ixs: &mut Vec<usize>,
+    ixs: &mut GenotypeIxs,
     all_alns: &AllAlignments,
     mut writer: Option<&mut impl Write>,
     params: &AssgnParams,
@@ -118,7 +181,7 @@ fn run_filter(
     // Vector (genotype index, score).
     let mut gt_best_probs = vec![0.0_f64; all_alns.reads().len()];
     let mut scores = vec![f64::NEG_INFINITY; genotypes.len()];
-    for &i in ixs.iter() {
+    for i in ixs.iter() {
         let info = &genotypes[i];
         let gt_ids = info.genotype.ids();
         gt_best_probs.copy_from_slice(&best_aln_matrix[gt_ids[0].ix()]);
@@ -132,7 +195,15 @@ fn run_filter(
         }
         scores[i] = score;
     }
-    truncate_ixs(ixs, &scores, genotypes, params.filt_diff, out_size, threads);
+    let cut_range = ixs.identify_cut_range(&scores, genotypes, threads, out_size, 2 * out_size, true);
+    let thresh = cut_range.best_score - params.filt_diff;
+    let m = if cut_range.min_size >= cut_range.max_size && thresh <= cut_range.worst_score {
+        cut_range.min_size
+    } else {
+        cut_range.min_size
+            + ixs.retained[cut_range.min_size..cut_range.max_size].partition_point(|&i| scores[i] >= thresh)
+    };
+    ixs.truncate(m, &cut_range, &scores, true);
     Ok(())
 }
 
@@ -269,13 +340,12 @@ impl Scheme {
 pub struct GenotypeInfo {
     pub genotype: Genotype,
     pub prior: f64,
-    pub never_discard: bool,
 }
 
 impl GenotypeInfo {
     #[inline]
     pub fn new(genotype: Genotype, prior: f64) -> Self {
-        Self { genotype, prior, never_discard: false }
+        Self { genotype, prior }
     }
 }
 
@@ -293,6 +363,8 @@ pub struct Data {
 
     /// Genotypes and their priors.
     pub genotypes: Vec<GenotypeInfo>,
+    /// Index of a fixed genotype.
+    pub fixed_gt_ix: Option<usize>,
 
     pub assgn_params: AssgnParams,
     pub debug: DebugLvl,
@@ -424,133 +496,132 @@ impl Prediction {
     }
 }
 
+/// Compare up to 100 genotypes with the best one using
+const SOPHISTICATED_COUNT: usize = 100;
+
 struct Predictions {
     predictions: Vec<Option<Prediction>>,
     /// Remaining indices after the latest iteration.
-    ixs: Vec<usize>,
+    ixs: GenotypeIxs,
 }
 
 impl Predictions {
-    fn new(n_gts: usize) -> Self {
+    fn new(n_gts: usize, fixed: Option<usize>) -> Self {
         Self {
             predictions: vec![None; n_gts],
-            ixs: (0..n_gts).collect(),
+            ixs: GenotypeIxs::new((0..n_gts).collect(), fixed),
         }
     }
 
-    /// Number of genotypes, still in contest.
-    fn curr_len(&self) -> usize {
-        self.ixs.len()
-    }
-
-    fn sort_indices(&mut self) {
-        // Decreasing sort by average likelihood.
-        self.ixs.sort_unstable_by(|&i, &j|
-            self.predictions[j].as_ref().map(|pred| pred.lik_mean).expect("Prediction undefined").total_cmp(
-            &self.predictions[i].as_ref().map(|pred| pred.lik_mean).expect("Prediction undefined")));
-    }
-
+    /// Discard improbable genotypes. At least `min_size` genotypes will be preserved,
+    /// genotypes between min_size and max_size will be compared with the best genotype and kept only if necessary.
+    ///
+    /// If out_ln_probs is provided, writes comparison log-likelihoods there.
     fn discard_improbable_genotypes(
         &mut self,
         genotypes: &[GenotypeInfo],
         prob_thresh: f64,
-        mut out_size: usize,
+        min_size: usize,
+        mut max_size: usize,
         threads: usize,
+        verbose: bool,
+        mut out_ln_probs: Option<&mut Vec<f64>>,
     ) {
         let n = self.ixs.len();
-        out_size = out_size.max(threads);
-        if prob_thresh == f64::NEG_INFINITY || out_size >= n {
+        if prob_thresh == f64::NEG_INFINITY || min_size >= n {
+            if let Some(ref mut v) = out_ln_probs {
+                let best = self.predictions[self.ixs.retained[0]].as_ref().expect("Unavailable prediction");
+                v.push(0.0);
+                v.extend(self.ixs.retained[1..].iter().map(|&ix| compare_two_likelihoods(
+                    self.predictions[ix].as_ref().expect("Unavailable prediction"), best)));
+            }
             return;
         }
 
-        self.sort_indices();
-        let best_ix = self.ixs[0];
-        let worst_ix = self.ixs[n - 1];
-        let best = self.predictions[best_ix].as_ref().unwrap().cheap_clone();
-        let worst = self.predictions[worst_ix].as_ref().unwrap().cheap_clone();
-        log::debug!("        Worst: {} ({:.0}), Best: {} ({:.0})",
-            genotypes[worst_ix].genotype, Ln::to_log10(worst.lik_mean),
-            genotypes[best_ix].genotype, Ln::to_log10(best.lik_mean));
+        max_size = max(min_size, max_size);
+        let cut_range = self.ixs.identify_cut_range(&self.predictions, genotypes, threads, min_size, max_size, verbose);
+        let mut cut_pos = cut_range.min_size;
 
-        // Only run sophisticated genotype comparison if output size is at most 500.
-        const SOPHISTICATED_COUNT: usize = 500;
+        let best = self.predictions[self.ixs.retained[0]].as_ref().expect("Unavailable prediction").cheap_clone();
+        if let Some(ref mut v) = out_ln_probs {
+            v.push(0.0);
+            v.extend(self.ixs.retained[1..cut_range.min_size].iter().map(|&ix| compare_two_likelihoods(
+                self.predictions[ix].as_ref().expect("Unavailable prediction"), &best)));
+        }
 
-        let mut new_ixs = self.ixs[..out_size].to_vec();
-        let mut rem_ixs = self.ixs[out_size..min(out_size * 2, n)].iter().copied();
-        if out_size <= SOPHISTICATED_COUNT {
-            // Stop when encountered 5 unlikely genotypes.
-            const STOP_COUNT: u32 = 5;
-            let mut dropped = 0;
-            while let Some(ix) = rem_ixs.next() {
-                let pred = self.predictions[ix].as_ref().unwrap();
-                let ln_pval = compare_two_likelihoods(pred, &best);
-                if ln_pval >= prob_thresh {
-                    new_ixs.push(ix);
-                } else {
-                    dropped += 1;
-                    self.predictions[ix].as_mut().unwrap().assgn_counts = None;
-                    if dropped >= STOP_COUNT {
-                        break;
-                    }
+        // Stop when encountered > 5 unlikely genotypes.
+        const MAX_DROPPED: u8 = 5;
+        let mut dropped_counter = 0..MAX_DROPPED;
+        let mut end_pos = self.ixs.retained.len();
+        for _ in cut_range.min_size..cut_range.max_size {
+            // This should not happen since we do `max_size - min_size` iterations,
+            // at each iteration gap `end_pos - cut_pos` decreases by one, and at the start
+            // `end_pos - cut_pos >= max_size - min_size`.
+            debug_assert!(cut_pos < end_pos);
+            let ix = self.ixs.retained[cut_pos];
+            let pred = self.predictions[ix].as_ref().expect("Unavailable prediction");
+            let ln_prob = compare_two_likelihoods(pred, &best);
+            if ln_prob < prob_thresh {
+                if dropped_counter.next().is_none() { break };
+                end_pos -= 1;
+                self.ixs.retained.swap(cut_pos, end_pos);
+            } else {
+                cut_pos += 1;
+                if let Some(ref mut v) = out_ln_probs {
+                    v.push(ln_prob);
                 }
             }
         }
+
         // Remove dropped assignment counts.
-        for ix in rem_ixs {
-            self.predictions[ix].as_mut().unwrap().assgn_counts = None;
+        self.ixs.retained[cut_pos..].iter()
+            .filter(|&&ix| Some(ix) != self.ixs.fixed)
+            .for_each(|&ix| self.predictions[ix].as_mut().unwrap().assgn_counts = None);
+        self.ixs.truncate(cut_pos, &cut_range, &self.predictions, verbose);
+        if let Some(ref mut v) = out_ln_probs && self.ixs.retained.len() == cut_pos + 1 {
+            // One fixed genotype remains.
+            let last_ix = *self.ixs.retained.last().unwrap();
+            let fixed_pred = self.predictions[last_ix].as_ref().expect("Unavailable prediction");
+            v.push(compare_two_likelihoods(&fixed_pred, &best));
         }
-        let m = new_ixs.len();
-        let last = self.predictions[new_ixs[m - 1]].as_ref().unwrap();
-        log::debug!("        Keep {}/{} genotypes ({:.1}%), smallest lik: {:.0} ({:.1}%)",
-            m, n, 100.0 * m as f64 / n as f64, Ln::to_log10(last.lik_mean),
-            100.0 * (last.lik_mean - worst.lik_mean) / (best.lik_mean - worst.lik_mean).max(1.0));
-        self.ixs = new_ixs;
     }
 
     fn produce_result(mut self, data: &Data) -> Genotyping {
         // ln(1e-5).
         const THRESH: f64 = -11.512925464970229;
         // Output at most this number of genotypes.
-        const MAX_GENOTYPES: usize = 50;
+        const MIN_GENOTYPES: usize = 10;
+        const MAX_GENOTYPES: usize = 100;
 
         let params = &data.assgn_params;
-        let min_output = max(4, params.out_bams);
-        let thresh_prob = THRESH.min(params.prob_thresh);
-        self.sort_indices();
-        let mut n = min(self.ixs.len(), MAX_GENOTYPES);
-        if n < 2 {
-            log::warn!("Only {} genotype(s) remaining, quality will be undefined", n);
-        }
-
         let genotypes = &data.genotypes;
-        let mut ln_probs = vec![0.0; n];
-        let mut predictions = Vec::with_capacity(n);
-        let mut out_genotypes = Vec::with_capacity(n);
-        let mut i = 0;
-        // Use while instead of for, as upper bound can change.
-        while i < n {
-            let u = self.ixs[i];
-            let pred_i = self.predictions[u].take().unwrap();
-            out_genotypes.push(genotypes[u].genotype.clone());
-            for j in i + 1..n {
-                let pred_j = self.predictions[self.ixs[j]].as_ref().unwrap();
-                let prob_j = compare_two_likelihoods(pred_j, &pred_i);
-                if i == 0 && j >= min_output && prob_j < thresh_prob {
-                    n = j;
-                    break;
-                }
-                ln_probs[i] += (-prob_j.exp()).ln_1p();
-                ln_probs[j] += prob_j;
-            }
-            predictions.push(pred_i);
-            i += 1;
+        let mut ln_probs = Vec::new();
+        self.discard_improbable_genotypes(genotypes, THRESH.min(params.prob_thresh),
+            max(MIN_GENOTYPES, params.out_bams), MAX_GENOTYPES, 1, false, Some(&mut ln_probs));
+        let n = self.ixs.len();
+        assert_eq!(ln_probs.len(), n);
+
+        let quality = if n < 2 {
+            log::warn!("Single genotype remaining, quality will be undefined");
+            f64::NAN
+        } else {
+            let norm_fct = Ln::sum(&ln_probs);
+            ln_probs.iter_mut().for_each(|v| *v -= norm_fct);
+            Phred::from_ln_prob(Ln::sum(&ln_probs[1..])).min(1e9)
+        };
+
+        let mut write_n = MIN_GENOTYPES;
+        if n > write_n && let Some(j) = self.ixs.fixed
+                .and_then(|fixed_ix| self.ixs.retained[write_n..].iter().position(|&ix| ix == fixed_ix)) {
+            self.ixs.retained.swap(write_n, j + write_n);
+            ln_probs.swap(write_n, j + write_n);
+            write_n += 1;
         }
-        ln_probs.truncate(n);
-        let norm_fct = Ln::sum(&ln_probs);
-        ln_probs.iter_mut().for_each(|v| *v -= norm_fct);
-        let quality = Phred::from_ln_prob(Ln::sum(&ln_probs[1..])).min(1e9);
+        ln_probs.truncate(write_n);
+        self.ixs.retained.truncate(write_n);
         Genotyping {
-            genotypes: out_genotypes,
+            genotypes: self.ixs.retained.iter().map(|&ix| genotypes[ix].genotype.clone()).collect(),
+            predictions: self.ixs.retained.iter().map(|&ix| self.predictions[ix].take().unwrap()).collect(),
             warnings: Vec::new(),
             weighted_dist: None,
             total_reads: data.all_alns.reads().len() as u32,
@@ -558,7 +629,7 @@ impl Predictions {
             true_edit_distances: data.true_edit_distances,
             unexpl_reads: None,
             tag: data.contigs.tag().to_owned(),
-            predictions, ln_probs, quality,
+            ln_probs, quality,
         }
     }
 }
@@ -830,7 +901,7 @@ fn solve_single_thread(
     let distr_cache = data.distr_cache.deref();
     for stage in &data.scheme.stages {
         describe_stage(Some(stage));
-        let n_gts = predictions.curr_len();
+        let n_gts = predictions.ixs.len();
         let out_size = data.scheme.stages.get(stage.ix + 1).map(|next_stage| next_stage.in_size);
         if !(data.assgn_params.dont_skip || out_size.map(|s| s < n_gts).unwrap_or(true)) {
             log::info!("    Skipping stage, not enough genotypes");
@@ -842,7 +913,7 @@ fn solve_single_thread(
 
         logger.reset(n_gts);
         let mut liks = vec![f64::NAN; usize::from(stage.attempts)];
-        for &ix in predictions.ixs.iter() {
+        for ix in predictions.ixs.iter() {
             let info = &data.genotypes[ix];
             let prefix = format!("{}\t{}\t", stage.ix + 1, info.genotype);
             let mut gt_alns = GenotypeAlignments::new(info.genotype.clone(), &data.contig_infos, &data.all_alns,
@@ -869,8 +940,9 @@ fn solve_single_thread(
                 writeln!(w, "{}{:.4}", prefix, Ln::to_log10(lik_mean)).map_err(add_path!(!))?;
             }
         }
-        if let Some(s) = out_size {
-            predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh, s, ONE_THREAD);
+        if let Some(min_size) = out_size {
+            predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh,
+                min_size, min(2 * min_size, SOPHISTICATED_COUNT), ONE_THREAD, true, None);
         }
         logger.finish_stage();
     }
@@ -910,7 +982,7 @@ pub fn solve(
 
     let mut sol_writer = ext::sys::create_brotli(&locus_dir.join("sol.csv.br"))?;
     writeln!(sol_writer, "stage\tgenotype\tscore").map_err(add_path!(!))?;
-    let mut predictions = Predictions::new(n_gts);
+    let mut predictions = Predictions::new(n_gts, data.fixed_gt_ix);
     let out_size0 = data.scheme.stages[0].in_size;
     if data.assgn_params.dont_skip || out_size0 < n_gts {
         let curr_sol_writer = (data.debug != DebugLvl::None).then_some(&mut sol_writer);
@@ -1015,7 +1087,7 @@ impl MainWorker {
 
         for stage in &scheme.stages {
             describe_stage(Some(stage));
-            let n_gts = predictions.curr_len();
+            let n_gts = predictions.ixs.len();
             let out_size = data.scheme.stages.get(stage.ix + 1).map(|next_stage| next_stage.in_size);
             if !(data.assgn_params.dont_skip || out_size.map(|s| s < n_gts).unwrap_or(true)) {
                 log::info!("    Skipping stage, not enough genotypes");
@@ -1026,14 +1098,14 @@ impl MainWorker {
             rem_jobs.clear();
             let mut start = 0;
             // Shuffle indices to better distribute them to threads.
-            predictions.ixs.shuffle(rng);
+            predictions.ixs.retained.shuffle(rng);
             for (i, sender) in self.senders.iter().enumerate() {
                 if start == n_gts {
                     break;
                 }
                 let rem_workers = n_workers - i;
                 let curr_jobs = (n_gts - start).fast_ceil_div(rem_workers);
-                let task = predictions.ixs[start..start + curr_jobs].to_vec();
+                let task = predictions.ixs.retained[start..start + curr_jobs].to_vec();
                 sender.send((stage.ix, task)).expect("Genotyping worker has failed!");
                 start += curr_jobs;
                 rem_jobs.push(curr_jobs);
@@ -1057,9 +1129,9 @@ impl MainWorker {
                     }
                 }
             }
-            if let Some(s) = out_size {
+            if let Some(min_size) = out_size {
                 predictions.discard_improbable_genotypes(&data.genotypes, data.assgn_params.prob_thresh,
-                    s, data.threads);
+                    min_size, min(2 * min_size, SOPHISTICATED_COUNT), data.threads, true, None);
             }
             logger.finish_stage();
         }
