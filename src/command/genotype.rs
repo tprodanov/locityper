@@ -1375,10 +1375,8 @@ fn write_vcf(
     let (_, ref_ranges) = vars.get_ref_ranges();
     // [NOTE] Can provide sample name.
     let groupped_haps = [("SAMPLE".to_string(), genotype.ids().iter().copied().map(Some).collect())];
-    let vcf_filename = vcf_filename.as_ref();
-    let tmp_filename = ext::sys::temp_filename(vcf_filename);
-    paf_vcf::write_vcf(ref_region.chrom(), ref_region.start(), &ref_ranges, &vars, contig_set, ref_id,
-        &groupped_haps, tmp_filename, vcf_filename)
+    paf_vcf::write_vcf(&vars, ref_region.chrom(), ref_region.start(), &ref_ranges, ref_seq,
+        contig_set, &groupped_haps, vcf_filename)
 }
 
 fn analyze_locus(
