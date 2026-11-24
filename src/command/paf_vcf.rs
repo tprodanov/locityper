@@ -1,11 +1,13 @@
 use std::{
     path::{Path, PathBuf},
     time::Instant,
-    io::Write,
     ffi::OsStr,
 };
 use colored::Colorize;
 use regex::Regex;
+use htslib::{
+    bcf::{self, header::Header, record::GenotypeAllele},
+};
 use crate::{
     err::{error, add_path, validate_param},
     ext::{
@@ -183,34 +185,6 @@ pub fn load_region(
         return Ok(None);
     }
     ReferenceRegion::load(fname).map(Some)
-}
-
-/// Creates either bgzip or plain output file. Second returned value is true if data is compressed.
-fn create_vcf_writer<'a>(
-    filename: impl AsRef<Path>,
-    samples: impl Iterator<Item = &'a str>,
-) -> crate::Result<(Box<dyn Write>, bool)>
-{
-    let filename = filename.as_ref();
-    let bgzip = filename.extension().and_then(OsStr::to_str) == Some("gz");
-    let mut out = if bgzip {
-        htslib::bgzf::Writer::from_path(&filename)
-            .map_err(|_| error!(RuntimeError, "Cannot create file {}", filename.display()))
-            .map(|w| Box::new(w) as Box<dyn Write>)?
-    } else {
-        ext::sys::create_file(filename)
-            .map(|w| Box::new(w) as Box<dyn Write>)?
-    };
-    const HEADER: &'static [u8] = b"\
-        ##fileformat=VCFv4.2\n\
-        ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
-        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
-    out.write_all(HEADER).map_err(add_path!(filename))?;
-    for sample in samples {
-        write!(out, "\t{}", sample).map_err(add_path!(filename))?;
-    }
-    writeln!(out).map_err(add_path!(filename))?;
-    Ok((out, bgzip))
 }
 
 #[derive(Clone, Debug)]
@@ -495,6 +469,26 @@ fn get_hap_ranges(ref_ranges: &[(u32, u32)], hap_vars: &[VarRange]) -> Vec<Optio
     hap_ranges
 }
 
+/// Creates either bgzip or plain VCF writer. Second returned value is true if data is compressed.
+pub(super) fn create_vcf_writer<'a>(
+    filename: impl AsRef<Path>,
+    chrom: &str,
+    samples: impl Iterator<Item = &'a str>,
+) -> crate::Result<(bcf::Writer, bool)>
+{
+    let filename = filename.as_ref();
+    let bgzip = filename.extension().and_then(OsStr::to_str) == Some("gz");
+    let mut header = Header::new();
+    // The contig must be defined in the header before records can reference it.
+    header.push_record(format!("##contig=<ID={}>", chrom).as_bytes());
+    for sample in samples {
+        header.push_sample(sample.as_bytes());
+    }
+    header.push_record(b"##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">");
+    let writer = bcf::Writer::from_path(filename, &header, !bgzip, bcf::Format::Vcf)?;
+    Ok((writer, bgzip))
+}
+
 pub(super) fn write_vcf(
     chrom: &str,
     shift: u32,
@@ -510,9 +504,13 @@ pub(super) fn write_vcf(
     let temp_vcf_filename = temp_vcf_filename.as_ref();
     let hap_ranges = vars.get_hap_ranges(&ref_ranges);
     let ref_seq = contig_set.get_seq(ref_id);
-    let (mut writer, bgzip) = create_vcf_writer(temp_vcf_filename, groupped_haps.iter().map(|(name, _)| name as &str))?;
+    let (mut writer, bgzip) = create_vcf_writer(
+        temp_vcf_filename, chrom, groupped_haps.iter().map(|(name, _)| name as &str))?;
+    let ploidy = groupped_haps.iter().map(|(_, ids)| ids.len()).max().unwrap_or(0);
 
     let mut hap_allele_ixs = IntMap::with_capacity_and_hasher(vars.haplotypes.len(), Default::default());
+    let mut genotypes: Vec<GenotypeAllele> = Vec::with_capacity(ploidy);
+    let mut record = writer.empty_record();
     for (i, &(ref_start, ref_end)) in ref_ranges.iter().enumerate() {
         let mut alleles = vec![&ref_seq[ref_start as usize..ref_end as usize]];
         hap_allele_ixs.clear();
@@ -532,25 +530,26 @@ pub(super) fn write_vcf(
             continue;
         }
 
-        write!(writer, "{}\t{}\t.", chrom, ref_start + shift + 1).map_err(add_path!(temp_vcf_filename))?;
-        for (i, allele) in alleles.iter().enumerate() {
-            writer.write_all(if i <= 1 { b"\t" } else { b"," }).map_err(add_path!(temp_vcf_filename))?;
-            writer.write_all(allele).map_err(add_path!(temp_vcf_filename))?;
-        }
-        writer.write_all(b"\t60\t.\t.\tGT").map_err(add_path!(temp_vcf_filename))?;
+        record.clear();
+        record.set_rid(Some(0));
+        record.set_pos((ref_start + shift) as i64);
+        record.set_alleles(&alleles)?;
+        record.set_qual(60.0);
 
+        const TRAILING_ALLELE: GenotypeAllele = GenotypeAllele::Phased(-1073741825);
+        genotypes.clear();
         for (_, hap_ids) in groupped_haps {
-            for (i, &opt_id) in hap_ids.iter().enumerate() {
-                writer.write_all(if i == 0 { b"\t" } else { b"|" }).map_err(add_path!(temp_vcf_filename))?;
+            genotypes.extend(hap_ids.iter().map(|opt_id| {
                 match opt_id.and_then(|id| hap_allele_ixs.get(&id)) {
-                    Some(allele_ix) => write!(writer, "{}", allele_ix),
-                    None => writer.write_all(b"."),
-                }.map_err(add_path!(temp_vcf_filename))?;
-            }
+                    Some(&allele_ix) => GenotypeAllele::Phased(allele_ix as i32),
+                    None => GenotypeAllele::PhasedMissing,
+                }
+            }));
+            genotypes.extend(std::iter::repeat_n(TRAILING_ALLELE, ploidy - hap_ids.len()));
         }
-        writeln!(writer).map_err(add_path!(temp_vcf_filename))?;
+        record.push_genotypes(&genotypes)?;
+        writer.write(&record)?;
     }
-    writer.flush().map_err(add_path!(temp_vcf_filename))?;
     std::mem::drop(writer);
 
     let final_vcf_filename = final_vcf_filename.as_ref();
