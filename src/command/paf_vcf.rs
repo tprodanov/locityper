@@ -18,7 +18,7 @@ use crate::{
         cigar::{Cigar, Operation},
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
     },
-    algo::{bisect, HashMap},
+    algo::{bisect, HashMap, IntMap},
     math::ifelse0,
     command::paths,
 };
@@ -285,19 +285,14 @@ fn move_all_left(vars: &mut Vec<VarRange>, ref_seq: &[u8], hap_seq: &[u8]) {
 }
 
 /// Variant ranges on various haplotypes.
+#[derive(Default)]
 pub(super) struct VarRanges {
-    /// For each haplotype, vector of variant ranges, if calculated.
-    haplotypes: Vec<Option<Vec<VarRange>>>,
+    /// For each haplotype, vector of variant ranges.
+    haplotypes: IntMap<ContigId, Vec<VarRange>>,
 }
 
 impl VarRanges {
-    pub fn new(n_contigs: usize) -> Self {
-        Self {
-            haplotypes: vec![None; n_contigs],
-        }
-    }
-
-    pub fn construct_haplotype_ranges(&mut self,
+    pub fn add_haplotype_ranges(&mut self,
         ref_seq: &[u8],
         hap_id: ContigId,
         hap_seq: &[u8],
@@ -335,11 +330,11 @@ impl VarRanges {
 
             if need_new {
                 let var = if rdiff == qdiff {
-                    VarRange::new(rpos,      rpos + rdiff,      qpos,      qpos + qdiff)
+                    VarRange::new(rpos, rpos + rdiff, qpos, qpos + qdiff)
                 } else if rpos == 0 || qpos == 0 {
-                    VarRange::new(rpos,      rpos + rdiff + 1,  qpos,      qpos + qdiff + 1)
+                    VarRange::new(rpos, rpos + rdiff + 1, qpos, qpos + qdiff + 1)
                 } else {
-                    VarRange::new(rpos - 1,  rpos + rdiff,      qpos - 1,  qpos + qdiff)
+                    VarRange::new(rpos - 1, rpos + rdiff, qpos - 1, qpos + qdiff)
                 };
                 vars.push(var);
             }
@@ -352,8 +347,8 @@ impl VarRanges {
             }
         }
         move_all_left(&mut vars, ref_seq, hap_seq);
-        let old = std::mem::replace(&mut self.haplotypes[hap_id.ix()], Some(vars));
-        if old.is_some() {
+        let old_val = self.haplotypes.insert(hap_id, vars);
+        if old_val.is_some() {
             log::warn!("Defined variants for the same haplotype twice");
         }
         Ok(())
@@ -366,10 +361,10 @@ impl VarRanges {
         ref_id: ContigId,
     ) -> crate::Result<Self> {
         let contigs = contig_set.contigs();
-        let mut this = Self::new(contigs.len());
+        let mut this = Self::default();
         let ref_hap = contigs.get_name(ref_id);
         let ref_seq = contig_set.get_seq(ref_id);
-        this.haplotypes[ref_id.ix()] = Some(Vec::new());
+        this.haplotypes.insert(ref_id, Vec::new());
 
         let mut file = ext::sys::open(paf_filename).map(PafFile::new)?;
         while let Some(entry) = file.next_wo_tags(contigs)? {
@@ -406,11 +401,11 @@ impl VarRanges {
                     ref_hap, contigs.get_name(hap_id), cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
                 continue;
             }
-            this.construct_haplotype_ranges(ref_seq, hap_id, hap_seq, &cigar)?;
+            this.add_haplotype_ranges(ref_seq, hap_id, hap_seq, &cigar)?;
         }
-        let n_missing = this.haplotypes.iter().filter(|opt| opt.is_none()).count();
-        if n_missing > 0 {
-            log::warn!("    {} / {} haplotype-reference alignments are missing", n_missing, contigs.len());
+        if this.haplotypes.len() < contigs.len() {
+            log::warn!("    {} / {} haplotype-reference alignments are missing",
+                contigs.len() - this.haplotypes.len(), contigs.len());
         }
         Ok(this)
     }
@@ -423,10 +418,9 @@ impl VarRanges {
     pub fn get_hap_ranges(
         &self,
         ref_ranges: &[(u32, u32)],
-    ) -> Vec<Vec<Option<(u32, u32)>>> {
+    ) -> IntMap<ContigId, Vec<Option<(u32, u32)>>> {
         self.haplotypes.iter()
-            .map(|hap_vars| hap_vars.as_ref().map(|vars| get_hap_ranges(&ref_ranges, vars))
-                .unwrap_or_else(|| vec![None; ref_ranges.len()]))
+            .map(|(&id, hap_vars)| (id, get_hap_ranges(&ref_ranges, hap_vars)))
             .collect()
     }
 
@@ -434,8 +428,7 @@ impl VarRanges {
     /// - sorted and de-duplicated reference ranges (ref_start, ref_end),
     /// - merged reference ranges. Combined ranges can touch (end == next_start) but do not overlap.
     pub fn get_ref_ranges(&self) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
-        let mut unique_ranges: Vec<_> = self.haplotypes.iter()
-            .filter_map(|v| v.as_ref())
+        let mut unique_ranges: Vec<_> = self.haplotypes.values()
             .flat_map(|v| v.iter())
             .map(|v| (v.ref_start, v.ref_end)).collect();
         unique_ranges.sort_unstable();
@@ -502,63 +495,72 @@ fn get_hap_ranges(ref_ranges: &[(u32, u32)], hap_vars: &[VarRange]) -> Vec<Optio
     hap_ranges
 }
 
-fn write_vcf(
+pub(super) fn write_vcf(
     chrom: &str,
     shift: u32,
     ref_ranges: &[(u32, u32)],
     vars: &VarRanges,
     contig_set: &ContigSet,
     ref_id: ContigId,
-    groupped_haps: &[(String, Vec<Option<usize>>)],
-    vcf_filename: &Path,
+    groupped_haps: &[(String, Vec<Option<ContigId>>)],
+    temp_vcf_filename: impl AsRef<Path>,
+    final_vcf_filename: impl AsRef<Path>,
 ) -> crate::Result<()>
 {
+    let temp_vcf_filename = temp_vcf_filename.as_ref();
     let hap_ranges = vars.get_hap_ranges(&ref_ranges);
     let ref_seq = contig_set.get_seq(ref_id);
-    let (mut writer, bgzip) = create_vcf_writer(vcf_filename, groupped_haps.iter().map(|(name, _)| name as &str))?;
+    let (mut writer, bgzip) = create_vcf_writer(temp_vcf_filename, groupped_haps.iter().map(|(name, _)| name as &str))?;
 
+    let mut hap_allele_ixs = IntMap::with_capacity_and_hasher(vars.haplotypes.len(), Default::default());
     for (i, &(ref_start, ref_end)) in ref_ranges.iter().enumerate() {
         let mut alleles = vec![&ref_seq[ref_start as usize..ref_end as usize]];
-        let hap_allele_ixs: Vec<Option<usize>> = contig_set.seqs().iter().zip(&hap_ranges)
-            .map(|(seq, hap)| hap[i].and_then(|(start, end)| {
-                let allele = &seq[start as usize..end as usize];
-                if allele.contains(&b'N') { return None; }
-                match alleles.iter().position(|&existing_allele| existing_allele == allele) {
-                    Some(allele_ix) => Some(allele_ix),
-                    None => {
-                        alleles.push(allele);
-                        Some(alleles.len() - 1)
-                    }
-                }
-        })).collect();
+        hap_allele_ixs.clear();
+        for (&id, curr_ranges) in hap_ranges.iter() {
+            let seq = contig_set.get_seq(id);
+            let Some((start, end)) = curr_ranges[i] else { continue };
+            let allele = &seq[start as usize..end as usize];
+            let allele_ix = alleles.iter().position(|&existing_allele| existing_allele == allele)
+                .unwrap_or_else(|| {
+                    alleles.push(allele);
+                    alleles.len() - 1
+                });
+            hap_allele_ixs.insert(id, allele_ix);
+        }
         if alleles.len() == 1 {
             // Can happen in separate.vcf.gz as some alleles become unknown.
             continue;
         }
 
-        write!(writer, "{}\t{}\t.", chrom, ref_start + shift + 1).map_err(add_path!(vcf_filename))?;
+        write!(writer, "{}\t{}\t.", chrom, ref_start + shift + 1).map_err(add_path!(temp_vcf_filename))?;
         for (i, allele) in alleles.iter().enumerate() {
-            writer.write_all(if i <= 1 { b"\t" } else { b"," }).map_err(add_path!(vcf_filename))?;
-            writer.write_all(allele).map_err(add_path!(vcf_filename))?;
+            writer.write_all(if i <= 1 { b"\t" } else { b"," }).map_err(add_path!(temp_vcf_filename))?;
+            writer.write_all(allele).map_err(add_path!(temp_vcf_filename))?;
         }
-        writer.write_all(b"\t60\t.\t.\tGT").map_err(add_path!(vcf_filename))?;
+        writer.write_all(b"\t60\t.\t.\tGT").map_err(add_path!(temp_vcf_filename))?;
 
-        for (_, hap_ixs) in groupped_haps {
-            for (i, &opt_j) in hap_ixs.iter().enumerate() {
-                writer.write_all(if i == 0 { b"\t" } else { b"|" }).map_err(add_path!(vcf_filename))?;
-                match opt_j.and_then(|j| hap_allele_ixs[j]) {
+        for (_, hap_ids) in groupped_haps {
+            for (i, &opt_id) in hap_ids.iter().enumerate() {
+                writer.write_all(if i == 0 { b"\t" } else { b"|" }).map_err(add_path!(temp_vcf_filename))?;
+                match opt_id.and_then(|id| hap_allele_ixs.get(&id)) {
                     Some(allele_ix) => write!(writer, "{}", allele_ix),
                     None => writer.write_all(b"."),
-                }.map_err(add_path!(vcf_filename))?;
+                }.map_err(add_path!(temp_vcf_filename))?;
             }
         }
-        writeln!(writer).map_err(add_path!(vcf_filename))?;
+        writeln!(writer).map_err(add_path!(temp_vcf_filename))?;
     }
-    writer.flush().map_err(add_path!(vcf_filename))?;
+    writer.flush().map_err(add_path!(temp_vcf_filename))?;
     std::mem::drop(writer);
+
+    let final_vcf_filename = final_vcf_filename.as_ref();
+    if temp_vcf_filename != final_vcf_filename {
+        std::fs::rename(&temp_vcf_filename, final_vcf_filename)
+            .map_err(add_path!(temp_vcf_filename, final_vcf_filename))?;
+    }
     if bgzip {
-        if let Err(e) = htslib::bcf::index::build(vcf_filename, None, 1, htslib::bcf::index::Type::Tbx) {
-            log::error!("Could not construct tabix index for VCF file {}: {}", ext::fmt::path(vcf_filename), e);
+        if let Err(e) = htslib::bcf::index::build(final_vcf_filename, None, 1, htslib::bcf::index::Type::Tbx) {
+            log::error!("Could not construct tabix index for VCF file {}: {}", ext::fmt::path(final_vcf_filename), e);
         }
     }
     Ok(())
@@ -572,7 +574,7 @@ fn group_haplotypes(
     contigs: &ContigNames,
     ref_hap: &str,
     disc_haps: &DiscardedHaplotypes,
-) -> crate::Result<(Vec<(String, Vec<Option<usize>>)>, ContigId)>
+) -> crate::Result<(Vec<(String, Vec<Option<ContigId>>)>, ContigId)>
 {
     // First, regular contig name, with lazy *? specifier.
     // Then, single digit after either . or _
@@ -580,13 +582,13 @@ fn group_haplotypes(
     let re = regex::Regex::new(PATTERN).unwrap();
 
     let mut ref_id = None;
-    let mut map = HashMap::<String, Vec<Option<usize>>>::default();
-    let mut add = |i: usize, name: &str| -> crate::Result<()> {
+    let mut map = HashMap::<String, Vec<Option<ContigId>>>::default();
+    let mut add = |id: ContigId, name: &str| -> crate::Result<()> {
         let c = re.captures(name).ok_or_else(|| error!(ParsingError, "Cannot parse contig name `{}`", name))?;
         let sample = &c[1];
         let opt_hap = c.get(2);
         if name == ref_hap {
-            ref_id = Some(ContigId::new(i));
+            ref_id = Some(id);
             if let Some(hap) = &opt_hap {
                 log::warn!("Reference name {} has haplotype suffix ({}); will keep it in the VCF file",
                     ref_hap, hap.as_str());
@@ -601,14 +603,14 @@ fn group_haplotypes(
         // so that we have indication that the sample is diploid.
         let new_len = vec.len().max(hap + 1).max(if opt_hap.is_none() { 1 } else { 2 });
         vec.resize(new_len, None);
-        vec[hap] = Some(i);
+        vec[hap] = Some(id);
         Ok(())
     };
 
-    for (i, contig) in contigs.names().iter().enumerate() {
-        add(i, contig)?;
-        for (hap, _) in disc_haps.identical_to(ContigId::new(i)).into_iter().flat_map(|vec| vec.iter()) {
-            add(i, hap)?;
+    for (id, contig) in itertools::izip!(contigs.ids(), contigs.names()) {
+        add(id, contig)?;
+        for (hap, _) in disc_haps.identical_to(id).into_iter().flat_map(|vec| vec.iter()) {
+            add(id, hap)?;
         }
     }
 
@@ -650,19 +652,14 @@ pub(super) fn convert_to_vcf(
     };
 
     let vars = VarRanges::from_paf(paf_filename, &contig_set, ref_id)?;
-    let tmp_merged = ext::sys::temp_filename(out_merged);
-    let tmp_separate = out_separate.map(|p| ext::sys::temp_filename(p));
-
     let (unique_ranges, merged_ranges) = vars.get_ref_ranges();
-    write_vcf(&chrom, shift, &merged_ranges, &vars, &contig_set, ref_id, &groupped_haps, &tmp_merged)?;
-    if let Some(separate_vcf_fname) = &tmp_separate {
-        write_vcf(&chrom, shift, &unique_ranges, &vars, &contig_set, ref_id, &groupped_haps, &separate_vcf_fname)?;
-    }
 
-    std::fs::rename(&tmp_merged, out_merged).map_err(add_path!(tmp_merged, out_merged))?;
-    if let Some(tmp_sep) = tmp_separate {
-        let out_sep = out_separate.unwrap();
-        std::fs::rename(&tmp_sep, out_sep).map_err(add_path!(tmp_sep, out_sep))?;
+    let tmp_merged = ext::sys::temp_filename(out_merged);
+    write_vcf(&chrom, shift, &merged_ranges, &vars, &contig_set, ref_id, &groupped_haps, &tmp_merged, &out_merged)?;
+    if let Some(separate_vcf_fname) = &out_separate {
+        let tmp_fname = ext::sys::temp_filename(separate_vcf_fname);
+        write_vcf(&chrom, shift, &unique_ranges, &vars, &contig_set, ref_id, &groupped_haps,
+            &tmp_fname, &separate_vcf_fname)?;
     }
     Ok(())
 }

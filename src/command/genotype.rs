@@ -19,15 +19,16 @@ use crate::{
         distr::WithQuantile,
     },
     seq::{
-        self, interv, recruit, minim_div, Interval,
+        self, interv, recruit, minim_div, hint_vcf,
+        Interval,
         paf::{PafFile, PafParseResult},
         fastx::{self, FastxRead, SingleRecord},
         contigs::{ContigId, ContigNames, ContigSet, Genotype, DiscardedHaplotypes},
+        cigar::Cigar,
         interv::ReferenceRegion,
         kmers::Kmer,
         counts::{KmerCount, KmerCounts},
         transfer::HapAlns,
-        hint_vcf,
     },
     bg::{
         TECHNOLOGIES, BgDistr, Technology, SequencingInfo,
@@ -49,7 +50,7 @@ use crate::{
     algo::{HashSet, HashMap},
 };
 use super::{
-    paths, DebugLvl,
+    paths, paf_vcf, DebugLvl,
     preproc::InputFiles,
 };
 
@@ -1255,21 +1256,29 @@ fn generate_genotypes(
 }
 
 /// Go through the haplotype-haplotype alignments, and store `HapAlns` and matrix of edit distances, when needed.
+/// If `ref_region_and_id` is Some, loads alignments relative to ref_id.
 fn process_paf(
     paf_filename: &Path,
     contig_set: &ContigSet,
     basis_contigs: &[ContigId],
+    ref_region_and_id: Option<&(ReferenceRegion, ContigId)>,
     technology: Technology,
     args: &Args,
-) -> crate::Result<(Option<Arc<HapAlns>>, Option<TriangleMatrix<Option<u32>>>)> {
+) -> crate::Result<(
+    Option<Arc<HapAlns>>,
+    Option<TriangleMatrix<Option<u32>>>,
+    Option<Vec<Option<Cigar>>>,
+)> {
     let contigs = contig_set.contigs();
-    let mut opt_hap_alns = if args.transfer_div > 0.0 {
+    let mut opt_hap_alns = if args.transfer_div > 0.0 || ref_region_and_id.is_some() {
         Some(HapAlns::new(contig_set, args.transfer_fails, technology.are_short_reads(),
             args.transfer_compl_kmer, args.transfer_compl_frac))
     } else { None };
     let mut contig_distances = args.use_paf.then(|| TriangleMatrix::new(contigs.len(), None));
-    if opt_hap_alns.is_none() && contig_distances.is_none() {
-        return Ok((None, None));
+    let mut opt_alns_to_ref: Option<(ContigId, Vec<_>)> = ref_region_and_id
+        .as_ref().map(|t| (t.1, vec![None; contigs.len()]));
+    if opt_hap_alns.is_none() && contig_distances.is_none() && opt_alns_to_ref.is_none() {
+        return Ok((None, None, None));
     }
 
     let mut in_basis_contigs = vec![false; contigs.len()];
@@ -1286,6 +1295,17 @@ fn process_paf(
         if let Some(dists) = &mut contig_distances && let Some(d) = entry.edit_distance() {
             *dists.get_symmetric_mut(entry.query_id().ix(), entry.target_id().ix()) = Some(d);
         }
+        if let Some((ref_id, alns_to_ref)) = &mut opt_alns_to_ref
+            && (entry.target_id() == *ref_id || entry.query_id() == *ref_id)
+            && let Some(cigar) = entry.cigar()
+        {
+            let (hap_id, cigar) = if entry.target_id() == *ref_id {
+                (entry.query_id(), cigar.clone())
+            } else {
+                (entry.target_id(), cigar.invert())
+            };
+            alns_to_ref[hap_id.ix()] = Some(cigar);
+        }
         if let Some(hap_alns) = &mut opt_hap_alns {
             hap_alns.add(&mut entry, contigs, 1.5 * args.transfer_div);
         }
@@ -1295,7 +1315,7 @@ fn process_paf(
             args.transfer_window.expect("Window size must be defined"),
             args.transfer_step.expect("Transfer step must be defined"), args.transfer_div);
     }
-    Ok((opt_hap_alns.map(Arc::new), contig_distances))
+    Ok((opt_hap_alns.map(Arc::new), contig_distances, opt_alns_to_ref.map(|t| t.1)))
 }
 
 fn load_ref_region(
@@ -1328,6 +1348,37 @@ fn load_ref_region(
             region.chrom(), region.start() + 1, region.end(), region.len(), ref_hap, ref_len));
     }
     Ok((region, ref_id))
+}
+
+/// Writes output VCF file based on the predicted haplotypes.
+fn write_vcf(
+    genotyping: &solve::Genotyping,
+    ref_id: ContigId,
+    ref_region: &ReferenceRegion,
+    alns_to_ref: &[Option<Cigar>],
+    contig_set: &ContigSet,
+    vcf_filename: impl AsRef<Path>,
+) -> crate::Result<()> {
+    let Some(genotype) = genotyping.genotypes().first() else {
+        log::debug!("No predicted genotype, skipping output VCF");
+        return Ok(())
+    };
+    let mut vars = paf_vcf::VarRanges::default();
+    let ref_seq = contig_set.get_seq(ref_id);
+    for &id in genotype.ids() {
+        if let Some(cigar) = &alns_to_ref[id.ix()] {
+            let hap_seq = contig_set.get_seq(id);
+            vars.add_haplotype_ranges(ref_seq, id, hap_seq, cigar)?;
+        }
+    }
+
+    let (_, ref_ranges) = vars.get_ref_ranges();
+    // [NOTE] Can provide sample name.
+    let groupped_haps = [("SAMPLE".to_string(), genotype.ids().iter().copied().map(Some).collect())];
+    let vcf_filename = vcf_filename.as_ref();
+    let tmp_filename = ext::sys::temp_filename(vcf_filename);
+    paf_vcf::write_vcf(ref_region.chrom(), ref_region.start(), &ref_ranges, &vars, contig_set, ref_id,
+        &groupped_haps, tmp_filename, vcf_filename)
 }
 
 fn analyze_locus(
@@ -1367,11 +1418,15 @@ fn analyze_locus(
     let tid2contig = locs::construct_tid_to_contig_map(bam_reader.header(), contigs)?;
     let opt_paf_fname = paths::LOCUS_PAFS.iter()
         .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
-    let (hap_alns, mut contig_distances) = if let Some(paf_fname) = opt_paf_fname {
-        process_paf(&paf_fname, &locus.set, &tid2contig, bg_distr.seq_info().technology(), args)?
+    let (hap_alns, mut contig_distances, alns_to_ref) = if let Some(paf_fname) = opt_paf_fname {
+        process_paf(&paf_fname, &locus.set, &tid2contig, ref_region_and_id.as_ref(),
+            bg_distr.seq_info().technology(), args)?
     } else {
-        (None, None)
+        (None, None, None)
     };
+    if args.write_vcf && alns_to_ref.is_none() {
+        log::warn!("Cannot write VCF since there are no precomputed haplotype alignments");
+    }
     let true_edit_distances = contig_distances.is_some();
 
     let dbg_writers = if args.debug >= DebugLvl::Full {
@@ -1432,6 +1487,10 @@ fn analyze_locus(
     let res_filename = locus.out_dir.join(paths::RES_JSON);
     let mut res_writer = ext::sys::create_gzip(&res_filename)?;
     genotyping.to_json().write_pretty(&mut res_writer, 4).map_err(add_path!(res_filename))?;
+
+    if let Some(alns_to_ref) = alns_to_ref && let Some((ref_region, ref_id)) = ref_region_and_id {
+        write_vcf(&genotyping, ref_id, &ref_region, &alns_to_ref, &locus.set, locus.out_dir.join("res.vcf.gz"))?;
+    }
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));
     Ok(())
