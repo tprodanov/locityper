@@ -81,6 +81,7 @@ struct Args {
     databases: Vec<PathBuf>,
     output: Option<PathBuf>,
     basis: String,
+    write_vcf: bool,
 
     subset_loci: HashSet<String>,
     ploidy: u8,
@@ -128,6 +129,7 @@ impl Default for Args {
             databases: Vec::new(),
             output: None,
             basis: "none".to_string(),
+            write_vcf: false,
 
             subset_loci: HashSet::default(),
             ploidy: 2,
@@ -193,6 +195,7 @@ impl Args {
 
         validate_param!(0 < self.transfer_compl_kmer && self.transfer_compl_kmer <= u16::MAX_KMER_SIZE,
             "k-mer size in --tr-compl must be between 1 and {}", u16::MAX_KMER_SIZE);
+        self.write_vcf |= self.hint.vcf.is_some();
         Ok(self)
     }
 
@@ -263,6 +266,8 @@ fn print_help(extended: bool) {
         "-o, --output".green(), "DIR".yellow());
     println!("    {:KEY$} {:VAL$}  Output BAM files for {} best genotypes [{}].",
         "-O, --out-bams".green(), "INT".yellow(), "INT".yellow(), super::fmt_def(defaults.assgn_params.out_bams));
+    println!("    {:KEY$} {:VAL$}  Write approximate VCF files for each locus.",
+        "    --write-vcf".green(), super::flag());
 
     println!("\n{}", "Optional arguments:".bold());
     println!("    {:KEY$} {:VAL$}  Interleaved paired-end reads in single input file.",
@@ -508,6 +513,7 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 }
             }
             Long("reg-weights") | Long("region-weights") => args.reg_weights = Some(parser.value()?.parse()?),
+            Long("write-vcf") => args.write_vcf = true,
 
             Short('m') | Long("minimizer") | Long("minimizers") =>
                 args.minimizer_kw = (parser.value()?.parse()?, parser.value()?.parse()?),
@@ -1346,7 +1352,7 @@ fn analyze_locus(
     }
 
     let contigs = locus.set.contigs();
-    let ref_region_and_id = if args.hint.vcf.is_some() {
+    let ref_region_and_id = if args.write_vcf {
         Some(load_ref_region(locus.db_dir.join(paths::LOCUS_BED), contigs, &locus.disc_haps)?)
     } else { None };
 
@@ -1417,7 +1423,8 @@ fn analyze_locus(
             debug: args.debug,
             threads: usize::from(args.threads).min(genotypes.len()),
             is_paired_end: bg_distr.insert_distr().is_paired_end(),
-            all_alns, genotypes, contig_infos, ref_region_and_id,
+            all_alns, genotypes, contig_infos,
+            ref_region_and_id: None, // Remove `: None` if want to output ref BAM.
         });
         solve::solve(&data, bg_distr, &locus.out_dir, &mut rng)?
     };

@@ -48,7 +48,7 @@ fn create_bam_header(
         match ref_region {
             Some(region) => {
                 record.push_tag(b"SN", region.chrom());
-                record.push_tag(b"LN", region.end());
+                record.push_tag(b"LN", region.end()); // [TODO] Can get chromosome length from hint VCF file.
             }
             None => {
                 record.push_tag(b"SN", contigs.get_name(id));

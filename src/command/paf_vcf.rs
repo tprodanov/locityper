@@ -185,8 +185,36 @@ pub fn load_region(
     ReferenceRegion::load(fname).map(Some)
 }
 
+/// Creates either bgzip or plain output file. Second returned value is true if data is compressed.
+fn create_vcf_writer<'a>(
+    filename: impl AsRef<Path>,
+    samples: impl Iterator<Item = &'a str>,
+) -> crate::Result<(Box<dyn Write>, bool)>
+{
+    let filename = filename.as_ref();
+    let bgzip = filename.extension().and_then(OsStr::to_str) == Some("gz");
+    let mut out = if bgzip {
+        htslib::bgzf::Writer::from_path(&filename)
+            .map_err(|_| error!(RuntimeError, "Cannot create file {}", filename.display()))
+            .map(|w| Box::new(w) as Box<dyn Write>)?
+    } else {
+        ext::sys::create_file(filename)
+            .map(|w| Box::new(w) as Box<dyn Write>)?
+    };
+    const HEADER: &'static [u8] = b"\
+        ##fileformat=VCFv4.2\n\
+        ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
+    out.write_all(HEADER).map_err(add_path!(filename))?;
+    for sample in samples {
+        write!(out, "\t{}", sample).map_err(add_path!(filename))?;
+    }
+    writeln!(out).map_err(add_path!(filename))?;
+    Ok((out, bgzip))
+}
+
 #[derive(Clone, Debug)]
-struct VarRange {
+pub(super) struct VarRange {
     ref_start: u32,
     ref_end: u32,
     hap_start: u32,
@@ -195,17 +223,17 @@ struct VarRange {
 
 impl VarRange {
     #[inline]
-    fn new(ref_start: u32, ref_end: u32, hap_start: u32, hap_end: u32) -> Self {
+    pub(super) fn new(ref_start: u32, ref_end: u32, hap_start: u32, hap_end: u32) -> Self {
         Self { ref_start, ref_end, hap_start, hap_end }
     }
 
     #[inline]
-    fn ref_len(&self) -> u32 {
+    pub(super) fn ref_len(&self) -> u32 {
         self.ref_end - self.ref_start
     }
 
     #[inline]
-    fn alt_len(&self) -> u32 {
+    pub(super) fn alt_len(&self) -> u32 {
         self.hap_end - self.hap_start
     }
 }
@@ -256,149 +284,177 @@ fn move_all_left(vars: &mut Vec<VarRange>, ref_seq: &[u8], hap_seq: &[u8]) {
     }
 }
 
-/// Convert one haplotype into VCF.
-/// `start` represent shift of the variants relative to the reference haplotype.
-/// Returns a vector of variant ranges.
-fn process_haplotype(
-    ref_seq: &[u8],
-    hap_seq: &[u8],
-    cigar: &Cigar,
-) -> crate::Result<Vec<VarRange>>
-{
-    let mut vars = Vec::<VarRange>::new();
-    let mut rpos = 0;
-    let mut qpos = 0;
-    for item in cigar.iter() {
-        let op = item.operation();
-        if op == Operation::Equal {
-            rpos += item.len();
-            qpos += item.len();
-            continue;
-        }
+/// Variant ranges on various haplotypes.
+pub(super) struct VarRanges {
+    /// For each haplotype, vector of variant ranges, if calculated.
+    haplotypes: Vec<Option<Vec<VarRange>>>,
+}
 
-        if op == Operation::Match || op == Operation::Hard {
-            return Err(error!(RuntimeError, "Unexpected operation (M/H) in CIGAR {}", cigar));
+impl VarRanges {
+    pub fn new(n_contigs: usize) -> Self {
+        Self {
+            haplotypes: vec![None; n_contigs],
         }
-        let (cons_query, cons_ref) = op.consumes_query_ref();
-        let qdiff = ifelse0(cons_query, item.len());
-        let rdiff = ifelse0(cons_ref, item.len());
+    }
 
-        let mut need_new = true;
-        if let Some(last_var) = vars.last_mut() {
-            if rpos <= last_var.ref_end && qpos <= last_var.hap_end {
-                last_var.ref_end = last_var.ref_end.max(rpos + rdiff);
-                last_var.hap_end = last_var.hap_end.max(qpos + qdiff);
-                need_new = false;
-            } else {
-                // Need to check that the new variant does not overlap the previous one on both haplotypes.
-                assert!(rpos > last_var.ref_end && qpos > last_var.hap_end);
+    pub fn construct_haplotype_ranges(&mut self,
+        ref_seq: &[u8],
+        hap_id: ContigId,
+        hap_seq: &[u8],
+        cigar: &Cigar,
+    ) -> crate::Result<()> {
+        let mut vars = Vec::<VarRange>::new();
+        let mut rpos = 0;
+        let mut qpos = 0;
+        for item in cigar.iter() {
+            let op = item.operation();
+            if op == Operation::Equal {
+                rpos += item.len();
+                qpos += item.len();
+                continue;
+            }
+
+            if op == Operation::Match || op == Operation::Hard {
+                return Err(error!(RuntimeError, "Unexpected operation (M/H) in CIGAR {}", cigar));
+            }
+            let (cons_query, cons_ref) = op.consumes_query_ref();
+            let qdiff = ifelse0(cons_query, item.len());
+            let rdiff = ifelse0(cons_ref, item.len());
+
+            let mut need_new = true;
+            if let Some(last_var) = vars.last_mut() {
+                if rpos <= last_var.ref_end && qpos <= last_var.hap_end {
+                    last_var.ref_end = last_var.ref_end.max(rpos + rdiff);
+                    last_var.hap_end = last_var.hap_end.max(qpos + qdiff);
+                    need_new = false;
+                } else {
+                    // Need to check that the new variant does not overlap the previous one on both haplotypes.
+                    assert!(rpos > last_var.ref_end && qpos > last_var.hap_end);
+                }
+            }
+
+            if need_new {
+                let var = if rdiff == qdiff {
+                    VarRange::new(rpos,      rpos + rdiff,      qpos,      qpos + qdiff)
+                } else if rpos == 0 || qpos == 0 {
+                    VarRange::new(rpos,      rpos + rdiff + 1,  qpos,      qpos + qdiff + 1)
+                } else {
+                    VarRange::new(rpos - 1,  rpos + rdiff,      qpos - 1,  qpos + qdiff)
+                };
+                vars.push(var);
+            }
+            rpos += rdiff;
+            qpos += qdiff;
+        }
+        if let Some(var) = vars.last() {
+            if var.ref_end > ref_seq.len() as u32 || var.hap_end > hap_seq.len() as u32 {
+                return Err(error!(RuntimeError, "CIGAR operation out of range of the sequence"));
             }
         }
+        move_all_left(&mut vars, ref_seq, hap_seq);
+        let old = std::mem::replace(&mut self.haplotypes[hap_id.ix()], Some(vars));
+        if old.is_some() {
+            log::warn!("Defined variants for the same haplotype twice");
+        }
+        Ok(())
+    }
 
-        if need_new {
-            let var = if rdiff == qdiff {
-                VarRange::new(rpos,      rpos + rdiff,      qpos,      qpos + qdiff)
-            } else if rpos == 0 || qpos == 0 {
-                VarRange::new(rpos,      rpos + rdiff + 1,  qpos,      qpos + qdiff + 1)
-            } else {
-                VarRange::new(rpos - 1,  rpos + rdiff,      qpos - 1,  qpos + qdiff)
+    /// Constructs variant ranges from PAF file with alignments between haplotypes and the reference haplotype.
+    pub fn from_paf(
+        paf_filename: &Path,
+        contig_set: &ContigSet,
+        ref_id: ContigId,
+    ) -> crate::Result<Self> {
+        let contigs = contig_set.contigs();
+        let mut this = Self::new(contigs.len());
+        let ref_hap = contigs.get_name(ref_id);
+        let ref_seq = contig_set.get_seq(ref_id);
+        this.haplotypes[ref_id.ix()] = Some(Vec::new());
+
+        let mut file = ext::sys::open(paf_filename).map(PafFile::new)?;
+        while let Some(entry) = file.next_wo_tags(contigs)? {
+            let mut entry = match entry {
+                PafParseResult::Entry(entry) => entry,
+                PafParseResult::UnknownContig(name) => {
+                    log::warn!("Cannot find sequence for haplotype {}", name);
+                    continue
+                }
             };
-            vars.push(var);
-        }
-        rpos += rdiff;
-        qpos += qdiff;
-    }
-    if let Some(var) = vars.last() {
-        if var.ref_end > ref_seq.len() as u32 || var.hap_end > hap_seq.len() as u32 {
-            return Err(error!(RuntimeError, "CIGAR operation out of range of the sequence"));
-        }
-    }
-    move_all_left(&mut vars, ref_seq, hap_seq);
-    Ok(vars)
-}
-
-/// Creates either bgzip or plain output file. Second returned value is true if data is compressed.
-fn create_vcf_writer<'a>(
-    filename: impl AsRef<Path>,
-    samples: impl Iterator<Item = &'a str>,
-) -> crate::Result<(Box<dyn Write>, bool)>
-{
-    let filename = filename.as_ref();
-    let bgzip = filename.extension().and_then(OsStr::to_str) == Some("gz");
-    let mut out = if bgzip {
-        htslib::bgzf::Writer::from_path(&filename)
-            .map_err(|_| error!(RuntimeError, "Cannot create file {}", filename.display()))
-            .map(|w| Box::new(w) as Box<dyn Write>)?
-    } else {
-        ext::sys::create_file(filename)
-            .map(|w| Box::new(w) as Box<dyn Write>)?
-    };
-    const HEADER: &'static [u8] = b"\
-        ##fileformat=VCFv4.2\n\
-        ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
-        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
-    out.write_all(HEADER).map_err(add_path!(filename))?;
-    for sample in samples {
-        write!(out, "\t{}", sample).map_err(add_path!(filename))?;
-    }
-    writeln!(out).map_err(add_path!(filename))?;
-    Ok((out, bgzip))
-}
-
-/// Reads PAF file and returns a vector of variants for each haplotype found in the contig set and in the PAF file.
-fn process_paf(
-    paf_filename: &Path,
-    contig_set: &ContigSet,
-    ref_id: ContigId,
-) -> crate::Result<Vec<Option<Vec<VarRange>>>> {
-    let contigs = contig_set.contigs();
-    let ref_hap = contigs.get_name(ref_id);
-    let ref_seq = contig_set.get_seq(ref_id);
-    let mut var_ranges = vec![None; contigs.len()];
-    var_ranges[ref_id.ix()] = Some(Vec::new());
-
-    let mut file = ext::sys::open(paf_filename).map(PafFile::new)?;
-    while let Some(entry) = file.next_wo_tags(contigs)? {
-        let mut entry = match entry {
-            PafParseResult::Entry(entry) => entry,
-            PafParseResult::UnknownContig(name) => {
-                log::warn!("Cannot find sequence for haplotype {}", name);
+            let (hap_id, invert) = if ref_id == entry.query_id() {
+                (entry.target_id(), true)
+            } else if ref_id == entry.target_id() {
+                (entry.query_id(), false)
+            } else {
+                continue
+            };
+            if !entry.full_positive_alignment() {
+                log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
+                    contigs.get_name(hap_id), ref_hap);
                 continue
             }
-        };
-        let (hap_id, invert) = if ref_id == entry.query_id() {
-            (entry.target_id(), true)
-        } else if ref_id == entry.target_id() {
-            (entry.query_id(), false)
-        } else {
-            continue
-        };
-        if !entry.full_positive_alignment() {
-            log::warn!("Alignment between {} and {} is on the reverse strand or does not fully cover both sequences",
-                contigs.get_name(hap_id), ref_hap);
-            continue
-        }
 
-        let Some(mut cigar) = entry.take_cigar() else {
-            log::warn!("CIGAR missing for {} and {}", ref_hap, contigs.get_name(hap_id));
-            continue
-        };
-        if invert {
-            cigar = cigar.invert();
+            let Some(mut cigar) = entry.take_cigar() else {
+                log::warn!("CIGAR missing for {} and {}", ref_hap, contigs.get_name(hap_id));
+                continue
+            };
+            if invert {
+                cigar = cigar.invert();
+            }
+            let hap_seq = contig_set.get_seq(hap_id);
+            if cigar.query_len() != hap_seq.len() as u32 || cigar.ref_len() != ref_seq.len() as u32 {
+                log::error!("Incorrect CIGAR for {} and {} (expected lengths {},{}, got {},{})",
+                    ref_hap, contigs.get_name(hap_id), cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
+                continue;
+            }
+            this.construct_haplotype_ranges(ref_seq, hap_id, hap_seq, &cigar)?;
         }
-        let hap_seq = contig_set.get_seq(hap_id);
-        if cigar.query_len() != hap_seq.len() as u32 || cigar.ref_len() != ref_seq.len() as u32 {
-            log::error!("Incorrect CIGAR for {} and {} (expected lengths {},{}, got {},{})",
-                ref_hap, contigs.get_name(hap_id), cigar.query_len(), cigar.ref_len(), hap_seq.len(), ref_seq.len());
-            continue;
+        let n_missing = this.haplotypes.iter().filter(|opt| opt.is_none()).count();
+        if n_missing > 0 {
+            log::warn!("    {} / {} haplotype-reference alignments are missing", n_missing, contigs.len());
         }
-        var_ranges[hap_id.ix()] = Some(process_haplotype(ref_seq, hap_seq, &cigar)?);
+        Ok(this)
     }
-    let n_missing = var_ranges.iter().filter(|opt| opt.is_none()).count();
-    if n_missing > 0 {
-        log::warn!("    {} / {} haplotype-reference alignments are missing", n_missing, var_ranges.len());
+
+    /// Returns vector (length = n_haps) of vectors (inner length = ref_ranges.len())
+    /// where hap_ranges[hap_ix][var_ix] = (hap_start, hap_end) corresponding to ref_ranges[var_ix].
+    /// Undefined haplotypes will received `None`.
+    ///
+    /// Also, individual haplotype ranges can be None when reference range starts or stops inside haplotype variant.
+    pub fn get_hap_ranges(
+        &self,
+        ref_ranges: &[(u32, u32)],
+    ) -> Vec<Vec<Option<(u32, u32)>>> {
+        self.haplotypes.iter()
+            .map(|hap_vars| hap_vars.as_ref().map(|vars| get_hap_ranges(&ref_ranges, vars))
+                .unwrap_or_else(|| vec![None; ref_ranges.len()]))
+            .collect()
     }
-    Ok(var_ranges)
+
+    /// Returns
+    /// - sorted and de-duplicated reference ranges (ref_start, ref_end),
+    /// - merged reference ranges. Combined ranges can touch (end == next_start) but do not overlap.
+    pub fn get_ref_ranges(&self) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+        let mut unique_ranges: Vec<_> = self.haplotypes.iter()
+            .filter_map(|v| v.as_ref())
+            .flat_map(|v| v.iter())
+            .map(|v| (v.ref_start, v.ref_end)).collect();
+        unique_ranges.sort_unstable();
+        unique_ranges.dedup();
+
+        let mut merged_ranges = Vec::<(u32, u32)>::new();
+        for &(start, end) in &unique_ranges {
+            if let Some(last) = merged_ranges.last_mut() {
+                if last.1 <= start {
+                    merged_ranges.push((start, end));
+                } else {
+                    last.1 = last.1.max(end);
+                }
+            } else {
+                merged_ranges.push((start, end));
+            }
+        }
+        (unique_ranges, merged_ranges)
+    }
 }
 
 /// Based on new reference ranges and old haplotype variants, get new haplotype ranges.
@@ -450,18 +506,14 @@ fn write_vcf(
     chrom: &str,
     shift: u32,
     ref_ranges: &[(u32, u32)],
-    vars: &[Option<Vec<VarRange>>],
+    vars: &VarRanges,
     contig_set: &ContigSet,
     ref_id: ContigId,
     groupped_haps: &[(String, Vec<Option<usize>>)],
     vcf_filename: &Path,
 ) -> crate::Result<()>
 {
-    let hap_ranges: Vec<_> = vars.iter()
-        .map(|hap_vars| hap_vars.as_ref().map(|vars| get_hap_ranges(&ref_ranges, vars))
-            .unwrap_or_else(|| vec![None; ref_ranges.len()]))
-        .collect();
-
+    let hap_ranges = vars.get_hap_ranges(&ref_ranges);
     let ref_seq = contig_set.get_seq(ref_id);
     let (mut writer, bgzip) = create_vcf_writer(vcf_filename, groupped_haps.iter().map(|(name, _)| name as &str))?;
 
@@ -508,49 +560,6 @@ fn write_vcf(
         if let Err(e) = htslib::bcf::index::build(vcf_filename, None, 1, htslib::bcf::index::Type::Tbx) {
             log::error!("Could not construct tabix index for VCF file {}: {}", ext::fmt::path(vcf_filename), e);
         }
-    }
-    Ok(())
-}
-
-/// Merge overlapping variants and return:
-/// - Reference ranges,
-/// - Corresponding haplotype ranges.
-/// All haplotype vectors have the same length as the the reference vector.
-fn combine_variants(
-    chrom: &str,
-    shift: u32,
-    vars: &[Option<Vec<VarRange>>],
-    contig_set: &ContigSet,
-    ref_id: ContigId,
-    groupped_haps: &[(String, Vec<Option<usize>>)],
-    merged_vcf_filename: &Path,
-    separate_vcf_filename: &Option<PathBuf>,
-) -> crate::Result<()> {
-    let mut unique_ranges: Vec<_> = vars.iter()
-        .filter_map(|v| v.as_ref())
-        .flat_map(|v| v.iter())
-        .map(|v| (v.ref_start, v.ref_end)).collect();
-    // Sort increasing by start, decreasing by end.
-    unique_ranges.sort_unstable();
-    unique_ranges.dedup();
-
-    // Get merged reference ranges. Do not merge variants that touch, but don't overlap (prev_end == next_start).
-    let mut merged_ref_ranges = Vec::<(u32, u32)>::new();
-    for &(start, end) in &unique_ranges {
-        if let Some(last) = merged_ref_ranges.last_mut() {
-            if last.1 <= start {
-                merged_ref_ranges.push((start, end));
-            } else {
-                last.1 = last.1.max(end);
-            }
-        } else {
-            merged_ref_ranges.push((start, end));
-        }
-    }
-
-    write_vcf(chrom, shift, &merged_ref_ranges, &vars, contig_set, ref_id, groupped_haps, merged_vcf_filename)?;
-    if let Some(separate_vcf_fname) = separate_vcf_filename {
-        write_vcf(chrom, shift, &unique_ranges, &vars, contig_set, ref_id, groupped_haps, separate_vcf_fname)?;
     }
     Ok(())
 }
@@ -640,10 +649,16 @@ pub(super) fn convert_to_vcf(
         None => (ref_hap.to_string(), 0),
     };
 
-    let vars = process_paf(paf_filename, &contig_set, ref_id)?;
+    let vars = VarRanges::from_paf(paf_filename, &contig_set, ref_id)?;
     let tmp_merged = ext::sys::temp_filename(out_merged);
     let tmp_separate = out_separate.map(|p| ext::sys::temp_filename(p));
-    combine_variants(&chrom, shift, &vars, &contig_set, ref_id, &groupped_haps, &tmp_merged, &tmp_separate)?;
+
+    let (unique_ranges, merged_ranges) = vars.get_ref_ranges();
+    write_vcf(&chrom, shift, &merged_ranges, &vars, &contig_set, ref_id, &groupped_haps, &tmp_merged)?;
+    if let Some(separate_vcf_fname) = &tmp_separate {
+        write_vcf(&chrom, shift, &unique_ranges, &vars, &contig_set, ref_id, &groupped_haps, &separate_vcf_fname)?;
+    }
+
     std::fs::rename(&tmp_merged, out_merged).map_err(add_path!(tmp_merged, out_merged))?;
     if let Some(tmp_sep) = tmp_separate {
         let out_sep = out_separate.unwrap();
