@@ -147,10 +147,11 @@ fn process_cluster(
     }
 
     #[inline]
-    fn reset_positions(pos: u32, start: &mut u32, ends: &mut [u32], max_end: &mut u32) {
+    fn reset_positions(pos: u32, start: &mut u32, ends: &mut [u32], max_end: &mut u32, effect_end: &mut u32) {
         *start = pos;
         ends.fill(pos);
         *max_end = pos;
+        *effect_end = pos;
     }
 
     debug_assert!(records.len() > 1);
@@ -158,6 +159,8 @@ fn process_cluster(
     let mut start = records[0].0.pos() as u32;
     let mut ends: SmallVec<[u32; 2]> = smallvec![start; ploidy];
     let mut max_end = start;
+    // Reference start + alt length.
+    let mut effect_end = start;
     let mut haplotypes: SmallVec<[Vec<u8>; 2]> = smallvec![Vec::new(); ploidy];
     let mut genotype_qual = f32::INFINITY;
 
@@ -170,32 +173,34 @@ fn process_cluster(
         let curr_end = record.end() as u32;
         if genotype.len() != ploidy {
             log::warn!("hint-vcf contains variants of different ploidy, skipping this variant.");
-            reset_positions(curr_end, &mut start, &mut ends, &mut max_end);
+            reset_positions(curr_end, &mut start, &mut ends, &mut max_end, &mut effect_end);
             haplotypes.iter_mut().for_each(Vec::clear);
             genotype_qual = f32::INFINITY;
             continue;
         }
         if start == max_end {
             // Between last recorded variant and this position there was no variation, moving start position.
-            reset_positions(curr_start, &mut start, &mut ends, &mut max_end);
-        } else if max_end <= curr_start {
+            reset_positions(curr_start, &mut start, &mut ends, &mut max_end, &mut effect_end);
+        } else if effect_end <= curr_start {
             // There is a reference gap between haplotypes, splitting into multiple variants.
-            if genotype_qual >= min_gq && max_end - start <= max_len {
+            if genotype_qual >= min_gq && effect_end - start <= max_len {
                 extend_haplotypes(&mut haplotypes, &mut ends, max_end, ref_seq, ref_shift);
                 block.push(Variant {
-                    start, genotype_qual,
+                    start,
+                    genotype_qual,
                     end: max_end,
                     haplotypes: std::mem::replace(&mut haplotypes, smallvec![Vec::new(); ploidy]),
                 });
             } else {
                 haplotypes.iter_mut().for_each(Vec::clear);
             }
-            reset_positions(curr_start, &mut start, &mut ends, &mut max_end);
+            reset_positions(curr_start, &mut start, &mut ends, &mut max_end, &mut effect_end);
             genotype_qual = f32::INFINITY;
         } else {
             // There is a variant in progress, extending some haplotypes up to `curr_start`.
             extend_haplotypes(&mut haplotypes, &mut ends, curr_start, ref_seq, ref_shift);
             max_end = max_end.max(curr_start);
+            effect_end = effect_end.max(curr_start);
         }
 
         let alleles = record.alleles();
@@ -205,21 +210,24 @@ fn process_cluster(
             if i != 0 {
                 if *end != curr_start {
                     log::warn!("Cannot reconcile overlapping variants, skipping some this variant.");
-                    reset_positions(curr_end, &mut start, &mut ends, &mut max_end);
+                    reset_positions(curr_end, &mut start, &mut ends, &mut max_end, &mut effect_end);
                     haplotypes.iter_mut().for_each(Vec::clear);
                     genotype_qual = f32::INFINITY;
                     break;
                 }
-                hap.extend_from_slice(&alleles[i]);
+                let allele_seq = &alleles[i];
+                hap.extend_from_slice(allele_seq);
                 *end = curr_end;
                 max_end = max_end.max(curr_end);
+                effect_end = effect_end.max(max_end).max(curr_start + allele_seq.len() as u32);
             }
         }
     }
-    if start != max_end && genotype_qual >= min_gq && max_end - start <= max_len {
+    if start != max_end && genotype_qual >= min_gq && effect_end - start <= max_len {
         extend_haplotypes(&mut haplotypes, &mut ends, max_end, ref_seq, ref_shift);
         block.push(Variant {
-            start, genotype_qual,
+            start,
+            genotype_qual,
             end: max_end,
             haplotypes: std::mem::replace(&mut haplotypes, smallvec![Vec::new(); ploidy]),
         });
@@ -253,6 +261,7 @@ fn retains_phasing(gt: &Genotype) -> bool {
 
 struct Cluster {
     last_end: u32,
+    effect_end: u32,
     retains_phasing: bool,
     // VCF record, genotype and genotype quality.
     records: Vec<(Record, Genotype, f32)>,
@@ -262,6 +271,7 @@ impl Cluster {
     fn new() -> Self {
         Self {
             last_end: 0,
+            effect_end: 0,
             retains_phasing: true,
             records: Vec::new(),
         }
@@ -269,7 +279,9 @@ impl Cluster {
 
     fn push(&mut self, record: Record, genotype: Genotype, genotype_qual: f32) {
         self.retains_phasing &= retains_phasing(&genotype);
-        self.last_end = self.last_end.max(record.end() as u32);
+        let alleles = record.alleles();
+        let max_len = genotype.iter().map(|i| alleles[i.index().unwrap() as usize].len()).max().unwrap();
+        self.last_end = self.last_end.max(record.end() as u32).max(record.pos() as u32 + max_len as u32);
         self.records.push((record, genotype, genotype_qual));
     }
 
@@ -282,7 +294,7 @@ impl Cluster {
     ) {
         if self.records.is_empty() { return };
         let first_start = self.records[0].0.pos() as u32;
-        if first_start < ref_region.start() || self.last_end >= ref_region.end() {
+        if first_start < ref_region.start() || self.last_end > ref_region.end() {
             self.retains_phasing = true;
             self.records.clear();
             return;
@@ -311,8 +323,8 @@ impl Cluster {
 
 impl Display for Cluster {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Cluster (end {}, {}phased, {} record(s))",
-            self.last_end,
+        write!(f, "Cluster (end {}, effective end {}, {}phased, {} record(s))",
+            self.last_end, self.effect_end,
             if self.retains_phasing { "" } else { "not " },
             self.records.len())?;
         for (record, gt, qual) in &self.records {
