@@ -119,7 +119,8 @@ struct Args {
     transfer_compl_kmer: u8,
     transfer_compl_frac: f64,
 
-    hint: hint_vcf::Params,
+    hint_vcf: Option<PathBuf>,
+    hint_params: hint_vcf::Params,
 }
 
 impl Default for Args {
@@ -167,7 +168,8 @@ impl Default for Args {
             transfer_compl_kmer: 5,
             transfer_compl_frac: 0.66,
 
-            hint: Default::default(),
+            hint_vcf: None,
+            hint_params: Default::default(),
         }
     }
 }
@@ -196,7 +198,7 @@ impl Args {
 
         validate_param!(0 < self.transfer_compl_kmer && self.transfer_compl_kmer <= u16::MAX_KMER_SIZE,
             "k-mer size in --tr-compl must be between 1 and {}", u16::MAX_KMER_SIZE);
-        self.write_vcf |= self.hint.vcf.is_some();
+        self.write_vcf |= self.hint_vcf.is_some();
         Ok(self)
     }
 
@@ -422,21 +424,12 @@ fn print_help(extended: bool) {
         println!("\n{}", "Hint VCF file:".bold());
         println!("    {:KEY$} {:VAL$}  Incorporate information from this VCF file.",
             "    --hint-vcf".green(), "FILE".yellow());
-        println!("    {:KEY$} {:VAL$}  Input VCF file is already phased.",
-            "    --hint-phased".green(), super::flag());
-        // println!("    {}  {}  If VCF has a different reference genome than the Locityper database,\n\
-        //     {EMPTY}  put BED files in `db/loci/*/<tag>.bed` (e.g. `.../GRCh38.bed`) with locus\n\
-        //     {EMPTY}  coordinates and specify basename here. BED files must contain the reference\n\
-        //     {EMPTY}  haplotype name with `ref-hap=...` in one of the columns.",
-        //     "    --hint-ref".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Only examine variants with this genotype quality [{}].",
-            "    --hint-gq".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hint.min_gq));
-        //     By default, VCF file is assumed to be constructed using the same\n\
-        //     {EMPTY}  reference genome as the Locityper database. This option allows to override the\n\
-        //     {EMPTY}  reference haplotype name. If VCF reference is completely different\n\
-        //     {EMPTY}  (e.g. GRCh38 instead of CHM13), provide a local If corresponding reference haplotype name\n\
-        //     {EMPTY} was constructed relative to this reference genome.\n\
-        //     {EMPTY}  Must match one of the haplotypes.
+            "    --hint-gq".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hint_params.min_gq));
+        println!("    {:KEY$} {:VAL$}  Only examine variants up to this sum length [{}].",
+            "    --hint-len".green(), "INT".yellow(), super::fmt_def(defaults.hint_params.max_len));
+        println!("    {:KEY$} {:VAL$}  VCF sample name.",
+            "    --hint-sample".green(), "STR".yellow());
     }
 
     println!("\n{}", "Execution arguments:".bold());
@@ -623,9 +616,10 @@ fn parse_args(argv: &[String]) -> crate::Result<Args> {
                 args.transfer_compl_frac = parser.value()?.parse()?;
             }
 
-            Long("hint-vcf") => args.hint.vcf = Some(parser.value()?.parse()?),
-            Long("hint-phased") => args.hint.already_phased = true,
-            Long("hint-gq") => args.hint.min_gq = parser.value()?.parse()?,
+            Long("hint-vcf") => args.hint_vcf = Some(parser.value()?.parse()?),
+            Long("hint-gq") => args.hint_params.min_gq = parser.value()?.parse()?,
+            Long("hint-len") => args.hint_params.max_len = parser.value()?.parse()?,
+            Long("hint-sample") => args.hint_params.sample = Some(parser.value()?.parse()?),
 
             Short('V') | Long("version") => {
                 super::print_version();
@@ -1388,6 +1382,7 @@ fn analyze_locus(
     distr_cache: &Arc<DistrCache>,
     opt_priors: Option<&HashMap<String, f64>>,
     explicit_weights: Option<&Path>,
+    hint_vcf: Option<&mut hint_vcf::HintVcf>,
     mut rng: ext::rand::XoshiroRng,
     args: &Args,
 ) -> crate::Result<()>
@@ -1404,6 +1399,11 @@ fn analyze_locus(
     let ref_region_and_id = if args.write_vcf {
         Some(load_ref_region(locus.db_dir.join(paths::LOCUS_BED), contigs, &locus.disc_haps)?)
     } else { None };
+
+    if let Some(vcf) = hint_vcf && let Some((ref_region, ref_id)) = &ref_region_and_id {
+        let ref_seq = locus.set.get_seq(*ref_id);
+        vcf.fetch_blocks(ref_region, ref_seq)?;
+    }
 
     let windows_writer = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
@@ -1561,6 +1561,9 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         return Ok(());
     }
 
+    let mut hint_vcf = args.hint_vcf.as_ref()
+        .map(|filename| hint_vcf::HintVcf::new(filename, args.hint_params.clone()))
+        .transpose()?;
     let scheme = Arc::new(Scheme::parse(&args.solvers)?);
     let distr_cache = Arc::new(DistrCache::new(&bg_distr, &args.assgn_params.alt_cn));
     let mut successes = 0;
@@ -1579,7 +1582,7 @@ pub(super) fn run(argv: &[String]) -> crate::Result<()> {
         // Jump over 2^192 random numbers. This way, all loci have independent random numbers.
         rng.long_jump();
         match analyze_locus(locus, filenames, &bg_distr, &edit_dist_cache, &scheme, &distr_cache,
-                locus_priors, locus_weights, rng_clone, &args) {
+                locus_priors, locus_weights, hint_vcf.as_mut(), rng_clone, &args) {
             Err(e) => log::error!("Error in locus {}: {}", locus.set.tag(), e.display()),
             Ok(()) => successes += 1,
         }

@@ -515,3 +515,12 @@ impl ReferenceRegion {
         self.end - self.start
     }
 }
+
+impl fmt::Display for ReferenceRegion {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.ref_hap {
+            Some(name) => write!(f, "{}:{}-{} (ref haplotype = {})", self.chrom, self.start + 1, self.end, name),
+            None => write!(f, "{}:{}-{}", self.chrom, self.start + 1, self.end)
+        }
+    }
+}
