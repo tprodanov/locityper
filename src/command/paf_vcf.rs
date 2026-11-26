@@ -2,6 +2,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
     ffi::OsStr,
+    sync::Arc,
 };
 use colored::Colorize;
 use regex::Regex;
@@ -425,7 +426,7 @@ impl VarRanges {
 
     pub fn generate_variants(
         &self,
-        writer: &bcf::Writer,
+        header: &Arc<bcf::header::HeaderView>,
         shift: u32,
         ref_ranges: &[(u32, u32)],
         ref_seq: &[u8],
@@ -457,7 +458,7 @@ impl VarRanges {
                 continue;
             }
 
-            let mut record = writer.empty_record();
+            let mut record = bcf::Record::new(Arc::clone(header));
             record.set_rid(Some(0));
             record.set_pos(i64::from(ref_start + shift));
             record.set_alleles(&alleles)?;
@@ -543,26 +544,24 @@ pub(super) fn create_vcf_header<'a>(
     header
 }
 
+pub(super) fn create_header_view(header: &bcf::Header) -> Arc<bcf::header::HeaderView> {
+    // duplicates the header, so the copy is synced.
+    let inner = unsafe { htslib::htslib::bcf_hdr_dup(header.inner_ptr()) };
+    Arc::new(unsafe { bcf::header::HeaderView::from_ptr(inner) })
+}
+
 pub(super) fn write_vcf(
-    vars: &VarRanges,
-    chrom: &str,
-    shift: u32,
-    ref_ranges: &[(u32, u32)],
-    ref_seq: &[u8],
-    contig_set: &ContigSet,
-    groupped_haps: &[(String, Vec<Option<ContigId>>)],
     vcf_filename: impl AsRef<Path>,
+    header: &bcf::header::Header,
+    records: &[bcf::Record],
 ) -> crate::Result<()>
 {
     let vcf_filename = vcf_filename.as_ref();
     let tmp_filename = ext::sys::temp_filename(vcf_filename);
-    let header = create_vcf_header(chrom, None, groupped_haps.iter().map(|(name, _)| name as &str));
     let bgzip = vcf_filename.extension().and_then(OsStr::to_str) == Some("gz");
-    let mut writer = bcf::Writer::from_path(&tmp_filename, &header, !bgzip, bcf::Format::Vcf)?;
-
-    let records = vars.generate_variants(&writer, shift, ref_ranges, ref_seq, contig_set, groupped_haps)?;
+    let mut writer = bcf::Writer::from_path(&tmp_filename, header, !bgzip, bcf::Format::Vcf)?;
     for record in records {
-        writer.write(&record)?;
+        writer.write(record)?;
     }
     std::mem::drop(writer);
 
@@ -663,10 +662,16 @@ pub(super) fn convert_to_vcf(
     let vars = VarRanges::from_paf(paf_filename, &contig_set, ref_id)?;
     let (unique_ranges, merged_ranges) = vars.get_ref_ranges();
 
+    let header = create_vcf_header(&chrom, None, groupped_haps.iter().map(|(name, _)| name as &str));
+    let header_view = create_header_view(&header);
     let ref_seq = contig_set.get_seq(ref_id);
-    write_vcf(&vars, &chrom, shift, &merged_ranges, ref_seq, contig_set, &groupped_haps, &out_merged)?;
+    let merged_records = vars.generate_variants(&header_view, shift, &merged_ranges, ref_seq,
+        contig_set, &groupped_haps)?;
+    write_vcf(&out_merged, &header, &merged_records)?;
     if let Some(separate_vcf_fname) = &out_separate {
-        write_vcf(&vars, &chrom, shift, &unique_ranges, ref_seq, contig_set, &groupped_haps, &separate_vcf_fname)?;
+        let sep_records = vars.generate_variants(&header_view, shift, &unique_ranges, ref_seq,
+            contig_set, &groupped_haps)?;
+        write_vcf(&separate_vcf_fname, &header, &sep_records)?;
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 use std::{
     path::Path,
-    rc::Rc,
+    sync::Arc,
 };
 use htslib::bam;
 use crate::{
@@ -96,7 +96,7 @@ fn calc_insert_size(opt_aln1: Option<&Alignment>, opt_aln2: Option<&Alignment>) 
 
 /// Creates mapped/unmapped record, sets position, sequence and qualities.
 fn create_record(
-    header: Rc<bam::HeaderView>,
+    header: Arc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
     shift: u32,
     opt_aln: Option<&Alignment>,
@@ -237,7 +237,7 @@ fn connect_pair(record1: &mut bam::Record, record2: &mut bam::Record, insert_siz
 fn generate_paired_end_records(
     groupped_alns: &GrouppedAlignments,
     read_alns: &[ReadGtAlns],
-    header: &Rc<bam::HeaderView>,
+    header: &Arc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
     shift: u32,
     records: &mut Vec<bam::Record>,
@@ -252,9 +252,9 @@ fn generate_paired_end_records(
     for (&ij, &(count, ln_prob)) in buffer1.iter() {
         let opt_aln1 = (ij.0 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.0));
         let opt_aln2 = (ij.1 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.1));
-        let mut record1 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln1, read_data,
+        let mut record1 = create_record(Arc::clone(header), contig_to_tid, shift, opt_aln1, read_data,
             ReadEnd::First, ln_prob, buffer2)?;
-        let mut record2 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln2, read_data,
+        let mut record2 = create_record(Arc::clone(header), contig_to_tid, shift, opt_aln2, read_data,
             ReadEnd::Second, ln_prob, buffer2)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record1.set_mapq(mapq);
@@ -278,7 +278,7 @@ fn generate_paired_end_records(
 fn generate_unused_paired_end_records(
     groupped_alns: &GrouppedAlignments,
     aln_pairs: &[&PairAlignment],
-    header: &Rc<bam::HeaderView>,
+    header: &Arc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
     shift: u32,
     records: &mut Vec<bam::Record>,
@@ -290,9 +290,9 @@ fn generate_unused_paired_end_records(
     for pair in aln_pairs {
         let opt_aln1 = pair.ix1().map(|i| groupped_alns.ith_aln(i));
         let opt_aln2 = pair.ix2().map(|j| groupped_alns.ith_aln(j));
-        let mut record1 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln1, read_data,
+        let mut record1 = create_record(Arc::clone(header), contig_to_tid, shift, opt_aln1, read_data,
             ReadEnd::First, pair.ln_prob(), buffer)?;
-        let mut record2 = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln2, read_data,
+        let mut record2 = create_record(Arc::clone(header), contig_to_tid, shift, opt_aln2, read_data,
             ReadEnd::Second, pair.ln_prob(), buffer)?;
         if secondary {
             record1.set_secondary();
@@ -312,7 +312,7 @@ fn generate_unused_paired_end_records(
 fn generate_single_end_records(
     groupped_alns: &GrouppedAlignments,
     read_alns: &[ReadGtAlns],
-    header: &Rc<bam::HeaderView>,
+    header: &Arc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
     shift: u32,
     records: &mut Vec<bam::Record>,
@@ -326,7 +326,7 @@ fn generate_single_end_records(
     let read_data = groupped_alns.read_data();
     for (&ij, &(count, ln_prob)) in buffer1.iter() {
         let opt_aln = (ij.0 != UNMAPPED).then(|| groupped_alns.ith_aln(ij.0));
-        let mut record = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln, read_data,
+        let mut record = create_record(Arc::clone(header), contig_to_tid, shift, opt_aln, read_data,
             ReadEnd::First, ln_prob, buffer2)?;
         let (prob, mapq) = count_to_prob(count, attempts);
         record.set_mapq(mapq);
@@ -344,7 +344,7 @@ fn generate_single_end_records(
 fn generate_unused_single_end_records(
     groupped_alns: &GrouppedAlignments,
     aln_pairs: &[&PairAlignment],
-    header: &Rc<bam::HeaderView>,
+    header: &Arc<bam::HeaderView>,
     contig_to_tid: &[Option<i32>],
     shift: u32,
     records: &mut Vec<bam::Record>,
@@ -355,7 +355,7 @@ fn generate_unused_single_end_records(
     let mut secondary = false;
     for pair in aln_pairs {
         let opt_aln = pair.ix1().map(|i| groupped_alns.ith_aln(i));
-        let mut record = create_record(Rc::clone(header), contig_to_tid, shift, opt_aln, read_data,
+        let mut record = create_record(Arc::clone(header), contig_to_tid, shift, opt_aln, read_data,
             ReadEnd::First, pair.ln_prob(), buffer)?;
         if secondary {
             record.set_secondary();
@@ -381,7 +381,7 @@ pub fn write_bam(
 {
     let (header, unique_ids) = create_bam_header(gt, &data.contigs, contig_to_tid, ref_region);
     let shift = ref_region.map(ReferenceRegion::start).unwrap_or(0);
-    let header_view = Rc::new(bam::HeaderView::from_header(&header));
+    let header_view = Arc::new(bam::HeaderView::from_header(&header));
     let mut records = Vec::new();
 
     let gt_alns = GenotypeAlignments::new(gt.clone(), &data.contig_infos, &data.all_alns, &data.assgn_params);

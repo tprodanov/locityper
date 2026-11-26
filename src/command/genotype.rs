@@ -1351,7 +1351,9 @@ fn write_vcf(
     ref_region: &ReferenceRegion,
     alns_to_ref: &[Option<Cigar>],
     contig_set: &ContigSet,
+    mut hint_vcf: Option<&mut hint_vcf::HintVcf>,
     vcf_filename: impl AsRef<Path>,
+    args: &Args,
 ) -> crate::Result<()> {
     let Some(genotype) = genotyping.genotypes().first() else {
         log::debug!("No predicted genotype, skipping output VCF");
@@ -1366,11 +1368,27 @@ fn write_vcf(
         }
     }
 
+    let (sample, chrom_len): (String, Option<u32>) = hint_vcf.as_ref()
+        .map(|vcf| (vcf.sample().to_string(), vcf.get_chrom_len(ref_region.chrom())))
+        .unwrap_or_else(|| ("SAMPLE".to_string(), None));
+    let mut header = paf_vcf::create_vcf_header(ref_region.chrom(), chrom_len, std::iter::once(&sample as &str));
+    let hint_blocks = hint_vcf.as_mut()
+        .map(|vcf| vcf.fetch_blocks(ref_region, ref_seq, usize::from(args.ploidy)))
+        .transpose()
+        .unwrap_or_else(|e| {
+            log::warn!("Could not load hint variants ({})", e.display());
+            None
+        }).unwrap_or_else(hint_vcf::VarBlocks::new_empty);
+    if !hint_blocks.is_empty() {
+        header.push_record(b"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description=\"Genotype quality\">");
+        header.push_record(b"##FORMAT=<ID=source,Number=1,Type=String,Description=\"Variant source\">");
+    }
+    let groupped_haps = [(sample, genotype.ids().iter().copied().map(Some).collect())];
     let (_, ref_ranges) = vars.get_ref_ranges();
-    // [NOTE] Can provide sample name.
-    let groupped_haps = [("SAMPLE".to_string(), genotype.ids().iter().copied().map(Some).collect())];
-    paf_vcf::write_vcf(&vars, ref_region.chrom(), ref_region.start(), &ref_ranges, ref_seq,
-        contig_set, &groupped_haps, vcf_filename)
+    let header_view = paf_vcf::create_header_view(&header);
+    let records = vars.generate_variants(&header_view, ref_region.start(), &ref_ranges, ref_seq,
+        contig_set, &groupped_haps)?;
+    paf_vcf::write_vcf(vcf_filename, &header, &records)
 }
 
 fn analyze_locus(
@@ -1396,15 +1414,6 @@ fn analyze_locus(
     }
 
     let contigs = locus.set.contigs();
-    let ref_region_and_id = if args.write_vcf {
-        Some(load_ref_region(locus.db_dir.join(paths::LOCUS_BED), contigs, &locus.disc_haps)?)
-    } else { None };
-
-    if let Some(vcf) = hint_vcf && let Some((ref_region, ref_id)) = &ref_region_and_id {
-        let ref_seq = locus.set.get_seq(*ref_id);
-        vcf.fetch_blocks(ref_region, ref_seq)?;
-    }
-
     let windows_writer = if args.debug >= DebugLvl::Some {
         let windows_filename = locus.out_dir.join("windows.bed.gz");
         Some(ext::sys::create_gzip(&windows_filename)?)
@@ -1416,6 +1425,9 @@ fn analyze_locus(
     let tid2contig = locs::construct_tid_to_contig_map(bam_reader.header(), contigs)?;
     let opt_paf_fname = paths::LOCUS_PAFS.iter()
         .map(|path| locus.db_dir.join(path)).filter(|path| path.exists()).next();
+    let ref_region_and_id = if args.write_vcf {
+        Some(load_ref_region(locus.db_dir.join(paths::LOCUS_BED), contigs, &locus.disc_haps)?)
+    } else { None };
     let (hap_alns, mut contig_distances, alns_to_ref) = if let Some(paf_fname) = opt_paf_fname {
         process_paf(&paf_fname, &locus.set, &tid2contig, ref_region_and_id.as_ref(),
             bg_distr.seq_info().technology(), args)?
@@ -1487,7 +1499,8 @@ fn analyze_locus(
     genotyping.to_json().write_pretty(&mut res_writer, 4).map_err(add_path!(res_filename))?;
 
     if let Some(alns_to_ref) = alns_to_ref && let Some((ref_region, ref_id)) = ref_region_and_id {
-        write_vcf(&genotyping, ref_id, &ref_region, &alns_to_ref, &locus.set, locus.out_dir.join("res.vcf.gz"))?;
+        write_vcf(&genotyping, ref_id, &ref_region, &alns_to_ref, &locus.set, hint_vcf,
+            locus.out_dir.join("res.vcf.gz"), args)?;
     }
     super::write_success_file(locus.out_dir.join(paths::SUCCESS))?;
     log::info!("    [{}] Successfully finished in {}", locus.set.tag(), ext::fmt::Duration(timer.elapsed()));

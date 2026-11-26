@@ -6,7 +6,7 @@ rust-version = "1.91"
 edition = "2024"
 
 [dependencies]
-htslib = { package = "rust-htslib", version = "0.51", default-features = false, features = ["bzip2", "curl", "lzma"] }
+htslib = { package = "rust-htslib", version = "1.0.2", default-features = false, features = ["bzip2", "curl", "lzma"] }
 nalgebra = { version = "0.35", default-features = false, features = ["std"] } # Possibly remove later.
 statrs = { version = "0.19", default-features = false } # Possibly remove later.
 nohash = { package = "nohash-hasher", version = "0.2.0", default-features = false, features = ["std"] }

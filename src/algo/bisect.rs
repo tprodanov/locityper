@@ -98,21 +98,15 @@ pub fn right_by_at<T>(
     lo
 }
 
-/// Finds the first index `i` (between `lo` and `hi`) where `! f(a[i])`.
-/// Returns `hi` if all `f(a[i])` for all `i`.
+/// Finds the first index `i` (between `lo` and `hi`) where `predicate(a[i])` is true.
+/// Returns `hi` if all `predicate(a[i])` is false for all `i`.
 ///
 /// This function takes $O(hi - lo)$, but can still be faster than binary search if expected $i - lo$ is small.
-pub fn right_boundary<T>(
+pub fn position_of<T>(
     a: &[T],
-    mut f: impl FnMut(&T) -> bool,
+    predicate: impl FnMut(&T) -> bool,
     lo: usize,
     hi: usize,
 ) -> usize {
-    assert!(hi <= a.len(), "Cannot perform linear search on indices {}, {} (len: {})", lo, hi, a.len());
-    for i in lo..hi {
-        if !f(unsafe { a.get_unchecked(i) }) {
-            return i;
-        }
-    }
-    hi
+    a[lo..hi].iter().position(predicate).map(|i| lo + i).unwrap_or(hi)
 }

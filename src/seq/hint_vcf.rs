@@ -1,6 +1,7 @@
 use std::{
     path::Path,
     fmt::{self, Display, Formatter},
+    cmp::max,
 };
 use smallvec::{smallvec, SmallVec};
 use htslib::{
@@ -11,7 +12,8 @@ use htslib::{
     },
 };
 use crate::{
-    err::error,
+    err::{error, Error},
+    algo::bisect,
 };
 use super::{
     interv::ReferenceRegion,
@@ -62,6 +64,11 @@ impl Variant {
                 .collect()
         )
     }
+
+    fn is_heterozygous(&self) -> bool {
+        let allele0 = self.haplotypes.first().unwrap();
+        self.haplotypes[1..].iter().any(|allele| allele != allele0)
+    }
 }
 
 impl Display for Variant {
@@ -77,42 +84,85 @@ impl Display for Variant {
     }
 }
 
+#[derive(Clone, Debug)]
+struct VarBlock {
+    /// This block contains variants start_ix..end_ix
+    start_ix: usize,
+    end_ix: usize,
+    /// Region between these indices is heterozygous (at least first and last variants in this region are).
+    heteroz_range: Option<(usize, usize)>,
+}
+
+impl VarBlock {
+    #[inline]
+    fn new(ix: usize) -> Self {
+        Self {
+            start_ix: ix,
+            end_ix: ix,
+            heteroz_range: None,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.start_ix == self.end_ix
+    }
+}
+
 /// Variants, groupped into blocks.
 /// Variants from the same block are phased in respect to each other.
 #[derive(Clone, Debug)]
 pub struct VarBlocks {
     variants: Vec<Variant>,
     /// A block `i` combines variants `blocks[i].0..blocks[i].1`.
-    /// There is always at least one (potentially empty) block.
-    blocks: Vec<(usize, usize)>,
+    /// During block construction there should always at least one (potentially empty) block.
+    blocks: Vec<VarBlock>,
 }
 
 impl VarBlocks {
-    fn new() -> Self {
-        Self {
+    #[inline]
+    pub fn new_empty() -> Self {
+        VarBlocks {
             variants: Vec::new(),
-            blocks: vec![(0, 0)],
+            blocks: Vec::new(),
         }
     }
 
     #[inline]
+    fn new() -> Self {
+        Self {
+            variants: Vec::new(),
+            blocks: vec![VarBlock::new(0)],
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.variants.is_empty()
+    }
+
+    #[inline]
     fn last_block_empty(&self) -> bool {
-        let block = self.blocks.last().unwrap();
-        block.0 == block.1
+        self.blocks.last().unwrap().is_empty()
     }
 
     #[inline]
     fn new_block(&mut self) {
         if !self.last_block_empty() {
             let n = self.variants.len();
-            self.blocks.push((n, n));
+            self.blocks.push(VarBlock::new(n));
         }
     }
 
     fn push_variant(&mut self, mut var: Variant) {
+        let n = self.variants.len();
         var.block_ix = self.blocks.len() - 1;
+        let last_block = self.blocks.last_mut().unwrap();
+        if var.is_heterozygous() {
+            last_block.heteroz_range.get_or_insert((n - 1, n)).1 = n;
+        }
+        last_block.end_ix = n;
         self.variants.push(var);
-        self.blocks.last_mut().unwrap().1 += 1;
     }
 
     fn pop_last_if_empty(&mut self) {
@@ -124,12 +174,12 @@ impl VarBlocks {
 
 impl Display for VarBlocks {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        for (i, &(start, end)) in self.blocks.iter().enumerate() {
+        for (i, block) in self.blocks.iter().enumerate() {
             if i > 0 {
                 writeln!(f)?;
             }
-            write!(f, "Block #{}, {} variant(s)", i, end - start)?;
-            for var in &self.variants[start..end] {
+            write!(f, "Block #{}, {} variant(s)", i, block.end_ix - block.start_ix)?;
+            for var in &self.variants[block.start_ix..block.end_ix] {
                 write!(f, "\n  {}", var)?;
             }
         }
@@ -147,6 +197,7 @@ fn process_cluster(
     blocks: &mut VarBlocks,
     min_gq: f32,
     max_len: u32,
+    ploidy: usize,
 ) {
     #[inline]
     fn extend_haplotypes(haplotypes: &mut [Vec<u8>], ends: &mut [u32], up_to: u32, ref_seq: &[u8], ref_shift: u32) {
@@ -167,8 +218,6 @@ fn process_cluster(
         *effect_end = pos;
     }
 
-    debug_assert!(records.len() > 1);
-    let ploidy = records[0].1.len();
     let mut start = records[0].0.pos() as u32;
     let mut ends: SmallVec<[u32; 2]> = smallvec![start; ploidy];
     let mut max_end = start;
@@ -184,13 +233,6 @@ fn process_cluster(
 
         let curr_start = record.pos() as u32;
         let curr_end = record.end() as u32;
-        if genotype.len() != ploidy {
-            log::warn!("hint-vcf contains variants of different ploidy, skipping this variant.");
-            reset_positions(curr_end, &mut start, &mut ends, &mut max_end, &mut effect_end);
-            haplotypes.iter_mut().for_each(Vec::clear);
-            genotype_qual = f32::INFINITY;
-            continue;
-        }
         if start == max_end {
             // Between last recorded variant and this position there was no variation, moving start position.
             reset_positions(curr_start, &mut start, &mut ends, &mut max_end, &mut effect_end);
@@ -295,6 +337,7 @@ impl Cluster {
         ref_seq: &[u8],
         min_gq: f32,
         max_len: u32,
+        ploidy: usize,
     ) {
         let Some(first_record) = self.records.first() else { return };
         if (first_record.0.pos() as u32) < ref_region.start() || self.last_end > ref_region.end() {
@@ -312,7 +355,7 @@ impl Cluster {
                 blocks.push_variant(Variant::from_record(record, genotype, *gq));
             }
         } else {
-            process_cluster(&self.records, ref_region.start(), ref_seq, blocks, min_gq, max_len);
+            process_cluster(&self.records, ref_region.start(), ref_seq, blocks, min_gq, max_len, ploidy);
         }
         if !self.retains_phasing {
             blocks.new_block();
@@ -351,10 +394,33 @@ fn get_gq(record: &Record, sample_id: usize, gq_type: bcf::header::TagType) -> c
     }.unwrap_or(0.0))
 }
 
+/// Pre-loads contig lengths from the VCF file in O(n).
+fn load_contig_lengths(header: &bcf::header::HeaderView) -> Vec<Option<u32>> {
+    let mut lengths = Vec::new();
+    for record in header.header_records() {
+        if let bcf::header::HeaderRecord::Contig { key, values } = record {
+            let Some(contig_len_str) = values.get("length") else { continue };
+            let Ok(contig_len) = contig_len_str.parse() else {
+                log::warn!("Cannot parse contig length in the VCF file");
+                continue
+            };
+            let Ok(rid) = header.name2rid(key.as_bytes()) else {
+                log::warn!("Cannot fully parse VCF header");
+                continue
+            };
+            lengths.resize(max(lengths.len(), rid as usize + 1), None);
+            lengths[rid as usize] = Some(contig_len);
+        }
+    }
+    lengths
+}
+
 /// Previously called VCF file.
 pub struct HintVcf {
     vcf: IndexedReader,
+    sample: String,
     sample_id: usize,
+    contig_lengths: Vec<Option<u32>>,
     gq_type: bcf::header::TagType,
     params: Params,
 }
@@ -371,6 +437,8 @@ impl HintVcf {
             None => return Err(error!(InvalidInput,
                 "VCF `{}` has more than one sample, please specify via --hint-sample", filename.display())),
         };
+        let sample = String::from_utf8(header.id_to_sample(bcf::header::Id(sample_id as u32)))
+            .map_err(|_| Error::utf8("sample name", &header.id_to_sample(bcf::header::Id(sample_id as u32))))?;
         let (gq_type, gq_length) = header.format_type(GQ_TAG)
             .map_err(|_| error!(InvalidInput, "Input VCF must have genotype qualities (GQ format field)"))?;
         if gq_type != bcf::header::TagType::Float && gq_type != bcf::header::TagType::Integer {
@@ -378,13 +446,25 @@ impl HintVcf {
         } else if gq_length != bcf::header::TagLength::Fixed(1) {
             return Err(error!(InvalidInput, "Genotype quality (GQ) must have Number=1 in the header"));
         }
-        Ok(Self { vcf, sample_id, gq_type, params })
+        let contig_lengths = load_contig_lengths(vcf.header());
+        Ok(Self { vcf, sample, sample_id, contig_lengths, gq_type, params })
+    }
+
+    pub fn get_chrom_len(&self, name: &str) -> Option<u32> {
+        self.vcf.header().name2rid(name.as_bytes())
+            .ok()
+            .and_then(|rid| self.contig_lengths.get(rid as usize).copied().flatten())
+    }
+
+    pub fn sample(&self) -> &str {
+        &self.sample
     }
 
     pub fn fetch_blocks(
         &mut self,
         ref_region: &ReferenceRegion,
         ref_seq: &[u8],
+        ploidy: usize,
     ) -> crate::Result<VarBlocks> {
         let mut blocks = VarBlocks::new();
         let mut cluster = Cluster::new();
@@ -397,20 +477,53 @@ impl HintVcf {
         let sample_id = self.sample_id;
         let gq_type = self.gq_type;
         let params = self.params.clone();
+        let mut warned_ploidy = false;
+
         for item in self.vcf.records() {
             let record = item.map_err(|e| error!(ParsingError, "Error parsing VCF file ({})", e))?;
             let genotype = record.genotypes()?.get(sample_id);
             if has_unkown_allele(&genotype) { continue };
+            if genotype.len() != ploidy {
+                if !warned_ploidy {
+                    log::warn!("hint-vcf contains variants of different ploidy, skipping this variant.");
+                }
+                warned_ploidy = true;
+                continue;
+            }
             let gt_qual = get_gq(&record, sample_id, gq_type)?;
 
             if cluster.last_end <= record.pos() as u32 {
-                cluster.save(&mut blocks, ref_region, ref_seq, params.min_gq, params.max_len);
+                cluster.save(&mut blocks, ref_region, ref_seq, params.min_gq, params.max_len, ploidy);
             }
             cluster.push(record, genotype, gt_qual);
         }
-        cluster.save(&mut blocks, ref_region, ref_seq, params.min_gq, params.max_len);
+        cluster.save(&mut blocks, ref_region, ref_seq, params.min_gq, params.max_len, ploidy);
         blocks.pop_last_if_empty();
         eprintln!("{}", blocks);
         Ok(blocks)
     }
+}
+
+/// Combine Locityper variants with variant blocks from the hint VCF.
+pub fn combine(
+    writer: &bcf::Writer,
+    locityper_vars: Vec<Record>,
+    blocks: &VarBlocks,
+    ref_region: &ReferenceRegion,
+    ref_seq: &[u8],
+) -> crate::Result<()> {
+    let n = locityper_vars.len();
+    let variants = &blocks.variants;
+    let m = variants.len();
+
+    for block in &blocks.blocks {
+        eprintln!("Processing {:?}", block);
+        assert!(!block.is_empty());
+        let start = variants[block.start_ix].start;
+        let end = variants[block.end_ix - 1].end;
+        // variants[i - 1].end() <= start
+        let i = bisect::right_by(variants, |var| var.end.cmp(&start));
+        let j = bisect::position_of(variants, |var| end <= var.start, i, n);
+    }
+    todo!()
 }

@@ -648,7 +648,7 @@ impl GrouppedAlignments {
     /// For a given contig, returns alignment pairs, corresponding to this contig.
     pub fn contig_alns(&self, contig_id: ContigId) -> &[PairAlignment] {
         let i = bisect::left_by(&self.aln_pairs, |paln| paln.contig_id().cmp(&contig_id));
-        let j = bisect::right_boundary(&self.aln_pairs, |paln| contig_id == paln.contig_id(), i, self.aln_pairs.len());
+        let j = bisect::position_of(&self.aln_pairs, |paln| contig_id != paln.contig_id(), i, self.aln_pairs.len());
         &self.aln_pairs[i..j]
     }
 
@@ -658,7 +658,7 @@ impl GrouppedAlignments {
         let mut j = 0;
         contig_ids.iter().map(move |&id| {
             let i = j; // Do this way so that we can immediately return value two lines later.
-            j = bisect::right_boundary(&self.aln_pairs, |aln| aln.contig_id() == id, i, n);
+            j = bisect::position_of(&self.aln_pairs, |aln| aln.contig_id() != id, i, n);
             if i == j { self.unmapped_prob } else { self.aln_pairs[i].ln_prob() }
         })
     }
