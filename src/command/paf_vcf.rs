@@ -439,7 +439,6 @@ impl VarRanges {
         let mut hap_allele_ixs = IntMap::with_capacity_and_hasher(self.haplotypes.len(), Default::default());
         let mut genotypes: Vec<GenotypeAllele> = Vec::with_capacity(ploidy);
         for (i, &(ref_start, ref_end)) in ref_ranges.iter().enumerate() {
-            let mut record = writer.empty_record();
             let mut alleles = vec![&ref_seq[ref_start as usize..ref_end as usize]];
             hap_allele_ixs.clear();
             for (&id, curr_ranges) in hap_ranges.iter() {
@@ -458,13 +457,11 @@ impl VarRanges {
                 continue;
             }
 
-            record.clear();
+            let mut record = writer.empty_record();
             record.set_rid(Some(0));
             record.set_pos(i64::from(ref_start + shift));
             record.set_alleles(&alleles)?;
             record.set_qual(60.0);
-
-            const TRAILING_ALLELE: GenotypeAllele = GenotypeAllele::Phased((i32::MIN >> 1) - 1);
             genotypes.clear();
             for (_, hap_ids) in groupped_haps {
                 genotypes.extend(hap_ids.iter().map(|opt_id| {
@@ -473,6 +470,7 @@ impl VarRanges {
                         None => GenotypeAllele::PhasedMissing,
                     }
                 }));
+                const TRAILING_ALLELE: GenotypeAllele = GenotypeAllele::Phased((i32::MIN >> 1) - 1);
                 genotypes.extend(std::iter::repeat_n(TRAILING_ALLELE, ploidy - hap_ids.len()));
             }
             record.push_genotypes(&genotypes)?;

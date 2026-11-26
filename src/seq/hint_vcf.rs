@@ -1,6 +1,6 @@
 use std::{
     path::Path,
-    fmt::{self, Display, Formatter, Write},
+    fmt::{self, Display, Formatter},
 };
 use smallvec::{smallvec, SmallVec};
 use htslib::{
@@ -38,34 +38,29 @@ impl Default for Params {
 pub struct Variant {
     start: u32,
     end: u32,
+    genotype_qual: f32,
     /// Consensus sequences for each haplotype.
     haplotypes: SmallVec<[Vec<u8>; 2]>,
-    genotype_qual: f32,
+    block_ix: usize,
 }
 
 impl Variant {
-    fn new(rec: &Record, genotype: &Genotype, genotype_qual: f32) -> Self {
+    fn new(start: u32, end: u32, genotype_qual: f32, haplotypes: SmallVec<[Vec<u8>; 2]>) -> Self {
+        Self {
+            start, end, genotype_qual, haplotypes,
+            block_ix: usize::MAX,
+        }
+    }
+
+    fn from_record(rec: &Record, genotype: &Genotype, genotype_qual: f32) -> Self {
         let start = rec.pos() as u32;
         let end = rec.end() as u32;
         let alleles = rec.alleles();
-        Self {
-            start, end, genotype_qual,
-            haplotypes: genotype.iter()
+        Self::new(start, end, genotype_qual,
+            genotype.iter()
                 .map(|allele| alleles[allele.index().expect("All alleles must be defined") as usize].to_vec())
-                .collect(),
-        }
-    }
-}
-
-// [DEBUG] Remove later.
-/// Writes a sequence, eliding the middle of long ones.
-fn write_seq(f: &mut Formatter<'_>, seq: &[u8]) -> fmt::Result {
-    const MAX: usize = 40;
-    let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    if seq.len() <= MAX {
-        f.write_str(&s(seq))
-    } else {
-        write!(f, "{}..{}({}bp)..{}", s(&seq[..15]), "", seq.len(), s(&seq[seq.len() - 15..]))
+                .collect()
+        )
     }
 }
 
@@ -74,51 +69,69 @@ impl Display for Variant {
         write!(f, "{}-{} ", self.start + 1, self.end)?;
         for (i, hap) in self.haplotypes.iter().enumerate() {
             if i > 0 {
-                f.write_char('|')?;
+                f.write_str(" | ")?;
             }
-            write_seq(f, hap)?;
+            f.write_str(std::str::from_utf8(hap).unwrap())?;
         }
         write!(f, " (GQ {:.1})", self.genotype_qual)
     }
 }
 
-/// Block of phased variants.
-#[derive(Debug, Clone)]
-pub struct VarBlock {
-    start: u32,
-    end: u32,
-    variants: SmallVec<[Variant; 1]>,
+/// Variants, groupped into blocks.
+/// Variants from the same block are phased in respect to each other.
+#[derive(Clone, Debug)]
+pub struct VarBlocks {
+    variants: Vec<Variant>,
+    /// A block `i` combines variants `blocks[i].0..blocks[i].1`.
+    /// There is always at least one (potentially empty) block.
+    blocks: Vec<(usize, usize)>,
 }
 
-impl VarBlock {
+impl VarBlocks {
     fn new() -> Self {
         Self {
-            start: u32::MAX,
-            end: 0,
-            variants: SmallVec::new(),
+            variants: Vec::new(),
+            blocks: vec![(0, 0)],
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.variants.is_empty()
+    #[inline]
+    fn last_block_empty(&self) -> bool {
+        let block = self.blocks.last().unwrap();
+        block.0 == block.1
     }
 
-    fn push(&mut self, var: Variant) {
-        // if var.start < self.end {
-        //     // Add overlapping variant.
-        //     if
-        // }
-        self.start = self.start.min(var.start);
-        self.end = self.end.max(var.end);
+    #[inline]
+    fn new_block(&mut self) {
+        if !self.last_block_empty() {
+            let n = self.variants.len();
+            self.blocks.push((n, n));
+        }
+    }
+
+    fn push_variant(&mut self, mut var: Variant) {
+        var.block_ix = self.blocks.len() - 1;
         self.variants.push(var);
+        self.blocks.last_mut().unwrap().1 += 1;
+    }
+
+    fn pop_last_if_empty(&mut self) {
+        if self.last_block_empty() {
+            self.blocks.pop();
+        }
     }
 }
 
-impl Display for VarBlock {
+impl Display for VarBlocks {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Block {}-{}, {} variant(s)", self.start + 1, self.end, self.variants.len())?;
-        for var in &self.variants {
-            write!(f, "\n  {}", var)?;
+        for (i, &(start, end)) in self.blocks.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "Block #{}, {} variant(s)", i, end - start)?;
+            for var in &self.variants[start..end] {
+                write!(f, "\n  {}", var)?;
+            }
         }
         Ok(())
     }
@@ -131,7 +144,7 @@ fn process_cluster(
     records: &[(Record, Genotype, f32)],
     ref_shift: u32,
     ref_seq: &[u8],
-    block: &mut VarBlock,
+    blocks: &mut VarBlocks,
     min_gq: f32,
     max_len: u32,
 ) {
@@ -185,12 +198,8 @@ fn process_cluster(
             // There is a reference gap between haplotypes, splitting into multiple variants.
             if genotype_qual >= min_gq && effect_end - start <= max_len {
                 extend_haplotypes(&mut haplotypes, &mut ends, max_end, ref_seq, ref_shift);
-                block.push(Variant {
-                    start,
-                    genotype_qual,
-                    end: max_end,
-                    haplotypes: std::mem::replace(&mut haplotypes, smallvec![Vec::new(); ploidy]),
-                });
+                blocks.push_variant(Variant::new(start, max_end, genotype_qual,
+                    std::mem::replace(&mut haplotypes, smallvec![Vec::new(); ploidy])));
             } else {
                 haplotypes.iter_mut().for_each(Vec::clear);
             }
@@ -225,12 +234,7 @@ fn process_cluster(
     }
     if start != max_end && genotype_qual >= min_gq && effect_end - start <= max_len {
         extend_haplotypes(&mut haplotypes, &mut ends, max_end, ref_seq, ref_shift);
-        block.push(Variant {
-            start,
-            genotype_qual,
-            end: max_end,
-            haplotypes: std::mem::replace(&mut haplotypes, smallvec![Vec::new(); ploidy]),
-        });
+        blocks.push_variant(Variant::new(start, max_end, genotype_qual, haplotypes));
     }
 }
 
@@ -286,34 +290,32 @@ impl Cluster {
     }
 
     fn save(&mut self,
-        blocks: &mut Vec<VarBlock>,
+        blocks: &mut VarBlocks,
         ref_region: &ReferenceRegion,
         ref_seq: &[u8],
         min_gq: f32,
         max_len: u32,
     ) {
-        if self.records.is_empty() { return };
-        let first_start = self.records[0].0.pos() as u32;
-        if first_start < ref_region.start() || self.last_end > ref_region.end() {
+        let Some(first_record) = self.records.first() else { return };
+        if (first_record.0.pos() as u32) < ref_region.start() || self.last_end > ref_region.end() {
             self.retains_phasing = true;
             self.records.clear();
             return;
         }
 
-        if !blocks.last().unwrap().is_empty() && !self.retains_phasing {
-            blocks.push(VarBlock::new());
-        }
-        let block = blocks.last_mut().unwrap();
-
-        if self.records.len() == 1 {
-            let (record, genotype, gq) = &self.records[0];
-            block.push(Variant::new(record, genotype, *gq));
-        } else {
-            process_cluster(&self.records, ref_region.start(), ref_seq, block, min_gq, max_len);
-        }
-
         if !self.retains_phasing {
-            blocks.push(VarBlock::new());
+            blocks.new_block();
+        }
+        if self.records.len() == 1 {
+            let (record, genotype, gq) = first_record;
+            if record.rlen() as u32 <= max_len {
+                blocks.push_variant(Variant::from_record(record, genotype, *gq));
+            }
+        } else {
+            process_cluster(&self.records, ref_region.start(), ref_seq, blocks, min_gq, max_len);
+        }
+        if !self.retains_phasing {
+            blocks.new_block();
         }
         self.retains_phasing = true;
         self.records.clear();
@@ -332,7 +334,7 @@ impl Display for Cluster {
             write!(f, "\n  {} ", record.pos() + 1)?;
             for (i, allele) in alleles.iter().enumerate() {
                 f.write_str(if i == 0 { "" } else if i == 1 { ">" } else { "," })?;
-                write_seq(f, allele)?;
+                f.write_str(std::str::from_utf8(allele).unwrap())?;
             }
             write!(f, " GT={} GQ={:.1}", gt, qual)?;
         }
@@ -383,8 +385,8 @@ impl HintVcf {
         &mut self,
         ref_region: &ReferenceRegion,
         ref_seq: &[u8],
-    ) -> crate::Result<Vec<VarBlock>> {
-        let mut blocks = vec![VarBlock::new()];
+    ) -> crate::Result<VarBlocks> {
+        let mut blocks = VarBlocks::new();
         let mut cluster = Cluster::new();
 
         let chrom = ref_region.chrom();
@@ -407,10 +409,8 @@ impl HintVcf {
             cluster.push(record, genotype, gt_qual);
         }
         cluster.save(&mut blocks, ref_region, ref_seq, params.min_gq, params.max_len);
-
-        for block in &blocks {
-            eprintln!("{}", block);
-        }
+        blocks.pop_last_if_empty();
+        eprintln!("{}", blocks);
         Ok(blocks)
     }
 }
