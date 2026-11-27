@@ -21,6 +21,7 @@ use crate::{
         cigar::{Cigar, Operation},
         contigs::{ContigId, ContigNames, ContigSet, DiscardedHaplotypes},
     },
+    var::Variant,
     algo::{bisect, HashMap, IntMap},
     math::ifelse0,
     command::paths,
@@ -426,58 +427,41 @@ impl VarRanges {
 
     pub fn generate_variants(
         &self,
-        header: &Arc<bcf::header::HeaderView>,
         shift: u32,
         ref_ranges: &[(u32, u32)],
         ref_seq: &[u8],
         contig_set: &ContigSet,
         groupped_haps: &[(String, Vec<Option<ContigId>>)],
-    ) -> crate::Result<Vec<bcf::Record>> {
+    ) -> crate::Result<Vec<Variant>> {
         let hap_ranges = self.get_hap_ranges(&ref_ranges);
         let ploidy = groupped_haps.iter().map(|(_, ids)| ids.len()).max().unwrap_or(0);
-        let mut records = Vec::with_capacity(ref_ranges.len());
+        let mut variants = Vec::with_capacity(ref_ranges.len());
 
         let mut hap_allele_ixs = IntMap::with_capacity_and_hasher(self.haplotypes.len(), Default::default());
-        let mut genotypes: Vec<GenotypeAllele> = Vec::with_capacity(ploidy);
         for (i, &(ref_start, ref_end)) in ref_ranges.iter().enumerate() {
-            let mut alleles = vec![&ref_seq[ref_start as usize..ref_end as usize]];
+            let mut var = Variant::new(shift + ref_start, shift + ref_end,
+                ref_seq[ref_start as usize..ref_end as usize].to_vec(), true);
             hap_allele_ixs.clear();
             for (&id, curr_ranges) in hap_ranges.iter() {
-                let seq = contig_set.get_seq(id);
                 let Some((start, end)) = curr_ranges[i] else { continue };
-                let allele = &seq[start as usize..end as usize];
-                let allele_ix = alleles.iter().position(|&existing_allele| existing_allele == allele)
-                    .unwrap_or_else(|| {
-                        alleles.push(allele);
-                        alleles.len() - 1
-                    });
-                hap_allele_ixs.insert(id, allele_ix);
+                let allele_ix = var.add_allele(&contig_set.get_seq(id)[start as usize..end as usize]);
+                hap_allele_ixs.insert(id, GenotypeAllele::Phased(allele_ix as i32));
             }
-            if alleles.len() == 1 {
+            if var.alleles().len() == 1 {
                 // Can happen in separate.vcf.gz as some alleles become unknown.
                 continue;
             }
 
-            let mut record = bcf::Record::new(Arc::clone(header));
-            record.set_rid(Some(0));
-            record.set_pos(i64::from(ref_start + shift));
-            record.set_alleles(&alleles)?;
-            record.set_qual(60.0);
-            genotypes.clear();
+            let genotypes = var.genotype_mut();
             for (_, hap_ids) in groupped_haps {
-                genotypes.extend(hap_ids.iter().map(|opt_id| {
-                    match opt_id.and_then(|id| hap_allele_ixs.get(&id)) {
-                        Some(&allele_ix) => GenotypeAllele::Phased(allele_ix as i32),
-                        None => GenotypeAllele::PhasedMissing,
-                    }
-                }));
+                genotypes.extend(hap_ids.iter().map(|opt_id|
+                    opt_id.and_then(|id| hap_allele_ixs.get(&id).copied()).unwrap_or(GenotypeAllele::PhasedMissing)));
                 const TRAILING_ALLELE: GenotypeAllele = GenotypeAllele::Phased((i32::MIN >> 1) - 1);
-                genotypes.extend(std::iter::repeat_n(TRAILING_ALLELE, ploidy - hap_ids.len()));
+                genotypes.resize(genotypes.len() + ploidy - hap_ids.len(), TRAILING_ALLELE);
             }
-            record.push_genotypes(&genotypes)?;
-            records.push(record);
+            variants.push(var);
         }
-        Ok(records)
+        Ok(variants)
     }
 }
 
@@ -553,15 +537,16 @@ pub(super) fn create_header_view(header: &bcf::Header) -> Arc<bcf::header::Heade
 pub(super) fn write_vcf(
     vcf_filename: impl AsRef<Path>,
     header: &bcf::header::Header,
-    records: &[bcf::Record],
+    variants: &[Variant],
 ) -> crate::Result<()>
 {
     let vcf_filename = vcf_filename.as_ref();
     let tmp_filename = ext::sys::temp_filename(vcf_filename);
     let bgzip = vcf_filename.extension().and_then(OsStr::to_str) == Some("gz");
     let mut writer = bcf::Writer::from_path(&tmp_filename, header, !bgzip, bcf::Format::Vcf)?;
-    for record in records {
-        writer.write(record)?;
+    for var in variants {
+        let record = var.create_record(&writer)?;
+        writer.write(&record)?;
     }
     std::mem::drop(writer);
 
@@ -663,14 +648,11 @@ pub(super) fn convert_to_vcf(
     let (unique_ranges, merged_ranges) = vars.get_ref_ranges();
 
     let header = create_vcf_header(&chrom, None, groupped_haps.iter().map(|(name, _)| name as &str));
-    let header_view = create_header_view(&header);
     let ref_seq = contig_set.get_seq(ref_id);
-    let merged_records = vars.generate_variants(&header_view, shift, &merged_ranges, ref_seq,
-        contig_set, &groupped_haps)?;
+    let merged_records = vars.generate_variants(shift, &merged_ranges, ref_seq, contig_set, &groupped_haps)?;
     write_vcf(&out_merged, &header, &merged_records)?;
     if let Some(separate_vcf_fname) = &out_separate {
-        let sep_records = vars.generate_variants(&header_view, shift, &unique_ranges, ref_seq,
-            contig_set, &groupped_haps)?;
+        let sep_records = vars.generate_variants(shift, &unique_ranges, ref_seq, contig_set, &groupped_haps)?;
         write_vcf(&separate_vcf_fname, &header, &sep_records)?;
     }
     Ok(())

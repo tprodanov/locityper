@@ -1386,10 +1386,8 @@ fn write_vcf(
     }
     let groupped_haps = [(sample, genotype.ids().iter().copied().map(Some).collect())];
     let (_, ref_ranges) = vars.get_ref_ranges();
-    let header_view = paf_vcf::create_header_view(&header);
-    let records = vars.generate_variants(&header_view, ref_region.start(), &ref_ranges, ref_seq,
-        contig_set, &groupped_haps)?;
-    paf_vcf::write_vcf(vcf_filename, &header, &records)
+    let variants = vars.generate_variants(ref_region.start(), &ref_ranges, ref_seq, contig_set, &groupped_haps)?;
+    paf_vcf::write_vcf(vcf_filename, &header, &variants)
 }
 
 fn analyze_locus(

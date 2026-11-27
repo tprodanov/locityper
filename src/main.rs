@@ -6,6 +6,7 @@ pub(crate) mod model;
 pub(crate) mod solvers;
 pub(crate) mod ext;
 pub(crate) mod command;
+pub(crate) mod var;
 
 mod err;
 // mod test;
