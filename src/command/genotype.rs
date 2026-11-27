@@ -425,7 +425,7 @@ fn print_help(extended: bool) {
         println!("    {:KEY$} {:VAL$}  Incorporate information from this VCF file.",
             "    --hint-vcf".green(), "FILE".yellow());
         println!("    {:KEY$} {:VAL$}  Only examine variants with this genotype quality [{}].",
-            "    --hint-gq".green(), "NUM".yellow(), super::fmt_def_f64(defaults.hint_params.min_gq));
+            "    --hint-gq".green(), "INT".yellow(), super::fmt_def(defaults.hint_params.min_gq));
         println!("    {:KEY$} {:VAL$}  Only examine variants up to this sum length [{}].",
             "    --hint-len".green(), "INT".yellow(), super::fmt_def(defaults.hint_params.max_len));
         println!("    {:KEY$} {:VAL$}  VCF sample name.",

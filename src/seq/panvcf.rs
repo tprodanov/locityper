@@ -171,10 +171,7 @@ pub fn filter_variants(
                 _ => {}
             }
             has_variation |= sample.subnames.iter().any(|haplotype|
-                match gt[haplotype.hap_ix] {
-                    GenotypeAllele::Phased(1..) | GenotypeAllele::Unphased(1..) => true,
-                    _ => false,
-                });
+                matches!(gt[haplotype.hap_ix], GenotypeAllele::Phased(1..) | GenotypeAllele::Unphased(1..)));
         }
         if has_variation {
             vars.push(var);

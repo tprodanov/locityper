@@ -42,28 +42,19 @@ impl Operation {
     /// Does the Cigar operation consume reference sequence?
     #[inline]
     pub const fn consumes_ref(self) -> bool {
-        match self {
-            Operation::Match | Operation::Equal | Operation::Diff | Operation::Del => true,
-            Operation::Soft | Operation::Hard | Operation::Ins => false,
-        }
+        matches!(self, Operation::Match | Operation::Equal | Operation::Diff | Operation::Del)
     }
 
     /// Does the Cigar operation consume query sequence?
     #[inline]
     pub const fn consumes_query(self) -> bool {
-        match self {
-            Operation::Match | Operation::Equal | Operation::Diff | Operation::Ins | Operation::Soft => true,
-            Operation::Hard | Operation::Del => false,
-        }
+        matches!(self, Operation::Match | Operation::Equal | Operation::Diff | Operation::Ins | Operation::Soft)
     }
 
     /// Does the Cigar operation consume both reference and query sequences?
     #[inline]
     pub const fn consumes_both(self) -> bool {
-        match self {
-            Operation::Match | Operation::Equal | Operation::Diff => true,
-            Operation::Soft | Operation::Hard | Operation::Ins | Operation::Del => false,
-        }
+        matches!(self, Operation::Match | Operation::Equal | Operation::Diff)
     }
 
     /// Returns tuple `(consumes_query(), consumes_ref())` in one go.
@@ -162,10 +153,7 @@ impl Operation {
 
     /// Returns true if insertion and deletion go right after another.
     pub const fn gap_conflict(self, next: Operation) -> bool {
-        match (self, next) {
-            (Operation::Ins, Operation::Del) | (Operation::Del, Operation::Ins) => true,
-            _ => false
-        }
+        matches!((self, next), (Operation::Ins, Operation::Del) | (Operation::Del, Operation::Ins))
     }
 }
 
