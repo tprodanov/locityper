@@ -60,12 +60,20 @@ fn get_ps(record: &Record, sample_id: usize) -> Option<i32> {
         .get(sample_id)?
         .first()
         .copied()
+        .filter(|x| *x >= i32::MIN + 1) // According to some sources, this can happen on missing entries (PS=.)
 }
 
+/// Growable vector with 2 elements on stack.
+type SmallVec2<T> = SmallVec<[T; 2]>;
+
 /// Wrapper around a record with additional helpful information.
+#[derive(Clone, Debug)]
 struct HeavyRecord {
-    record: Record,
-    genotype: Genotype,
+    start: u32,
+    end: u32,
+    record: Option<Record>,
+    genotype: Option<Genotype>,
+    haplotypes: SmallVec2<Vec<u8>>,
     genotype_qual: i32,
     phase_block: Option<i32>,
     phased: bool,
@@ -74,80 +82,101 @@ struct HeavyRecord {
 }
 
 impl HeavyRecord {
-    fn new(
+    fn from_record(
         record: Record,
         sample_id: usize,
         gq_type: bcf::header::TagType,
         has_ps: bool,
         ploidy: usize,
+        warn_ploidy: &mut bool,
     ) -> crate::Result<Option<Self>> {
         let genotype = record.genotypes()?.get(sample_id);
         if has_unkown_allele(&genotype) { return Ok(None) };
         if genotype.len() != ploidy {
-            log::warn!("hint-vcf contains variants of different ploidy, skipping this variant.");
+            if *warn_ploidy {
+                log::warn!("hint-vcf contains variants of different ploidy, skipping this variant.");
+                *warn_ploidy = false;
+            }
             return Ok(None);
         }
 
-        let allele0 = genotype[0].index().unwrap();
+        let alleles = record.alleles();
+        let mut haplotypes: SmallVec2<Vec<u8>> = SmallVec::new();
+        let allele_ix0 = genotype[0].index().unwrap();
         let mut homozygous = true;
         let mut phased = true;
-        for &allele in genotype.iter() {
-            homozygous &= allele.index().unwrap() == allele0;
-            phased &= matches!(allele, GenotypeAllele::Phased(_));
+        for &allele_ix in genotype.iter() {
+            phased &= matches!(allele_ix, GenotypeAllele::Phased(_));
+            let allele_ix = allele_ix.index().unwrap();
+            homozygous &= allele_ix == allele_ix0;
+            haplotypes.push(alleles[allele_ix as usize].to_vec());
         };
-        let all_reference = homozygous && allele0 == 0;
+        let all_reference = homozygous && allele_ix0 == 0;
 
         let genotype_qual = get_gq(&record, sample_id, gq_type)?;
         let phase_block = (has_ps && phased).then(|| get_ps(&record, sample_id)).flatten();
-        Ok(Some(Self { record, genotype, genotype_qual, phase_block, phased, homozygous, all_reference }))
+        Ok(Some(Self {
+            start: record.pos() as u32,
+            end: record.end() as u32,
+            record: Some(record),
+            genotype: Some(genotype),
+            haplotypes, genotype_qual, phase_block, phased, homozygous, all_reference,
+        }))
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct Variant {
-    start: u32,
-    end: u32,
-    genotype_qual: i32,
-    /// Stores true if all of the haplotypes = reference.
-    all_reference: bool,
-    /// Stores true if all haplotypes are the same.
-    homozygous: bool,
-    /// Consensus sequences for each haplotype.
-    haplotypes: SmallVec<[Vec<u8>; 2]>,
-}
+    fn from_locityper_rec(record: Record) -> Self {
+        let genotype = record.genotypes().expect("Undefined genotype").get(0);
+        let alleles = record.alleles();
+        let mut haplotypes: SmallVec2<Vec<u8>> = SmallVec::new();
+        let allele_ix0 = genotype[0].index().unwrap();
+        let mut homozygous = true;
+        for &allele_ix in genotype.iter() {
+            let allele_ix = allele_ix.index().unwrap();
+            homozygous &= allele_ix == allele_ix0;
+            haplotypes.push(alleles[allele_ix as usize].to_vec());
+        };
+        assert!(!homozygous || allele_ix0 != 0, "Locityper variants should not be all-reference");
+        Self {
+            start: record.pos() as u32,
+            end: record.end() as u32,
+            record: Some(record),
+            genotype: Some(genotype),
+            genotype_qual: 0,
+            phase_block: None,
+            phased: true,
+            all_reference: false,
+            haplotypes, homozygous,
+        }
+    }
 
-impl Variant {
-    fn new(
+    fn from_haplotypes(
         start: u32,
         end: u32,
         genotype_qual: i32,
-        haplotypes: SmallVec<[Vec<u8>; 2]>,
-        all_reference: bool,
+        haplotypes: SmallVec2<Vec<u8>>,
     ) -> Self {
-        let allele0 = haplotypes.first().unwrap();
-        let homozygous = haplotypes[1..].iter().all(|allele| allele == allele0);
+        let hap0 = haplotypes.first().unwrap();
+        let homozygous = haplotypes[1..].iter().all(|hap| hap == hap0);
         Self {
-            start, end, genotype_qual, haplotypes, all_reference, homozygous,
+            record: None,
+            genotype: None,
+            phase_block: None,
+            all_reference: false,
+            phased: true,
+            start, end, haplotypes, genotype_qual, homozygous,
         }
     }
 
-    fn from_record(heavy_record: &HeavyRecord) -> Self {
-        let alleles = heavy_record.record.alleles();
-        let haplotypes = heavy_record.genotype.iter()
-            .map(|allele| alleles[allele.index().expect("All alleles must be defined") as usize].to_vec())
-            .collect();
-        Self {
-            start: heavy_record.record.pos() as u32,
-            end: heavy_record.record.end() as u32,
-            genotype_qual: heavy_record.genotype_qual,
-            all_reference: heavy_record.all_reference,
-            homozygous: heavy_record.homozygous,
-            haplotypes,
-        }
+    fn record(&self) -> &Record {
+        self.record.as_ref().expect("Record must be defined")
+    }
+
+    fn genotype(&self) -> &Genotype {
+        self.genotype.as_ref().expect("Genotype must be defined")
     }
 }
 
-impl Display for Variant {
+impl Display for HeavyRecord {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{} ", self.start + 1, self.end)?;
         for (i, hap) in self.haplotypes.iter().enumerate() {
@@ -164,7 +193,7 @@ impl Display for Variant {
 /// Variants from the same block are phased in respect to each other.
 #[derive(Clone, Debug)]
 pub struct VarBlocks {
-    variants: Vec<Variant>,
+    variants: Vec<HeavyRecord>,
     /// A block `i` combines variants `blocks[i].0..blocks[i].1`.
     /// During block construction there should always at least one (potentially empty) block.
     blocks: Vec<(usize, usize)>,
@@ -207,7 +236,7 @@ impl VarBlocks {
     }
 
     #[inline]
-    fn push_variant(&mut self, var: Variant) {
+    fn push_variant(&mut self, var: HeavyRecord) {
         self.variants.push(var);
         self.blocks.last_mut().unwrap().1 = self.variants.len();
     }
@@ -255,7 +284,7 @@ impl<'a> RefSeq<'a> {
 
 /// Process cluster of overlapping variants.
 /// This skips homozygous reference variants,
-/// and constructs `Variant` with consensus sequences for each non-overlapping region.
+/// and constructs `HeavyRecord`s with consensus sequences for each non-overlapping region.
 fn process_cluster(
     records: &[HeavyRecord],
     ref_seq: RefSeq,
@@ -282,19 +311,19 @@ fn process_cluster(
         *effect_end = pos;
     }
 
-    let mut start = records[0].record.pos() as u32;
-    let mut ends: SmallVec<[u32; 2]> = smallvec![start; ploidy];
+    let mut start = records[0].start;
+    let mut ends: SmallVec2<u32> = smallvec![start; ploidy];
     let mut max_end = start;
     // Reference start + alt length.
     let mut effect_end = start;
-    let mut haplotypes: SmallVec<[Vec<u8>; 2]> = smallvec![Vec::new(); ploidy];
+    let mut haplotypes: SmallVec2<Vec<u8>> = smallvec![Vec::new(); ploidy];
     let mut genotype_qual = i32::MAX;
 
     for record in records {
         if record.all_reference { continue };
 
-        let curr_start = record.record.pos() as u32;
-        let curr_end = record.record.end() as u32;
+        let curr_start = record.start;
+        let curr_end = record.end;
         if start == max_end {
             // Between last recorded variant and this position there was no variation, moving start position.
             reset_positions(curr_start, &mut start, &mut ends, &mut max_end, &mut effect_end);
@@ -302,8 +331,8 @@ fn process_cluster(
             // There is a reference gap between haplotypes, splitting into multiple variants.
             if genotype_qual >= min_gq && effect_end - start <= max_len {
                 extend_haplotypes(&mut haplotypes, &mut ends, max_end, ref_seq);
-                blocks.push_variant(Variant::new(start, max_end, genotype_qual,
-                    std::mem::replace(&mut haplotypes, smallvec![Vec::new(); ploidy]), false));
+                blocks.push_variant(HeavyRecord::from_haplotypes(start, max_end, genotype_qual,
+                    std::mem::replace(&mut haplotypes, smallvec![Vec::new(); ploidy])));
             } else {
                 haplotypes.iter_mut().for_each(Vec::clear);
             }
@@ -316,9 +345,9 @@ fn process_cluster(
             effect_end = effect_end.max(curr_start);
         }
 
-        let alleles = record.record.alleles();
         genotype_qual = genotype_qual.min(record.genotype_qual);
-        for (&allele, end, hap) in itertools::izip!(record.genotype.iter(), &mut ends, &mut haplotypes) {
+        for (&allele, allele_seq, end, hap) in
+            itertools::izip!(record.genotype().iter(), &record.haplotypes, &mut ends, &mut haplotypes) {
             let i = allele.index().unwrap() as usize;
             if i != 0 {
                 if *end != curr_start {
@@ -328,7 +357,6 @@ fn process_cluster(
                     genotype_qual = i32::MAX;
                     break;
                 }
-                let allele_seq = &alleles[i];
                 hap.extend_from_slice(allele_seq);
                 *end = curr_end;
                 max_end = max_end.max(curr_end);
@@ -338,13 +366,12 @@ fn process_cluster(
     }
     if start != max_end && genotype_qual >= min_gq && effect_end - start <= max_len {
         extend_haplotypes(&mut haplotypes, &mut ends, max_end, ref_seq);
-        blocks.push_variant(Variant::new(start, max_end, genotype_qual, haplotypes, false));
+        blocks.push_variant(HeavyRecord::from_haplotypes(start, max_end, genotype_qual, haplotypes));
     }
 }
 
 struct Cluster {
     last_end: u32,
-    effect_end: u32,
     /// Does this cluster connect to the previous one via phase blocks?
     connects_back: bool,
     /// Same with the next block.
@@ -357,7 +384,6 @@ impl Cluster {
     fn new() -> Self {
         Self {
             last_end: 0,
-            effect_end: 0,
             connects_back: true,
             connects_forward: true,
             records: Vec::new(),
@@ -388,9 +414,8 @@ impl Cluster {
             }
             *current_phase_block = record.phase_block;
         }
-        let alleles = record.record.alleles();
-        let max_len = record.genotype.iter().map(|i| alleles[i.index().unwrap() as usize].len()).max().unwrap();
-        self.last_end = self.last_end.max(record.record.end() as u32).max(record.record.pos() as u32 + max_len as u32);
+        let max_len = record.haplotypes.iter().map(|hap| hap.len()).max().unwrap();
+        self.last_end = self.last_end.max(record.end).max(record.start + max_len as u32);
         self.records.push(record);
     }
 
@@ -399,7 +424,7 @@ impl Cluster {
         self.connects_back = true;
         self.connects_forward = true;
         self.records.clear();
-        // Do not reset last_end and effect_end because they will be updated on push.
+        // Do not reset last_end because they will be updated on push.
     }
 
     fn save(&mut self,
@@ -411,7 +436,7 @@ impl Cluster {
         ploidy: usize,
     ) {
         let Some(first_record) = self.records.first() else { return };
-        if (first_record.record.pos() as u32) < ref_region.start() || self.last_end > ref_region.end() {
+        if (first_record.start) < ref_region.start() || self.last_end > ref_region.end() {
             self.reset();
             return;
         }
@@ -420,8 +445,9 @@ impl Cluster {
             blocks.new_block();
         }
         if self.records.len() == 1 {
-            if first_record.record.rlen() as u32 <= max_len {
-                blocks.push_variant(Variant::from_record(first_record));
+            let record = self.records.pop().expect("Length is exactly 1");
+            if record.record().rlen() as u32 <= max_len && record.genotype_qual >= min_gq {
+                blocks.push_variant(record);
             }
         } else {
             process_cluster(&self.records, ref_seq, blocks, min_gq, max_len, ploidy);
@@ -430,23 +456,6 @@ impl Cluster {
             blocks.new_block();
         }
         self.reset();
-    }
-}
-
-impl Display for Cluster {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Cluster (end {}, effective end {}, {} record(s))",
-            self.last_end, self.effect_end, self.records.len())?;
-        for record in &self.records {
-            let alleles = record.record.alleles();
-            write!(f, "\n  {} ", record.record.pos() + 1)?;
-            for (i, allele) in alleles.iter().enumerate() {
-                f.write_str(if i == 0 { "" } else if i == 1 { ">" } else { "," })?;
-                f.write_str(std::str::from_utf8(allele).unwrap())?;
-            }
-            write!(f, " GT={} GQ={}", record.genotype, record.genotype_qual)?;
-        }
-        Ok(())
     }
 }
 
@@ -538,11 +547,13 @@ impl HintVcf {
         let params = self.params.clone();
         let ref_seq = RefSeq::new(ref_region.start(), ref_seq);
         let mut phase_block = None;
+        let mut warn_ploidy = true;
 
         for item in self.vcf.records() {
             let record = item.map_err(|e| error!(ParsingError, "Error parsing VCF file ({})", e))?;
-            let Some(record) = HeavyRecord::new(record, sample_id, gq_type, has_ps, ploidy)? else { continue };
-            if cluster.last_end <= record.record.pos() as u32 {
+            let Some(record) = HeavyRecord::from_record(record, sample_id, gq_type, has_ps, ploidy, &mut warn_ploidy)?
+                else { continue };
+            if cluster.last_end <= record.start {
                 cluster.save(&mut blocks, ref_region, ref_seq, params.min_gq, params.max_len, ploidy);
             }
             cluster.push(record, &mut phase_block);
@@ -554,13 +565,75 @@ impl HintVcf {
     }
 }
 
+// trait VarOrRec {
+//     fn start(&self) -> u32;
+
+//     fn end(&self) -> u32;
+
+//     fn haplotypes(&self) -> impl Iterator<Item = &[u8]>;
+// }
+
+// impl VarOrRec for Variant {
+//     #[inline]
+//     fn start(&self) -> u32 { self.start }
+
+//     #[inline]
+//     fn end(&self) -> u32 { self.end }
+
+//     #[inline]
+//     fn haplotypes(&self) -> impl Iterator<Item = &[u8]> {
+//         self.haplotypes.iter().map(AsRef::as_ref)
+//     }
+// }
+
+// impl VarOrRec for HeavyRecord {
+//     #[inline]
+//     fn start(&self) -> u32 { self.start }
+
+//     #[inline]
+//     fn end(&self) -> u32 { self.end }
+
+//     #[inline]
+//     fn haplotypes(&self) -> impl Iterator<Item = &[u8]> {
+//         let alleles = self.record.alleles();
+//         self.genotype.iter()
+//             .map(move |allele_ix| alleles[allele_ix.index().expect("Undefined allele") as usize])
+//     }
+// }
+
+// fn consensus_sequence<'a>(
+//     ref_seq: RefSeq,
+//     start: u32,
+//     end: u32,
+//     variants: impl Iterator<Item = &'a Variant>,
+//     ploidy: usize,
+// ) -> SmallVec2<Vec<u8>> {
+//     let mut last_end = start;
+//     let mut consensuses: SmallVec2<Vec<u8>> = smallvec![Vec::new(); ploidy];
+//     for var in variants {
+//         let between_seq = ref_seq.get(last_end, var.start);
+//         for (consensus, hap) in itertools::izip!(&mut consensuses, &var.haplotypes) {
+//             consensus.extend_from_slice(between_seq);
+//             consensus.extend_from_slice(hap);
+//         }
+//         last_end = var.end;
+//     }
+//     if last_end < end {
+//         let between_seq = ref_seq.get(last_end, end);
+//         for consensus in &mut consensuses {
+//             consensus.extend_from_slice(between_seq);
+//         }
+//     }
+//     consensuses
+// }
+
 // fn create_record(
 //     header: &Arc<bcf::header::HeaderView>,
 //     start: u32,
 //     end: u32,
 //     ref_seq: RefSeq,
 //     hap_alleles: &[impl AsRef<[u8]>],
-//     phased: bool,
+//     phase_block: Option<i32>,
 // ) -> Record {
 //     let mut record = Record::new(Arc::clone(header));
 //     record.set_rid(Some(0));
@@ -569,7 +642,8 @@ impl HintVcf {
 
 //     let ref_allele = ref_seq.get(start, end);
 //     let mut alleles: SmallVec<[&[u8]; 3]> = smallvec![ref_allele];
-//     let mut genotype: SmallVec<[GenotypeAllele; 2]> = SmallVec::new();
+//     let mut genotype: SmallVec2<GenotypeAllele> = SmallVec::new();
+//     let phased = phase_block.is_some();
 //     for allele in hap_alleles {
 //         let allele = allele.as_ref();
 //         let allele_ix = alleles.iter().position(|&existing_allele| existing_allele == allele)
@@ -581,24 +655,39 @@ impl HintVcf {
 //     }
 //     record.set_alleles(&alleles).expect("Failed to set alleles");
 //     record.push_genotypes(&genotype).expect("Failed to set genotype");
+//     if let Some(ps) = phase_block {
+//         record.push_format_integer(PS_TAG, &[ps]).expect("Failed to set PS tag");
+//     }
 //     record
 // }
 
 // /// Identify, which of the hint haplotypes is more similar to which of the Locityper haplotypes.
 // /// Returns conversion: `conv[hint_haplotype] = locityper_haplotype`, if phasing is possible.
 // fn phase_block(
-//     block: &VarBlock,
 //     block_variants: &[Variant],
 //     locityper_recs: &[Record],
 //     ref_seq: RefSeq,
-// ) -> Option<SmallVec<[usize; 2]>> {
-//     // Returns None if there were no heterozygous variants, so it's impossible to phase.
-//     let (heteroz_start_ix, heteroz_end_ix) = block.heteroz_range?;
+// ) -> Option<SmallVec2<usize>> {
+//     // Returns None if there were no heterozygous variants, so there is nothing to phase.
+//     let het_i = block_variants.iter().position(|var| !var.homozygous)?;
+//     let het_j = block_variants.iter().rposition(|var| !var.homozygous).unwrap();
+//     let het_reg_variants = &block_variants[het_i..=het_j];
+//     let mut het_start = het_reg_variants.first().unwrap().start;
+//     let mut het_end = het_reg_variants.last().unwrap().end;
+//     // Returns None if no Locityper variants in the heterozygous region.
+//     let lt_i = locityper_recs.iter().position(|rec| het_start < rec.end() as u32)?;
+//     let lt_j = locityper_recs.iter().rposition(|rec| (rec.pos() as u32) < het_end).unwrap();
+//     if lt_i > lt_j {
+//         return None;
+//     }
+//     let het_reg_lt_recs = &locityper_recs[lt_i..=lt_j];
+//     het_start = het_start.min(locityper_recs.first().unwrap().pos() as u32);
+//     het_end = het_end.max(locityper_recs.last().unwrap().end() as u32);
 //     todo!()
 // }
 
 // fn process_block(
-//     block: &VarBlock,
+//     block_ps: Option<i32>,
 //     block_variants: &[Variant],
 //     locityper_recs: &[Record],
 //     header: &Arc<bcf::header::HeaderView>,
@@ -610,8 +699,7 @@ impl HintVcf {
 //         new_records.extend(
 //             block_variants.iter()
 //                 .filter(|var| !var.all_reference)
-//                 .map(|var| create_record(header, var.start, var.end, ref_seq, &var.haplotypes,
-//                     block.len() > 1 || !var.heterozygous))
+//                 .map(|var| create_record(header, var.start, var.end, ref_seq, &var.haplotypes, block_ps))
 //         );
 //         return;
 //     }
@@ -627,17 +715,17 @@ impl HintVcf {
 //     ref_seq: &[u8],
 // ) -> crate::Result<Vec<Record>> {
 //     let n = locityper_recs.len();
-//     let ref_seq = RefSeq::new(ref_region.start(), ref_seq);
+//     let ref_seq = RefSeq::new(ref_region.start, ref_seq);
 //     let variants = &blocks.variants;
 //     let mut new_records = Vec::new();
 //     let copied_up_to = 0;
 
-//     for block in &blocks.blocks {
-//         eprintln!("Processing {:?}", block);
-//         assert!(!block.is_empty());
-//         let start = variants[block.start_ix].start;
-//         let end = variants[block.end_ix - 1].end;
-//         // variants[i - 1].end() <= start
+//     for &(start_ix, end_ix) in &blocks.blocks {
+//         assert!(start_ix < end_ix);
+//         let block_variants = &variants[start_ix..end_ix];
+//         let start = block_variants.first().unwrap().start;
+//         let end = block_variants.last().unwrap().end;
+//         let block_ps = (block_variants.len() > 1).then_some(start);
 //         let i = bisect::right_by(&locityper_recs, |rec| (rec.end() as u32).cmp(&start));
 //         let j = bisect::position_of(&locityper_recs, |rec| end <= rec.pos() as u32, i, n);
 //         new_records.extend_from_slice(&locityper_recs[copied_up_to..i]);

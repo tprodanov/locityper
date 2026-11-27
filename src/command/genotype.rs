@@ -1381,6 +1381,7 @@ fn write_vcf(
         }).unwrap_or_else(hint_vcf::VarBlocks::new_empty);
     if !hint_blocks.is_empty() {
         header.push_record(b"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description=\"Genotype quality\">");
+        header.push_record(b"##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase block\">");
         header.push_record(b"##FORMAT=<ID=source,Number=1,Type=String,Description=\"Variant source\">");
     }
     let groupped_haps = [(sample, genotype.ids().iter().copied().map(Some).collect())];
